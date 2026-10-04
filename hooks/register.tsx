@@ -9,6 +9,9 @@ import {
   JOURNAL_MAX_BYTES,
   NOTES_KEPT,
   SYSTEM,
+  ASK_SYSTEM,
+  askPrompt,
+  askSection,
   beforeAfter,
   changeOf,
   cleanConcepts,
@@ -285,6 +288,20 @@ async function setNote($: EngineInterface, id: string, patch: Partial<LearnNote>
 
 async function isPaneVisible($: EngineInterface): Promise<boolean> {
   return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced && pane.isShown)
+}
+
+/** Appends a /learn ask question and answer to today's journal of the note's project, after any save still running. */
+function saveAsk($: EngineInterface, cfg: Config, note: LearnNote, question: string, answer: string, at: number): Promise<string | undefined> {
+  const run = saving.then(async () => {
+    try {
+      return await appendJournal($, cfg, note.root || (await $.session.root()), at, askSection(note, question, answer, at))
+    } catch (error) {
+      $.ui.log(`learn-notes: 질문과 답을 파일에 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
+      return undefined
+    }
+  })
+  saving = run
+  return run
 }
 
 /** Appends a recap to the journal of the last day it covers a note of, after any save still running. */
@@ -665,10 +682,29 @@ const markWrong: typeof markReviewed = (index, keys, at) => markMissed(markRevie
 
 const NO_CONCEPTS_FOR_QUIZ = '아직 모인 개념이 없어 퀴즈를 낼 수 없습니다. 노트가 쓰이면 "배울 개념"이 쌓입니다.'
 
-/** Asks the model for a new quiz on the concepts due first and keeps it; or says why there is none. */
-async function makeQuiz($: EngineInterface, cfg: Config, now: number): Promise<{ items: LearnQuizItem[] } | { error: string }> {
-  const picks = quizPick(await read($, concepts), now)
-  if (picks.length === 0) return { error: NO_CONCEPTS_FOR_QUIZ }
+/**
+ * Asks the model for a new quiz and keeps it; or says why there is none. The
+ * concepts due first, or `only` these (a note's, for t in the pane).
+ */
+async function makeQuiz(
+  $: EngineInterface,
+  cfg: Config,
+  now: number,
+  only?: readonly string[],
+): Promise<{ items: LearnQuizItem[] } | { error: string }> {
+  const index = await read($, concepts)
+  const map = await read($, aliases)
+  const picks = only
+    ? only
+        .map(key => resolveKey(map, key))
+        .filter((key, i, all) => all.indexOf(key) === i)
+        .flatMap(key => {
+          const one = conceptAt(index, key)
+          return one ? [{ ...one, key }] : []
+        })
+        .slice(0, 3)
+    : quizPick(index, now)
+  if (picks.length === 0) return { error: only ? '이 노트에는 배울 개념이 없어 퀴즈를 낼 수 없습니다.' : NO_CONCEPTS_FOR_QUIZ }
   let reply
   try {
     reply = await $.model.complete({ model: cfg.model, system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: 900, effort: 'low', timeoutMs: 90_000 })
@@ -683,13 +719,13 @@ async function makeQuiz($: EngineInterface, cfg: Config, now: number): Promise<{
   return { items }
 }
 
-/** The pane's s: a new quiz, the pane saying "making" until it is there or failed. */
-async function startQuiz($: EngineInterface, cfg: Config): Promise<void> {
+/** The pane's s (or t, on `only` a note's concepts): a new quiz, the pane saying "making" until it is there or failed. */
+async function startQuiz($: EngineInterface, cfg: Config, only?: readonly string[]): Promise<void> {
   if (isQuizMaking) return
   isQuizMaking = true
   try {
     await update($, quizRun, () => ({ isMaking: true, error: null }))
-    const made = await makeQuiz($, cfg, await $.clock.now())
+    const made = await makeQuiz($, cfg, await $.clock.now(), only)
     await update($, quizRun, () => ({ isMaking: false, error: 'error' in made ? made.error : null }))
   } catch (error) {
     $.ui.log(`learn-notes: 퀴즈를 내지 못했습니다 (${String(error)})`, { to: 'debug' })
@@ -749,8 +785,8 @@ async function journalDays($: EngineInterface, cfg: Config): Promise<{ day: stri
     .sort((a, b) => (a.day < b.day ? 1 : -1))
 }
 
-/** Writes the note for `id` with the model; the pane redraws as its status moves. */
-async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite: boolean): Promise<void> {
+/** Writes the note for `id` with the model; the pane redraws as its status moves. `isEasier`: in the plainest words (e). */
+async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite: boolean, isEasier = false): Promise<void> {
   if (inFlight.has(id)) return
   inFlight.add(id)
   try {
@@ -761,7 +797,7 @@ async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite:
       const reply = await $.model.complete({
         model: cfg.model,
         system: SYSTEM,
-        prompt: notePrompt(note, cfg.level, knownNames(await read($, concepts))),
+        prompt: notePrompt(note, isEasier ? 'beginner' : cfg.level, knownNames(await read($, concepts)), isEasier),
         maxTokens: 1500,
         effort: 'low',
         timeoutMs: 90_000,
@@ -824,7 +860,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'learn',
       description: '학습 노트 패널을 연다 (/learn help: 하위 명령)',
-      argumentHint: '[last|concepts|recap|quiz|find|day|days|merge|save|clear|help]',
+      argumentHint: '[last|concepts|recap|quiz|ask|stats|anki|find|day|days|merge|save|clear|help]',
       immediate: true,
     })
     isInteractive = e.isInteractive
@@ -1048,6 +1084,24 @@ export const register: Register = (on, options) => {
       return {
         text: `복습 퀴즈 · ${made.items.length}문제\n\n${lines.join('\n\n')}\n\n먼저 스스로 답해 보고, /learn quiz 정답으로 확인하세요. 패널(/learn)의 퀴즈 보기(q)에서는 한 문제씩 답을 보고 맞음·틀림을 고를 수 있습니다.`,
       }
+    }
+    if (arg === 'ask') {
+      if (rest === '') return { text: ASK_USAGE }
+      const wanted = await read($, selectedId)
+      const note = list.find(one => one.id === wanted) ?? list.at(-1)
+      if (!note) return { text: '물어볼 노트가 없습니다. 코딩을 요청해 노트가 생기면 /learn ask 질문으로 물어보세요.' }
+      let reply
+      try {
+        reply = await $.model.complete({ model: cfg.model, system: ASK_SYSTEM, prompt: askPrompt(note, rest, cfg.level), maxTokens: 900, effort: 'low', timeoutMs: 90_000 })
+      } catch {
+        return { text: `'${cfg.model}' 모델을 부를 수 없습니다 · /config에서 다른 모델을 골라 보세요` }
+      }
+      if (!reply.isAnswered) return { text: `답하지 못했습니다: ${failureText(reply).replace(/ · .*$/, '')}` }
+      const answer = cut(reply.text, 4000)
+      const now = await $.clock.now()
+      const path = cfg.isAutoSave ? await saveAsk($, cfg, note, rest, answer, now) : undefined
+      const which = `${when(note.at, now)} 노트${note.prompt === '' ? '' : ` (${cut(note.prompt.replace(/\s+/g, ' '), 40)})`}`
+      return { text: `${which}에 대한 답${path ? ' · 일지에 남김' : ''}\n\n${answer}` }
     }
     if (arg === 'recap') {
       const now = await $.clock.now()
@@ -1316,10 +1370,25 @@ export const register: Register = (on, options) => {
           />
           )}
           {quizButtons}
+          {mode === 'note' && note.status === 'ready' && note.concepts.length > 0 && (
+            <Button
+              key="note-quiz"
+              hotkey="t"
+              plain
+              label="이 노트 퀴즈"
+              onPress={async () => {
+                await update($, view, () => 'quiz')
+                void startQuiz($, cfg, note.concepts)
+              }}
+            />
+          )}
+          {mode === 'note' && note.status === 'ready' && (
+            <Button key="easier" hotkey="e" plain dimColor={isBusy} label="더 쉽게" onPress={() => void writeNote($, cfg, note.id, note.savedAs !== null, true)} />
+          )}
         </Box>
         {e.surface === 'terminal' && !e.props.isFocused && (
           <Text dimColor wrap="truncate-end">
-            ctrl+x tab으로 패널을 고르면 {mode === 'quiz' ? 'v·s·a·o·x' : mode === 'concepts' ? 'v·q' : 'p·n·v·w·q'} 키를 쓸 수 있습니다
+            ctrl+x tab으로 패널을 고르면 {mode === 'quiz' ? 'v·s·a·o·x' : mode === 'concepts' ? 'v·q' : mode === 'note' && note.status === 'ready' ? 'p·n·v·w·q·t·e' : 'p·n·v·w·q'} 키를 쓸 수 있습니다
           </Text>
         )}
         {!isWhole(mode) && (
@@ -1664,6 +1733,8 @@ const HELP = [
   '- `/learn recap`: 오늘 배운 것 정리 (어제 · 이번주 · 최근 7일 · 2026-10-03도 됩니다) · 일지에 남김',
   '- `/learn quiz`: 복습할 개념으로 문제 · `/learn quiz 정답`으로 답을 보고 복습으로 표시 · `/learn quiz 틀림 2`로 틀린 문제를 다음 퀴즈에 다시',
   '- 패널의 퀴즈 보기(q): s로 문제 받기 · a로 정답 보기 · o 맞힘 · x 틀림 (틀린 개념은 다음 퀴즈에 먼저)',
+  '- `/learn ask 질문`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기 · 답은 일지에도 남음',
+  '- 패널의 노트 보기: t로 이 노트의 개념만 퀴즈 · e로 더 쉽게(비유를 넣어) 다시 쓰기',
   '- `/learn find 말`: 모든 프로젝트의 노트에서 찾기 (요청 · 내용 · 파일 · 개념)',
   '- `/learn days`: 이 프로젝트의 일지 날짜',
   '- `/learn day 2026-10-03`: 그날 노트 목차 (오늘 · 어제도 됩니다)',
@@ -1674,6 +1745,7 @@ const HELP = [
 /** Lines /learn day prints at most: the reply goes into the conversation the model reads. */
 const DAY_LINES = 40
 const QUIZ_USAGE = '쓰는 법: /learn quiz (문제 받기) · /learn quiz 정답 (답 보기 · 복습으로 표시) · /learn quiz 틀림 2 (틀린 문제를 다음 퀴즈에 다시)'
+const ASK_USAGE = '쓰는 법: /learn ask 질문 (예: /learn ask 왜 let 대신 const를 썼어?) · 패널에서 고른 노트(없으면 마지막 노트)에 대해 답합니다'
 const NO_QUIZ = '아직 낸 퀴즈가 없습니다. /learn quiz로 먼저 문제를 받으세요.'
 const MERGE_USAGE =
   '쓰는 법: /learn merge 합칠 개념 = 남길 개념  (예: /learn merge Destructuring = 구조 분해 할당 · = 대신 => -> → | 도 됩니다 · 거꾸로 하면 되돌립니다)'

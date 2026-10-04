@@ -370,12 +370,8 @@ function changeLabel(change: LearnChange): string {
   return `${kindText(change.kind)}, +${change.added} −${change.removed}${cutNote}`
 }
 
-/** The one user message the model reads for a note. */
-export function notePrompt(
-  note: Pick<LearnNote, 'prompt' | 'answer' | 'changes' | 'moreFiles'>,
-  level: Level,
-  known: readonly string[] = [],
-): string {
+/** Each changed file as a heading and its diff, as many as fit in `budget`, then what was left out. */
+function diffBlocks(note: Pick<LearnNote, 'changes' | 'moreFiles'>, budget: number): string[] {
   const files: string[] = []
   const skipped: string[] = []
   let used = 0
@@ -383,19 +379,34 @@ export function notePrompt(
     const fence = fenceFor(change.diff)
     const body = change.diff === '' ? '(diff 없음)' : `${fence}diff\n${change.diff}\n${fence}`
     const block = `### ${change.file} (${changeLabel(change)})\n${body}`
-    if (used + block.length > PROMPT_DIFF_BUDGET) {
+    if (used + block.length > budget) {
       skipped.push(change.file)
       continue
     }
     files.push(block)
     used += block.length
   }
-  const rest = [
+  return [
+    ...files,
     ...(skipped.length > 0 ? [`(diff를 싣지 못한 파일: ${skipped.join(', ')})`] : []),
     ...(note.moreFiles > 0 ? [`(그 밖에 파일 ${note.moreFiles}개가 더 바뀌었지만 여기엔 싣지 않았다)`] : []),
   ]
+}
+
+/** For a note asked to be easier (e in the pane): the words a learner who got lost needs. */
+const EASIER_TEXT =
+  '이번에는 앞서 쓴 노트가 어려웠다는 요청이다. 문장을 짧게 끊고, 전문 용어는 하나도 빼지 말고 일상어로 풀어 쓰고, 배울 개념마다 일상의 비유를 하나씩 들어라. 코드 인용은 그대로 둔다.'
+
+/** The one user message the model reads for a note; `isEasier` asks for the plainest words and an everyday comparison per concept. */
+export function notePrompt(
+  note: Pick<LearnNote, 'prompt' | 'answer' | 'changes' | 'moreFiles'>,
+  level: Level,
+  known: readonly string[] = [],
+  isEasier = false,
+): string {
   return [
     LEVEL_TEXT[level],
+    ...(isEasier ? [EASIER_TEXT] : []),
     '',
     '## 사용자의 요청',
     note.prompt === '' ? '(요청 문장 없음)' : cut(note.prompt, 1500),
@@ -404,8 +415,7 @@ export function notePrompt(
     note.answer === '' ? '(설명 없음)' : cut(note.answer, 1500),
     '',
     '## 바뀐 코드',
-    ...files,
-    ...rest,
+    ...diffBlocks(note, PROMPT_DIFF_BUDGET),
     '',
     ...(known.length > 0
       ? [
@@ -424,6 +434,48 @@ export function notePrompt(
     '(1~3개. "- **개념 이름**: 설명 — 그 개념이 쓰인 코드 한 줄을 백틱으로 인용". 줄 번호는 쓰지 마라)',
     '### 직접 확인해 볼 것',
     '(실행하거나 바꿔 보며 확인할 수 있는 것 1~2개)',
+  ].join('\n')
+}
+
+export const ASK_SYSTEM = [
+  '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 코딩 튜터다.',
+  '학습자가 학습 노트를 읽다가 질문했다. 노트와 그 노트의 코드 전후(diff)를 근거로 한국어로 답한다.',
+  '질문에 바로 답하고, 필요하면 짧은 예시 코드를 하나 보인다. 노트와 diff에 없는 것은 일반론이라고 밝힌다. 200단어를 넘기지 않는다.',
+  '코드는 백틱으로 감싸고, 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
+].join(' ')
+
+/** The one user message the model reads for /learn ask: the question, then the note and its code. */
+export function askPrompt(note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles'>, question: string, level: Level): string {
+  return [
+    LEVEL_TEXT[level],
+    '',
+    '## 학습자의 질문',
+    cut(question, 1000),
+    '',
+    '## 그 노트의 요청',
+    note.prompt === '' ? '(요청 문장 없음)' : cut(note.prompt, 1000),
+    '',
+    '## 학습 노트',
+    note.status === 'ready' ? cut(note.text, 4000) : '(노트가 아직 없다. 코드 전후만 보고 답한다)',
+    '',
+    '## 바뀐 코드',
+    ...diffBlocks(note, PROMPT_DIFF_BUDGET),
+  ].join('\n')
+}
+
+/** A /learn ask question and its answer as a journal section; not a note, so day contents and recaps pass over it. */
+export function askSection(note: Pick<LearnNote, 'at' | 'prompt'>, question: string, answer: string, at: number): string {
+  return [
+    `## ${stamp(at).day} 질문 (${stamp(at).time})`,
+    '',
+    `**노트**: ${stamp(note.at).day} ${stamp(note.at).time} · ${note.prompt === '' ? '(요청 없음)' : cut(note.prompt.replace(/\s+/g, ' '), 120)}`,
+    '',
+    `**물음**: ${cut(question.replace(/\s+/g, ' '), 400)}`,
+    '',
+    answer,
+    '',
+    '---',
+    '',
   ].join('\n')
 }
 

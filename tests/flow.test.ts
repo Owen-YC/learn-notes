@@ -1607,3 +1607,63 @@ test('with the review reminder off nothing is pinned', { options: { reviewRemind
   await finish(w)
   expect(w.statuses).toEqual([])
 })
+
+test('t in the note view quizzes on that note\'s concepts only', async ($, on) => {
+  const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  w.answer = CONCEPT_NOTE(['for...of 반복문', '기본 매개변수'])
+  await turn($, () => $.tool.call(EDIT_A))
+  await finish(w)
+  const ui = await pane($)
+  expect(await ui.find({ type: 'Button', text: '이 노트 퀴즈' })).toBeDefined()
+  w.answer = 'Q1: 문제 하나\nA1: 답 하나\nQ2: 문제 둘\nA2: 답 둘'
+  await ui.press({ key: 'note-quiz' })
+  await w.clock.settle()
+  const asked = w.models.at(-1)!
+  expect(asked).toContain('1. for...of 반복문 —')
+  expect(asked).toContain('2. 기본 매개변수 —')
+  expect(asked).not.toContain('클로저')
+  expect(await ui.find({ type: 'Text', text: /2문제 중 0개 채점/ })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: '문제 하나' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('e rewrites the note in plainer words with an everyday comparison', async ($, on) => {
+  const w = world(on)
+  await turn($, () => $.tool.call(EDIT_A))
+  await finish(w)
+  const ui = await pane($)
+  expect(w.models[0]).not.toContain('일상의 비유')
+  w.answer = NOTE_TEXT.replace('let을 const로 바꿔', '값을 한 번 정하면 못 바꾸게(상자에 자물쇠) 해서')
+  await ui.press({ key: 'easier' })
+  await w.clock.settle()
+  expect(w.models).toHaveLength(2)
+  expect(w.models[1]).toContain('일상의 비유')
+  expect(w.models[1]).toContain('입문자')
+  expect(await ui.find({ type: 'Markdown', text: /상자에 자물쇠/ })).toBeDefined()
+  expect(w.journal().at(-1)!.text).toContain('(다시 쓴 노트)')
+  await ui.unmount()
+})
+
+test('/learn ask answers about the chosen note, and keeps the question out of the day\'s notes', async ($, on) => {
+  const w = world(on)
+  await start($)
+  expect((await learn($, 'ask')).text).toContain('쓰는 법: /learn ask 질문')
+  expect((await learn($, 'ask 왜 const야?')).text).toContain('물어볼 노트가 없습니다')
+  await turn($, () => $.tool.call(EDIT_A), 't1', 'b를 상수로 바꿔줘')
+  await finish(w)
+  w.answer = '`const`는 다시 대입할 수 없어서, 실수로 값을 바꾸는 일을 막아 줍니다.'
+  const reply = await learn($, 'ask 왜 let 대신 const를 썼어?')
+  expect(reply.text).toContain('노트 (b를 상수로 바꿔줘)에 대한 답 · 일지에 남김')
+  expect(reply.text).toContain('실수로 값을 바꾸는 일을 막아 줍니다')
+  const asked = w.models.at(-1)!
+  expect(asked).toContain('## 학습자의 질문\n왜 let 대신 const를 썼어?')
+  expect(asked).toContain('let을 const로 바꿔')
+  expect(asked).toContain('+const b = 2')
+  const journal = w.files.get(JOURNAL) ?? ''
+  expect(journal).toMatch(/## 2026-10-03 질문 \(\d\d:\d\d\)/)
+  expect(journal).toContain('**물음**: 왜 let 대신 const를 썼어?')
+  // The day's contents still count one note.
+  expect((await learn($, 'day 오늘')).text).not.toContain('질문')
+})
