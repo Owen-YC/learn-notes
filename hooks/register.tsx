@@ -110,6 +110,8 @@ import {
 
 const PANE = 'learn-notes'
 const TITLE = '학습 노트'
+/** How the pane's keys are reached. A Korean input mode sends `ㅂ` for `q`, which no hotkey matches, so the English one is named. */
+const KEYS_HINT = '단축키는 ctrl+x tab으로 패널을 고른 뒤 영문 상태에서 누릅니다'
 
 const notes = atom({ plugin: 'learn-notes', key: 'notes' } as const, [])
 const live = atom({ plugin: 'learn-notes', key: 'live' } as const, null)
@@ -1927,7 +1929,7 @@ export const register: Register = (on, options) => {
     }
     const root = await $.session.root()
     const hint = isSystemFolder(root) ? `\n\n${systemFolderHint(root)}` : ''
-    if (opened.isPlaced) return { text: `학습 노트 패널을 열었습니다. 단축키는 ctrl+x tab으로 패널을 고른 뒤 누릅니다.${hint}` }
+    if (opened.isPlaced) return { text: `학습 노트 패널을 열었습니다. ${KEYS_HINT} (한글 상태면 q가 ㅂ으로 들어가 먹지 않습니다).${hint}` }
     $.ui.log(`learn-notes: 패널을 열지 못했습니다 (${opened.reason})`, { to: 'debug' })
     return {
       text: `이 화면에는 패널을 띄울 수 없어 마지막 노트를 여기에 적습니다. 터미널을 전체 화면(/tui fullscreen)으로 쓰면 오른쪽에 패널이 붙습니다.\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
@@ -1971,8 +1973,8 @@ export const register: Register = (on, options) => {
     ) : null
     const keysHint =
       e.surface === 'terminal' && !e.props.isFocused ? (
-        <Text dimColor wrap="truncate-end">
-          단축키는 ctrl+x tab으로 패널을 고른 뒤 누릅니다
+        <Text dimColor wrap="wrap">
+          {KEYS_HINT}
         </Text>
       ) : null
     const strip = viewStrip($, shown, note !== undefined, el)
@@ -2191,8 +2193,8 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boo
       ) : Input ? (
         <Input
           key={fieldKey}
-          label="질문 "
-          placeholder="이 노트에서 궁금한 것을 적고 Enter (예: 왜 const를 썼어?)"
+          label="질문"
+          placeholder="궁금한 것을 적고 Enter"
           submitLabel="묻기"
           value={ask.draft ?? ''}
           onSubmit={value => void askInPane($, cfg, note.id, value)}
@@ -2665,8 +2667,8 @@ function quizView(
                 {Input && (
                   <Input
                     key={fieldKey(i)}
-                    label="내 답 "
-                    placeholder="답을 적고 Enter: Claude가 채점"
+                    label="내 답"
+                    placeholder="답을 적고 Enter"
                     submitLabel="채점받기"
                     value={run.draft && run.draft.at === current.at && run.draft.i === i ? run.draft.text : ''}
                     onSubmit={value => void checkAnswer($, cfg, i, value)}
@@ -2706,7 +2708,7 @@ const HELP = [
   'learn-notes 명령',
   '',
   '**자주 쓰는 것**',
-  '- `/learn`: 학습 노트 패널 열기 (단축키는 ctrl+x tab으로 패널을 고른 뒤 누릅니다)',
+  `- \`/learn\`: 학습 노트 패널 열기 (${KEYS_HINT})`,
   '- `/learn quiz`: 복습할 개념으로 퀴즈 받기 (내가 만든 코드로 묻습니다) · `/learn quiz 1 내 답`: Claude에게 채점받기',
   '- `/learn ask 질문`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기',
   '- `/learn recap`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
@@ -2714,6 +2716,7 @@ const HELP = [
   '**패널 키**',
   '- 노트: `p`·`n` 이전·다음 · `v` 보기 바꾸기(노트 → 전/후 → 개념 모음) · `w` 다시 쓰기',
   '- 노트 아래: `t` 이 노트 퀴즈 · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기',
+  '- 키가 먹지 않으면 한/영을 영문 상태로 바꾸세요. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다',
   '- 퀴즈(`q`): `s` 문제 받기 · `i` 답 적기(Enter로 채점) · `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기',
   '',
   '**더 있는 것**',

@@ -87,6 +87,12 @@ import {
   sideBySide,
   wordDiff,
   PAIRS_WEIGHED,
+  BOLD,
+  SYSTEM,
+  ASK_SYSTEM,
+  RECAP_SYSTEM,
+  QUIZ_SYSTEM,
+  CHECK_SYSTEM,
   type Hunk,
 } from '../hooks/notes'
 
@@ -1355,5 +1361,15 @@ describe('1.5.0 review', () => {
     const { before, after } = sideBySide(hunk!)
     expect(before[0]!.kind).toBe('whole')
     expect(after[0]!.kind).toBe('whole')
+  })
+})
+
+describe('1.5.1: bold the pane can close', () => {
+  test('every prompt whose answer the pane draws as Markdown asks for bold that a particle does not hold open', () => {
+    const prompts = { SYSTEM, ASK_SYSTEM, RECAP_SYSTEM, QUIZ_SYSTEM, CHECK_SYSTEM }
+    for (const [name, prompt] of Object.entries(prompts)) expect([name, prompt.includes(BOLD)]).toEqual([name, true])
+    // The case CommonMark cannot close, written out, and what still closes: a concept line's `- **이름 (X)**: 설명`.
+    expect(BOLD).toContain('"**누적(쌓아올리기)**하는"이 아니라 "**누적**(쌓아올리기)하는"')
+    expect(BOLD).toContain('쌍점')
   })
 })

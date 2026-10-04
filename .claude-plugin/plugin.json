@@ -50,7 +50,7 @@
     "autoOpen": {
       "type": "boolean",
       "title": "첫 노트가 생기면 패널 자동으로 열기",
-      "description": "전체 화면 터미널에서 144칸 이상일 때만 저절로 열립니다. 그 밖에는 /learn으로 엽니다",
+      "description": "전체 화면 터미널에서 144칸 이상이면 저절로 열립니다. /learn으로 연 적이 있고 손으로 닫지 않았으면(ctrl+x x) 110칸부터 열립니다. 그보다 좁으면 토스트로 알리니 /learn으로 엽니다",
       "default": true
     },
     "reviewReminder": {

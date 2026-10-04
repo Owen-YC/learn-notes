@@ -543,7 +543,9 @@ test('an unfocused terminal pane says how to reach its keys', async ($, on) => {
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
   const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: false })
-  expect(await ui.find({ type: 'Text', text: /단축키는 ctrl\+x tab으로 패널을 고른 뒤 누릅니다/ })).toBeDefined()
+  // A Korean input mode sends ㅂ for q: the English one is named, and wrapped, since a narrow pane would cut it off.
+  const hint = await ui.find({ type: 'Text', text: /단축키는 ctrl\+x tab으로 패널을 고른 뒤 영문 상태에서 누릅니다/ })
+  expect(hint?.props.wrap).toBe('wrap')
   await ui.unmount()
 })
 
@@ -1945,13 +1947,46 @@ test('started in a system folder, the code Claude puts in its scratchpad is note
   await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u9', file_path: '/tmp/claude-0/scratchpad/try.mjs' }), 't2')
   await finish(w)
   expect(w.models).toHaveLength(1)
-  expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다. 단축키는 ctrl+x tab으로 패널을 고른 뒤 누릅니다.')
+  expect((await learn($, '')).text).toBe(
+    '학습 노트 패널을 열었습니다. 단축키는 ctrl+x tab으로 패널을 고른 뒤 영문 상태에서 누릅니다 (한글 상태면 q가 ㅂ으로 들어가 먹지 않습니다).',
+  )
 })
 
 /** The answer field of question `i` in the pane's quiz, keyed by the quiz it belongs to. */
 function mineKey(store: Map<string, unknown>, i: number) {
   return `quiz-mine-${(store.get('quiz') as { at: number }).at}-${i}`
 }
+
+/** Cells a terminal gives `text`: two for Hangul and the other wide letters, one for the rest. */
+function cells(text: string): number {
+  return [...text].reduce((sum, ch) => sum + (/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/u.test(ch) ? 2 : 1), 0)
+}
+
+/** Under the pane docked in a 120-column terminal (about 49 cells), with room for a narrower dock. */
+const FIELD_CELLS = 40
+
+test('the text fields fit a narrow pane in one row: a label with no trailing space, a short placeholder', async ($, on) => {
+  const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  await turn($, () => $.tool.call(EDIT_A))
+  await finish(w)
+  const ui = await pane($)
+  const fields = [await ui.find({ type: 'Input' })]
+  w.answer = THREE_QUESTIONS
+  await ui.press({ key: 'quiz' })
+  await ui.press({ key: 'quiz-new' })
+  await w.clock.settle()
+  fields.push(await ui.find({ type: 'Input', key: mineKey(store, 0) }))
+  expect(fields.map(field => field?.props.label)).toEqual(['질문', '내 답'])
+  for (const field of fields) {
+    const { label, placeholder, submitLabel } = field!.props as { label: string; placeholder: string; submitLabel: string }
+    // The terminal draws `${label}: ` before the field and ` ⏎ ${submitLabel}` after it while focused; a row wider
+    // than the pane pushes the label's colon and the Enter mark onto rows of their own.
+    expect(cells(`${label}: ${placeholder} ⏎ ${submitLabel}`)).toBeLessThanOrEqual(FIELD_CELLS)
+  }
+  await ui.unmount()
+})
 
 test('a typed answer is graded by the model: the grade, feedback and model answer stay open, and the next question follows', async ($, on) => {
   const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])

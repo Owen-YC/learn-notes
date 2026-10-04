@@ -801,6 +801,13 @@ const LEVEL_TEXT: Record<Level, string> = {
 /** The one speech level of everything the model writes for the learner, so notes, answers and recaps read alike. */
 const TONE = '문장은 합니다체(~합니다, ~입니다)로 맞춰 쓴다.'
 
+/**
+ * Bold the pane's Markdown can close. Under CommonMark a closing `**` right after punctuation (`)`, a quote, a
+ * backtick) with a letter right after it closes nothing, so `**누적(쌓아올리기)**하는` shows its asterisks, and a
+ * Korean particle is that letter. Space, a colon, a comma or a full stop after it still close it, as `- **이름 (X)**:` does.
+ */
+export const BOLD = '굵게(**…**)가 괄호·따옴표·백틱으로 끝나면 닫는 ** 바로 뒤에 조사 같은 글자를 붙이지 않는다(띄어쓰기나 쌍점·쉼표·마침표는 괜찮다). 붙이면 굵게가 풀려 별표가 그대로 보인다. 예: "**누적(쌓아올리기)**하는"이 아니라 "**누적**(쌓아올리기)하는", "**`const`**는"이 아니라 "`const`는".'
+
 export const SYSTEM = [
   '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 코딩 튜터다.',
   '방금 AI 도우미가 한 턴 동안 바꾼 코드의 전후(unified diff)를 보고 학습 노트를 한국어 마크다운으로 쓴다.',
@@ -808,6 +815,7 @@ export const SYSTEM = [
   '도우미의 설명이 diff와 맞지 않으면 diff를 믿는다. 일부만 실린 파일은 보이는 부분만 말한다.',
   '코드 줄을 인용할 때는 짧게, 백틱으로 감싼다. 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
   TONE,
+  BOLD,
 ].join(' ')
 
 /** A backtick fence longer than any backtick run in `text`, so the text cannot close it. */
@@ -897,6 +905,7 @@ export const ASK_SYSTEM = [
   '질문에 바로 답하고, 필요하면 짧은 예시 코드를 하나 보인다. 노트와 diff에 없는 것은 일반론이라고 밝힌다. 200단어를 넘기지 않는다.',
   '코드는 백틱으로 감싸고, 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
   TONE,
+  BOLD,
 ].join(' ')
 
 /** What `r` under a note asks: its changed code followed step by step on one example, kept under the note as this label. */
@@ -1717,6 +1726,7 @@ export const RECAP_SYSTEM = [
   '노트에 있는 것만 말한다. 인사말이나 맺음말은 쓰지 않는다.',
   '코드는 백틱(`)으로 감싸고, 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다.',
   TONE,
+  BOLD,
 ].join(' ')
 
 /** The one user message the model reads for a recap. */
@@ -1810,6 +1820,7 @@ export const QUIZ_SYSTEM = [
   '그 사람이 전에 배운 개념을 스스로 떠올려 보게 하는 짧은 문제를 한국어로 낸다.',
   '주어진 설명과 코드 안에서만 묻는다. 정답이 하나로 정해지는 문제를 낸다.',
   '코드는 백틱(`)으로 감싸고, 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다.',
+  BOLD,
 ].join(' ')
 
 /** The one user message the model reads for a quiz: each concept with what the notes said about it, and the learner's code it was met in. */
@@ -1844,6 +1855,7 @@ export const CHECK_SYSTEM = [
   '문제와 모범 답, 학습자가 직접 적은 답을 보고 채점한다. 표현이 달라도 뜻이 같으면 맞다. 맞춤법·말투·길이는 보지 않는다.',
   '코드는 백틱(`)으로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
   TONE,
+  BOLD,
 ].join(' ')
 
 /** The one user message the model reads to grade a typed answer. */
