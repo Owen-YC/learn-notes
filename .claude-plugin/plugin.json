@@ -53,6 +53,12 @@
       "description": "전체 화면 터미널(오른쪽에 붙는 자리)에서 144칸 이상일 때만 저절로 열린다. 그 밖에는 /learn으로 연다",
       "default": true
     },
+    "reviewReminder": {
+      "type": "boolean",
+      "title": "복습 알림 (상태줄)",
+      "description": "복습할 때가 된 개념이 있으면 프롬프트 아래 상태줄에 '복습할 개념 n개'를 띄운다",
+      "default": true
+    },
     "autoSave": {
       "type": "boolean",
       "title": "노트를 마크다운 파일로 자동 저장",

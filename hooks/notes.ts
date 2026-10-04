@@ -637,6 +637,7 @@ export function cleanConcepts(raw: unknown, aliases: Readonly<Record<string, str
     const marks = quizMarks(prior ?? {}, {
       ...(typeof one.reviewedAt === 'number' ? { reviewedAt: one.reviewedAt } : {}),
       ...(typeof one.missedAt === 'number' ? { missedAt: one.missedAt } : {}),
+      ...(typeof one.step === 'number' && Number.isFinite(one.step) ? { step: Math.max(0, Math.min(REVIEW_DAYS.length - 1, Math.floor(one.step))) } : {}),
     })
     index[key] = prior
       ? { ...unmarked(prior), count: prior.count + one.count, firstAt: Math.min(prior.firstAt, firstAt), lastAt: Math.max(prior.lastAt, lastAt), ...marks }
@@ -722,14 +723,47 @@ export function progressOf(index: Readonly<Record<string, LearnConcept>>, now: n
   return { fresh, again }
 }
 
-/** Concepts met once and not since for a week: the ones worth a second look, the oldest first. */
+/** Days until a concept comes back for review, by its step: a right answer moves it a step on, a wrong one back to the first. */
+export const REVIEW_DAYS: readonly number[] = [1, 3, 7, 14, 30, 60]
+const DAY = 86_400_000
+const TOP_STEP = REVIEW_DAYS.length - 1
+
+/** A concept's review step: the one quizzes gave it, else one more for each time a note met it again. */
+export function stepOf(one: LearnConcept): number {
+  if (typeof one.step === 'number') return Math.max(0, Math.min(TOP_STEP, Math.floor(one.step)))
+  return Math.max(0, Math.min(TOP_STEP, one.count - 1))
+}
+
+/** When a concept is due for review: right away after a wrong answer, else its step's days after it was last met. */
+export function dueAt(one: LearnConcept): number {
+  if (isMissed(one)) return one.missedAt ?? 0
+  return lastSeen(one) + REVIEW_DAYS[stepOf(one)]! * DAY
+}
+
+/** Every concept due for review now: wrong answers first (the oldest miss first), then the longest overdue. */
+export function dueConcepts(index: Readonly<Record<string, LearnConcept>>, now: number): RankedConcept[] {
+  const due = rankConcepts(index).filter(one => dueAt(one) <= now)
+  const missed = due.filter(isMissed).sort((a, b) => (a.missedAt ?? 0) - (b.missedAt ?? 0))
+  const rest = due.filter(one => !isMissed(one)).sort((a, b) => dueAt(a) - dueAt(b))
+  return [...missed, ...rest]
+}
+
+/** The first few concepts due for review (see dueConcepts). */
 export function reviewQueue(index: Readonly<Record<string, LearnConcept>>, now: number, size = 5): RankedConcept[] {
-  const ranked = rankConcepts(index)
-  const missed = ranked.filter(isMissed).sort((a, b) => (a.missedAt ?? 0) - (b.missedAt ?? 0))
-  const stale = ranked
-    .filter(one => !isMissed(one) && one.count === 1 && lastSeen(one) < now - WEEK)
-    .sort((a, b) => lastSeen(a) - lastSeen(b))
-  return [...missed, ...stale].slice(0, size)
+  return dueConcepts(index, now).slice(0, size)
+}
+
+/** "오늘", "내일", "3일 뒤", or "2일 지남": when a concept comes up for review, said from `now`. */
+export function dueText(one: LearnConcept, now: number): string {
+  const days = Math.round((startOfDay(dueAt(one)) - startOfDay(now)) / DAY)
+  if (days === 0) return '오늘'
+  if (days === 1) return '내일'
+  return days > 0 ? `${days}일 뒤` : `${-days}일 지남`
+}
+
+function startOfDay(ms: number): number {
+  const d = new Date(ms)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
 }
 
 /** True while the learner's last answer to its quiz question was wrong: a later quiz that goes over it clears this. */
@@ -1150,7 +1184,7 @@ export function quizPick(index: Readonly<Record<string, LearnConcept>>, now: num
   const due = reviewQueue(index, now, size)
   const rest = rankConcepts(index)
     .filter(one => !due.some(other => other.key === one.key))
-    .sort((a, b) => lastSeen(a) - lastSeen(b))
+    .sort((a, b) => dueAt(a) - dueAt(b))
   return [...due, ...rest].slice(0, size)
 }
 
@@ -1225,7 +1259,11 @@ export function markReviewed(index: Readonly<Record<string, LearnConcept>>, keys
   const next: Record<string, LearnConcept> = { ...index }
   for (const key of keys) {
     const one = conceptAt(next, key)
-    if (one) next[key] = { ...unmarked(one), reviewedAt: Math.max(one.reviewedAt ?? 0, at) }
+    if (!one) continue
+    // A step a day at most: going over it again the same day (or pressing twice) does not move it on.
+    const isSameDay = one.reviewedAt !== undefined && at - one.reviewedAt < DAY / 2
+    const step = isSameDay ? stepOf(one) : Math.min(stepOf(one) + 1, TOP_STEP)
+    next[key] = { ...unmarked(one), reviewedAt: Math.max(one.reviewedAt ?? 0, at), step }
   }
   return next
 }
@@ -1235,7 +1273,7 @@ export function markMissed(index: Readonly<Record<string, LearnConcept>>, keys: 
   const next: Record<string, LearnConcept> = { ...index }
   for (const key of keys) {
     const one = conceptAt(next, key)
-    if (one) next[key] = { ...one, missedAt: at }
+    if (one) next[key] = { ...one, missedAt: at, step: 0 }
   }
   return next
 }
@@ -1245,15 +1283,26 @@ function unmarked(one: LearnConcept): LearnConcept {
   const rest = { ...one }
   delete rest.reviewedAt
   delete rest.missedAt
+  delete rest.step
   return rest
 }
 
-/** One concept's quiz marks out of two copies of it: the later review, and a miss only if it came after that review. */
-function quizMarks(a: Partial<LearnConcept>, b: Partial<LearnConcept>): Pick<LearnConcept, 'reviewedAt' | 'missedAt'> {
+/**
+ * One concept's quiz marks out of two copies of it: the later review with its
+ * step, and a miss only if it came after that review (its step then the first).
+ */
+function quizMarks(a: Partial<LearnConcept>, b: Partial<LearnConcept>): Pick<LearnConcept, 'reviewedAt' | 'missedAt' | 'step'> {
   const reviewedAt = Math.max(a.reviewedAt ?? -1, b.reviewedAt ?? -1)
   const missedAt = Math.max(a.missedAt ?? -1, b.missedAt ?? -1)
+  const isMiss = missedAt >= 0 && missedAt >= reviewedAt
+  // The step goes with the latest review; a miss that review came after took its own step 0 with it.
+  const ra = a.reviewedAt ?? -1
+  const rb = b.reviewedAt ?? -1
+  const later = ra > rb ? a : rb > ra ? b : typeof a.step === 'number' ? a : b
+  const step = isMiss ? 0 : later.step
   return {
     ...(reviewedAt >= 0 ? { reviewedAt } : {}),
-    ...(missedAt >= 0 && missedAt >= reviewedAt ? { missedAt } : {}),
+    ...(isMiss ? { missedAt } : {}),
+    ...(typeof step === 'number' ? { step } : {}),
   }
 }

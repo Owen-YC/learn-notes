@@ -74,6 +74,11 @@ export type LearnConcept = {
   reviewedAt?: number
   /** Milliseconds since the epoch when the learner said they got its quiz question wrong (/learn quiz 틀림); cleared when a later quiz goes over it. */
   missedAt?: number
+  /**
+   * Its spaced-review step once quizzed: due again 1, 3, 7, 14, 30 or 60 days after it was last met.
+   * A right answer moves it a step on (once a day at most), a wrong one back to 0; absent, the notes that met it again count.
+   */
+  step?: number
 }
 
 /** One quiz question about a concept; the answer stays hidden until /learn quiz 정답, or a in the pane's quiz. */

@@ -1,3 +1,4 @@
+import type { LearnConcept } from '../types'
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
@@ -43,6 +44,10 @@ import {
   jsonBytes,
   progressOf,
   reviewQueue,
+  dueText,
+  dueAt,
+  stepOf,
+  REVIEW_DAYS,
   creationHunk,
   expandHome,
   failureText,
@@ -347,7 +352,7 @@ describe('concepts', () => {
     expect(cleaned['c:forof반복문']).toMatchObject({ name: 'for...of 반복문', count: 3, firstAt: 1, lastAt: 9 })
   })
 
-  test('progress counts the last week, and the review queue holds what was met once long ago', () => {
+  test('progress counts the last week, and the review queue holds what is due, the longest overdue first', () => {
     const now = Date.UTC(2026, 9, 3)
     const day = 86_400_000
     const index = {
@@ -359,7 +364,8 @@ describe('concepts', () => {
     expect(progressOf(index, now)).toEqual({ fresh: 1, again: 1 })
     const twice = { ...index, 'c:e': { name: 'E', count: 2, firstAt: now - 2 * day, lastAt: now - day, blurb: '', files: [] } }
     expect(progressOf(twice, now)).toEqual({ fresh: 2, again: 2 })
-    expect(reviewQueue(index, now).map(one => one.name)).toEqual(['C', 'D'])
+    // Met once: due a day after. Met three times: step 2, due a week after (B, five days from now).
+    expect(reviewQueue(index, now).map(one => one.name)).toEqual(['C', 'D', 'A'])
   })
 })
 
@@ -620,15 +626,18 @@ describe('quiz', () => {
     'c:new': { name: '화살표 함수', count: 1, firstAt: now - day, lastAt: now - day, blurb: 'd', files: [] },
   }
 
-  test('a quiz picks what is due first, then what has gone longest unseen', () => {
-    expect(quizPick(index, now).map(one => one.name)).toEqual(['호이스팅', '클로저', 'for...of'])
+  test('a quiz picks what is due first, the longest overdue first, then what falls due soonest', () => {
+    expect(quizPick(index, now).map(one => one.name)).toEqual(['호이스팅', '클로저', '화살표 함수'])
+    expect(quizPick(index, now, 4).map(one => one.name)).toEqual(['호이스팅', '클로저', '화살표 함수', 'for...of'])
     expect(quizPick({}, now)).toEqual([])
   })
 
   test('going over a concept in a quiz takes it off the review queue', () => {
     const reviewed = markReviewed(index, ['c:older', 'c:none'], now)
     expect(reviewed['c:older']!.reviewedAt).toBe(now)
-    expect(reviewQueue(reviewed, now).map(one => one.name)).toEqual(['클로저'])
+    expect(reviewed['c:older']!.step).toBe(1)
+    expect(dueText(reviewed['c:older']!, now)).toBe('3일 뒤')
+    expect(reviewQueue(reviewed, now).map(one => one.name)).toEqual(['클로저', '화살표 함수'])
     expect(quizPick(reviewed, now)[0]!.name).toBe('클로저')
   })
 
@@ -821,5 +830,54 @@ describe('real-run edges', () => {
       expect(isGitMove(command)).toBe(true)
     for (const command of ['git commit -m "merge stuff"', 'git status', 'git diff HEAD', 'git log --oneline', 'sed -i s/a/b/ x && git add x', 'echo digit stash'])
       expect(isGitMove(command)).toBe(false)
+  })
+})
+
+describe('spaced review', () => {
+  const now = Date.UTC(2026, 9, 3, 3)
+  const day = 86_400_000
+  const one: LearnConcept = { name: '클로저', count: 1, firstAt: now, lastAt: now, blurb: '', files: [] }
+
+  test('right answers space it out 1 → 3 → 7 → 14 → 30 → 60 days, a step a day at most', () => {
+    expect(REVIEW_DAYS).toEqual([1, 3, 7, 14, 30, 60])
+    let index: Record<string, LearnConcept> = { 'c:클로저': one }
+    expect(dueText(index['c:클로저']!, now)).toBe('내일')
+    let at = now + day
+    const seen: number[] = []
+    for (let i = 0; i < 7; i += 1) {
+      index = markReviewed(index, ['c:클로저'], at)
+      seen.push(stepOf(index['c:클로저']!))
+      at = dueAt(index['c:클로저']!)
+    }
+    expect(seen).toEqual([1, 2, 3, 4, 5, 5, 5])
+    // Going over it again the same day (or a second press) does not move it on.
+    const once = markReviewed({ 'c:클로저': one }, ['c:클로저'], now + day)
+    const twice = markReviewed(once, ['c:클로저'], now + day + 60_000)
+    expect(stepOf(twice['c:클로저']!)).toBe(1)
+    expect(dueAt(twice['c:클로저']!)).toBe(now + day + 60_000 + 3 * day)
+  })
+
+  test('a wrong answer sends it back to the first step and makes it due now; met again in notes counts as steps', () => {
+    const reviewed = markReviewed(markReviewed({ 'c:클로저': one }, ['c:클로저'], now + day), ['c:클로저'], now + 5 * day)
+    expect(stepOf(reviewed['c:클로저']!)).toBe(2)
+    const missed = markMissed(reviewed, ['c:클로저'], now + 6 * day)
+    expect(stepOf(missed['c:클로저']!)).toBe(0)
+    expect(dueAt(missed['c:클로저']!)).toBe(now + 6 * day)
+    expect(reviewQueue(missed, now + 6 * day).map(c => c.name)).toEqual(['클로저'])
+    // Right the next day: one step on from the first.
+    const back = markReviewed(missed, ['c:클로저'], now + 7 * day)
+    expect(stepOf(back['c:클로저']!)).toBe(1)
+    expect(back['c:클로저']!.missedAt).toBeUndefined()
+    // Never quizzed, but three notes met it: step 2, due a week after the last.
+    expect(dueText({ ...one, count: 3 }, now + 2 * day)).toBe('5일 뒤')
+    expect(dueText({ ...one, count: 3 }, now + 9 * day)).toBe('2일 지남')
+  })
+
+  test('the step survives the store and a merge with an older copy', () => {
+    const stepped = markReviewed({ 'c:클로저': one }, ['c:클로저'], now + day)
+    expect(cleanConcepts(JSON.parse(JSON.stringify(stepped)))['c:클로저']!.step).toBe(1)
+    expect(cleanConcepts({ x: { ...one, step: 99 } })['c:클로저']!.step).toBe(5)
+    const merged = mergeConcepts({ 'c:a': { ...one, name: 'A' }, ...{ 'c:클로저': stepped['c:클로저']! } }, 'c:a', 'c:클로저', '클로저')
+    expect(merged['c:클로저']!.step).toBe(1)
   })
 })

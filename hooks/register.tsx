@@ -40,6 +40,8 @@ import {
   knownNames,
   listItem,
   isMissed,
+  dueConcepts,
+  dueText,
   markMissed,
   markReviewed,
   merge,
@@ -63,7 +65,6 @@ import {
   progressOf,
   rankConcepts,
   resolveKey,
-  reviewQueue,
   searchNotes,
   type RankedConcept,
   stamp,
@@ -133,6 +134,7 @@ type Config = {
   isAutoNote: boolean
   isAutoOpen: boolean
   isAutoSave: boolean
+  isReviewReminder: boolean
   model: string
   level: Level
   saveDir: string
@@ -143,6 +145,7 @@ function configOf(options: Readonly<Record<string, unknown>>): Config {
     isAutoNote: options.autoNote !== false,
     isAutoOpen: options.autoOpen !== false,
     isAutoSave: options.autoSave !== false,
+    isReviewReminder: options.reviewReminder !== false,
     model: typeof options.model === 'string' && options.model !== '' ? options.model : 'haiku',
     level: options.level === 'intermediate' || options.level === 'advanced' ? options.level : 'beginner',
     saveDir: typeof options.saveDir === 'string' ? options.saveDir.trim() : '',
@@ -160,6 +163,8 @@ let canDock: boolean | undefined
 const inFlight = new Set<string>()
 /** True while the pane asks the model for a quiz: one at a time. */
 let isQuizMaking = false
+/** The status line this plugin last pinned, so an unchanged count is not pinned again. */
+let shownReminder: string | undefined
 /** Saves run one after another: each reads the journal and writes it whole. */
 let saving: Promise<unknown> = Promise.resolve()
 /** Store writes likewise: each reads a whole value and writes it back. */
@@ -459,6 +464,7 @@ async function learnConceptsNow($: EngineInterface, cfg: Config, note: LearnNote
     )
     await $.store.set(CONCEPTS_KEY, index)
     await update($, concepts, () => index)
+    await remind($, cfg)
     if (cfg.isAutoSave) await saveConcepts($, cfg, index)
   } catch (error) {
     $.ui.log(`learn-notes: 개념을 모으지 못했습니다 (${String(error)})`, { to: 'debug' })
@@ -551,6 +557,7 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
       await $.store.set(ALIASES_KEY, nextMap)
       await $.store.set(MERGES_KEY, nextMerges)
       await update($, concepts, () => folded)
+      await remind($, cfg)
       await update($, aliases, () => nextMap)
       const now = await $.clock.now()
       await update($, notes, list =>
@@ -575,6 +582,18 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
   return run
 }
 
+/**
+ * Pins "복습할 개념 n개" under the prompt while any concept is due for review,
+ * and takes it down when none is (or the reminder is off in /config).
+ */
+async function remind($: EngineInterface, cfg: Config): Promise<void> {
+  const due = cfg.isReviewReminder ? dueConcepts(await read($, concepts), await $.clock.now()).length : 0
+  const text = due > 0 ? `학습 노트 · 복습할 개념 ${due}개 · /learn 패널에서 q` : undefined
+  if (text === shownReminder) return
+  shownReminder = text
+  $.ui.status(text)
+}
+
 /** Marks concepts after a quiz (gone over, or got wrong), in the store and the pane's mirror. */
 function markConcepts($: EngineInterface, cfg: Config, mark: typeof markReviewed, keys: readonly string[], at: number): Promise<boolean> {
   const run = storing.then(async () => {
@@ -583,6 +602,7 @@ function markConcepts($: EngineInterface, cfg: Config, mark: typeof markReviewed
       const index = mark(cleanConcepts(await $.store.get(CONCEPTS_KEY), map), keys.map(key => resolveKey(map, key)), at)
       await $.store.set(CONCEPTS_KEY, index)
       await update($, concepts, () => index)
+      await remind($, cfg)
       if (cfg.isAutoSave) await saveConcepts($, cfg, index)
       return true
     } catch (error) {
@@ -809,6 +829,7 @@ export const register: Register = (on, options) => {
     })
     isInteractive = e.isInteractive
     await loadHistory($)
+    await remind($, cfg)
     // A quiz request a reload cut off is not coming back; the last quiz is there for the pane to draw.
     if (!isQuizMaking) await update($, quizRun, () => ({ isMaking: false, error: null }))
     if ((await read($, quiz)) === null) {
@@ -946,6 +967,8 @@ export const register: Register = (on, options) => {
         if (!(await isPaneVisible($))) void $.ui.open({ id: PANE, title: TITLE })
       }
     }
+    // Concepts fall due as time passes: each turn's end looks again.
+    await remind($, cfg)
     return next(e)
   })
 
@@ -1016,7 +1039,7 @@ export const register: Register = (on, options) => {
         }
         // The pane's quiz shows them graded too.
         await keepQuiz($, { ...current, items: current.items.map((item, i) => (numbers.includes(i + 1) ? { ...item, result: 'wrong' as const } : item)) })
-        return { text: `다시 볼 개념에 올렸습니다: ${items.map(item => item.name).join(' · ')}. 다음 /learn quiz에 먼저 나옵니다.` }
+        return { text: `복습할 개념 맨 앞에 올렸습니다: ${items.map(item => item.name).join(' · ')}. 다음 퀴즈에 먼저 나옵니다.` }
       }
       if (rest !== '') return { text: QUIZ_USAGE }
       const made = await makeQuiz($, cfg, now)
@@ -1099,9 +1122,13 @@ export const register: Register = (on, options) => {
       if (ranked.length === 0) return { text: '아직 모인 개념이 없습니다. 노트가 쓰이면 "배울 개념"이 여기에 쌓입니다.' }
       const now = await $.clock.now()
       const { fresh, again } = progressOf(await read($, concepts), now)
-      const queue = reviewQueue(await read($, concepts), now)
-      const lines = ranked.slice(0, 30).map(one => `- **${one.name}** ×${one.count} · ${stamp(one.lastAt).day}: ${one.blurb}`)
-      const review = queue.length > 0 ? `\n\n다시 볼 개념: ${queue.map(one => (isMissed(one) ? `${one.name} (퀴즈 틀림)` : one.name)).join(', ')}` : ''
+      const due = dueConcepts(await read($, concepts), now)
+      const queue = due.slice(0, 5)
+      const lines = ranked.slice(0, 30).map(one => `- **${one.name}** ×${one.count} · ${stamp(one.lastAt).day} · 다음 복습 ${dueText(one, now)}: ${one.blurb}`)
+      const review =
+        queue.length > 0
+          ? `\n\n복습할 개념 ${due.length}개: ${queue.map(one => (isMissed(one) ? `${one.name} (퀴즈 틀림)` : one.name)).join(', ')}${due.length > queue.length ? ' …' : ''} · 패널에서 q, 또는 /learn quiz`
+          : ''
       const more = ranked.length > 30 ? `\n\n${moreConceptsText(ranked.length - 30, cfg.isAutoSave)}.` : ''
       return {
         text: `지금까지 배운 개념 ${ranked.length}개 · 최근 7일 새 개념 ${fresh}개 · 복습 ${again}개${review}\n\n${lines.join('\n')}${more}`,
@@ -1466,7 +1493,8 @@ function conceptsView(
     return <Text dimColor>아직 모인 개념이 없습니다. 노트가 쓰이면 "배울 개념"이 여기에 쌓입니다.</Text>
   }
   const { fresh, again } = progressOf(index, now)
-  const queue = reviewQueue(index, now)
+  const due = dueConcepts(index, now)
+  const queue = due.slice(0, 5)
   const shown = ranked.slice(0, 30)
   const row = (one: RankedConcept) => {
     const taught = taughtBy(list, map, one.key)
@@ -1480,7 +1508,7 @@ function conceptsView(
             {' '}
             ×{one.count} · {when(one.lastAt, now)}
             {one.reviewedAt !== undefined ? ` · 복습 ${when(one.reviewedAt, now)}` : ''}
-            {isMissed(one) ? ' · 퀴즈 틀림' : ''}
+            {isMissed(one) ? ' · 퀴즈 틀림' : ` · 다음 복습 ${dueText(one, now)}`}
           </Text>
         </Text>
         {one.blurb !== '' && <Markdown text={one.blurb} dimColor />}
@@ -1508,13 +1536,16 @@ function conceptsView(
       </Text>
       {queue.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
-          <Text color="yellow">다시 볼 개념 · 퀴즈에서 틀렸거나, 한 번 배우고 일주일 넘게 안 나온 것</Text>
+          <Text color="yellow" wrap="wrap">
+            복습할 개념 {due.length}개 <Text dimColor>· 틀린 것 먼저, 잊을 때쯤 다시 나옵니다 · q로 퀴즈</Text>
+          </Text>
           {queue.map(one => (
             <Text key={`due-${one.key}`} dimColor wrap="truncate-end">
               {'  '}
-              {one.name} · {isMissed(one) ? `퀴즈 틀림 ${when(one.missedAt ?? now, now)}` : when(one.lastAt, now)}
+              {one.name} · {isMissed(one) ? `퀴즈 틀림 ${when(one.missedAt ?? now, now)}` : dueText(one, now)}
             </Text>
           ))}
+          {due.length > queue.length && <Text dimColor>{'  '}그 밖에 {due.length - queue.length}개</Text>}
         </Box>
       )}
       <Box marginTop={1}>
@@ -1629,9 +1660,9 @@ const HELP = [
   '',
   '- `/learn`: 학습 노트 패널 열기',
   '- `/learn last`: 마지막 노트',
-  '- `/learn concepts`: 지금까지 배운 개념 (진도 · 다시 볼 개념)',
+  '- `/learn concepts`: 지금까지 배운 개념 (진도 · 복습할 개념 · 다음 복습 날짜)',
   '- `/learn recap`: 오늘 배운 것 정리 (어제 · 이번주 · 최근 7일 · 2026-10-03도 됩니다) · 일지에 남김',
-  '- `/learn quiz`: 다시 볼 개념으로 복습 문제 · `/learn quiz 정답`으로 답을 보고 복습으로 표시 · `/learn quiz 틀림 2`로 틀린 문제를 다음 퀴즈에 다시',
+  '- `/learn quiz`: 복습할 개념으로 문제 · `/learn quiz 정답`으로 답을 보고 복습으로 표시 · `/learn quiz 틀림 2`로 틀린 문제를 다음 퀴즈에 다시',
   '- 패널의 퀴즈 보기(q): s로 문제 받기 · a로 정답 보기 · o 맞힘 · x 틀림 (틀린 개념은 다음 퀴즈에 먼저)',
   '- `/learn find 말`: 모든 프로젝트의 노트에서 찾기 (요청 · 내용 · 파일 · 개념)',
   '- `/learn days`: 이 프로젝트의 일지 날짜',
