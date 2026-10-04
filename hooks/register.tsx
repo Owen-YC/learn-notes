@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementTable, EngineInterface, Register } from 'claude-code'
 
-import type { LearnChange, LearnConcept, LearnLive, LearnNote, LearnSubmit, LearnView } from '../types'
+import type { LearnChange, LearnConcept, LearnLive, LearnNote, LearnQuizItem, LearnSubmit, LearnView } from '../types'
 import {
   HISTORY_PER_PROJECT,
   HISTORY_PROJECTS,
@@ -88,10 +88,27 @@ const aliases = atom({ plugin: 'learn-notes', key: 'aliases' } as const, {})
 const quiz = atom({ plugin: 'learn-notes', key: 'quiz' } as const, null)
 const submitted = atom({ plugin: 'learn-notes', key: 'submitted' } as const, { list: [], lastRequest: null })
 
-/** `$.store` keys: notes per project for the next session, and the concept index. */
+/** `$.store` keys: notes per project for the next session, the concept index, merges and the last quiz. */
 const HISTORY_KEY = 'history'
 const CONCEPTS_KEY = 'concepts'
 const ALIASES_KEY = 'aliases'
+/** The last /learn quiz, so its answers are there in the next session too. */
+const QUIZ_KEY = 'quiz'
+/** What each merge folded away, so merging back splits the two again: merged-away key → its record. */
+const MERGES_KEY = 'merges'
+
+type MergeRecord = { concept: LearnConcept; into: string; both: number }
+
+function cleanMerges(raw: unknown): Record<string, MergeRecord> {
+  const out: Record<string, MergeRecord> = {}
+  if (!isRecord(raw)) return out
+  for (const [key, value] of Object.entries(raw)) {
+    if (!isRecord(value) || typeof value.into !== 'string' || typeof value.both !== 'number') continue
+    const [concept] = Object.values(cleanConcepts({ one: value.concept }))
+    if (concept) out[key] = { concept, into: value.into, both: value.both }
+  }
+  return out
+}
 
 /** Merges read back from the store: only concept keys pointing at concept keys. */
 function cleanAliases(raw: unknown): Record<string, string> {
@@ -475,14 +492,15 @@ async function allNotes($: EngineInterface): Promise<LearnNote[]> {
   return [...byId.values()]
 }
 
-type MergeResult = { isDone: true; gone: LearnConcept; kept: LearnConcept } | { isDone: false; text: string }
+type MergeResult = { isDone: true; gone: LearnConcept; kept: LearnConcept; isSplit: boolean } | { isDone: false; text: string }
 
 /**
  * Folds the concept named `fromName` into the one named `intoName`, against
  * the store as it is now (another session may have merged since): counts
  * added less the notes that taught both, the alias kept for later notes, the
  * pane's notes re-keyed. Naming a concept that was merged away as the target
- * undoes that merge (a rename back).
+ * undoes that merge: two concepts merged are split again as they were, less
+ * nothing met since; a rename is renamed back.
  */
 function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, intoName: string): Promise<MergeResult> {
   const run = storing.then(async (): Promise<MergeResult> => {
@@ -497,25 +515,42 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
       const gone = conceptAt(index, from)
       if (!gone) return { isDone: false, text: `없는 개념입니다: '${fromName}'. /learn concepts로 이름을 확인하세요.\n\n${MERGE_USAGE}` }
       if (from === into) return { isDone: false, text: `'${fromName}' · '${intoName}': 이미 같은 개념으로 셉니다.` }
+      const merges = cleanMerges(await $.store.get(MERGES_KEY))
+      const record = isUndo ? merges[named] : undefined
       const nextMap: Record<string, string> = {}
       for (const [key, target] of Object.entries(map)) if (!(isUndo && key === named)) nextMap[key] = target
-      nextMap[from] = into
-      // One note that taught both names counts once.
-      const both = (await allNotes($)).filter(note => {
-        const keys = note.concepts.map(key => resolveKey(map, key))
-        return keys.includes(from) && keys.includes(resolveKey(map, into))
-      }).length
-      const folded = mergeConcepts(index, from, into, intoName)
-      const kept = folded[into]!
-      folded[into] = { ...kept, count: Math.max(1, kept.count - both) }
+      const nextMerges: Record<string, MergeRecord> = { ...merges }
+      delete nextMerges[named]
+      let folded: Record<string, LearnConcept>
+      let isSplit = false
+      if (record && record.into === from) {
+        // Two concepts merged before: each gets its own back; what the merged one met since stays with it.
+        folded = { ...index, [named]: record.concept }
+        folded[from] = { ...gone, count: Math.max(1, gone.count - (record.concept.count - record.both)) }
+        isSplit = true
+      } else {
+        nextMap[from] = into
+        // One note that taught both names counts once; merging back a rename has nothing to take off.
+        const both = isUndo
+          ? 0
+          : (await allNotes($)).filter(note => {
+              const keys = note.concepts.map(key => resolveKey(map, key))
+              return keys.includes(from) && keys.includes(resolveKey(map, into))
+            }).length
+        if (!isUndo && conceptAt(index, into)) nextMerges[from] = { concept: gone, into, both }
+        folded = mergeConcepts(index, from, into, intoName)
+        const kept = folded[into]!
+        folded[into] = { ...kept, count: Math.max(1, kept.count - both) }
+      }
       await $.store.set(CONCEPTS_KEY, folded)
       await $.store.set(ALIASES_KEY, nextMap)
+      await $.store.set(MERGES_KEY, nextMerges)
       await update($, concepts, () => folded)
       await update($, aliases, () => nextMap)
       const now = await $.clock.now()
       await update($, notes, list =>
         list.map(note =>
-          note.concepts.includes(from)
+          !isSplit && note.concepts.includes(from)
             ? {
                 ...note,
                 concepts: note.concepts.map(key => (key === from ? into : key)).filter((key, i, all) => all.indexOf(key) === i),
@@ -525,7 +560,7 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
         ),
       )
       if (cfg.isAutoSave) await saveConcepts($, cfg, folded)
-      return { isDone: true, gone, kept: folded[into]! }
+      return isSplit ? { isDone: true, gone: folded[named]!, kept: folded[from]!, isSplit } : { isDone: true, gone, kept: folded[into]!, isSplit }
     } catch (error) {
       $.ui.log(`learn-notes: 개념을 합치지 못했습니다 (${String(error)})`, { to: 'debug' })
       return { isDone: false, text: '개념을 합치지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.' }
@@ -566,6 +601,31 @@ async function journalEntriesFor($: EngineInterface, cfg: Config, days: readonly
     }
   }
   return found
+}
+
+type Quiz = { at: number; items: LearnQuizItem[]; isRevealed: boolean }
+
+/** This session's last quiz, else the one a past session left in the store. */
+async function lastQuiz($: EngineInterface): Promise<Quiz | null> {
+  const here = await read($, quiz)
+  if (here) return here
+  const raw = await $.store.get(QUIZ_KEY).catch(() => undefined)
+  if (!isRecord(raw) || typeof raw.at !== 'number' || !Array.isArray(raw.items)) return null
+  const items = raw.items.filter(
+    (one): one is LearnQuizItem =>
+      isRecord(one) && typeof one.key === 'string' && typeof one.name === 'string' && typeof one.question === 'string' && typeof one.answer === 'string',
+  )
+  return items.length > 0 ? { at: raw.at, items, isRevealed: raw.isRevealed === true } : null
+}
+
+/** The quiz as it stands now, in the session and the store. */
+async function keepQuiz($: EngineInterface, next: Quiz): Promise<void> {
+  await update($, quiz, () => next)
+  try {
+    await $.store.set(QUIZ_KEY, next)
+  } catch (error) {
+    $.ui.log(`learn-notes: 퀴즈를 저장소에 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+  }
 }
 
 /** The days this project has journal files for, the newest first, each with its parts in order. */
@@ -777,13 +837,16 @@ export const register: Register = (on, options) => {
         updatedAt: at,
       }
       await update($, notes, list => [...list, note].slice(-NOTES_KEPT))
-      if (cfg.isAutoNote) {
+      if (cfg.isAutoNote && isInteractive) {
         $.clock.after(1, () => void writeNote($, cfg, note.id, false))
+      } else if (cfg.isAutoNote) {
+        // A -p run's process ends with its turn: the note is written before the turn is handed on,
+        // or it never lands. The model call does not count against this hook's time.
+        await writeNote($, cfg, note.id, false)
       } else if (cfg.isAutoSave) {
         await save($, cfg, note, false)
       }
-      // Stored at once, so a session that ends mid-note still leaves it for the next one;
-      // a -p run stores it only once written, as its process may end before that.
+      // Stored at once, so a session that ends mid-note still leaves it for the next one.
       if (isInteractive || note.status !== 'writing') await persist($)
       // Opened unasked only where it docks beside the transcript, and once a session.
       if (cfg.isAutoOpen && canDock === true && !(await read($, autoOpened))) {
@@ -824,18 +887,21 @@ export const register: Register = (on, options) => {
       if (!result.isDone) return { text: result.text }
       await persist($)
       const { gone, kept } = result
+      if (result.isSplit) {
+        return { text: `되돌렸습니다. 다시 따로 셉니다: '${gone.name}' ×${gone.count} · '${kept.name}' ×${kept.count}` }
+      }
       return {
         text: `합쳤습니다: '${gone.name}' ×${gone.count} → '${kept.name}' ×${kept.count}. 앞으로 노트의 '${gone.name}'도 '${kept.name}' 개념으로 셉니다.`,
       }
     }
     if (arg === 'quiz') {
       const now = await $.clock.now()
-      const current = await read($, quiz)
+      const current = await lastQuiz($)
       if (/^(정답|답|answer|answers)$/i.test(rest)) {
         if (!current || current.items.length === 0) return { text: NO_QUIZ }
         // Seeing the answers again keeps the misses marked since the first time.
         const isMarked = !current.isRevealed && (await markConcepts($, cfg, markReviewed, current.items.map(item => item.key), now))
-        await update($, quiz, () => ({ ...current, isRevealed: true }))
+        await keepQuiz($, { ...current, isRevealed: true })
         const lines = current.items.map((item, i) => listItem(i + 1, `${item.answer}\n(개념: ${item.name})`))
         const marked = isMarked ? `\n\n복습으로 표시했습니다: ${current.items.map(item => item.name).join(' · ')}` : ''
         const hint = `\n\n틀린 문제는 /learn quiz 틀림 ${current.items.length > 1 ? '2' : '1'}처럼 번호로 알려 주면 다음 퀴즈에 먼저 나옵니다.`
@@ -868,7 +934,7 @@ export const register: Register = (on, options) => {
       if (!reply.isAnswered) return { text: `퀴즈를 내지 못했습니다: ${failureText(reply).replace(/ · .*$/, '')}` }
       const items = parseQuiz(reply.text, picks)
       if (items.length === 0) return { text: '퀴즈를 내지 못했습니다: 모델의 답을 문제로 읽지 못했습니다. 다시 해 보세요.' }
-      await update($, quiz, () => ({ at: now, items, isRevealed: false }))
+      await keepQuiz($, { at: now, items, isRevealed: false })
       const lines = items.map((item, i) => listItem(i + 1, item.question))
       return { text: `복습 퀴즈 · ${items.length}문제\n\n${lines.join('\n\n')}\n\n먼저 스스로 답해 보고, /learn quiz 정답으로 확인하세요.` }
     }

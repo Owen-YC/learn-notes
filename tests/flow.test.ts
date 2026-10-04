@@ -881,17 +881,16 @@ test('moving to another project swaps the pane and keeps each note under its own
   await ui.unmount()
 })
 
-test('a -p run stores a note only once it is written', async ($, on) => {
+test('a -p run writes its note before the turn ends, as its process exits right after (real run)', async ($, on) => {
   const store = new Map<string, unknown>()
-  const w = world(on, 'hold', null, true, store)
+  const w = world(on, 'ok', null, true, store)
   await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
   await turn($, () => $.tool.call(EDIT_A), 't1')
-  expect(store.get('history')).toBeUndefined()
-  await w.clock.advance(5)
-  w.release()
-  await w.clock.settle()
+  // No clock moves: by the time the turn is over, the note is written, stored and in the journal.
   const notes = (store.get('history') as Record<string, { notes: { status: string }[] }>)['/proj']!.notes
   expect(notes.map(n => n.status)).toEqual(['ready'])
+  expect(w.journal()[0]!.text).toContain('let을 const로 바꿔')
+  expect(w.models).toHaveLength(1)
 })
 
 test('a concept met once and not for a week comes back as one to look at again', async ($, on) => {
@@ -1076,6 +1075,28 @@ test('merging back the other way undoes a rename (review R10)', async ($, on) =>
   expect(back.text).toContain("합쳤습니다: '구조분해' ×1 → 'Destructuring' ×1")
   expect(Object.keys(store.get('concepts') as object)).toEqual(['c:destructuring'])
   expect(store.get('aliases')).toEqual({ 'c:구조분해': 'c:destructuring' })
+})
+
+test('merging two concepts back the other way splits them as they were (real run)', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  w.answer = CONCEPT_NOTE(['할인 공식'])
+  await turn($, () => $.tool.call(EDIT_A), 't1')
+  await finish(w)
+  w.answer = CONCEPT_NOTE(['누적 변수'])
+  await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+  await finish(w)
+  expect((await learn($, 'merge 할인 공식 = 누적 변수')).text).toContain("합쳤습니다: '할인 공식' ×1 → '누적 변수' ×2")
+  const back = await learn($, 'merge 누적 변수 = 할인 공식')
+  expect(back.text).toBe("되돌렸습니다. 다시 따로 셉니다: '할인 공식' ×1 · '누적 변수' ×1")
+  const index = store.get('concepts') as Record<string, { name: string; count: number }>
+  expect(Object.values(index).map(one => `${one.name} ×${one.count}`).sort()).toEqual(['누적 변수 ×1', '할인 공식 ×1'])
+  expect(store.get('aliases')).toEqual({})
+  expect(store.get('merges')).toEqual({})
+  // Merged again, then once more the other way: the same split.
+  await learn($, 'merge 할인 공식 = 누적 변수')
+  expect((await learn($, 'merge 누적 변수 = 할인 공식')).text).toContain('다시 따로 셉니다')
 })
 
 test('a store that refuses a merge answers in words instead of failing the command (review R8)', async ($, on) => {
@@ -1400,6 +1421,24 @@ test('/learn quiz 틀림 puts the missed concept first in the next quiz, and see
   const after = Object.values(store.get('concepts') as Record<string, { missedAt?: number }>)
   expect(after.every(one => one.missedAt === undefined)).toBe(true)
   expect((await learn($, 'concepts')).text).not.toContain('퀴즈 틀림')
+})
+
+test('a quiz from a past session still shows its answers and takes misses (real run)', async ($, on) => {
+  const store = new Map<string, unknown>()
+  store.set('concepts', { 'c:클로저': { name: '클로저', count: 1, firstAt: 1, lastAt: 1, blurb: '함수가 바깥 변수를 기억한다', files: [] } })
+  store.set('quiz', { at: 1, isRevealed: false, items: [{ key: 'c:클로저', name: '클로저', question: 'counter()가 왜 커질까?', answer: '바깥 변수를 기억해서다.' }] })
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  const shown = await learn($, 'quiz 정답')
+  expect(shown.text).toContain('1. 바깥 변수를 기억해서다.')
+  expect(shown.text).toContain('복습으로 표시했습니다: 클로저')
+  expect((store.get('quiz') as { isRevealed: boolean }).isRevealed).toBe(true)
+  expect((await learn($, 'quiz 틀림 1')).text).toContain('다시 볼 개념에 올렸습니다: 클로저')
+  // A new quiz is kept in the store for the next session.
+  w.answer = 'Q1: 새 문제\nA1: 새 답'
+  await learn($, 'quiz')
+  expect(store.get('quiz')).toMatchObject({ isRevealed: false, items: [{ question: '새 문제', answer: '새 답' }] })
+  expect(w.models).toHaveLength(1)
 })
 
 test('/learn quiz says so when there is nothing to ask or the reply is not a quiz', async ($, on) => {
