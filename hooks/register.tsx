@@ -1762,7 +1762,7 @@ function conceptsView(
       {queue.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Text color="yellow" wrap="wrap">
-            복습할 개념 {due.length}개 <Text dimColor>· 틀린 것 먼저, 잊을 때쯤 다시 나옵니다 · q로 퀴즈</Text>
+            복습할 개념 {due.length}개 <Text dimColor>· 틀린 것 먼저, 잊을 때쯤 다시 나옵니다 · 퀴즈 보기에서 풀어요</Text>
           </Text>
           {queue.map(one => (
             <Text key={`due-${one.key}`} dimColor wrap="truncate-end">
