@@ -35,8 +35,10 @@ import {
   parseMerge,
   resolveKey,
   searchNotes,
+  closeConceptBold,
   conceptKey,
   conceptsOf,
+  revealNext,
   countConcepts,
   cleanConcepts,
   fitHistory,
@@ -356,6 +358,64 @@ describe('concepts', () => {
 
   test('a bold label line ends the section too', () => {
     expect(names('### 배울 개념\n- **A**: a\n**직접 확인해 볼 것**\n- **B**: b')).toEqual(['A'])
+  })
+
+  // haiku's own note (Windows Terminal run, 1.4.0): the second name opened in bold and never closed.
+  const OPEN_BOLD_NOTE = [
+    '### 배울 개념',
+    '- **선택적 속성 (복습)**: `quantity?`처럼 물음표를 붙여 있어도 되고 없어도 되는 속성을 표시합니다 — ``@param {Array<{price: number, quantity?: number}>}``',
+    '- **널 병합 연산자 (??): 왼쪽 값이 `null`이나 `undefined`이면 오른쪽 값을 쓰는 연산자로, 기본값을 편하게 정할 수 있습니다 — ``const quantity = item?.quantity ?? 1;``',
+    '- **누적 계산 (복습)**: `reduce()`로 배열의 모든 항목을 하나씩 처리하면서 결과를 누적합니다 — ``items.reduce((total, item, i) => { ... }, 0)``',
+    '',
+    '### 직접 확인해 볼 것',
+    '- `getCartTotal([{ price: 1000 }])`를 실행해 보세요.',
+  ].join('\n')
+
+  test('a name the model opened in bold and never closed runs to its colon, not out of the concepts (1.5.1)', () => {
+    const found = conceptsOf(OPEN_BOLD_NOTE)
+    expect(found.map(one => one.name)).toEqual(['선택적 속성', '널 병합 연산자 (??)', '누적 계산'])
+    expect(found[1]!.key).toBe(conceptKey('널 병합 연산자'))
+    expect(found[1]!.blurb.startsWith('왼쪽 값이 `null`이나')).toBe(true)
+  })
+
+  test('an open bold that is no concept line stays out (1.5.1)', () => {
+    // No colon to end the name at; a colon inside the name; a sub-bullet; no bullet at all.
+    expect(names('### 배울 개념\n- **클로저 — 바깥 변수를 기억한다')).toEqual([])
+    expect(names('### 배울 개념\n- **std::move 이동 의미론: 값을 옮긴다')).toEqual([])
+    expect(names('### 배울 개념\n- **CSS :hover 선택자: 마우스가 올라간 요소')).toEqual([])
+    expect(names('### 배울 개념\n- **A**: a\n  - **예시: 카운터')).toEqual(['A'])
+    expect(names('### 배울 개념\n**참고: 아래 예시는 브라우저에서만 돈다\n- **A**: a')).toEqual(['A'])
+    // A section label left open, nothing after its colon: at the end of the line, before a trailing space, full-width.
+    for (const label of ['- **직접 확인해 볼 것:', '- **직접 확인해 볼 것: ', '- **직접 확인해 볼 것：']) {
+      expect(names(`### 배울 개념\n${label}\n- **A**: a`)).toEqual(['A'])
+    }
+    // A name of no words is none, and is not closed into four stars.
+    expect(names('### 배울 개념\n- ** : 설명')).toEqual([])
+    expect(closeConceptBold('### 배울 개념\n- ** : 설명')).toBe('### 배울 개념\n- ** : 설명')
+    // Full-width colon and a numbered entry read as the others do.
+    expect(names('### 배울 개념\n- **전각 콜론：설명\n2. **번호 항목: 설명')).toEqual(['전각 콜론', '번호 항목'])
+  })
+
+  test('the note keeps its words, the open bold closed at its colon, and reads back the same (1.5.1)', () => {
+    const closed = closeConceptBold(OPEN_BOLD_NOTE)
+    const lines = closed.split('\n')
+    expect(lines[2]).toBe('- **널 병합 연산자 (??)**: 왼쪽 값이 `null`이나 `undefined`이면 오른쪽 값을 쓰는 연산자로, 기본값을 편하게 정할 수 있습니다 — ``const quantity = item?.quantity ?? 1;``')
+    // Every other line as it was, and the closed note gives the same concepts as the open one.
+    expect(lines.filter((_line, i) => i !== 2)).toEqual(OPEN_BOLD_NOTE.split('\n').filter((_line, i) => i !== 2))
+    expect(conceptsOf(closed)).toEqual(conceptsOf(OPEN_BOLD_NOTE))
+    // Outside the concepts, an open bold is the model's own and is left; so is a line whose bold is closed already.
+    const elsewhere = '### 한 줄 요약\n- **요약: 그대로\n### 배울 개념\n- **A**: a\n- **클로저: 바깥 변수를 기억하는 함수**\n```\n- **코드: 그대로\n```'
+    expect(closeConceptBold(elsewhere)).toBe(elsewhere)
+  })
+
+  test('a scroll to a row just put in the tree is tried again while it is not drawn, and only then (1.5.1)', () => {
+    // The engine's own reasons (claude.exe 2.1.289).
+    expect(revealNext(undefined, 3)).toBe('done')
+    expect(revealNext('no element of its own is drawn under that key', 3)).toBe('again')
+    expect(revealNext('no element of its own is drawn under that key', 0)).toBe('stop')
+    expect(revealNext("not this plugin's site", 3)).toBe('stop')
+    expect(revealNext('no such site', 3)).toBe('stop')
+    expect(revealNext('the window moved meanwhile', 3)).toBe('stop')
   })
 
   test('rewriting an older note moves neither date the wrong way', () => {

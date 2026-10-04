@@ -1102,27 +1102,76 @@ function isSectionStart(line: string): boolean {
 
 const REVIEW_MARK = /[(\[（［]\s*(?:복습|다시)\s*[)\]）］]/g
 
+/** A concept line, top level only (a sub-bullet is indented two spaces or more): its bold name, then the rest. */
+const CONCEPT_LINE = /^ ?(?:[-*+•]|\d+[.)])?\s*\*\*(.+?)\*\*\s*(.*)$/
 /**
- * The concepts a note teaches: the bold names on the top-level lines under its
- * '배울 개념' heading, each with its line. Sub-bullets, code blocks and the
- * next section are not concepts; '(복습)' marks and a trailing colon leave the name.
+ * A concept line whose bold the model opened and never closed
+ * ('- **널 병합 연산자 (??): 설명'): the name runs to its colon. Only on a
+ * bulleted line, with a name of words (no code, star or colon in it), a colon
+ * a space follows (not `std::move`, not `:hover`) and words after it, so a
+ * section label left open is no concept.
  */
-export function conceptsOf(text: string, max = 160): { key: string; name: string; blurb: string }[] {
-  const lines = text.split('\n')
+const OPEN_BOLD_LINE = /^( ?(?:[-*+•]|\d+[.)])\s*)\*\*([^*`:：\s][^*`:：]{0,39}?)\s*(:(?=\s)|：)\s*(\S.*)$/
+
+/**
+ * What to do after the pane was asked to scroll to a row (`$.ui.scroll`'s
+ * `deny`, `left` tries to go): done when it moved; again while the row is not
+ * drawn yet (it was just put in the tree); else stop, for nothing else changes
+ * with waiting (no pane open, the key not this plugin's).
+ */
+export function revealNext(deny: string | undefined, left: number): 'done' | 'again' | 'stop' {
+  if (deny === undefined) return 'done'
+  return left > 0 && /\bdrawn\b/.test(deny) ? 'again' : 'stop'
+}
+
+/** The indexes of the lines under a note's '배울 개념' heading a concept can be on: outside code, before the next section. */
+function conceptLineIndexes(lines: readonly string[]): number[] {
   const start = lines.findIndex(line => isConceptHeading(line.trim()))
   if (start === -1) return []
-  const found: { key: string; name: string; blurb: string }[] = []
+  const found: number[] = []
   let isInCode = false
-  for (const raw of lines.slice(start + 1)) {
-    const line = raw.trim()
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i]!.trim()
     if (line.startsWith('```') || line.startsWith('~~~')) {
       isInCode = !isInCode
       continue
     }
     if (isInCode || line === '') continue
     if (isSectionStart(line)) break
-    // Top level only: a sub-bullet is indented two spaces or more.
-    const m = /^ ?(?:[-*+•]|\d+[.)])?\s*\*\*(.+?)\*\*\s*(.*)$/.exec(raw)
+    found.push(i)
+  }
+  return found
+}
+
+/**
+ * A note as written, but a concept name the model opened in bold and never
+ * closed is closed at its colon: it shows bold, not two stars, and reads back
+ * as the concept it is.
+ */
+export function closeConceptBold(text: string): string {
+  const lines = text.split('\n')
+  for (const i of conceptLineIndexes(lines)) {
+    const raw = lines[i]!
+    const open = CONCEPT_LINE.test(raw) ? null : OPEN_BOLD_LINE.exec(raw)
+    if (open) lines[i] = `${open[1]}**${open[2]!.trim()}**${open[3]} ${open[4]}`
+  }
+  return lines.join('\n')
+}
+
+/**
+ * The concepts a note teaches: the bold names on the top-level lines under its
+ * '배울 개념' heading, each with its line. Sub-bullets, code blocks and the
+ * next section are not concepts; '(복습)' marks and a trailing colon leave the
+ * name. A name whose bold was never closed runs to its colon.
+ */
+export function conceptsOf(text: string, max = 160): { key: string; name: string; blurb: string }[] {
+  const lines = text.split('\n')
+  const found: { key: string; name: string; blurb: string }[] = []
+  for (const i of conceptLineIndexes(lines)) {
+    const raw = lines[i]!
+    const closed = CONCEPT_LINE.exec(raw)
+    const open = closed ? null : OPEN_BOLD_LINE.exec(raw)
+    const m = closed ?? (open && [open[0], open[2]!, open[4]!])
     if (!m) continue
     const name = cut(
       m[1]!

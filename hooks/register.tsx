@@ -37,7 +37,9 @@ import {
   conceptAt,
   conceptKey,
   conceptsMarkdown,
+  closeConceptBold,
   conceptsOf,
+  revealNext,
   countConcepts,
   creationHunk,
   deletionHunk,
@@ -171,6 +173,27 @@ const VIEW_LABEL: Record<LearnView, string> = { note: '노트', split: '전/후'
 const viewOf = (raw: string): LearnView => ((VIEWS as readonly string[]).includes(raw) ? (raw as LearnView) : raw === 'diff' ? 'split' : 'note')
 /** Views about every note at once, not the selected one. */
 const isWhole = (mode: LearnView) => mode === 'concepts' || mode === 'quiz'
+/** Where the pane stands in the notes: the chosen one, else the newest (the pane follows). */
+function shownAt(list: readonly LearnNote[], wanted: string | null): number {
+  const found = wanted === null ? -1 : list.findIndex(one => one.id === wanted)
+  return found === -1 ? list.length - 1 : found
+}
+
+/**
+ * The `i`th question kept under a note, by when it was asked (and its place
+ * among any asked the same moment): asked at different times, its key stays
+ * its own as more are asked.
+ */
+function askedKey(id: string, asks: readonly LearnAsk[], i: number): string {
+  const at = asks[i]?.at ?? 0
+  const before = asks.slice(0, i).filter(one => one.at === at).length
+  return `asked-${id}-${at}${before === 0 ? '' : `-${before}`}`
+}
+/** Why a note's question has no answer, in red under its field. */
+const askErrorKey = (id: string) => `ask-error-${id}`
+/** How often, and how far apart, a row the pane is about to draw is looked for before it is scrolled to. */
+const REVEAL_TRIES = 10
+const REVEAL_RETRY_MS = 50
 
 type Config = {
   isAutoNote: boolean
@@ -209,6 +232,8 @@ let isQuizMaking = false
 let isQuizChecking = false
 /** Notes whose question asked in the pane the model is answering now: one at a time per note. */
 const asking = new Set<string>()
+/** How often the person has moved the pane's window themselves (wheel, scroll keys): a move after a question is theirs to keep. */
+let personScrolls = 0
 /** The status line this plugin last pinned, so an unchanged count is not pinned again; null until the first look since this load. */
 let shownReminder: string | undefined | null = null
 /** Quiz questions being graded now (quiz time and number), so a second press while the first is written does nothing. */
@@ -1111,7 +1136,7 @@ async function askNote(
   id: string,
   question: string,
   label = question,
-): Promise<{ answer: string; note: LearnNote; path: string | undefined } | { error: string }> {
+): Promise<{ answer: string; note: LearnNote; path: string | undefined; at: number } | { error: string }> {
   const note = (await read($, notes)).find(one => one.id === id)
   if (!note) return { error: '그 노트가 패널에 없습니다.' }
   const asked = await askModel($, cfg, { system: ASK_SYSTEM, prompt: askPrompt(note, question, cfg.level), maxTokens: 900 })
@@ -1122,7 +1147,37 @@ async function askNote(
   await setNote($, id, { asks: [...(latest.asks ?? []), { question: cut(label, 1000), answer, at: now }].slice(-ASKS_KEPT) })
   await persist($)
   const path = cfg.isAutoSave ? await saveAsk($, cfg, note, label, answer, now) : undefined
-  return { answer, note, path }
+  return { answer, note, path, at: now }
+}
+
+/** True while the pane shows this note's own view, where its questions and answers are drawn. */
+async function isNoteShown($: EngineInterface, id: string): Promise<boolean> {
+  const list = await read($, notes)
+  return viewOf(await read($, view)) === 'note' && list[shownAt(list, await read($, selectedId))]?.id === id
+}
+
+/**
+ * Scrolls the pane to a row it is about to draw under a note (an answer, or
+ * why there is none): the field the person typed in gives way to it, so
+ * nothing else brings it into view. The engine scrolls only to a key it has
+ * drawn, so the row is looked for again for a moment. The engine moves the
+ * window for a plugin whatever the person did, so a move of theirs since
+ * `since` (personScrolls then) leaves the window where they put it.
+ */
+function revealInPane($: EngineInterface, key: string, block: 'start' | 'nearest', since: number): void {
+  const said = (why: string) => $.ui.log(`learn-notes: ${key} (${block}, ${PANE})로 스크롤하지 않았습니다 (${why})`, { to: 'debug' })
+  const attempt = (left: number) => {
+    if (personScrolls !== since) return
+    void $.ui.scroll({ to: { key }, in: PANE, block }).then(
+      result => {
+        const next = revealNext(result.deny, left)
+        if (next === 'again') $.clock.after(REVEAL_RETRY_MS, () => attempt(left - 1))
+        else if (next === 'stop') said(result.deny ?? '')
+      },
+      (thrown: unknown) => said(String(thrown)),
+    )
+  }
+  attempt(REVEAL_TRIES)
 }
 
 /**
@@ -1138,16 +1193,20 @@ async function askInPane($: EngineInterface, cfg: Config, id: string, text: stri
     if (label === undefined) await set({ isAsking: true, error: null, draft: question })
     return
   }
+  const since = personScrolls
   if (question === '') {
     await set({ isAsking: false, error: '물어볼 것을 적은 뒤 Enter를 누르세요.', draft: null })
+    if (await isNoteShown($, id)) revealInPane($, askErrorKey(id), 'nearest', since)
     return
   }
   asking.add(id)
   let error: string | null = null
+  let answeredAt: number | undefined
   try {
     await set({ isAsking: true, error: null, draft: kept })
     const asked = await askNote($, cfg, id, question, label)
     if ('error' in asked) error = asked.error
+    else answeredAt = asked.at
   } catch (thrown) {
     $.ui.log(`learn-notes: 질문에 답하지 못했습니다 (${String(thrown)})`, { to: 'debug' })
     error = '답하지 못했습니다. 잠시 뒤 다시 해 보세요.'
@@ -1156,6 +1215,13 @@ async function askInPane($: EngineInterface, cfg: Config, id: string, text: stri
     // A question whose answer did not come back stays in the field to send again (r's is one key away).
     await set({ isAsking: false, error, draft: label !== undefined ? kept : error !== null ? question : null })
   }
+  // The answer lands below the bottom of a long note: its question goes to the top of the pane, as much of it showing as fits.
+  if (!(await isNoteShown($, id))) return
+  if (answeredAt !== undefined) {
+    const asks = (await read($, notes)).find(one => one.id === id)?.asks ?? []
+    const i = asks.map(one => one.at).lastIndexOf(answeredAt)
+    if (i !== -1) revealInPane($, askedKey(id, asks, i), 'start', since)
+  } else if (error !== null) revealInPane($, askErrorKey(id), 'nearest', since)
 }
 
 /** The days this project has journal files for, the newest first, each with its parts in order. */
@@ -1203,7 +1269,7 @@ async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite:
       return
     }
     const patch: Partial<LearnNote> =
-      'error' in asked ? { status: 'failed', text: `${asked.error} · w로 다시 쓰기` } : { status: 'ready', text: cut(asked.text, 9000) }
+      'error' in asked ? { status: 'failed', text: `${asked.error} · w로 다시 쓰기` } : { status: 'ready', text: closeConceptBold(cut(asked.text, 9000)) }
     // A note cleared from the pane meanwhile, or left behind by a /cd, is still saved and stored from this copy.
     let done = (await setNote($, id, patch)) ?? { ...note, ...patch }
     if (done.status === 'ready') {
@@ -1349,8 +1415,7 @@ async function countUnlisted($: EngineInterface, count: number): Promise<void> {
 async function stepNote($: EngineInterface, delta: number): Promise<void> {
   const list = await read($, notes)
   await update($, selectedId, current => {
-    const found = current === null ? -1 : list.findIndex(one => one.id === current)
-    const at = found === -1 ? list.length - 1 : found
+    const at = shownAt(list, current)
     const to = Math.max(0, Math.min(list.length - 1, at + delta))
     return to >= list.length - 1 ? null : (list[to]?.id ?? null)
   })
@@ -1869,6 +1934,12 @@ export const register: Register = (on, options) => {
     }
   })
 
+  // The person's own moves of the pane's window, counted so an answer arriving later does not pull them away (revealInPane).
+  on('ui.scroll', { requestId: PANE }, ($, e, next) => {
+    if (e.origin.kind === 'person') personScrolls += 1
+    return next(e)
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const el = $.ui.resolve(e)
     const { Box, Text, Button } = el
@@ -1886,8 +1957,7 @@ export const register: Register = (on, options) => {
     const run = await read($, quizRun)
     const asks = await read($, askRun)
 
-    const found = wanted === null ? -1 : list.findIndex(one => one.id === wanted)
-    const at = found === -1 ? list.length - 1 : found
+    const at = shownAt(list, wanted)
     const note = list[at]
     // Before the first note, a note's own view (전/후) shows the note view's welcome.
     const shown: LearnView = note || isWhole(mode) ? mode : 'note'
@@ -2108,8 +2178,8 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boo
           <Button key="ask-type" hotkey="i" plain label="질문하기" onPress={() => void $.ui.focus({ requestId: PANE, key: fieldKey }).catch(() => undefined)} />
         )}
       </Box>
-      {(note.asks ?? []).slice(-2).map((one, i) => (
-        <Box key={`asked-${i}`} flexDirection="column" marginTop={1}>
+      {(note.asks ?? []).map((one, i, all) => ({ one, key: askedKey(note.id, all, i) })).slice(-2).map(({ one, key }) => (
+        <Box key={key} flexDirection="column" marginTop={1}>
           <Text color="cyan" wrap="wrap">
             {one.question === TRACE_LABEL ? `▶ ${TRACE_LABEL}` : `질문 · ${one.question}`}
           </Text>
@@ -2129,9 +2199,11 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boo
         />
       ) : null}
       {ask.error !== null && (
-        <Text color="red" wrap="wrap">
-          {ask.error}
-        </Text>
+        <Box key={askErrorKey(note.id)}>
+          <Text color="red" wrap="wrap">
+            {ask.error}
+          </Text>
+        </Box>
       )}
     </Box>
   )

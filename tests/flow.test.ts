@@ -221,6 +221,17 @@ function pane($: Engine, surface: 'terminal' | 'desktop' = 'terminal', props = P
   return $.ui.mount({ plugin: 'learn-notes', surface, component: 'Pane', requestId: 'learn-notes', props })
 }
 
+/**
+ * Where the plugin asked the pane to scroll, in order. Nothing beneath answers $.ui.scroll in this kit and a
+ * test's on('ui.scroll') is not asked either, so each request shows as the debug line saying why it did not move.
+ */
+function scrollsOf(w: World): { key: string; block: string; site: string }[] {
+  return w.logs.flatMap(line => {
+    const m = /^learn-notes: (\S+) \((\w+), (\S+)\)로 스크롤하지/.exec(line)
+    return m ? [{ key: m[1]!, block: m[2]!, site: m[3]! }] : []
+  })
+}
+
 /** Draws the spinner as the fullscreen terminal does, which tells the plugin a pane would dock. */
 async function fullscreen($: Engine, isFullscreen = true) {
   const ui = await $.ui.mount({
@@ -2140,6 +2151,70 @@ test('a question typed under a note is answered there and kept with it, and a fo
   await again.unmount()
 })
 
+test('the pane goes down to each answer under the note on show, or to why there is none (1.5.1)', async ($, on) => {
+  const w = world(on)
+  await start($)
+  await turn($, () => $.tool.call(EDIT_A), 't1', 'b를 상수로 바꿔줘')
+  await finish(w)
+  const ui = await pane($)
+  const key = String((await ui.find({ type: 'Input' }))!.props.key)
+  const ask = async (text: string) => {
+    await ui.input({ key, text })
+    await w.clock.settle()
+    return scrollsOf(w).at(-1)!
+  }
+  const shown = async (to: { key: string }) => (await ui.find({ type: 'Box', key: to.key }))?.text ?? ''
+
+  // Nothing typed: the red line under the field.
+  const blank = await ask('  ')
+  expect(blank).toMatchObject({ block: 'nearest', site: 'learn-notes' })
+  expect(await shown(blank)).toContain('물어볼 것을 적은 뒤 Enter를 누르세요.')
+
+  // Each answer: its question goes to the top of the pane. Two asked the same moment, then two more past
+  // the two drawn and the three kept: the row gone to is always the question just answered.
+  for (const [i, word] of ['첫째', '둘째', '셋째', '넷째'].entries()) {
+    if (i === 2) await w.clock.advance(7)
+    w.answer = `${word} 답입니다.`
+    const to = await ask(`${word} 질문`)
+    expect(to).toMatchObject({ block: 'start', site: 'learn-notes' })
+    expect(await shown(to)).toContain(`질문 · ${word} 질문`)
+    expect(scrollsOf(w)).toHaveLength(i + 2)
+  }
+
+  // An answer that did not come back: the red reason under the field, scrolled to where it shows.
+  w.model = 'error'
+  const failed = await ask('다섯째 질문')
+  expect(failed).toMatchObject({ block: 'nearest', site: 'learn-notes' })
+  expect(await shown(failed)).toContain('답하지 못했습니다: 서버가 붐빕니다')
+  await ui.unmount()
+})
+
+test('a concept the model left in open bold is closed in the note, and counted like the others (1.5.1)', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const w = world(on, 'ok', null, true, store)
+  w.answer = [
+    '### 한 줄 요약',
+    '수량이 없으면 1로 셌다',
+    '### 배울 개념',
+    '- **널 병합 연산자 (??): 왼쪽 값이 없으면 오른쪽 값을 쓴다 — ``item.quantity ?? 1``',
+    '- **for...of 반복문**: 배열을 하나씩 돈다 — ``for (const item of items)``',
+    '### 직접 확인해 볼 것',
+    '- 수량을 빼고 실행해 보기',
+  ].join('\n')
+  await start($)
+  await turn($, () => $.tool.call(EDIT_A), 't1')
+  await finish(w)
+  const note = (store.get('history') as Record<string, { notes: { text: string; concepts: string[] }[] }>)['/proj']!.notes[0]!
+  expect(note.text).toContain('- **널 병합 연산자 (??)**: 왼쪽 값이 없으면')
+  expect(note.concepts).toEqual(['c:널병합연산자', 'c:forof반복문'])
+  const names = Object.values(store.get('concepts') as Record<string, { name: string }>).map(one => one.name)
+  expect(names).toContain('널 병합 연산자 (??)')
+  const ui = await pane($)
+  expect(await ui.find({ type: 'Markdown', text: '**널 병합 연산자 (??)**: 왼쪽 값이 없으면' })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: '- **널 병합 연산자 (??): 왼쪽' })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('undoing a merge leaves every note counting under its own name again (review)', async ($, on) => {
   const store = new Map<string, unknown>()
   const w = world(on, 'ok', null, true, store)
@@ -2319,6 +2394,10 @@ test('questions under two notes are answered each in its own place (review)', as
   w.release()
   await w.clock.settle()
   expect(await ui.find({ type: 'Text', text: '질문 · 첫 노트 질문' })).toBeDefined()
+  // Only the note on show is scrolled to: the second note's answer came while the first one was shown.
+  const scrolled = scrollsOf(w)
+  expect(scrolled).toHaveLength(1)
+  expect((await ui.find({ type: 'Box', key: scrolled[0]!.key }))?.text).toContain('질문 · 첫 노트 질문')
   await ui.press({ key: 'next' })
   expect(await ui.find({ type: 'Text', text: '질문 · 둘째 노트 질문' })).toBeDefined()
   await ui.unmount()
