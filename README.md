@@ -22,6 +22,8 @@ Claude가 코드를 고치면 **바뀌기 전과 후**를 모아 두었다가, �
 | **개념 모음** | **퀴즈: 내 답을 Claude가 채점** |
 | ![배운 개념 모음](docs/images/pane-concepts.png) | ![퀴즈 채점](docs/images/pane-quiz.png) |
 
+> **팀에 소개할 때**: [안내서 PDF](docs/team/learn-notes-guide.pdf)(15쪽, 모드 개념부터 설치·기능·활용 팁까지)와 [소개 PPT](docs/team/learn-notes-intro.pptx)(22장, 발표 대본 포함)를 그대로 나눠 주세요.
+
 ## 빠른 시작
 
 Claude Code **v2.1.287 이상**이 필요합니다 (`claude --version`).
