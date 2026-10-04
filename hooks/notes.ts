@@ -1,7 +1,7 @@
 // Pure helpers: hunks to diff text and back, the prompt for a note, the
 // journal's markdown. No `$` here, so tests reach every branch directly.
 
-import type { LearnChange, LearnConcept, LearnDayActivity, LearnNote, LearnQuizItem, LearnSubmit } from '../types'
+import type { LearnAsk, LearnChange, LearnConcept, LearnDayActivity, LearnNote, LearnQuizItem, LearnQuizMarks, LearnSubmit } from '../types'
 
 export type Hunk = {
   oldStart: number
@@ -19,7 +19,7 @@ export const FILES_PER_NOTE = 12
 export const NOTES_KEPT = 40
 /** Characters of diff the model reads for one note. */
 export const PROMPT_DIFF_BUDGET = 14000
-/** A journal past this many bytes rolls over to `-2.md`, `-3.md`: a read takes at most 4 MiB. */
+/** A journal past this many bytes rolls over to `~2.md`, `~3.md`: a read takes at most 4 MiB. */
 export const JOURNAL_MAX_BYTES = 3_000_000
 /** Notes the store keeps per project, and projects it keeps, for the next session's pane. */
 export const HISTORY_PER_PROJECT = 30
@@ -81,7 +81,8 @@ export function tally(hunks: readonly Hunk[]): { added: number; removed: number 
 /** A hunk whose lines lack a marker (a context line that lost its space) gets one. */
 function normalise(h: Hunk): Hunk {
   const lines = h.lines.map(line => {
-    const flat = clean(line)
+    // A CRLF file's line keeps its \r from some tools: it is the line end, not a line break.
+    const flat = clean(line.replace(/\r$/, ''))
     return /^[ +\-\\]/.test(flat) ? flat : ` ${flat}`
   })
   return { ...h, lines }
@@ -346,7 +347,7 @@ export function joinPath(dir: string, path: string, home?: string): string {
   const base = isAbsolutePath(p) ? p : `${dir.replace(/[\\/]+$/, '')}/${p}`
   const isWindows = /^[A-Za-z]:/.test(base) || base.startsWith('\\\\') || (!base.startsWith('/') && base.includes('\\'))
   const sep = isWindows ? '\\' : '/'
-  const lead = /^[A-Za-z]:/.test(base) ? base.slice(0, 2) : base.startsWith('\\\\') ? '\\\\' : base.startsWith('/') ? '' : ''
+  const lead = /^[A-Za-z]:/.test(base) ? base.slice(0, 2) : base.startsWith('\\\\') ? '\\\\' : ''
   const rest = lead === '\\\\' ? base.slice(2) : lead !== '' ? base.slice(2) : base
   const parts: string[] = []
   for (const part of rest.split(/[\\/]+/)) {
@@ -413,7 +414,7 @@ export function isSystemFolder(root: string | undefined): boolean {
 export function systemFolderHint(root: string): string {
   const isWindows = /^[A-Za-z]:/.test(root)
   const how = isWindows ? 'PowerShell에서 cd ~\\practice 뒤 claude' : '터미널에서 cd ~/practice 뒤 claude'
-  return `Claude Code가 시스템 폴더(${root})에서 켜져 있어요. 작업 폴더에서 켜면 파일이 그 폴더에 생겨요 (${how}). 그동안 Claude가 임시 폴더에 만든 파일도 노트에 담아요.`
+  return `Claude Code가 시스템 폴더(${root})에서 켜져 있습니다. 작업 폴더에서 켜면 파일이 그 폴더에 생깁니다 (${how}). 그동안 Claude가 임시 폴더에 만든 파일도 노트에 담습니다.`
 }
 
 /** True for a path under `dir` (either separator). */
@@ -528,12 +529,16 @@ const LEVEL_TEXT: Record<Level, string> = {
   advanced: '읽는 사람은 숙련자다. 설계 선택, 대안, 트레이드오프, 놓치기 쉬운 위험에 무게를 둔다.',
 }
 
+/** The one speech level of everything the model writes for the learner, so notes, answers and recaps read alike. */
+const TONE = '문장은 합니다체(~합니다, ~입니다)로 맞춰 쓴다.'
+
 export const SYSTEM = [
   '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 코딩 튜터다.',
   '방금 AI 도우미가 한 턴 동안 바꾼 코드의 전후(unified diff)를 보고 학습 노트를 한국어 마크다운으로 쓴다.',
   '근거는 diff, 사용자의 요청, 도우미의 설명 셋뿐이다. 셋 어디에도 없는 의도만 "아마 ~일 것이다"처럼 추측임을 밝힌다.',
   '도우미의 설명이 diff와 맞지 않으면 diff를 믿는다. 일부만 실린 파일은 보이는 부분만 말한다.',
   '코드 줄을 인용할 때는 짧게, 백틱으로 감싼다. 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
+  TONE,
 ].join(' ')
 
 /** A backtick fence longer than any backtick run in `text`, so the text cannot close it. */
@@ -572,7 +577,7 @@ function diffBlocks(note: Pick<LearnNote, 'changes' | 'moreFiles'>, budget: numb
 
 /** For a note asked to be easier (e in the pane): the words a learner who got lost needs. */
 const EASIER_TEXT =
-  '이번에는 앞서 쓴 노트가 어려웠다는 요청이다. 문장을 짧게 끊고, 전문 용어는 하나도 빼지 말고 일상어로 풀어 쓰고, 배울 개념마다 일상의 비유를 하나씩 들어라. 코드 인용은 그대로 둔다.'
+  '이번에는 앞서 쓴 노트가 어려웠다는 요청이다. 합니다체는 그대로 지키면서 문장을 짧게 끊고, 전문 용어는 하나도 빼지 말고 일상어로 풀어 쓰고, 배울 개념마다 일상의 비유를 하나씩 들어라. 코드 인용은 그대로 둔다.'
 
 /** The one user message the model reads for a note; `isEasier` asks for the plainest words and an everyday comparison per concept. */
 export function notePrompt(
@@ -619,16 +624,32 @@ export const ASK_SYSTEM = [
   '학습자가 학습 노트를 읽다가 질문했다. 노트와 그 노트의 코드 전후(diff)를 근거로 한국어로 답한다.',
   '질문에 바로 답하고, 필요하면 짧은 예시 코드를 하나 보인다. 노트와 diff에 없는 것은 일반론이라고 밝힌다. 200단어를 넘기지 않는다.',
   '코드는 백틱으로 감싸고, 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
+  TONE,
 ].join(' ')
 
-/** The one user message the model reads for /learn ask: the question, then the note and its code. */
-export function askPrompt(note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles'>, question: string, level: Level): string {
+/** Questions a note keeps with their answers, the newest; older ones stay in the journal. */
+export const ASKS_KEPT = 3
+
+/**
+ * The one user message the model reads for a question about a note: the
+ * question, the note's last questions and answers (so a follow-up reads in
+ * context), then the note and its code.
+ */
+export function askPrompt(
+  note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles' | 'asks'>,
+  question: string,
+  level: Level,
+): string {
+  const earlier = (note.asks ?? []).slice(-2)
   return [
     LEVEL_TEXT[level],
     '',
     '## 학습자의 질문',
     cut(question, 1000),
     '',
+    ...(earlier.length > 0
+      ? ['## 앞서 이 노트에 대해 나눈 질문과 답 (이어지는 질문일 수 있다)', ...earlier.flatMap(one => [`- 질문: ${cut(one.question, 300)}`, `  답: ${cut(one.answer.replace(/\s+/g, ' '), 600)}`]), '']
+      : []),
     '## 그 노트의 요청',
     note.prompt === '' ? '(요청 문장 없음)' : cut(note.prompt, 1000),
     '',
@@ -670,19 +691,19 @@ export function summaryOf(text: string): string {
 }
 
 const API_ERROR_TEXT: Record<string, string> = {
-  overloaded: '서버가 붐빕니다',
-  rate_limit: '요청 한도에 걸렸습니다',
-  authentication_failed: '로그인이 필요합니다',
+  overloaded: '서버가 붐빕니다. 잠시 뒤 다시 해 보세요',
+  rate_limit: '요청 한도에 걸렸습니다. 잠시 뒤 다시 해 보세요',
+  authentication_failed: '로그인이 필요합니다 (/login)',
 }
 
-/** Why a note could not be written, in words a learner can act on. */
+/** Why a model call brought no answer, in words a learner can act on; the caller says how to try again. */
 export function failureText(reply: { reason: string; status?: number | null; error?: string }): string {
   if (reply.reason === 'api-error') {
     const known = reply.error === undefined ? undefined : API_ERROR_TEXT[reply.error]
-    return `${known ?? `API 오류${reply.status ? ` ${reply.status}` : ''}`} · 잠시 뒤 [다시 쓰기]`
+    return known ?? `API 오류${reply.status ? ` ${reply.status}` : ''}. 잠시 뒤 다시 해 보세요`
   }
-  if (reply.reason === 'empty-reply') return '모델이 빈 답을 보냈습니다 · [다시 쓰기]'
-  if (reply.reason === 'aborted') return '중단됐습니다 (시간 초과 또는 모드 다시 불러오기) · [다시 쓰기]'
+  if (reply.reason === 'empty-reply') return '모델이 빈 답을 보냈습니다'
+  if (reply.reason === 'aborted') return '시간이 너무 걸리거나 중간에 끊겨 멈췄습니다'
   return reply.reason
 }
 
@@ -757,7 +778,8 @@ export function journalSection(note: LearnNote, isRewrite = false): string {
   return [
     `## ${day} ${time}${isRewrite ? ' (다시 쓴 노트)' : ''}`,
     '',
-    `**요청**: ${note.prompt === '' ? '(없음)' : cut(note.prompt, 400)}`,
+    // One line: a pasted code block cut short would swallow the rest of the section.
+    `**요청**: ${note.prompt === '' ? '(없음)' : closeTicks(cut(note.prompt.replace(/\s+/g, ' '), 400))}`,
     '',
     `**바뀐 파일**: ${[...files, ...more].join(' · ')}`,
     '',
@@ -840,13 +862,9 @@ export function conceptsOf(text: string, max = 160): { key: string; name: string
   return found
 }
 
-function own(index: Readonly<Record<string, LearnConcept>>, key: string): LearnConcept | undefined {
-  return Object.prototype.hasOwnProperty.call(index, key) ? index[key] : undefined
-}
-
 /** The concept under `key`, only if the index itself holds it (never an inherited property). */
 export function conceptAt(index: Readonly<Record<string, LearnConcept>>, key: string): LearnConcept | undefined {
-  return own(index, key)
+  return Object.prototype.hasOwnProperty.call(index, key) ? index[key] : undefined
 }
 
 /** A concept index read back from the store: bad entries dropped, keys from an older build re-made. */
@@ -862,7 +880,7 @@ export function cleanConcepts(raw: unknown, aliases: Readonly<Record<string, str
     const firstAt = typeof one.firstAt === 'number' ? one.firstAt : 0
     const lastAt = typeof one.lastAt === 'number' ? one.lastAt : firstAt
     const files = Array.isArray(one.files) ? one.files.filter(file => typeof file === 'string').slice(0, 5) : []
-    const prior = own(index, key)
+    const prior = conceptAt(index, key)
     const marks = quizMarks(prior ?? {}, {
       ...(typeof one.reviewedAt === 'number' ? { reviewedAt: one.reviewedAt } : {}),
       ...(typeof one.missedAt === 'number' ? { missedAt: one.missedAt } : {}),
@@ -890,13 +908,13 @@ export function countConcepts(
 ): Record<string, LearnConcept> {
   const next: Record<string, LearnConcept> = { ...index }
   for (const key of untaught) {
-    const prior = own(next, key)
+    const prior = conceptAt(next, key)
     if (!prior) continue
     if (prior.count <= 1) delete next[key]
     else next[key] = { ...prior, count: prior.count - 1 }
   }
   for (const one of taught) {
-    const prior = own(next, one.key)
+    const prior = conceptAt(next, one.key)
     const seen = [...(one.files ?? files), ...(prior?.files ?? [])].filter((file, i, all) => all.indexOf(file) === i).slice(0, 5)
     next[one.key] = prior
       ? {
@@ -1017,6 +1035,7 @@ export function forHistory(note: LearnNote): LearnNote {
     prompt: cut(note.prompt, 600),
     answer: cut(note.answer, 600),
     text: note.status === 'ready' ? closeTicks(cut(note.text, HISTORY_TEXT_BUDGET)) : note.text,
+    ...(note.asks ? { asks: note.asks.slice(-ASKS_KEPT).map(one => ({ ...one, question: cut(one.question, 400), answer: closeTicks(closeFence(cut(one.answer, 1500))) })) } : {}),
     changes: note.changes.map(change => {
       if (change.diff.length <= HISTORY_DIFF_BUDGET) return change
       const { diff } = hunksToDiff(parseDiff(change.diff), HISTORY_DIFF_BUDGET)
@@ -1126,7 +1145,7 @@ export function journalIndex(markdown: string): { time: string; request: string;
     const request = cut(/^\*\*요청\*\*:\s*(.*)$/m.exec(section)?.[1]?.trim() ?? '', 80)
     const summary = /^#{1,4}\s*한 줄 요약/m.test(section) ? summaryOf(section) : ''
     const entry = { time: head[1]!, request, summary, isRewrite: head[2]!.includes('다시 쓴 노트') }
-    const same = found.findIndex(one => one.time === entry.time && one.request === entry.request)
+    const same = found.findIndex(one => one.time === entry.time && isSameRequest(one.request, entry.request))
     if (same !== -1 && entry.isRewrite) found[same] = entry
     else found.push(entry)
   }
@@ -1328,7 +1347,7 @@ export function journalEntries(markdown: string): RecapEntry[] {
       concepts: conceptsOf(body).map(one => ({ key: one.key, name: one.name })),
     }
     const isRewrite = head[3]!.includes('다시 쓴 노트')
-    const same = found.findIndex(one => one.entry.day === entry.day && one.entry.time === entry.time && one.entry.request === entry.request)
+    const same = found.findIndex(one => one.entry.day === entry.day && one.entry.time === entry.time && isSameRequest(one.entry.request, entry.request))
     if (same !== -1 && isRewrite) found[same] = { entry, isRewrite }
     else found.push({ entry, isRewrite })
   }
@@ -1367,6 +1386,7 @@ export const RECAP_SYSTEM = [
   '그 사람이 정해진 기간에 받은 학습 노트들의 요약을 보고, 기간 전체를 돌아보는 정리를 한국어 마크다운으로 쓴다.',
   '노트에 있는 것만 말한다. 인사말이나 맺음말은 쓰지 않는다.',
   '코드는 백틱(`)으로 감싸고, 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다.',
+  TONE,
 ].join(' ')
 
 /** The one user message the model reads for a recap. */
@@ -1413,6 +1433,39 @@ export function recapSection(range: RecapRange, text: string, at: number, day: s
   return [`## ${day} 정리 · ${range.label} (${stamp(at).time})`, '', text, '', '---', ''].join('\n')
 }
 
+/** A concept picked for a quiz, with the code a note met it in when there is one: the quiz asks about the learner's own code. */
+export type QuizPick = RankedConcept & { code?: { file: string; text: string } }
+
+/** Characters of the learner's code a quiz question is shown for one concept. */
+const QUIZ_CODE_BUDGET = 700
+
+/**
+ * The code a concept was met in, from one change: the lines after the change
+ * (with two lines around each changed spot), from a few lines above the line
+ * its explanation quotes when one does; undefined for a change with no new code.
+ */
+export function codeFor(change: Pick<LearnChange, 'diff'>, blurb: string): string | undefined {
+  const after = parseDiff(change.diff).flatMap((h, i) => {
+    const lines = beforeAfter(focus(h, 2)).after.split('\n')
+    return i > 0 ? ['…', ...lines] : lines
+  })
+  if (after.every(line => line.trim() === '' || line === '…')) return undefined
+  const quotes = [...blurb.matchAll(/``(.+?)``|`([^`]+)`/g)].map(m => squash(m[1] ?? m[2]!)).filter(q => q.length >= 4)
+  const hit = after.findIndex(line => {
+    const flat = squash(line)
+    return flat.length > 0 && quotes.some(q => flat.includes(q) || (flat.length >= 8 && q.includes(flat)))
+  })
+  const kept: string[] = []
+  let used = 0
+  for (const line of after.slice(hit === -1 ? 0 : Math.max(0, hit - 5))) {
+    if (used + line.length + 1 > QUIZ_CODE_BUDGET || kept.length >= 16) break
+    kept.push(line)
+    used += line.length + 1
+  }
+  while (kept.length > 0 && (kept.at(-1)!.trim() === '' || kept.at(-1) === '…')) kept.pop()
+  return kept.length > 0 ? kept.join('\n') : undefined
+}
+
 /** Concepts for a quiz: the ones due for a second look first, then the longest unseen; at most `size`. */
 export function quizPick(index: Readonly<Record<string, LearnConcept>>, now: number, size = 3): RankedConcept[] {
   const due = reviewQueue(index, now, size)
@@ -1429,19 +1482,29 @@ export const QUIZ_SYSTEM = [
   '코드는 백틱(`)으로 감싸고, 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다.',
 ].join(' ')
 
-/** The one user message the model reads for a quiz: each concept with what the notes said about it. */
-export function quizPrompt(picks: readonly LearnConcept[], level: Level): string {
+/** The one user message the model reads for a quiz: each concept with what the notes said about it, and the learner's code it was met in. */
+export function quizPrompt(picks: readonly (LearnConcept & { code?: QuizPick['code'] })[], level: Level): string {
+  const hasCode = picks.some(one => one.code !== undefined)
   return [
     LEVEL_TEXT[level],
     '',
     '## 개념',
-    ...picks.map((one, i) => `${i + 1}. ${one.name} — ${one.blurb || '(설명 없음)'}`),
+    ...picks.flatMap((one, i) => {
+      const head = `${i + 1}. ${one.name} — ${one.blurb || '(설명 없음)'}`
+      if (!one.code) return [head]
+      const fence = fenceFor(one.code.text)
+      return [head, `   학습자가 만든 코드 (${one.code.file}):`, fence, one.code.text, fence]
+    }),
     '',
     `개념마다 문제 하나씩, 위 순서대로 ${picks.length}개를 낸다. 문제에 개념 이름을 그대로 쓰지 말고, 코드나 상황을 보여 주고 묻는다.`,
+    ...(hasCode ? ['학습자가 만든 코드가 붙은 개념은 그 코드를 그대로, 또는 조금 바꿔 보여 주고 묻는다. 자기 코드로 다시 떠올리게 하는 것이 목적이다.'] : []),
+    '힌트는 막힌 학습자가 답을 떠올리게 돕는 실마리 한 문장이다. 답이나 개념 이름을 그대로 말하지 않는다.',
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
     'Q1: (문제 한두 문장)',
+    'H1: (힌트 한 문장)',
     'A1: (답 한두 문장)',
     'Q2: …',
+    'H2: …',
     'A2: …',
   ].join('\n')
 }
@@ -1450,6 +1513,7 @@ export const CHECK_SYSTEM = [
   '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 복습 퀴즈를 채점하는 튜터다.',
   '문제와 모범 답, 학습자가 직접 적은 답을 보고 채점한다. 표현이 달라도 뜻이 같으면 맞다. 맞춤법·말투·길이는 보지 않는다.',
   '코드는 백틱(`)으로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
+  TONE,
 ].join(' ')
 
 /** The one user message the model reads to grade a typed answer. */
@@ -1501,6 +1565,14 @@ export function parseCheck(text: string): { verdict: 'right' | 'partial' | 'wron
   return { verdict, feedback: cut(feedback.replace(/\n{2,}/g, '\n'), 600) }
 }
 
+/** True when two journal requests are one note's: the same words, one perhaps cut short or written on one line by an older build. */
+export function isSameRequest(a: string, b: string): boolean {
+  const norm = (text: string) => text.replace(/\s+/g, ' ').trim().replace(/…$/, '')
+  const x = norm(a)
+  const y = norm(b)
+  return x === y || (x !== '' && y !== '' && (x.startsWith(y) || y.startsWith(x)))
+}
+
 /** Text cut inside a code block gets its closing fence, so it does not swallow what follows. */
 function closeFence(text: string): string {
   const fences = text.split('\n').filter(line => /^\s*```/.test(line)).length
@@ -1514,22 +1586,46 @@ export function listItem(n: number, text: string): string {
 }
 
 /**
- * Questions and answers read back from the model's reply, paired by number
- * with the concepts asked about. A question or answer runs on over the lines
- * after its marker (a code block in it included) until the next marker.
+ * Questions, hints and answers read back from the model's reply, paired by
+ * number with the concepts asked about. Each runs on over the lines after its
+ * marker (a code block in it included) until the next marker; a hint may be missing.
  */
 export function parseQuiz(text: string, picks: readonly RankedConcept[]): LearnQuizItem[] {
+  const aware = quizItems(quizParts(text, true), picks)
+  // A fence the model left open would hide every marker after it: then read it as if there were no code.
+  return aware.length >= picks.length ? aware : [aware, quizItems(quizParts(text, false), picks)].reduce((a, b) => (b.length > a.length ? b : a))
+}
+
+/** A line that only opens or closes a code block (a language name may follow): not one holding code on it too. */
+const BARE_FENCE = /^\s*(`{3,}|~{3,})[\w+.-]*\s*$/
+
+/**
+ * Each marker's text (Q1, H1, A1, …), the lines after it included. With
+ * `isFenceAware`, a capital marker inside a code block is the code's own line
+ * (`h1.textContent`, `a1.`); a marker seen twice keeps its first text.
+ */
+function quizParts(text: string, isFenceAware: boolean): Map<string, string[]> {
   const parts = new Map<string, string[]>()
   let current: string[] | undefined
+  let fence: string | null = null
   for (const raw of text.split('\n')) {
-    const m = /^\s*(?:\*\*)?([QA])\s*(\d+)\s*(?:\*\*)?\s*[:.)：]\s*(?:\*\*)?\s*(.*)$/i.exec(raw)
-    if (m) {
+    const m = fence !== null ? null : /^\s*(?:\*\*)?([QHA])\s*(\d+)\s*(?:\*\*)?\s*[:.)：]\s*(?:\*\*)?\s*(.*)$/.exec(raw)
+    const key = m ? `${m[1]}${Number(m[2])}` : undefined
+    if (m && key && !parts.has(key)) {
       current = [m[3]!.replace(/\*\*$/, '')]
-      parts.set(`${m[1]!.toUpperCase()}${Number(m[2])}`, current)
+      parts.set(key, current)
     } else if (current) {
       current.push(raw)
     }
+    const bare = isFenceAware ? BARE_FENCE.exec(raw) : null
+    if (bare && fence === null) fence = bare[1]!
+    else if (bare && fence !== null && bare[1]!.startsWith(fence[0]!) && bare[1]!.length >= fence.length) fence = null
   }
+  return parts
+}
+
+/** The questions read out of `parts`, paired by number with the concepts asked about. */
+function quizItems(parts: Map<string, string[]>, picks: readonly RankedConcept[]): LearnQuizItem[] {
   const read = (key: string) => {
     const lines = parts.get(key)
     return lines ? closeFence(cut(lines.join('\n').replace(/\n{3,}/g, '\n\n'), 1200)) : ''
@@ -1538,7 +1634,10 @@ export function parseQuiz(text: string, picks: readonly RankedConcept[]): LearnQ
   picks.forEach((one, i) => {
     const question = read(`Q${i + 1}`)
     const answer = read(`A${i + 1}`)
-    if (question && answer) items.push({ key: one.key, name: one.name, question, answer })
+    const hint = parts.has(`H${i + 1}`) ? closeFence(cut(parts.get(`H${i + 1}`)!.join('\n').replace(/\n{2,}/g, '\n'), 300)) : ''
+    // A hint that is the answer itself helps no one.
+    const isHelpful = hint !== '' && squash(hint) !== squash(answer)
+    if (question && answer) items.push({ key: one.key, name: one.name, question, ...(isHelpful ? { hint } : {}), answer })
   })
   return items
 }
@@ -1567,6 +1666,43 @@ export function markMissed(index: Readonly<Record<string, LearnConcept>>, keys: 
     if (one) next[key] = { ...one, missedAt: at, step: 0 }
   }
   return next
+}
+
+/**
+ * The index with partly right answers marked: gone over now, and a step back
+ * (never below the first), so it comes back sooner without counting as forgotten.
+ */
+export function markPartial(index: Readonly<Record<string, LearnConcept>>, keys: readonly string[], at: number): Record<string, LearnConcept> {
+  const next: Record<string, LearnConcept> = { ...index }
+  for (const key of keys) {
+    const one = conceptAt(next, key)
+    if (one) next[key] = { ...unmarked(one), reviewedAt: Math.max(one.reviewedAt ?? 0, at), step: Math.max(0, stepOf(one) - 1) }
+  }
+  return next
+}
+
+/** A concept's quiz marks as they stand, to put back if the grade that follows is turned the other way. */
+export function marksOf(one: LearnConcept): LearnQuizMarks {
+  return {
+    ...(one.reviewedAt !== undefined ? { reviewedAt: one.reviewedAt } : {}),
+    ...(one.missedAt !== undefined ? { missedAt: one.missedAt } : {}),
+    ...(one.step !== undefined ? { step: one.step } : {}),
+  }
+}
+
+/** How a grade marks a concept: markReviewed, markPartial, markMissed or a mix. */
+export type Mark = (index: Readonly<Record<string, LearnConcept>>, keys: readonly string[], at: number) => Record<string, LearnConcept>
+
+/**
+ * The index with one concept graded again at `at`: its marks from before the
+ * first grade put back while nothing has gone over it since, then `mark`, so
+ * turning a grade the other way is as if it had been given that way.
+ */
+export function regrade(index: Readonly<Record<string, LearnConcept>>, key: string, before: LearnQuizMarks | undefined, at: number, mark: Mark): Record<string, LearnConcept> {
+  const one = conceptAt(index, key)
+  if (!one) return { ...index }
+  const isUntouched = before !== undefined && one.reviewedAt === at
+  return mark(isUntouched ? { ...index, [key]: { ...unmarked(one), ...before } } : index, [key], at)
 }
 
 /** A concept without its quiz marks, for putting the right ones back. */
@@ -1598,9 +1734,6 @@ function quizMarks(a: Partial<LearnConcept>, b: Partial<LearnConcept>): Pick<Lea
   }
 }
 
-/** One day's learning (see LearnDayActivity). */
-export type DayActivity = LearnDayActivity
-
 /** Days of activity the store keeps, the newest. */
 export const ACTIVITY_DAYS = 120
 
@@ -1608,25 +1741,25 @@ const isDay = (day: string) => /^\d{4}-\d{2}-\d{2}$/.test(day)
 const count = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : 0)
 
 /** The newest ACTIVITY_DAYS days of a record. */
-function keepLatest(record: Record<string, DayActivity>): Record<string, DayActivity> {
+function keepLatest(record: Record<string, LearnDayActivity>): Record<string, LearnDayActivity> {
   const days = Object.keys(record).sort().slice(-ACTIVITY_DAYS)
   return Object.fromEntries(days.map(day => [day, record[day]!]))
 }
 
 /** The activity record read back from the store: bad days dropped, the newest ACTIVITY_DAYS kept. */
-export function cleanActivity(raw: unknown): Record<string, DayActivity> {
-  const record: Record<string, DayActivity> = {}
+export function cleanActivity(raw: unknown): Record<string, LearnDayActivity> {
+  const record: Record<string, LearnDayActivity> = {}
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return record
   for (const [day, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!isDay(day) || typeof value !== 'object' || value === null) continue
-    const one = value as Partial<DayActivity>
+    const one = value as Partial<LearnDayActivity>
     record[day] = { notes: count(one.notes), right: count(one.right), wrong: count(one.wrong) }
   }
   return keepLatest(record)
 }
 
 /** The record with `delta` added on `day`; no count goes below zero. */
-export function addActivity(record: Readonly<Record<string, DayActivity>>, day: string, delta: Partial<DayActivity>): Record<string, DayActivity> {
+export function addActivity(record: Readonly<Record<string, LearnDayActivity>>, day: string, delta: Partial<LearnDayActivity>): Record<string, LearnDayActivity> {
   const prior = Object.prototype.hasOwnProperty.call(record, day) ? record[day]! : { notes: 0, right: 0, wrong: 0 }
   const next = {
     notes: Math.max(0, prior.notes + (delta.notes ?? 0)),
@@ -1637,8 +1770,8 @@ export function addActivity(record: Readonly<Record<string, DayActivity>>, day: 
 }
 
 /** A first record made from the notes still kept: each written note on its day. */
-export function activityFromNotes(list: readonly Pick<LearnNote, 'at' | 'status'>[]): Record<string, DayActivity> {
-  let record: Record<string, DayActivity> = {}
+export function activityFromNotes(list: readonly Pick<LearnNote, 'at' | 'status'>[]): Record<string, LearnDayActivity> {
+  let record: Record<string, LearnDayActivity> = {}
   for (const note of list) if (note.status === 'ready') record = addActivity(record, stamp(note.at).day, { notes: 1 })
   return record
 }
@@ -1663,16 +1796,16 @@ export type LearnStats = {
   best: number
   isTodayActive: boolean
   /** The last seven days, today included. */
-  week: DayActivity
+  week: LearnDayActivity
   /** Graded answers in the last thirty days. */
   month: { right: number; wrong: number }
   /** The last seven days, the oldest first. */
-  days: { day: string; weekday: string; one: DayActivity }[]
+  days: { day: string; weekday: string; one: LearnDayActivity }[]
 }
 
-const isActive = (one: DayActivity | undefined) => one !== undefined && one.notes + one.right + one.wrong > 0
+const isActive = (one: LearnDayActivity | undefined) => one !== undefined && one.notes + one.right + one.wrong > 0
 
-export function statsOf(record: Readonly<Record<string, DayActivity>>, now: number): LearnStats {
+export function statsOf(record: Readonly<Record<string, LearnDayActivity>>, now: number): LearnStats {
   const at = (day: string) => (Object.prototype.hasOwnProperty.call(record, day) ? record[day] : undefined)
   const back = daysBack(now, ACTIVITY_DAYS + 1)
   const isTodayActive = isActive(at(back[0]!.day))

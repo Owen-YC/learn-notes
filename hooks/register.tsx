@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementTable, EngineInterface, Register } from 'claude-code'
 
-import type { LearnChange, LearnConcept, LearnDayActivity, LearnLive, LearnNote, LearnQuizItem, LearnQuizRun, LearnSubmit, LearnView } from '../types'
+import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnLive, LearnNote, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSubmit, LearnView } from '../types'
 import {
   HISTORY_PER_PROJECT,
   HISTORY_PROJECTS,
@@ -10,7 +10,14 @@ import {
   NOTES_KEPT,
   SYSTEM,
   ASK_SYSTEM,
+  ASKS_KEPT,
   CHECK_SYSTEM,
+  codeFor,
+  markPartial,
+  marksOf,
+  regrade,
+  type Mark,
+  type QuizPick,
   checkPrompt,
   parseCheck,
   activityFromNotes,
@@ -107,6 +114,7 @@ const paneRoot = atom({ plugin: 'learn-notes', key: 'root' } as const, null)
 const aliases = atom({ plugin: 'learn-notes', key: 'aliases' } as const, {})
 const quiz = atom({ plugin: 'learn-notes', key: 'quiz' } as const, null)
 const quizRun = atom({ plugin: 'learn-notes', key: 'quizRun' } as const, { isMaking: false, error: null })
+const askRun = atom({ plugin: 'learn-notes', key: 'askRun' } as const, {})
 const activity = atom({ plugin: 'learn-notes', key: 'activity' } as const, {})
 const submitted = atom({ plugin: 'learn-notes', key: 'submitted' } as const, { list: [], lastRequest: null })
 
@@ -151,7 +159,8 @@ type History = Record<string, HistoryEntry>
 
 // The friendly view first: the note, then before/after, then the raw diff, then every concept so far, then a quiz on them.
 const VIEWS: readonly LearnView[] = ['note', 'split', 'diff', 'concepts', 'quiz']
-const VIEW_NEXT: Record<LearnView, LearnView> = { note: 'split', split: 'diff', diff: 'concepts', concepts: 'quiz', quiz: 'note' }
+// v goes round the reading views; the quiz is q's, and v goes back from it to the note.
+const VIEW_NEXT: Record<LearnView, LearnView> = { note: 'split', split: 'diff', diff: 'concepts', concepts: 'note', quiz: 'note' }
 const VIEW_LABEL: Record<LearnView, string> = { note: '노트', split: '전/후', diff: 'diff', concepts: '개념 모음', quiz: '퀴즈' }
 /** Views about every note at once, not the selected one. */
 const isWhole = (mode: LearnView) => mode === 'concepts' || mode === 'quiz'
@@ -191,14 +200,24 @@ const inFlight = new Set<string>()
 let isQuizMaking = false
 /** True while the model grades a typed answer: one at a time. */
 let isQuizChecking = false
+/** Notes whose question asked in the pane the model is answering now: one at a time per note. */
+const asking = new Set<string>()
 /** The status line this plugin last pinned, so an unchanged count is not pinned again; null until the first look since this load. */
 let shownReminder: string | undefined | null = null
 /** Quiz questions being graded now (quiz time and number), so a second press while the first is written does nothing. */
 const grading = new Set<string>()
-/** Saves run one after another: each reads the journal and writes it whole. */
-let saving: Promise<unknown> = Promise.resolve()
-/** Store writes likewise: each reads a whole value and writes it back. */
-let storing: Promise<unknown> = Promise.resolve()
+/**
+ * Work that must not interleave runs one after another in its lane: journal
+ * saves (each reads a journal and writes it whole) and store writes (each
+ * reads a whole value and writes it back). One that fails never stops the next.
+ */
+const lanes: Record<'saving' | 'storing', Promise<unknown>> = { saving: Promise.resolve(), storing: Promise.resolve() }
+
+function enqueue<T>(lane: keyof typeof lanes, work: () => Promise<T>): Promise<T> {
+  const run = lanes[lane].catch(() => undefined).then(work)
+  lanes[lane] = run
+  return run
+}
 let hasWarnedSave = false
 let hasWarnedStore = false
 /** False for a `-p` run or an SDK host: there a note is stored only once written, since the process may end first. */
@@ -232,6 +251,11 @@ function fromHistory(raw: unknown, root: string): LearnNote | undefined {
     concepts: Array.isArray(note.concepts) ? note.concepts.filter(key => typeof key === 'string') : [],
     root: typeof note.root === 'string' && note.root !== '' ? note.root : root,
     updatedAt: typeof note.updatedAt === 'number' ? note.updatedAt : note.at,
+    asks: Array.isArray(raw.asks)
+      ? raw.asks.filter(
+          (one): one is LearnAsk => isRecord(one) && typeof one.question === 'string' && typeof one.answer === 'string' && typeof one.at === 'number',
+        )
+      : [],
   }
 }
 
@@ -264,12 +288,9 @@ async function journalDir($: EngineInterface, cfg: Config): Promise<string> {
 
 /** Appends one note to the day's journal, after any save still running. */
 function save($: EngineInterface, cfg: Config, note: LearnNote, isRewrite: boolean): Promise<string | undefined> {
-  const run = saving.then(() => saveNow($, cfg, note, isRewrite))
-  saving = run
-  return run
+  return enqueue('saving', () => saveNow($, cfg, note, isRewrite))
 }
 
-/** A failure is a toast once and a debug line, never a broken turn. */
 /** Appends `section` to `root`'s journal for the day of `at`, rolling over to the next part past the read limit. */
 async function appendJournal($: EngineInterface, cfg: Config, root: string, at: number, section: string): Promise<string> {
   const dir = await journalDir($, cfg)
@@ -284,14 +305,16 @@ async function appendJournal($: EngineInterface, cfg: Config, root: string, at: 
   return path
 }
 
+/** A failure is a toast once and a debug line, never a broken turn. */
 async function saveNow($: EngineInterface, cfg: Config, note: LearnNote, isRewrite: boolean): Promise<string | undefined> {
   try {
     // Into the journal of the note's own project, even after a /cd.
     const root = note.root || (await $.session.root())
     const path = await appendJournal($, cfg, root, note.at, journalSection(note, isRewrite))
-    await setNote($, note.id, { savedAs: note.status })
+    await setNote($, note.id, { savedAs: note.status, isUnsaved: false })
     return path
   } catch (error) {
+    await setNote($, note.id, { isUnsaved: true }).catch(() => undefined)
     $.ui.log(`learn-notes: 노트를 파일에 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
     if (!hasWarnedSave) {
       hasWarnedSave = true
@@ -321,7 +344,7 @@ async function isPaneVisible($: EngineInterface): Promise<boolean> {
 
 /** Appends a /learn ask question and answer to the journal the note is in, after any save still running. */
 function saveAsk($: EngineInterface, cfg: Config, note: LearnNote, question: string, answer: string, at: number): Promise<string | undefined> {
-  const run = saving.then(async () => {
+  return enqueue('saving', async () => {
     try {
       // Into the journal of the note's own day: asking never makes a journal day with no notes.
       return await appendJournal($, cfg, note.root || (await $.session.root()), note.at, askSection(note, question, answer, at))
@@ -330,13 +353,11 @@ function saveAsk($: EngineInterface, cfg: Config, note: LearnNote, question: str
       return undefined
     }
   })
-  saving = run
-  return run
 }
 
 /** Appends a recap to the journal of the last day it covers a note of, after any save still running. */
 function saveRecap($: EngineInterface, cfg: Config, root: string, range: RecapRange, text: string, at: number, day: string): Promise<string | undefined> {
-  const run = saving.then(async () => {
+  return enqueue('saving', async () => {
     try {
       // Under the day of the last note it covers, so a recap never makes a journal day with no notes.
       return await appendJournal($, cfg, root, dayNoon(day), recapSection(range, text, at, day))
@@ -345,8 +366,6 @@ function saveRecap($: EngineInterface, cfg: Config, root: string, range: RecapRa
       return undefined
     }
   })
-  saving = run
-  return run
 }
 
 /**
@@ -355,17 +374,17 @@ function saveRecap($: EngineInterface, cfg: Config, root: string, range: RecapRa
  * two sessions in one project keep each other's notes; `forget` drops the
  * project instead (/learn clear).
  */
-function persist($: EngineInterface, forget = false): Promise<void> {
-  const run = storing.then(() => persistNow($, forget))
-  storing = run
-  return run
+function persist($: EngineInterface, forget = false, extra: readonly LearnNote[] = []): Promise<void> {
+  return enqueue('storing', () => persistNow($, forget, extra))
 }
 
-async function persistNow($: EngineInterface, forget: boolean): Promise<void> {
+/** See persist; `extra`: notes to store though the pane no longer holds them (one finished after a /cd). */
+async function persistNow($: EngineInterface, forget: boolean, extra: readonly LearnNote[]): Promise<void> {
   try {
     const root = await $.session.root()
     const now = await $.clock.now()
-    const list = await read($, notes)
+    const pane = await read($, notes)
+    const list = [...pane, ...extra.filter(one => !pane.some(other => other.id === one.id))]
     const raw = await $.store.get(HISTORY_KEY)
     const history: History = {}
     if (isRecord(raw)) {
@@ -481,15 +500,13 @@ async function followRoot($: EngineInterface): Promise<void> {
  * pane's mirror); a rewrite counts only what changed. Returns the note's keys.
  */
 function learnConcepts($: EngineInterface, cfg: Config, note: LearnNote): Promise<string[]> {
-  const run = storing.then(() => learnConceptsNow($, cfg, note))
-  storing = run
-  return run
+  return enqueue('storing', () => learnConceptsNow($, cfg, note))
 }
 
 async function learnConceptsNow($: EngineInterface, cfg: Config, note: LearnNote): Promise<string[]> {
   // A name merged away (/learn merge, here or in another session) counts under the concept it went into;
   // the note's own keys from before a merge are read the same way, so a rewrite never counts one twice.
-  const map = await currentAliases($)
+  const map = await currentAliases($).catch(() => read($, aliases))
   // Files are matched on the whole explanation line: a cut one can lose the code it quotes.
   const lines = new Map(conceptsOf(note.text, Number.POSITIVE_INFINITY).map(one => [one.key, one.blurb]))
   const found = conceptsOf(note.text)
@@ -521,15 +538,13 @@ async function learnConceptsNow($: EngineInterface, cfg: Config, note: LearnNote
 
 /** Rewrites concepts.md beside the journals, after any journal save still running. */
 function saveConcepts($: EngineInterface, cfg: Config, index: Record<string, LearnConcept>): Promise<unknown> {
-  const run = saving.then(async () => {
+  return enqueue('saving', async () => {
     try {
       await $.fs.write(`${(await journalDir($, cfg)).replace(/[\\/]+$/, '')}/concepts.md`, conceptsMarkdown(index))
     } catch (error) {
       $.ui.log(`learn-notes: 개념 모음을 파일에 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
     }
   })
-  saving = run
-  return run
 }
 
 /** Every note there is: the pane's, then every project's in the store (the pane's copy of one note wins). */
@@ -555,13 +570,13 @@ type MergeResult = { isDone: true; gone: LearnConcept; kept: LearnConcept; isSpl
 /**
  * Folds the concept named `fromName` into the one named `intoName`, against
  * the store as it is now (another session may have merged since): counts
- * added less the notes that taught both, the alias kept for later notes, the
- * pane's notes re-keyed. Naming a concept that was merged away as the target
+ * added less the notes that taught both, the alias kept for every note's old
+ * key and for later notes. Naming a concept that was merged away as the target
  * undoes that merge: two concepts merged are split again as they were, less
  * nothing met since; a rename is renamed back.
  */
 function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, intoName: string): Promise<MergeResult> {
-  const run = storing.then(async (): Promise<MergeResult> => {
+  return enqueue('storing', async (): Promise<MergeResult> => {
     try {
       const map = cleanAliases(await $.store.get(ALIASES_KEY))
       const index = cleanConcepts(await $.store.get(CONCEPTS_KEY), map)
@@ -578,7 +593,8 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
       const nextMap: Record<string, string> = {}
       for (const [key, target] of Object.entries(map)) if (!(isUndo && key === named)) nextMap[key] = target
       const nextMerges: Record<string, MergeRecord> = { ...merges }
-      delete nextMerges[named]
+      // Only an undo spends its record: a later merge into the same name must not lose an earlier one's.
+      if (isUndo) delete nextMerges[named]
       let folded: Record<string, LearnConcept>
       let isSplit = false
       if (record && record.into === from) {
@@ -605,19 +621,9 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
       await $.store.set(MERGES_KEY, nextMerges)
       await update($, concepts, () => folded)
       await remind($, cfg)
+      // The notes keep the keys they were written with: every reader follows the aliases, so undoing a merge
+      // finds each note's concept where it was.
       await update($, aliases, () => nextMap)
-      const now = await $.clock.now()
-      await update($, notes, list =>
-        list.map(note =>
-          !isSplit && note.concepts.includes(from)
-            ? {
-                ...note,
-                concepts: note.concepts.map(key => (key === from ? into : key)).filter((key, i, all) => all.indexOf(key) === i),
-                updatedAt: Math.max(now, note.updatedAt + 1),
-              }
-            : note,
-        ),
-      )
       if (cfg.isAutoSave) await saveConcepts($, cfg, folded)
       return isSplit ? { isDone: true, gone: folded[named]!, kept: folded[from]!, isSplit } : { isDone: true, gone, kept: folded[into]!, isSplit }
     } catch (error) {
@@ -625,8 +631,6 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
       return { isDone: false, text: '개념을 합치지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.' }
     }
   })
-  storing = run
-  return run
 }
 
 /** The activity record as the store has it; a first one is made from the notes still kept. */
@@ -637,7 +641,7 @@ async function storedActivity($: EngineInterface): Promise<Record<string, LearnD
 
 /** Adds a new quiz's questions to the bank /learn anki exports; never fails the caller. */
 function bankQuestions($: EngineInterface, items: readonly LearnQuizItem[], at: number): Promise<void> {
-  const run = storing.then(async () => {
+  return enqueue('storing', async () => {
     try {
       const bank = addToBank(cleanBank(await $.store.get(BANK_KEY)), items.map(({ key, name, question, answer }) => ({ key, name, question, answer })), at)
       await $.store.set(BANK_KEY, bank)
@@ -645,8 +649,6 @@ function bankQuestions($: EngineInterface, items: readonly LearnQuizItem[], at: 
       $.ui.log(`learn-notes: 퀴즈 문제를 모아 두지 못했습니다 (${String(error)})`, { to: 'debug' })
     }
   })
-  storing = run
-  return run
 }
 
 /**
@@ -655,7 +657,7 @@ function bankQuestions($: EngineInterface, items: readonly LearnQuizItem[], at: 
  * instead of to a record that already holds them.
  */
 function seedActivity($: EngineInterface): Promise<void> {
-  const run = storing.then(async () => {
+  return enqueue('storing', async () => {
     try {
       const raw = await $.store.get(ACTIVITY_KEY)
       const record = raw === undefined ? activityFromNotes(await allNotes($)) : cleanActivity(raw)
@@ -665,13 +667,11 @@ function seedActivity($: EngineInterface): Promise<void> {
       $.ui.log(`learn-notes: 학습 기록을 읽지 못했습니다 (${String(error)})`, { to: 'debug' })
     }
   })
-  storing = run
-  return run
 }
 
 /** Counts a written note or graded answers on `day`, in the store and the pane's mirror; never fails the caller. */
 function recordActivity($: EngineInterface, day: string, delta: Partial<LearnDayActivity>): Promise<void> {
-  const run = storing.then(async () => {
+  return enqueue('storing', async () => {
     try {
       const next = addActivity(cleanActivity(await $.store.get(ACTIVITY_KEY)), day, delta)
       await $.store.set(ACTIVITY_KEY, next)
@@ -680,8 +680,6 @@ function recordActivity($: EngineInterface, day: string, delta: Partial<LearnDay
       $.ui.log(`learn-notes: 학습 기록을 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
     }
   })
-  storing = run
-  return run
 }
 
 /**
@@ -696,24 +694,38 @@ async function remind($: EngineInterface, cfg: Config): Promise<void> {
   $.ui.status(text)
 }
 
-/** Marks concepts after a quiz (gone over, or got wrong), in the store and the pane's mirror. */
-function markConcepts($: EngineInterface, cfg: Config, mark: typeof markReviewed, keys: readonly string[], at: number): Promise<boolean> {
-  const run = storing.then(async () => {
+/**
+ * Marks concepts after a quiz grade, in the store and the pane's mirror: the
+ * marks each had before (in the order of `keys`), or undefined when the store
+ * could not be written.
+ */
+function markConcepts(
+  $: EngineInterface,
+  cfg: Config,
+  mark: Mark,
+  keys: readonly string[],
+  at: number,
+): Promise<(LearnQuizMarks | undefined)[] | undefined> {
+  return enqueue('storing', async () => {
     try {
       const map = cleanAliases(await $.store.get(ALIASES_KEY))
-      const index = mark(cleanConcepts(await $.store.get(CONCEPTS_KEY), map), keys.map(key => resolveKey(map, key)), at)
+      const prior = cleanConcepts(await $.store.get(CONCEPTS_KEY), map)
+      const resolved = keys.map(key => resolveKey(map, key))
+      const before = resolved.map(key => {
+        const one = conceptAt(prior, key)
+        return one ? marksOf(one) : undefined
+      })
+      const index = mark(prior, resolved, at)
       await $.store.set(CONCEPTS_KEY, index)
       await update($, concepts, () => index)
       await remind($, cfg)
       if (cfg.isAutoSave) await saveConcepts($, cfg, index)
-      return true
+      return before
     } catch (error) {
       $.ui.log(`learn-notes: 복습을 기록하지 못했습니다 (${String(error)})`, { to: 'debug' })
-      return false
+      return undefined
     }
   })
-  storing = run
-  return run
 }
 
 /** Every note the journal holds for these days in this project, part by part. */
@@ -732,22 +744,36 @@ async function journalEntriesFor($: EngineInterface, cfg: Config, days: readonly
 
 type Quiz = { at: number; items: LearnQuizItem[]; isRevealed: boolean }
 
+/** A concept's marks read back off a stored quiz question. */
+function marksFrom(raw: unknown): LearnQuizMarks | undefined {
+  if (!isRecord(raw)) return undefined
+  return {
+    ...(typeof raw.reviewedAt === 'number' ? { reviewedAt: raw.reviewedAt } : {}),
+    ...(typeof raw.missedAt === 'number' ? { missedAt: raw.missedAt } : {}),
+    ...(typeof raw.step === 'number' ? { step: raw.step } : {}),
+  }
+}
+
 /** One quiz question read back from the store; undefined when it is not one. */
 function quizItemOf(one: unknown): LearnQuizItem | undefined {
   if (!isRecord(one)) return undefined
-  const { key, name, question, answer, isShown, result, gradedAt, mine, verdict, feedback } = one
+  const { key, name, question, answer, hint, isHinted, isShown, result, gradedAt, mine, verdict, feedback } = one
   if (typeof key !== 'string' || typeof name !== 'string' || typeof question !== 'string' || typeof answer !== 'string') return undefined
+  const before = marksFrom(one.before)
   return {
     key,
     name,
     question,
     answer,
+    ...(typeof hint === 'string' && hint !== '' ? { hint } : {}),
+    ...(isHinted === true ? { isHinted } : {}),
     ...(isShown === true ? { isShown } : {}),
     ...(result === 'right' || result === 'wrong' ? { result } : {}),
     ...(typeof gradedAt === 'number' ? { gradedAt } : {}),
     ...(typeof mine === 'string' ? { mine } : {}),
     ...(verdict === 'right' || verdict === 'partial' || verdict === 'wrong' ? { verdict } : {}),
     ...(typeof feedback === 'string' ? { feedback } : {}),
+    ...(before ? { before } : {}),
   }
 }
 
@@ -766,17 +792,90 @@ function isAnswerShown(current: Quiz, item: LearnQuizItem): boolean {
   return current.isRevealed || item.isShown === true
 }
 
-/** A wrong answer: gone over now, and first in the next quiz. */
-const markWrong: typeof markReviewed = (index, keys, at) => markMissed(markReviewed(index, keys, at), keys, at)
+/** True for a question still to answer: not graded, its answer not seen. */
+function isOpen(current: Quiz, item: LearnQuizItem): boolean {
+  return item.result === undefined && !isAnswerShown(current, item)
+}
 
-/** Claude's grade of a typed answer, as the pane says it. */
-const VERDICT_TEXT: Record<'right' | 'partial' | 'wrong', string> = { right: '맞혔어요.', partial: '거의 맞았어요.', wrong: '아쉬워요.' }
+/** A wrong answer: gone over now, back to the first step, and first in the next quiz. */
+const markWrong: Mark = (index, keys, at) => markMissed(markReviewed(index, keys, at), keys, at)
+
+/** How a grade marks its concept: right a step on, partly right a step back, wrong back to the first. */
+function markFor(result: 'right' | 'wrong', verdict: LearnQuizItem['verdict']): Mark {
+  return result === 'right' ? markReviewed : verdict === 'partial' ? markPartial : markWrong
+}
+
+/** Claude's grade of a typed answer, as the pane and /learn quiz say it. */
+const VERDICT_TEXT: Record<'right' | 'partial' | 'wrong', string> = { right: '맞혔습니다.', partial: '거의 맞았습니다.', wrong: '아쉽지만 틀렸습니다.' }
+
+/** True for a question Claude graded partly right, its grade still standing: counted wrong, its concept a step back. */
+function isPartly(item: LearnQuizItem): boolean {
+  return item.result === 'wrong' && item.verdict === 'partial' && item.isLearnerGraded !== true
+}
+
+/** True for a typed answer whose grade the learner set otherwise than Claude's verdict. */
+function isTurned(item: LearnQuizItem): boolean {
+  if (item.verdict === undefined || item.result === undefined || item.isLearnerGraded !== true) return false
+  return item.verdict !== (item.result === 'right' ? 'right' : 'wrong')
+}
+
+/** A graded question's mark: ✓ 맞힘, △ 거의 맞음 (partly right, counted not yet right) or ✗ 틀림. */
+function resultMark(item: LearnQuizItem): string {
+  return item.result === 'right' ? '✓ 맞힘' : isPartly(item) ? '△ 거의 맞음' : '✗ 틀림'
+}
+
+/** What happens to the concepts a finished quiz missed: the wrong first next time, the partly right a little sooner. */
+function missesText(items: readonly LearnQuizItem[]): string {
+  if (items.some(item => item.result === 'wrong' && !isPartly(item))) return '틀린 개념은 다음 퀴즈에 먼저 나옵니다'
+  if (items.some(isPartly)) return '거의 맞힌 개념은 조금 일찍 다시 나옵니다'
+  return ''
+}
 
 const NO_CONCEPTS_FOR_QUIZ = '아직 모인 개념이 없어 퀴즈를 낼 수 없습니다. 노트가 쓰이면 "배울 개념"이 쌓입니다.'
+const CHECKING_TEXT = '답을 채점하고 있습니다. 채점이 끝난 뒤 새 문제를 받으세요.'
+const MOVED_TEXT = '그사이 새 퀴즈가 나와 이 답은 채점하지 않았습니다.'
+const GRADE_NOT_KEPT = '채점을 적지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.'
+
+/** What to say when the model in /config cannot be called (an organization's policy, a name this build does not know). */
+function noModelText(cfg: Config): string {
+  return `'${cfg.model}' 모델을 부를 수 없습니다 · /config에서 다른 모델을 골라 보세요`
+}
+
+/** One model call for the learner: its text, or why there is none in words they can act on. */
+async function askModel(
+  $: EngineInterface,
+  cfg: Config,
+  call: { system: string; prompt: string; maxTokens: number; timeoutMs?: number },
+): Promise<{ text: string } | { error: string }> {
+  let reply
+  try {
+    reply = await $.model.complete({ model: cfg.model, effort: 'low', timeoutMs: 90_000, ...call })
+  } catch {
+    return { error: noModelText(cfg) }
+  }
+  return reply.isAnswered ? { text: reply.text } : { error: failureText(reply) }
+}
+
+/** Each concept with the learner's code from the latest note that taught it, while a note still holds it. */
+async function withCode($: EngineInterface, picks: readonly RankedConcept[], map: Readonly<Record<string, string>>): Promise<QuizPick[]> {
+  const written = (await allNotes($)).filter(note => note.status === 'ready').sort((a, b) => b.at - a.at)
+  return picks.map(one => {
+    const note = written.find(each => each.concepts.some(key => resolveKey(map, key) === one.key))
+    if (!note) return one
+    // The files the concept's explanation quotes first.
+    const changes = [...note.changes].sort((a, b) => Number(one.files.includes(b.file)) - Number(one.files.includes(a.file)))
+    for (const change of changes) {
+      const text = codeFor(change, one.blurb)
+      if (text) return { ...one, code: { file: change.file.split(/[\\/]/).at(-1) ?? change.file, text } }
+    }
+    return one
+  })
+}
 
 /**
  * Asks the model for a new quiz and keeps it; or says why there is none. The
- * concepts due first, or `only` these (a note's, for t in the pane).
+ * concepts due first, or `only` these (a note's, for t in the pane), each
+ * asked about the code the learner made with it where a note still holds it.
  */
 async function makeQuiz(
   $: EngineInterface,
@@ -786,7 +885,7 @@ async function makeQuiz(
 ): Promise<{ items: LearnQuizItem[] } | { error: string }> {
   const index = await read($, concepts)
   const map = await read($, aliases)
-  const picks = only
+  const chosen = only
     ? only
         .map(key => resolveKey(map, key))
         .filter((key, i, all) => all.indexOf(key) === i)
@@ -796,15 +895,11 @@ async function makeQuiz(
         })
         .slice(0, 3)
     : quizPick(index, now)
-  if (picks.length === 0) return { error: only ? '이 노트에는 배울 개념이 없어 퀴즈를 낼 수 없습니다.' : NO_CONCEPTS_FOR_QUIZ }
-  let reply
-  try {
-    reply = await $.model.complete({ model: cfg.model, system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: 900, effort: 'low', timeoutMs: 90_000 })
-  } catch {
-    return { error: `'${cfg.model}' 모델을 부를 수 없습니다 · /config에서 다른 모델을 골라 보세요` }
-  }
-  if (!reply.isAnswered) return { error: `퀴즈를 내지 못했습니다: ${failureText(reply).replace(/ · .*$/, '')}` }
-  const items = parseQuiz(reply.text, picks)
+  if (chosen.length === 0) return { error: only ? '이 노트에는 배울 개념이 없어 퀴즈를 낼 수 없습니다.' : NO_CONCEPTS_FOR_QUIZ }
+  const picks = await withCode($, chosen, map)
+  const asked = await askModel($, cfg, { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: 1400 })
+  if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
+  const items = parseQuiz(asked.text, picks)
   if (items.length === 0) return { error: '퀴즈를 내지 못했습니다: 모델의 답을 문제로 읽지 못했습니다. 다시 해 보세요.' }
   await keepQuiz($, { at: now, items, isRevealed: false })
   await update($, quizRun, run => ({ ...run, error: null }))
@@ -815,6 +910,10 @@ async function makeQuiz(
 /** The pane's s (or t, on `only` a note's concepts): a new quiz, the pane saying "making" until it is there or failed. */
 async function startQuiz($: EngineInterface, cfg: Config, only?: readonly string[]): Promise<void> {
   if (isQuizMaking) return
+  if (isQuizChecking) {
+    await update($, quizRun, run => ({ ...run, error: CHECKING_TEXT }))
+    return
+  }
   isQuizMaking = true
   try {
     await update($, quizRun, () => ({ isMaking: true, error: null }))
@@ -828,6 +927,14 @@ async function startQuiz($: EngineInterface, cfg: Config, only?: readonly string
   }
 }
 
+/** The pane's h: one question's hint. */
+async function showHint($: EngineInterface, i: number): Promise<void> {
+  const current = await lastQuiz($)
+  const item = current?.items[i]
+  if (!current || !item?.hint || item.isHinted || item.result !== undefined) return
+  await keepQuiz($, { ...current, items: current.items.map((one, j) => (j === i ? { ...one, isHinted: true } : one)) })
+}
+
 /** The pane's a: one question's answer. */
 async function showAnswer($: EngineInterface, i: number): Promise<void> {
   const current = await lastQuiz($)
@@ -836,18 +943,19 @@ async function showAnswer($: EngineInterface, i: number): Promise<void> {
   await keepQuiz($, { ...current, items: current.items.map((one, j) => (j === i ? { ...one, isShown: true } : one)) })
 }
 
-/** The pane's o and x: the learner's own grade for one question, kept on its concept for the next quiz. */
+/** The pane's o and x: the learner's own grade for one question whose answer they saw. */
 async function gradeQuiz($: EngineInterface, cfg: Config, i: number, result: 'right' | 'wrong'): Promise<void> {
   const current = await lastQuiz($)
   const item = current?.items[i]
   if (!current || !item || item.result !== undefined || !isAnswerShown(current, item)) return
-  await applyGrade($, cfg, current, i, result, {})
+  if ((await applyGrade($, cfg, current, i, result, {})) === 'failed') await update($, quizRun, run => ({ ...run, error: GRADE_NOT_KEPT }))
 }
 
 /**
- * One question's grade, kept: its concept marked (a step on, or back to the
- * first), the quiz saved, the day's count added; `extra` is what a graded
- * typed answer brings (the answer, Claude's verdict and feedback).
+ * One question's first grade, kept: its concept marked (a step on, a step back
+ * for a partly right typed answer, or back to the first), its marks from
+ * before kept on the question for turning the grade around, the quiz saved,
+ * the day's count added. `extra` is what a graded typed answer brings.
  */
 async function applyGrade(
   $: EngineInterface,
@@ -856,69 +964,64 @@ async function applyGrade(
   i: number,
   result: 'right' | 'wrong',
   extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback'>,
-): Promise<void> {
-  const item = current.items[i]
-  if (!item) return
+): Promise<'kept' | 'busy' | 'moved' | 'failed'> {
   const mark = `${current.at}:${i}`
-  if (grading.has(mark)) return
+  if (grading.has(mark)) return 'busy'
   grading.add(mark)
   try {
+    // As it stands now: a new quiz may have replaced this one, or the question been graded meanwhile.
+    const fresh = (await lastQuiz($)) ?? current
+    if (fresh.at !== current.at) return 'moved'
+    const item = fresh.items[i]
+    if (!item || item.result !== undefined) return 'busy'
     const now = await $.clock.now()
-    if (!(await markConcepts($, cfg, result === 'right' ? markReviewed : markWrong, [item.key], now))) {
-      await update($, quizRun, run => ({ ...run, error: '채점을 적지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.' }))
-      return
-    }
+    const before = await markConcepts($, cfg, markFor(result, extra.verdict), [item.key], now)
+    if (!before) return 'failed'
     // Read again: the quiz may have moved on while the concepts were written.
-    const latest = (await lastQuiz($)) ?? current
-    if (latest.at !== current.at) return
-    await keepQuiz($, { ...latest, items: latest.items.map((one, j) => (j === i ? { ...one, ...extra, isShown: true, result, gradedAt: now } : one)) })
+    const latest = (await lastQuiz($)) ?? fresh
+    if (latest.at !== current.at) return 'kept'
+    const prior = before[0]
+    await keepQuiz($, {
+      ...latest,
+      items: latest.items.map((one, j) => (j === i ? { ...one, ...extra, isShown: true, result, gradedAt: now, ...(prior ? { before: prior } : {}) } : one)),
+    })
     await update($, quizRun, run => ({ ...run, error: null }))
     await recordActivity($, stamp(now).day, result === 'right' ? { right: 1 } : { wrong: 1 })
+    return 'kept'
   } finally {
     grading.delete(mark)
   }
 }
 
-/** Enter in the quiz's answer field: Claude grades the learner's own answer against the model answer. */
-async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: string): Promise<void> {
-  const mine = text.trim()
-  const current = await lastQuiz($)
-  const item = current?.items[i]
-  if (!current || !item || item.result !== undefined || isAnswerShown(current, item) || isQuizChecking) return
-  if (mine === '') {
-    await update($, quizRun, run => ({ ...run, error: '답을 적은 뒤 Enter를 눌러 주세요. 모르겠으면 a로 정답만 볼 수 있어요.' }))
-    return
-  }
-  isQuizChecking = true
+/**
+ * Turns a graded question the other way (the pane's f; /learn quiz 맞음 · 틀림
+ * on one already graded): its concept graded again from its marks before the
+ * first grade, as if graded this way then, and the answer moved between the
+ * counts of the day it was graded. False when the store could not be written.
+ */
+async function regradeQuiz($: EngineInterface, cfg: Config, current: Quiz, i: number, result: 'right' | 'wrong'): Promise<'kept' | 'busy' | 'moved' | 'failed'> {
+  const guard = `${current.at}:${i}`
+  // A second press while the first is written does nothing: the grade is turned once.
+  if (grading.has(guard)) return 'busy'
+  grading.add(guard)
   try {
-    await update($, quizRun, run => ({ ...run, checking: i, error: null }))
-    let reply
-    try {
-      reply = await $.model.complete({ model: cfg.model, system: CHECK_SYSTEM, prompt: checkPrompt(item, mine, cfg.level), maxTokens: 400, effort: 'low', timeoutMs: 60_000 })
-    } catch {
-      await update($, quizRun, run => ({ ...run, error: `'${cfg.model}' 모델을 부를 수 없습니다 · /config에서 다른 모델을 골라 보세요` }))
-      return
+    const fresh = (await lastQuiz($)) ?? current
+    if (fresh.at !== current.at) return 'moved'
+    const item = fresh.items[i]
+    if (!item || item.result === undefined || (item.result === result && !isPartly(item))) return 'busy'
+    const at = item.gradedAt ?? (await $.clock.now())
+    // The learner's own word: fully right or fully wrong, never "partly".
+    const mark: Mark = (index, keys) => regrade(index, keys[0]!, item.before, at, result === 'right' ? markReviewed : markWrong)
+    if (!(await markConcepts($, cfg, mark, [item.key], at))) return 'failed'
+    const latest = (await lastQuiz($)) ?? fresh
+    if (latest.at === current.at) {
+      await keepQuiz($, { ...latest, items: latest.items.map((one, j) => (j === i ? { ...one, result, isLearnerGraded: true } : one)) })
     }
-    if (!reply.isAnswered) {
-      await update($, quizRun, run => ({ ...run, error: `채점하지 못했습니다: ${failureText(reply).replace(/ · .*$/, '')}` }))
-      return
-    }
-    const graded = parseCheck(reply.text)
-    if (!graded) {
-      await update($, quizRun, run => ({ ...run, error: '채점 결과를 읽지 못했습니다. 다시 Enter를 눌러 보세요.' }))
-      return
-    }
-    // Almost right still comes back soon: the concept is not solid yet.
-    await applyGrade($, cfg, current, i, graded.verdict === 'right' ? 'right' : 'wrong', { mine: cut(mine, 1500), ...graded })
-    await update($, quizRun, run => ({ ...run, draft: null }))
-    return
-  } catch (error) {
-    $.ui.log(`learn-notes: 답을 채점하지 못했습니다 (${String(error)})`, { to: 'debug' })
-    await update($, quizRun, run => ({ ...run, error: '채점하지 못했습니다. 잠시 뒤 다시 해 보세요.' }))
+    // Partly right was counted wrong already: only a right one moves between the counts.
+    if (item.result !== result) await recordActivity($, stamp(at).day, result === 'right' ? { right: 1, wrong: -1 } : { right: -1, wrong: 1 })
+    return 'kept'
   } finally {
-    isQuizChecking = false
-    // A grade that did not come back leaves the answer in the field to send again.
-    await update($, quizRun, run => ({ ...run, checking: null, draft: run.error !== null ? mine : null }))
+    grading.delete(guard)
   }
 }
 
@@ -927,13 +1030,57 @@ async function flipGrade($: EngineInterface, cfg: Config, i: number): Promise<vo
   const current = await lastQuiz($)
   const item = current?.items[i]
   if (!current || !item || item.result === undefined || item.verdict === undefined) return
-  const result = item.result === 'right' ? 'wrong' : 'right'
-  const now = await $.clock.now()
-  if (!(await markConcepts($, cfg, result === 'right' ? markReviewed : markWrong, [item.key], now))) return
-  await keepQuiz($, { ...current, items: current.items.map((one, j) => (j === i ? { ...one, result } : one)) })
-  // The answer moves from one count to the other on the day it was graded.
-  const day = stamp(item.gradedAt ?? now).day
-  await recordActivity($, day, result === 'right' ? { right: 1, wrong: -1 } : { right: -1, wrong: 1 })
+  if ((await regradeQuiz($, cfg, current, i, item.result === 'right' ? 'wrong' : 'right')) === 'failed') {
+    await update($, quizRun, run => ({ ...run, error: GRADE_NOT_KEPT }))
+  }
+}
+
+/** Claude grades a typed answer to question `i` against its answer and the grade is kept: the question as graded, or why there is no grade. */
+async function gradeTyped($: EngineInterface, cfg: Config, current: Quiz, i: number, mine: string): Promise<{ item: LearnQuizItem } | { error: string }> {
+  const item = current.items[i]
+  if (!item) return { error: '없는 문제입니다.' }
+  const asked = await askModel($, cfg, { system: CHECK_SYSTEM, prompt: checkPrompt(item, mine, cfg.level), maxTokens: 400, timeoutMs: 60_000 })
+  if ('error' in asked) return { error: `채점하지 못했습니다: ${asked.error}` }
+  const graded = parseCheck(asked.text)
+  if (!graded) return { error: '채점 결과를 읽지 못했습니다. 다시 보내 보세요.' }
+  // Almost right is not right yet: counted wrong, its concept a step back.
+  const kept = await applyGrade($, cfg, current, i, graded.verdict === 'right' ? 'right' : 'wrong', { mine: cut(mine, 1500), ...graded })
+  if (kept === 'failed') return { error: GRADE_NOT_KEPT }
+  if (kept === 'busy') return { error: '이 문제는 그사이 이미 채점했습니다.' }
+  const latest = (await lastQuiz($)) ?? current
+  if (kept === 'moved' || latest.at !== current.at) return { error: MOVED_TEXT }
+  return { item: latest.items[i] ?? { ...item, mine, ...graded } }
+}
+
+/** Enter in the quiz's answer field: Claude grades the learner's own answer, the pane saying so meanwhile. */
+async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: string): Promise<void> {
+  const mine = text.trim()
+  const current = await lastQuiz($)
+  const item = current?.items[i]
+  if (!current || !item || !isOpen(current, item)) return
+  if (isQuizChecking) {
+    await update($, quizRun, run => ({ ...run, error: '다른 답을 채점하고 있습니다. 잠시 뒤 다시 Enter를 누르세요.', draft: { at: current.at, i, text: mine } }))
+    return
+  }
+  if (mine === '') {
+    const stuck = item.hint ? '막히면 h로 힌트를, a로 정답을 봅니다.' : '모르겠으면 a로 정답을 봅니다.'
+    await update($, quizRun, run => ({ ...run, error: `답을 적은 뒤 Enter를 누르세요. ${stuck}` }))
+    return
+  }
+  isQuizChecking = true
+  let error: string | null = null
+  try {
+    await update($, quizRun, run => ({ ...run, checking: i, error: null }))
+    const graded = await gradeTyped($, cfg, current, i, mine)
+    if ('error' in graded) error = graded.error
+  } catch (thrown) {
+    $.ui.log(`learn-notes: 답을 채점하지 못했습니다 (${String(thrown)})`, { to: 'debug' })
+    error = '채점하지 못했습니다. 잠시 뒤 다시 해 보세요.'
+  } finally {
+    isQuizChecking = false
+    // A grade that did not come back leaves the answer in that question's field to send again.
+    await update($, quizRun, run => ({ ...run, checking: null, error: error ?? run.error, draft: error !== null ? { at: current.at, i, text: mine } : null }))
+  }
 }
 
 /** The quiz as it stands now, in the session and the store. */
@@ -943,6 +1090,54 @@ async function keepQuiz($: EngineInterface, next: Quiz): Promise<void> {
     await $.store.set(QUIZ_KEY, next)
   } catch (error) {
     $.ui.log(`learn-notes: 퀴즈를 저장소에 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+  }
+}
+
+/** Asks the model about a note and keeps the question and answer on it (and in the journal): the answer, or why there is none. */
+async function askNote(
+  $: EngineInterface,
+  cfg: Config,
+  id: string,
+  question: string,
+): Promise<{ answer: string; note: LearnNote; path: string | undefined } | { error: string }> {
+  const note = (await read($, notes)).find(one => one.id === id)
+  if (!note) return { error: '그 노트가 패널에 없습니다.' }
+  const asked = await askModel($, cfg, { system: ASK_SYSTEM, prompt: askPrompt(note, question, cfg.level), maxTokens: 900 })
+  if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
+  const answer = cut(asked.text, 4000)
+  const now = await $.clock.now()
+  const latest = (await read($, notes)).find(one => one.id === id) ?? note
+  await setNote($, id, { asks: [...(latest.asks ?? []), { question: cut(question, 1000), answer, at: now }].slice(-ASKS_KEPT) })
+  await persist($)
+  const path = cfg.isAutoSave ? await saveAsk($, cfg, note, question, answer, now) : undefined
+  return { answer, note, path }
+}
+
+/** Enter in a note's question field: the answer shows under the note, the pane saying so meanwhile. */
+async function askInPane($: EngineInterface, cfg: Config, id: string, text: string): Promise<void> {
+  const question = text.trim()
+  const set = (state: LearnAskRun) => update($, askRun, all => ({ ...all, [id]: state }))
+  if (asking.has(id)) {
+    await set({ isAsking: true, error: null, draft: question })
+    return
+  }
+  if (question === '') {
+    await set({ isAsking: false, error: '물어볼 것을 적은 뒤 Enter를 누르세요.', draft: null })
+    return
+  }
+  asking.add(id)
+  let error: string | null = null
+  try {
+    await set({ isAsking: true, error: null, draft: null })
+    const asked = await askNote($, cfg, id, question)
+    if ('error' in asked) error = asked.error
+  } catch (thrown) {
+    $.ui.log(`learn-notes: 질문에 답하지 못했습니다 (${String(thrown)})`, { to: 'debug' })
+    error = '답하지 못했습니다. 잠시 뒤 다시 해 보세요.'
+  } finally {
+    asking.delete(id)
+    // A question whose answer did not come back stays in the field to send again.
+    await set({ isAsking: false, error, draft: error !== null ? question : null })
   }
 }
 
@@ -961,46 +1156,59 @@ async function journalDays($: EngineInterface, cfg: Config): Promise<{ day: stri
     .sort((a, b) => (a.day < b.day ? 1 : -1))
 }
 
-/** Writes the note for `id` with the model; the pane redraws as its status moves. `isEasier`: in the plainest words (e). */
+/**
+ * Writes the note for `id` with the model; the pane redraws as its status
+ * moves. `isEasier`: in the plainest words (e). A rewrite that fails leaves the
+ * note as it was and says why in a toast. Never rejects.
+ */
 async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite: boolean, isEasier = false): Promise<void> {
   if (inFlight.has(id)) return
   inFlight.add(id)
   try {
-    // A note counts toward the day's learning the first time it is written, never on a rewrite.
     const prior = (await read($, notes)).find(one => one.id === id)
-    const isCounted = prior?.isCounted === true || prior?.status === 'ready'
+    if (!prior) return
+    // A note counts toward the day's learning the first time it is written, never on a rewrite.
+    const isCounted = prior.isCounted === true || prior.status === 'ready'
+    const good = prior.status === 'ready' ? { status: prior.status, text: prior.text } : undefined
     const note = await setNote($, id, { status: 'writing', text: '' })
     if (!note) return
-    let patch: Partial<LearnNote>
-    try {
-      const reply = await $.model.complete({
-        model: cfg.model,
-        system: SYSTEM,
-        prompt: notePrompt(note, isEasier ? 'beginner' : cfg.level, knownNames(await read($, concepts)), isEasier),
-        maxTokens: 1500,
-        effort: 'low',
-        timeoutMs: 90_000,
-      })
-      patch = reply.isAnswered
-        ? { status: 'ready', text: cut(reply.text, 9000) }
-        : { status: 'failed', text: failureText(reply) }
-    } catch {
-      patch = { status: 'failed', text: `'${cfg.model}' 모델을 부를 수 없습니다 · /config에서 다른 모델을 골라 보세요` }
+    const asked = await askModel($, cfg, {
+      system: SYSTEM,
+      prompt: notePrompt(note, isEasier ? 'beginner' : cfg.level, knownNames(await read($, concepts)), isEasier),
+      maxTokens: 1500,
+    })
+    if ('error' in asked && good) {
+      // Only the new version failed: the note it was to replace stays, in the pane, the store and the journal.
+      const kept = (await setNote($, id, good)) ?? { ...note, ...good }
+      // A store write meanwhile (another turn, a question) may hold it as being written: store it as it is again.
+      await persist($, false, [kept])
+      $.ui.toast(`노트를 다시 쓰지 못했습니다: ${asked.error} · 원래 노트는 그대로입니다`, { timeoutMs: 8000 })
+      return
     }
-    // A note cleared from the pane meanwhile is still saved from this copy.
+    const patch: Partial<LearnNote> =
+      'error' in asked ? { status: 'failed', text: `${asked.error} · w로 다시 쓰기` } : { status: 'ready', text: cut(asked.text, 9000) }
+    // A note cleared from the pane meanwhile, or left behind by a /cd, is still saved and stored from this copy.
     let done = (await setNote($, id, patch)) ?? { ...note, ...patch }
     if (done.status === 'ready') {
-      const keys = await learnConcepts($, cfg, done)
-      done = (await setNote($, id, { concepts: keys })) ?? { ...done, concepts: keys }
-      if (!isCounted) await recordActivity($, stamp(done.at).day, { notes: 1 })
-      if (!done.isCounted) done = (await setNote($, id, { isCounted: true })) ?? { ...done, isCounted: true }
+      try {
+        const keys = await learnConcepts($, cfg, done)
+        done = (await setNote($, id, { concepts: keys })) ?? { ...done, concepts: keys }
+        if (!isCounted) await recordActivity($, stamp(done.at).day, { notes: 1 })
+        if (!done.isCounted) done = (await setNote($, id, { isCounted: true })) ?? { ...done, isCounted: true }
+      } catch (error) {
+        $.ui.log(`learn-notes: 노트의 개념을 세지 못했습니다 (${String(error)})`, { to: 'debug' })
+      }
     }
     if (cfg.isAutoSave) await save($, cfg, done, isRewrite)
-    await persist($)
+    // Not saved: /learn save still finds it, rewritten or not.
+    else done = (await setNote($, id, { isUnsaved: true })) ?? { ...done, isUnsaved: true }
+    await persist($, false, [done])
     if (done.status === 'ready' && !(await isPaneVisible($))) {
       const line = summaryOf(done.text)
       $.ui.toast(`학습 노트: ${line === '' ? '준비됐습니다' : line} · /learn으로 보기`, { timeoutMs: 6000 })
     }
+  } catch (error) {
+    $.ui.log(`learn-notes: 노트를 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
   } finally {
     inFlight.delete(id)
   }
@@ -1076,6 +1284,33 @@ async function collectShellChanges($: EngineInterface, tool: 'Bash' | 'PowerShel
   }
 }
 
+/**
+ * A shell command's edits folded into the running turn, after it ran: the
+ * engine's own diff when it gave one, else the named files read again and
+ * compared with `before`. Never fails the command.
+ */
+async function collectShell(
+  $: EngineInterface,
+  tool: 'Bash' | 'PowerShell',
+  command: string,
+  ran: { deny?: unknown; isError?: boolean; result?: unknown },
+  before: Map<string, string | null | undefined> | undefined,
+): Promise<void> {
+  try {
+    // What a stash, checkout or pull put on disk is not an edit made this turn.
+    if (ran.deny !== undefined || isGitMove(command)) return
+    const result = ran.result
+    const edits = isRecord(result) ? shellEdits(result.bashEditDiff) : undefined
+    if (edits) {
+      if (!ran.isError) await collectEdits($, tool, edits)
+    } else if (before) {
+      await collectShellChanges($, tool, before)
+    }
+  } catch (error) {
+    $.ui.log(`learn-notes: ${tool} 명령의 변경을 잡지 못했습니다 (${String(error)})`, { to: 'debug' })
+  }
+}
+
 /** Folds one tool's change into the running turn. */
 async function collect($: EngineInterface, change: LearnChange): Promise<void> {
   await update($, live, prior => {
@@ -1104,6 +1339,138 @@ async function stepNote($: EngineInterface, delta: number): Promise<void> {
   })
 }
 
+/**
+ * /learn quiz and what may follow it: a new quiz; `1 내 답`, a typed answer
+ * Claude grades; `힌트`; `정답`, the answers; `맞음 1` · `틀림 2`, the
+ * learner's own grade once the answer is seen (or turning a grade around).
+ */
+async function quizCommand($: EngineInterface, cfg: Config, rest: string): Promise<string> {
+  const now = await $.clock.now()
+  const current = await lastQuiz($)
+  if (/^(정답|답|answer|answers)$/i.test(rest)) {
+    if (!current) return NO_QUIZ
+    await keepQuiz($, { ...current, isRevealed: true })
+    const lines = current.items.map((item, i) => listItem(i + 1, `${item.answer}\n(개념: ${item.name}${item.result !== undefined ? ` · ${resultMark(item)}` : ''})`))
+    const open = current.items.flatMap((item, i) => (item.result === undefined ? [i + 1] : []))
+    // Seeing the answers grades nothing: only what the learner says counts toward the record and the review steps.
+    const how =
+      open.length > 0
+        ? `\n\n스스로 채점해 번호로 알려 주세요: 맞힌 문제는 /learn quiz 맞음 ${open.join(' ')} · 틀린 문제는 /learn quiz 틀림 ${open[0]}\n채점한 문제만 학습 기록과 복습 간격에 들어갑니다.`
+        : ''
+    return `정답\n\n${lines.join('\n\n')}${how}`
+  }
+  if (/^(문제|questions?)$/i.test(rest)) {
+    if (!current) return NO_QUIZ
+    const lines = current.items.map((item, i) => listItem(i + 1, `${item.result !== undefined ? `${resultMark(item)} · ` : ''}${item.question}`))
+    const open = current.items.findIndex(item => isOpen(current, item))
+    const next = open === -1 ? '모두 채점했거나 정답을 봤습니다. 새 문제는 /learn quiz.' : `답을 적어 채점받기: /learn quiz ${open + 1} 내 답`
+    return `복습 퀴즈 · ${current.items.length}문제 (${when(current.at, now)})\n\n${lines.join('\n\n')}\n\n${next}`
+  }
+  if (/^(힌트|hint|hints)$/i.test(rest)) {
+    if (!current) return NO_QUIZ
+    const open = current.items.flatMap((item, i) => (isOpen(current, item) ? [{ item, n: i + 1 }] : []))
+    if (open.length === 0) return '힌트를 볼 문제가 없습니다 (모두 채점했거나 정답을 봤습니다). 새 문제는 /learn quiz.'
+    const hinted = open.filter(one => one.item.hint !== undefined)
+    if (hinted.length === 0) return '남은 문제에는 힌트가 없습니다. 정답을 보려면 /learn quiz 정답.'
+    await keepQuiz($, { ...current, items: current.items.map((item, i) => (hinted.some(one => one.n === i + 1) ? { ...item, isHinted: true } : item)) })
+    return `힌트\n\n${hinted.map(one => listItem(one.n, one.item.hint!)).join('\n\n')}\n\n답을 적어 채점받기: /learn quiz ${hinted[0]!.n} 내 답`
+  }
+  const grade = /^(맞음|맞았어|맞혔어|맞힘|right|correct|틀림|틀렸어|틀렸음|틀린|오답|miss|missed|wrong)\s*(.*)$/i.exec(rest)
+  if (grade) {
+    if (!current) return NO_QUIZ
+    const result = /^(맞|right|correct)/i.test(grade[1]!) ? 'right' : 'wrong'
+    const word = result === 'right' ? '맞음' : '틀림'
+    const said = [...new Set((grade[2]!.match(/\d+/g) ?? []).map(Number))]
+    const numbers = said.length === 0 && current.items.length === 1 ? [1] : said
+    if (numbers.length === 0 || numbers.some(n => current.items[n - 1] === undefined)) {
+      return `문제 번호를 1~${current.items.length} 사이로 알려 주세요. 예: /learn quiz ${word} ${current.items.length}`
+    }
+    const checking = (await read($, quizRun)).checking
+    if (typeof checking === 'number' && numbers.includes(checking + 1)) return `${checking + 1}번은 지금 Claude가 채점하고 있습니다. 채점이 끝난 뒤 다시 알려 주세요.`
+    const unseen = numbers.filter(n => isOpen(current, current.items[n - 1]!))
+    if (unseen.length > 0) {
+      return `${unseen.join(', ')}번은 아직 정답을 보지 않았습니다. 답을 적어 채점받기: /learn quiz ${unseen[0]} 내 답 · 정답 보기: /learn quiz 정답`
+    }
+    const changed: string[] = []
+    for (const n of numbers) {
+      const latest = (await lastQuiz($)) ?? current
+      if (latest.at !== current.at) return MOVED_TEXT
+      const item = latest.items[n - 1]!
+      if (item.result === result && !isPartly(item)) continue
+      const done = item.result === undefined ? await applyGrade($, cfg, latest, n - 1, result, {}) : await regradeQuiz($, cfg, latest, n - 1, result)
+      if (done === 'failed') return GRADE_NOT_KEPT
+      if (done === 'moved') return MOVED_TEXT
+      if (done === 'kept') changed.push(`${n}. ${item.name}`)
+    }
+    if (changed.length === 0) return `이미 ${word}으로 적혀 있습니다.`
+    return result === 'right'
+      ? `맞힌 것으로 적었습니다: ${changed.join(' · ')}. 다음 복습까지 간격이 늘어납니다.`
+      : `틀린 것으로 적었습니다: ${changed.join(' · ')}. 복습할 개념 맨 앞에 올라 다음 퀴즈에 먼저 나옵니다.`
+  }
+  const typed = /^(\d+)\s*번?\s*[.):]?\s+([\s\S]+)$/.exec(rest)
+  if (typed) {
+    if (!current) return NO_QUIZ
+    const n = Number(typed[1])
+    const item = current.items[n - 1]
+    if (!item) return `문제 번호를 1~${current.items.length} 사이로 적어 주세요. 예: /learn quiz 1 내 답`
+    if (item.result !== undefined) return `${n}번은 이미 채점했습니다 (${resultMark(item)}). 새 문제는 /learn quiz.`
+    if (isAnswerShown(current, item)) return `${n}번은 정답을 이미 봤습니다. 스스로 채점해 알려 주세요: /learn quiz 맞음 ${n} · /learn quiz 틀림 ${n}`
+    if (isQuizChecking) return '다른 답을 채점하고 있습니다. 잠시 뒤 다시 보내 주세요.'
+    if (isQuizMaking) return '새 문제를 만들고 있습니다. 문제가 나온 뒤 /learn quiz 문제로 보고 답하세요.'
+    isQuizChecking = true
+    try {
+      await update($, quizRun, run => ({ ...run, checking: n - 1, error: null }))
+      const graded = await gradeTyped($, cfg, current, n - 1, typed[2]!.trim())
+      if ('error' in graded) return graded.error
+      const after = (await lastQuiz($)) ?? current
+      const next = after.items.findIndex(one => isOpen(after, one))
+      const right = after.items.filter(one => one.result === 'right').length
+      const tail =
+        next !== -1
+          ? `다음 문제: /learn quiz ${next + 1} 내 답${after.items[next]!.hint && !after.items[next]!.isHinted ? ' · 막히면 /learn quiz 힌트' : ''}`
+          : after.items.every(one => one.result !== undefined)
+            ? `다 풀었습니다: ${after.items.length}문제 중 ${right}개 맞힘.${missesText(after.items) ? ` ${missesText(after.items)}.` : ''}`
+            : ''
+      const done = graded.item
+      return [
+        `${n}번 ${resultMark(done)} · ${VERDICT_TEXT[done.verdict ?? 'wrong']} ${done.feedback ?? ''}`.trim(),
+        '',
+        '정답',
+        done.answer,
+        '',
+        `채점이 이상하면 바꾸세요: /learn quiz ${done.result === 'right' ? '틀림' : '맞음'} ${n}`,
+        ...(tail ? ['', tail] : []),
+      ].join('\n')
+    } finally {
+      isQuizChecking = false
+      await update($, quizRun, run => ({ ...run, checking: null }))
+    }
+  }
+  if (rest !== '') return QUIZ_USAGE
+  if (isQuizMaking) return '패널에서 문제를 만들고 있습니다. 잠시 뒤 /learn quiz 문제로 보세요.'
+  if (isQuizChecking) return '답을 채점하고 있습니다. 채점이 끝난 뒤 새 문제를 받으세요.'
+  isQuizMaking = true
+  let made
+  try {
+    made = await makeQuiz($, cfg, now)
+  } finally {
+    isQuizMaking = false
+  }
+  if ('error' in made) return made.error
+  return [
+    `복습 퀴즈 · ${made.items.length}문제`,
+    '',
+    made.items.map((item, i) => listItem(i + 1, item.question)).join('\n\n'),
+    '',
+    '먼저 스스로 답해 보세요.',
+    '- 답을 적어 채점받기: /learn quiz 1 내 답',
+    ...(made.items.some(item => item.hint !== undefined) ? ['- 막히면 힌트: /learn quiz 힌트'] : []),
+    '- 정답만 보기: /learn quiz 정답 (그 뒤 맞음·틀림을 번호로 알려 주세요)',
+    '',
+    '패널(/learn)의 퀴즈 보기(q)에서도 같은 문제를 이어서 풉니다.',
+  ].join('\n')
+}
+
 export const register: Register = (on, options) => {
   const cfg = configOf(options)
 
@@ -1111,7 +1478,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'learn',
       description: '학습 노트 패널을 연다 (/learn help: 하위 명령)',
-      argumentHint: '[last|concepts|recap|quiz|ask|stats|anki|find|day|days|merge|save|clear|help]',
+      argumentHint: '[quiz|recap|ask|stats|concepts|find|day|anki|last|help]',
       immediate: true,
     })
     isInteractive = e.isInteractive
@@ -1120,6 +1487,8 @@ export const register: Register = (on, options) => {
     await remind($, cfg)
     // A quiz request a reload cut off is not coming back; the last quiz is there for the pane to draw.
     if (!isQuizMaking && !isQuizChecking) await update($, quizRun, () => ({ isMaking: false, error: null, checking: null }))
+    // A question a reload cut off is not coming back: its field is there again.
+    await update($, askRun, all => Object.fromEntries(Object.entries(all).filter(([id]) => !asking.has(id)).map(([id, one]) => [id, { ...one, isAsking: false }])))
     if ((await read($, quiz)) === null) {
       const last = await lastQuiz($)
       if (last) await update($, quiz, () => last)
@@ -1194,42 +1563,20 @@ export const register: Register = (on, options) => {
     // A command that may write gets the files it names read first, for when the engine gives no diff of its own.
     const before = WRITES.test(e.command) && !isGitMove(e.command) ? await readTargets($, e.command) : undefined
     const ran = await next(e)
-    try {
-      // What a stash, checkout or pull put on disk is not an edit made this turn.
-      if (ran.deny !== undefined || isGitMove(e.command)) return ran
-      const result: unknown = ran.result
-      const edits = isRecord(result) ? shellEdits(result.bashEditDiff) : undefined
-      if (edits) {
-        if (!ran.isError) await collectEdits($, 'Bash', edits)
-      } else if (before) {
-        await collectShellChanges($, 'Bash', before)
-      }
-    } catch (error) {
-      $.ui.log(`learn-notes: 셸 명령의 변경을 잡지 못했습니다 (${String(error)})`, { to: 'debug' })
-    }
+    await collectShell($, 'Bash', e.command, ran, before)
     return ran
   })
 
   // Claude Code on Windows runs commands with its PowerShell tool (always without Git Bash). Not every
-  // build names it, so it is matched by name here; its edits are read the same way as Bash's.
+  // build names it, so it is matched by name here. Its many ways to write a file (aliases, .NET calls)
+  // are not worth guessing at: every command gets the files it names read first.
   on('tool.call', async ($, e, next) => {
     if ((e.tool as string) !== 'PowerShell') return next(e)
     const input: unknown = e
     const command = isRecord(input) && typeof input.command === 'string' ? input.command : ''
     const before = command !== '' && !isGitMove(command) ? await readTargets($, command) : undefined
     const ran = await next(e)
-    try {
-      if (ran.deny !== undefined) return ran
-      const result: unknown = ran.result
-      const edits = isRecord(result) ? shellEdits(result.bashEditDiff) : undefined
-      if (edits) {
-        if (!ran.isError) await collectEdits($, 'PowerShell', edits)
-      } else if (before) {
-        await collectShellChanges($, 'PowerShell', before)
-      }
-    } catch (error) {
-      $.ui.log(`learn-notes: PowerShell 명령의 변경을 잡지 못했습니다 (${String(error)})`, { to: 'debug' })
-    }
+    await collectShell($, 'PowerShell', command, ran, before)
     return ran
   })
 
@@ -1285,8 +1632,9 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'learn' }, async ($, e) => {
     const words = e.args.trim()
-    const arg = (words.split(/\s+/)[0] ?? '').toLowerCase()
-    const rest = words.slice(arg.length).trim()
+    const said = (words.split(/\s+/)[0] ?? '').toLowerCase()
+    const arg = COMMAND_WORDS[said] ?? said
+    const rest = words.slice(said.length).trim()
     const list = await read($, notes)
     if (arg === 'help') return { text: HELP }
     if (arg === 'find') {
@@ -1320,60 +1668,7 @@ export const register: Register = (on, options) => {
         text: `합쳤습니다: '${gone.name}' ×${gone.count} → '${kept.name}' ×${kept.count}. 앞으로 노트의 '${gone.name}'도 '${kept.name}' 개념으로 셉니다.`,
       }
     }
-    if (arg === 'quiz') {
-      const now = await $.clock.now()
-      const current = await lastQuiz($)
-      if (/^(정답|답|answer|answers)$/i.test(rest)) {
-        if (!current || current.items.length === 0) return { text: NO_QUIZ }
-        // Seeing the answers again keeps the misses marked since the first time, and the grades given in the pane.
-        const ungraded = current.items.filter(item => item.result === undefined)
-        const isMarked =
-          !current.isRevealed && ungraded.length > 0 && (await markConcepts($, cfg, markReviewed, ungraded.map(item => item.key), now))
-        // Seen and not said wrong: right, until /learn quiz 틀림 says otherwise.
-        const items = isMarked
-          ? current.items.map(item => (item.result === undefined ? { ...item, isShown: true, result: 'right' as const, gradedAt: now } : item))
-          : current.items
-        await keepQuiz($, { ...current, isRevealed: true, items })
-        if (isMarked) await recordActivity($, stamp(now).day, { right: ungraded.length })
-        const lines = current.items.map((item, i) => listItem(i + 1, `${item.answer}\n(개념: ${item.name})`))
-        const marked = isMarked ? `\n\n복습으로 표시했습니다: ${ungraded.map(item => item.name).join(' · ')}` : ''
-        const hint = `\n\n틀린 문제는 /learn quiz 틀림 ${current.items.length > 1 ? '2' : '1'}처럼 번호로 알려 주면 다음 퀴즈에 먼저 나옵니다.`
-        return { text: `정답\n\n${lines.join('\n\n')}${marked}${hint}` }
-      }
-      const miss = /^(?:틀림|틀렸어|틀렸음|틀린|오답|miss|missed|wrong)\s*(.*)$/i.exec(rest)
-      if (miss) {
-        if (!current || current.items.length === 0) return { text: NO_QUIZ }
-        if (!current.isRevealed) return { text: '먼저 /learn quiz 정답으로 답을 맞춰 본 뒤, 틀린 문제 번호를 알려 주세요.' }
-        const said = [...new Set((miss[1]!.match(/\d+/g) ?? []).map(Number))]
-        const numbers = said.length === 0 && current.items.length === 1 ? [1] : said
-        const items = numbers.map(n => current.items[n - 1]).filter(item => item !== undefined)
-        if (items.length === 0 || items.length !== numbers.length) {
-          return { text: `틀린 문제 번호를 1~${current.items.length} 사이로 알려 주세요. 예: /learn quiz 틀림 ${current.items.length}` }
-        }
-        if (!(await markConcepts($, cfg, markMissed, items.map(item => item.key), now))) {
-          return { text: '틀린 문제를 적지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.' }
-        }
-        // The pane's quiz shows them graded too. An answer counted right turns wrong on the day it was counted.
-        const flipped = items.filter(item => item.result === 'right')
-        const fresh = items.filter(item => item.result === undefined).length
-        await keepQuiz($, {
-          ...current,
-          items: current.items.map((item, i) =>
-            numbers.includes(i + 1) && item.result !== 'wrong' ? { ...item, result: 'wrong' as const, gradedAt: item.gradedAt ?? now } : item,
-          ),
-        })
-        for (const item of flipped) await recordActivity($, stamp(item.gradedAt ?? now).day, { right: -1, wrong: 1 })
-        if (fresh > 0) await recordActivity($, stamp(now).day, { wrong: fresh })
-        return { text: `복습할 개념 맨 앞에 올렸습니다: ${items.map(item => item.name).join(' · ')}. 다음 퀴즈에 먼저 나옵니다.` }
-      }
-      if (rest !== '') return { text: QUIZ_USAGE }
-      const made = await makeQuiz($, cfg, now)
-      if ('error' in made) return { text: made.error }
-      const lines = made.items.map((item, i) => listItem(i + 1, item.question))
-      return {
-        text: `복습 퀴즈 · ${made.items.length}문제\n\n${lines.join('\n\n')}\n\n먼저 스스로 답해 보고, /learn quiz 정답으로 확인하세요. 패널(/learn)의 퀴즈 보기(q)에서는 한 문제씩 답을 보고 맞음·틀림을 고를 수 있습니다.`,
-      }
-    }
+    if (arg === 'quiz') return { text: await quizCommand($, cfg, rest) }
     if (arg === 'anki') {
       const bank = cleanBank(await $.store.get(BANK_KEY).catch(() => undefined))
       const out = ankiText(bank, await read($, concepts))
@@ -1383,7 +1678,7 @@ export const register: Register = (on, options) => {
         await $.fs.write(path, out.text)
       } catch (error) {
         $.ui.log(`learn-notes: Anki 파일을 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
-        return { text: `Anki 파일을 쓰지 못했습니다 (${path}). /config에서 저장 폴더를 확인하세요.` }
+        return { text: `Anki 파일을 쓰지 못했습니다 (${path}). 폴더에 쓸 수 있는지 확인하거나 /config에서 저장 폴더(saveDir)를 바꾸세요.` }
       }
       return {
         text: [
@@ -1425,18 +1720,12 @@ export const register: Register = (on, options) => {
       const wanted = await read($, selectedId)
       const note = list.find(one => one.id === wanted) ?? list.at(-1)
       if (!note) return { text: '물어볼 노트가 없습니다. 코딩을 요청해 노트가 생기면 /learn ask 질문으로 물어보세요.' }
-      let reply
-      try {
-        reply = await $.model.complete({ model: cfg.model, system: ASK_SYSTEM, prompt: askPrompt(note, rest, cfg.level), maxTokens: 900, effort: 'low', timeoutMs: 90_000 })
-      } catch {
-        return { text: `'${cfg.model}' 모델을 부를 수 없습니다 · /config에서 다른 모델을 골라 보세요` }
-      }
-      if (!reply.isAnswered) return { text: `답하지 못했습니다: ${failureText(reply).replace(/ · .*$/, '')}` }
-      const answer = cut(reply.text, 4000)
+      const asked = await askNote($, cfg, note.id, rest)
+      if ('error' in asked) return { text: asked.error }
       const now = await $.clock.now()
-      const path = cfg.isAutoSave ? await saveAsk($, cfg, note, rest, answer, now) : undefined
       const which = `${when(note.at, now)} 노트${note.prompt === '' ? '' : ` (${cut(note.prompt.replace(/\s+/g, ' '), 40)})`}`
-      return { text: `${which}에 대한 답${path ? ' · 일지에 남김' : ''}\n\n${answer}` }
+      const where = note.status === 'ready' ? ' · 패널의 노트 아래에도 남습니다' : ''
+      return { text: `${which}에 대한 답${asked.path ? ' · 일지에 남김' : ''}${where}\n\n${asked.answer}` }
     }
     if (arg === 'recap') {
       const now = await $.clock.now()
@@ -1447,53 +1736,47 @@ export const register: Register = (on, options) => {
       const map = await currentAliases($)
       // The journal holds every note of those days; the pane and the store keep only the latest few.
       const written = await journalEntriesFor($, cfg, range.days)
-      const keyOf = (day: string, time: string, request: string) => `${day} ${time} ${request.split('\n')[0]!.trim().slice(0, 40)}`
-      const seen = new Set(written.map(entry => keyOf(entry.day, entry.time, entry.request)))
+      // A journal written before 1.4.0 holds a request's first line only, a newer one the whole request on one line.
+      const flat = (request: string) => request.replace(/\s+/g, ' ').trim().slice(0, 40)
+      const isWritten = (note: LearnNote) => {
+        const { day, time } = stamp(note.at)
+        const mine = flat(note.prompt === '' ? '(없음)' : note.prompt)
+        return written.some(entry => entry.day === day && entry.time === time && (mine.startsWith(flat(entry.request)) || flat(entry.request).startsWith(mine)))
+      }
       const kept = (await allNotes($)).filter(note => (note.root || root) === root)
       const unwritten = kept
         .filter(note => note.at >= range.from && note.at < range.to)
-        .filter(note => !seen.has(keyOf(stamp(note.at).day, stamp(note.at).time, note.prompt === '' ? '(없음)' : note.prompt)))
+        .filter(note => !isWritten(note))
         .map(note => noteEntry(note, index, map))
       const chosen = [...written, ...unwritten]
       if (chosen.length === 0) return { text: `${range.label}의 노트가 이 프로젝트에 없습니다.` }
       const isPartial = written.length === 0 && kept.length >= HISTORY_PER_PROJECT && Math.min(...kept.map(note => note.at)) > range.from
       const lastDay = chosen.map(entry => entry.day).sort().at(-1)!
-      let reply
-      try {
-        reply = await $.model.complete({
-          model: cfg.model,
-          system: RECAP_SYSTEM,
-          prompt: recapPrompt(range, chosen, index, map, cfg.level, isPartial),
-          maxTokens: 1200,
-          effort: 'low',
-          timeoutMs: 90_000,
-        })
-      } catch {
-        return { text: `'${cfg.model}' 모델을 부를 수 없습니다 · /config에서 다른 모델을 골라 보세요` }
-      }
-      if (!reply.isAnswered) return { text: `정리를 쓰지 못했습니다: ${failureText(reply).replace(/ · .*$/, '')}` }
-      const text = cut(reply.text, 6000)
+      const asked = await askModel($, cfg, { system: RECAP_SYSTEM, prompt: recapPrompt(range, chosen, index, map, cfg.level, isPartial), maxTokens: 1200 })
+      if ('error' in asked) return { text: `정리를 쓰지 못했습니다: ${asked.error}` }
+      const text = cut(asked.text, 6000)
       const path = cfg.isAutoSave ? await saveRecap($, cfg, root, range, text, now, lastDay) : undefined
       const partial = isPartial ? ' · 일지가 없어 남아 있는 최근 노트만 봤습니다' : ''
       return { text: `${range.label} 정리 · 노트 ${chosen.length}개${partial}${path ? ' · 일지에 남김' : ''}\n\n${text}` }
     }
-    if (arg === 'days') {
+    if (arg === 'day' || arg === 'days') {
       const days = await journalDays($, cfg)
-      if (days.length === 0) return { text: `이 프로젝트의 일지가 아직 없습니다 (${await journalDir($, cfg)}).` }
-      const shown = days.slice(0, 14).map(one => `- ${one.day}${one.parts.length > 1 ? ` (파일 ${one.parts.length}개)` : ''}`)
-      return { text: `이 프로젝트의 일지 ${days.length}일 · 최근 순\n\n${shown.join('\n')}\n\n/learn day 날짜로 그날의 목차를 봅니다.` }
-    }
-    if (arg === 'day') {
+      const dir = await journalDir($, cfg)
+      const listed = () =>
+        days.length === 0
+          ? `이 프로젝트의 일지가 아직 없습니다 (${dir}). 노트가 쓰이면 날짜별로 쌓입니다.`
+          : `이 프로젝트의 일지 ${days.length}일 · 최근 순\n\n${days
+              .slice(0, 14)
+              .map(one => `- ${one.day}${one.parts.length > 1 ? ` (파일 ${one.parts.length}개)` : ''}`)
+              .join('\n')}\n\n/learn day 날짜로 그날의 목차를 봅니다.`
+      if (arg === 'days') return { text: listed() }
       const now = await $.clock.now()
-      const day =
-        rest === '' || rest === '오늘' || rest.toLowerCase() === 'today'
-          ? stamp(now).day
-          : rest === '어제' || rest.toLowerCase() === 'yesterday'
-            ? dayBefore(now)
-            : rest
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { text: '쓰는 법: /learn day 2026-10-03 (또는 오늘 · 어제)' }
-      const found = (await journalDays($, cfg)).find(one => one.day === day)
-      if (!found) return { text: `${day}의 일지가 없습니다. /learn days로 있는 날짜를 봅니다.` }
+      const isToday = rest === '' || rest === '오늘' || rest.toLowerCase() === 'today'
+      const day = isToday ? stamp(now).day : rest === '어제' || rest.toLowerCase() === 'yesterday' ? dayBefore(now) : rest
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { text: '쓰는 법: /learn day 2026-10-03 (또는 오늘 · 어제) · /learn days: 일지가 있는 날짜' }
+      const found = days.find(one => one.day === day)
+      // No journal today yet: the days there are, rather than a dead end.
+      if (!found) return { text: rest === '' ? `오늘 일지는 아직 없습니다.\n\n${listed()}` : `${day}의 일지가 없습니다. /learn days로 있는 날짜를 봅니다.` }
       const index = []
       for (const path of found.parts) index.push(...journalIndex(await $.fs.read(path).catch(() => '')))
       const lines = index
@@ -1513,14 +1796,14 @@ export const register: Register = (on, options) => {
       const { fresh, again } = progressOf(await read($, concepts), now)
       const due = dueConcepts(await read($, concepts), now)
       const queue = due.slice(0, 5)
-      const lines = ranked.slice(0, 30).map(one => `- **${one.name}** ×${one.count} · ${stamp(one.lastAt).day} · 다음 복습 ${dueText(one, now)}: ${one.blurb}`)
+      const lines = ranked.slice(0, 30).map(one => `- **${one.name}** ×${one.count} · 최근 ${stamp(one.lastAt).day} · 다음 복습 ${dueText(one, now)}: ${one.blurb}`)
       const review =
         queue.length > 0
           ? `\n\n복습할 개념 ${due.length}개: ${queue.map(one => (isMissed(one) ? `${one.name} (퀴즈 틀림)` : one.name)).join(', ')}${due.length > queue.length ? ' …' : ''} · 패널에서 q, 또는 /learn quiz`
           : ''
       const more = ranked.length > 30 ? `\n\n${moreConceptsText(ranked.length - 30, cfg.isAutoSave)}.` : ''
       return {
-        text: `지금까지 배운 개념 ${ranked.length}개 · 최근 7일 새 개념 ${fresh}개 · 복습 ${again}개${review}\n\n${lines.join('\n')}${more}`,
+        text: `지금까지 배운 개념 ${ranked.length}개 · 최근 7일 새 개념 ${fresh}개 · 다시 만난 개념 ${again}개${review}\n\n${lines.join('\n')}${more}`,
       }
     }
     if (arg === 'clear') {
@@ -1531,7 +1814,7 @@ export const register: Register = (on, options) => {
     }
     if (arg === 'save') {
       if (list.length === 0) return { text: EMPTY_TEXT }
-      const pending = list.filter(one => one.status !== 'writing' && one.savedAs !== one.status)
+      const pending = list.filter(one => one.status !== 'writing' && (one.savedAs !== one.status || one.isUnsaved === true))
       const writing = list.filter(one => one.status === 'writing').length
       const later = writing > 0 ? ` 쓰는 중인 노트 ${writing}개는 다 쓰이면 ${cfg.isAutoSave ? '저절로 저장됩니다' : '/learn save로 저장하세요'}.` : ''
       if (pending.length === 0) {
@@ -1545,10 +1828,12 @@ export const register: Register = (on, options) => {
       }
       await persist($)
       await saveConcepts($, cfg, await read($, concepts))
-      if (paths.size === 0) return { text: '파일에 쓰지 못했습니다. claude --debug 로그를 보세요.' }
+      if (paths.size === 0) {
+        return { text: `노트를 ${await journalDir($, cfg)}에 쓰지 못했습니다. 그 폴더에 쓸 수 있는지 확인하거나 /config에서 저장 폴더(saveDir)를 바꾸세요.` }
+      }
       return { text: `노트 ${pending.length}개를 저장했습니다: ${[...paths].join(', ')}${later}` }
     }
-    if (arg !== '') return { text: USAGE }
+    if (arg !== '') return { text: `모르는 하위 명령입니다: '${said}'.\n\n${SHORT_HELP}` }
     await update($, autoOpened, () => true)
     const opened = await $.ui.open({ id: PANE, title: TITLE })
     const last = list.at(-1)
@@ -1560,9 +1845,10 @@ export const register: Register = (on, options) => {
     }
     const root = await $.session.root()
     const hint = isSystemFolder(root) ? `\n\n${systemFolderHint(root)}` : ''
-    if (opened.isPlaced) return { text: `학습 노트 패널을 열었습니다.${hint}` }
+    if (opened.isPlaced) return { text: `학습 노트 패널을 열었습니다. 단축키는 ctrl+x tab으로 패널을 고른 뒤 누릅니다.${hint}` }
+    $.ui.log(`learn-notes: 패널을 열지 못했습니다 (${opened.reason})`, { to: 'debug' })
     return {
-      text: `패널을 그릴 화면이 없습니다 (${opened.reason}). 마지막 노트를 여기에 적습니다.\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
+      text: `이 화면에는 패널을 띄울 수 없어 마지막 노트를 여기에 적습니다. 터미널을 전체 화면(/tui fullscreen)으로 쓰면 오른쪽에 패널이 붙습니다.\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
     }
   })
 
@@ -1581,19 +1867,13 @@ export const register: Register = (on, options) => {
     const progress = statsLine(statsOf(await read($, activity), now))
     const current = await read($, quiz)
     const run = await read($, quizRun)
-    const quizBody = mode === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, el) : null
+    const asks = await read($, askRun)
 
     const found = wanted === null ? -1 : list.findIndex(one => one.id === wanted)
     const at = found === -1 ? list.length - 1 : found
     const note = list[at]
-
-    // q jumps to the quiz from any view but the one whose v already goes there.
-    const quizButtons =
-      mode === 'quiz' ? (
-        quizNewButton($, cfg, current !== null, run.isMaking, hasConcepts, el)
-      ) : note && VIEW_NEXT[mode] === 'quiz' ? null : (
-        <Button key="quiz" hotkey="q" plain label="퀴즈" onPress={() => update($, view, () => 'quiz')} />
-      )
+    // Before the first note, a note's own views (전/후, diff) show the note view's welcome.
+    const shown: LearnView = note || isWhole(mode) ? mode : 'note'
 
     const liveBlock = running && running.changes.length > 0 ? liveView(running, isDock, cfg.isAutoNote, el) : null
     const root = await $.session.root()
@@ -1602,40 +1882,45 @@ export const register: Register = (on, options) => {
         {systemFolderHint(root)}
       </Text>
     ) : null
+    const keysHint =
+      e.surface === 'terminal' && !e.props.isFocused ? (
+        <Text dimColor wrap="truncate-end">
+          단축키는 ctrl+x tab으로 패널을 고른 뒤 누릅니다
+        </Text>
+      ) : null
+    const strip = viewStrip($, shown, note !== undefined, el)
 
     if (!note) {
       // No note in this project yet: concepts learned elsewhere, and a quiz on them, are still one key away.
-      const isConcepts = mode === 'concepts' && hasConcepts
-      const isQuiz = mode === 'quiz' && hasConcepts
+      const welcome = (
+        <Box flexDirection="column" marginTop={hasConcepts ? 1 : 0}>
+          <Text bold>아직 학습 노트가 없습니다</Text>
+          <Text wrap="wrap">
+            Claude에게 파일을 만들거나 고쳐 달라고 요청해 보세요. 턴이 끝나면 무엇이 왜 바뀌었고 무엇을 배울 수 있는지 노트로 정리해
+            여기에 보여 줍니다.
+          </Text>
+          <Text dimColor wrap="wrap">
+            예: "hello.js에 이름을 받아 인사하는 함수를 만들어 줘"
+          </Text>
+          {hasConcepts && (
+            <Text dimColor wrap="wrap">
+              지금까지 배운 개념 {Object.keys(index).length}개가 있습니다 · v로 보기 · q로 퀴즈
+            </Text>
+          )}
+        </Box>
+      )
       return (
         <Box flexDirection="column">
           {systemHint}
           {liveBlock}
-          {hasConcepts && (
-            <Box flexWrap="wrap" columnGap={2}>
-              <Button
-                key="view"
-                hotkey="v"
-                plain
-                label={isConcepts || isQuiz ? '노트 보기' : '개념 모음 보기'}
-                onPress={() => update($, view, () => (isConcepts || isQuiz ? 'note' : 'concepts'))}
-              />
-              {quizButtons}
-            </Box>
-          )}
-          {isConcepts || isQuiz ? (
+          {hasConcepts && strip}
+          {hasConcepts && keysHint}
+          {hasConcepts && shown !== 'note' ? (
             <Box marginTop={1} flexDirection="column">
-              {isQuiz ? quizBody : conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)}
+              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, el) : conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)}
             </Box>
           ) : (
-            <Box flexDirection="column">
-              <Text bold>아직 학습 노트가 없습니다</Text>
-              <Text dimColor>
-                Claude가 파일을 고치면 바뀌기 전과 후를 모았다가, 턴이 끝날 때 무엇이 왜 바뀌었고 무엇을 배울 수 있는지
-                노트로 정리해 여기에 보여 줍니다.
-              </Text>
-              {hasConcepts && <Text dimColor>지금까지 배운 개념 {Object.keys(index).length}개가 있습니다 · v로 보기 · q로 퀴즈</Text>}
-            </Box>
+            welcome
           )}
         </Box>
       )
@@ -1645,17 +1930,18 @@ export const register: Register = (on, options) => {
     const totalAdded = note.changes.reduce((sum, c) => sum + c.added, 0)
     const totalRemoved = note.changes.reduce((sum, c) => sum + c.removed, 0)
     const fileCount = note.changes.length + note.moreFiles
-    const writeLabel = isBusy ? '쓰는 중…' : note.status === 'ready' ? '다시 쓰기' : '노트 쓰기'
+    const writeLabel = isBusy ? '쓰는 중…' : note.status === 'off' ? '노트 쓰기' : '다시 쓰기'
 
     const body =
-      mode === 'quiz' ? (
-        quizBody
-      ) : mode === 'concepts' ? (
+      shown === 'quiz' ? (
+        quizView($, cfg, current, run, hasConcepts, now, el)
+      ) : shown === 'concepts' ? (
         conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)
-      ) : mode === 'note' ? (
+      ) : shown === 'note' ? (
         <Box flexDirection="column">
           {noteBody(note, isBusy, el)}
           {note.status === 'ready' && note.concepts.length > 0 && conceptLine(note, index, map, el)}
+          {note.status === 'ready' && noteTools($, cfg, note, isBusy, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el)}
         </Box>
       ) : (
         <Box flexDirection="column">
@@ -1670,7 +1956,7 @@ export const register: Register = (on, options) => {
               </Text>
               {change.diff === '' ? (
                 <Text dimColor>(파일이 커서 diff를 만들지 못했습니다)</Text>
-              ) : mode === 'diff' ? (
+              ) : shown === 'diff' ? (
                 diffView(change, el)
               ) : (
                 splitView(change, el)
@@ -1685,79 +1971,143 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column">
         {systemHint}
         {liveBlock}
-        {!isWhole(mode) && (
+        {!isWhole(shown) && (
           <Text wrap="truncate-end">
-          <Text bold>
-            노트 {at + 1}/{list.length}
-          </Text>
-          <Text dimColor>
-            {' '}
-            · {note.isPast ? '지난 세션 · ' : ''}
-            {when(note.at, now)} · 파일 {fileCount}개 · +{totalAdded} −{totalRemoved}
-          </Text>
+            <Text bold>
+              노트 {at + 1}/{list.length}
+            </Text>
+            <Text dimColor>
+              {' '}
+              · {note.isPast ? '지난 세션 · ' : ''}
+              {when(note.at, now)} · 파일 {fileCount}개 · +{totalAdded} −{totalRemoved}
+            </Text>
           </Text>
         )}
-        <Box flexWrap="wrap" columnGap={2}>
-          {!isWhole(mode) && <Button key="prev" hotkey="p" plain label="◀ 이전" onPress={() => stepNote($, -1)} />}
-          {!isWhole(mode) && <Button key="next" hotkey="n" plain label="다음 ▶" onPress={() => stepNote($, 1)} />}
-          <Button
-            key="view"
-            hotkey="v"
-            plain
-            label={`${VIEW_LABEL[VIEW_NEXT[mode]]} 보기`}
-            onPress={() => update($, view, current => VIEW_NEXT[current])}
-          />
-          {!isWhole(mode) && (
-          <Button
-            key="write"
-            hotkey="w"
-            plain
-            dimColor={isBusy}
-            label={writeLabel}
-            onPress={() => void writeNote($, cfg, note.id, note.savedAs !== null)}
-          />
-          )}
-          {quizButtons}
-          {mode === 'note' && note.status === 'ready' && note.concepts.length > 0 && (
+        {!isWhole(shown) && (
+          <Box flexWrap="wrap" columnGap={2}>
+            <Button key="prev" hotkey="p" plain label="◀ 이전" onPress={() => stepNote($, -1)} />
+            <Button key="next" hotkey="n" plain label="다음 ▶" onPress={() => stepNote($, 1)} />
             <Button
-              key="note-quiz"
-              hotkey="t"
+              key="write"
+              hotkey="w"
               plain
-              label="이 노트 퀴즈"
-              onPress={async () => {
-                await update($, view, () => 'quiz')
-                void startQuiz($, cfg, note.concepts)
-              }}
+              dimColor={isBusy}
+              label={writeLabel}
+              onPress={() => void writeNote($, cfg, note.id, note.savedAs !== null)}
             />
-          )}
-          {mode === 'note' && note.status === 'ready' && (
-            <Button key="easier" hotkey="e" plain dimColor={isBusy} label="더 쉽게" onPress={() => void writeNote($, cfg, note.id, note.savedAs !== null, true)} />
-          )}
-        </Box>
-        {e.surface === 'terminal' && !e.props.isFocused && (
-          <Text dimColor wrap="truncate-end">
-            ctrl+x tab으로 패널을 고르면 {mode === 'quiz' ? 'v·s·i·a·o·x·f' : mode === 'concepts' ? 'v' : mode === 'note' && note.status === 'ready' ? 'p·n·v·w·q·t·e' : 'p·n·v·w·q'} 키를 쓸 수 있습니다
-          </Text>
+          </Box>
         )}
-        {!isWhole(mode) && (
+        {!isWhole(shown) && (
           <Text dimColor wrap="truncate-end">
             요청: {note.prompt === '' ? '(없음)' : note.prompt.replace(/\s+/g, ' ')}
           </Text>
         )}
-        <Text>
-          {VIEWS.flatMap((one, i) => [
-            ...(i > 0 ? [<Text dimColor>{' · '}</Text>] : []),
-            <Text bold={one === mode} underline={one === mode} dimColor={one !== mode}>
-              {VIEW_LABEL[one]}
-            </Text>,
-          ])}
-        </Text>
+        {strip}
+        {keysHint}
         <Box marginTop={1} flexDirection="column">
           {body}
         </Box>
       </Box>
     )
   })
+}
+
+/**
+ * The views in one row, the one shown in bold: v goes on through the note's
+ * views (노트 → 전/후 → diff → 개념 모음 → 노트), q to the quiz from anywhere,
+ * and a click to any of them. Before the first note: 노트 · 개념 모음 · 퀴즈.
+ */
+function viewStrip($: EngineInterface, mode: LearnView, hasNote: boolean, el: ElementTable) {
+  const { Box, Text, Button } = el
+  const order: readonly LearnView[] = hasNote ? VIEWS : ['note', 'concepts', 'quiz']
+  const next: LearnView = hasNote ? VIEW_NEXT[mode] : mode === 'note' ? 'concepts' : 'note'
+  const items = order.map(one => {
+    if (one === mode) {
+      return (
+        <Text key={`at-${one}`} bold underline>
+          {VIEW_LABEL[one]}
+        </Text>
+      )
+    }
+    const go = () => update($, view, () => one)
+    if (one === 'quiz') return <Button key="quiz" hotkey="q" plain label={VIEW_LABEL[one]} onPress={go} />
+    if (one === next) return <Button key="view" hotkey="v" plain label={VIEW_LABEL[one]} onPress={go} />
+    return <Button key={`view-${one}`} plain dimColor label={VIEW_LABEL[one]} onPress={go} />
+  })
+  return (
+    <Box flexWrap="wrap" columnGap={1}>
+      {items.flatMap((item, i) =>
+        i > 0
+          ? [
+              <Text key={`sep-${i}`} dimColor>
+                ·
+              </Text>,
+              item,
+            ]
+          : [item],
+      )}
+    </Box>
+  )
+}
+
+/**
+ * Under a written note, what to do with it: a quiz on its concepts (t), the
+ * note again in plainer words (e), and a question about it (i, the field
+ * below), with the latest questions and their answers.
+ */
+function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boolean, ask: LearnAskRun, el: ElementTable) {
+  const { Box, Text, Button, Markdown } = el
+  // The mobile app draws no text field yet: there a question goes through /learn ask.
+  const Input = 'Input' in el ? el.Input : undefined
+  const fieldKey = `ask-${note.id}`
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Box flexWrap="wrap" columnGap={2}>
+        <Text dimColor>이 노트로</Text>
+        {note.concepts.length > 0 && (
+          <Button
+            key="note-quiz"
+            hotkey="t"
+            plain
+            label="퀴즈"
+            onPress={async () => {
+              await update($, view, () => 'quiz')
+              void startQuiz($, cfg, note.concepts)
+            }}
+          />
+        )}
+        <Button key="easier" hotkey="e" plain dimColor={isBusy} label="더 쉽게" onPress={() => void writeNote($, cfg, note.id, note.savedAs !== null, true)} />
+        {Input && (
+          <Button key="ask-type" hotkey="i" plain label="질문하기" onPress={() => void $.ui.focus({ requestId: PANE, key: fieldKey }).catch(() => undefined)} />
+        )}
+      </Box>
+      {(note.asks ?? []).slice(-2).map((one, i) => (
+        <Box key={`asked-${i}`} flexDirection="column" marginTop={1}>
+          <Text color="cyan" wrap="wrap">
+            질문 · {one.question}
+          </Text>
+          <Markdown text={one.answer} />
+        </Box>
+      ))}
+      {ask.isAsking ? (
+        <Text color="cyan">답을 쓰는 중입니다…</Text>
+      ) : Input ? (
+        <Input
+          key={fieldKey}
+          label="질문 "
+          placeholder="이 노트에서 궁금한 것을 적고 Enter (예: 왜 const를 썼어?)"
+          submitLabel="묻기"
+          value={ask.draft ?? ''}
+          onSubmit={value => void askInPane($, cfg, note.id, value)}
+        />
+      ) : null}
+      {ask.error !== null && (
+        <Text color="red" wrap="wrap">
+          {ask.error}
+        </Text>
+      )}
+    </Box>
+  )
 }
 
 /** What the running turn has changed so far: a list where the pane is docked, one line inline. */
@@ -1793,7 +2143,7 @@ function noteBody(note: LearnNote, isBusy: boolean, el: ElementTable) {
   const { Text, Markdown } = el
   if (note.status === 'ready') return <Markdown text={note.text} />
   if (note.status === 'writing' && isBusy) return <Text color="cyan">노트를 쓰는 중입니다…</Text>
-  if (note.status === 'writing') return <Text color="yellow">노트 쓰기가 멈췄습니다 (모드를 다시 불러왔을 수 있습니다) · w로 다시 쓰기</Text>
+  if (note.status === 'writing') return <Text color="yellow">노트를 쓰다 멈췄습니다 · w로 다시 쓰기</Text>
   if (note.status === 'failed') return <Text color="red">노트를 쓰지 못했습니다: {note.text}</Text>
   return <Text dimColor>자동 노트가 꺼져 있습니다. w로 노트를 쓰거나 v로 전후 코드를 보세요.</Text>
 }
@@ -1869,7 +2219,7 @@ function conceptLine(
       )}
       {again.length > 0 && (
         <Text wrap="wrap">
-          <Text color="cyan">복습한 개념</Text>
+          <Text color="cyan">다시 만난 개념</Text>
           <Text dimColor> {again.map(one => `${one.name} ×${one.count}`).join(' · ')}</Text>
         </Text>
       )}
@@ -1877,7 +2227,6 @@ function conceptLine(
   )
 }
 
-/** Every concept the notes have taught, the most met first. */
 /** Shows one note in the note view; the newest means "follow". */
 async function openNote($: EngineInterface, id: string): Promise<void> {
   const list = await read($, notes)
@@ -1924,8 +2273,8 @@ function conceptsView(
           </Text>
           <Text dimColor>
             {' '}
-            ×{one.count} · {when(one.lastAt, now)}
-            {one.reviewedAt !== undefined ? ` · 복습 ${when(one.reviewedAt, now)}` : ''}
+            ×{one.count} · 최근 {when(one.lastAt, now)}
+            {one.reviewedAt !== undefined ? ` · 퀴즈 ${when(one.reviewedAt, now)}` : ''}
             {isMissed(one) ? ' · 퀴즈 틀림' : ` · 다음 복습 ${dueText(one, now)}`}
           </Text>
         </Text>
@@ -1950,7 +2299,7 @@ function conceptsView(
   return (
     <Box flexDirection="column">
       <Text bold>
-        지금까지 배운 개념 {ranked.length}개 <Text dimColor>· 최근 7일 새 개념 {fresh}개 · 복습 {again}개</Text>
+        지금까지 배운 개념 {ranked.length}개 <Text dimColor>· 최근 7일 새 개념 {fresh}개 · 다시 만난 개념 {again}개</Text>
       </Text>
       <Text color="cyan" wrap="wrap">
         {progress}
@@ -1958,7 +2307,7 @@ function conceptsView(
       {queue.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Text color="yellow" wrap="wrap">
-            복습할 개념 {due.length}개 <Text dimColor>· 틀린 것 먼저, 잊을 때쯤 다시 나옵니다 · 퀴즈 보기에서 풀어요</Text>
+            복습할 개념 {due.length}개 <Text dimColor>· 틀린 것 먼저, 잊을 때쯤 다시 나옵니다 · q로 퀴즈</Text>
           </Text>
           {queue.map(one => (
             <Text key={`due-${one.key}`} dimColor wrap="truncate-end">
@@ -1978,17 +2327,11 @@ function conceptsView(
   )
 }
 
-/** The quiz view's s: the first quiz, or the next one; nothing while one is being made or there is nothing to ask. */
-function quizNewButton($: EngineInterface, cfg: Config, hasQuiz: boolean, isMaking: boolean, hasConcepts: boolean, el: ElementTable) {
-  const { Button } = el
-  if (!hasConcepts || isMaking) return null
-  return <Button key="quiz-new" hotkey="s" plain label={hasQuiz ? '새 문제 받기' : '퀴즈 시작'} onPress={() => void startQuiz($, cfg)} />
-}
-
 /**
- * The quiz, one question at a time: the learner answers in their head, a shows
- * the answer, o or x says how it went, and a wrong one comes first next time.
- * The questions already graded stay above as one line each.
+ * The quiz, one question at a time: the learner types an answer for Claude to
+ * grade (i, Enter), or looks at a hint (h) or the answer (a) and grades it
+ * themselves (o, x); a wrong one comes first next time. The questions already
+ * graded stay above as one line each, the last one Claude graded opened up.
  */
 function quizView(
   $: EngineInterface,
@@ -2021,22 +2364,27 @@ function quizView(
           </Text>
         )}
       </Text>
+      {hasConcepts && !run.isMaking && (run.checking ?? null) === null && (
+        <Box>
+          <Button key="quiz-new" hotkey="s" plain label={current ? '새 문제 받기' : '퀴즈 시작'} onPress={() => void startQuiz($, cfg)} />
+        </Box>
+      )}
       {!hasConcepts && <Text dimColor>{NO_CONCEPTS_FOR_QUIZ}</Text>}
       {hasConcepts && items.length === 0 && !run.isMaking && (
-        <Text dimColor>
-          복습할 때가 된 개념(틀린 것 먼저)으로 문제를 냅니다. s로 시작해서, 답을 적어 Enter로 Claude에게 채점받거나(i로 입력칸), a로 정답만 보고 o(맞힘)·x(틀림)를 고르세요.
+        <Text dimColor wrap="wrap">
+          복습할 때가 된 개념(틀린 것 먼저)으로, 내가 만든 코드에서 문제를 냅니다. 답을 적고 Enter를 누르면 Claude가 채점합니다. 막히면 h로 힌트를, a로 정답을
+          봅니다.
         </Text>
       )}
       {run.isMaking && <Text color="cyan">문제를 만드는 중입니다…</Text>}
-      {run.error !== null && <Text color="red">{run.error}</Text>}
+      {run.error !== null && (
+        <Text color="red" wrap="wrap">
+          {run.error}
+        </Text>
+      )}
       {items.map((item, i) => {
         if (item.result !== undefined) {
-          const isPartial = item.result === 'wrong' && item.verdict === 'partial'
-          const mark = (
-            <Text color={item.result === 'right' ? 'green' : isPartial ? 'yellow' : 'red'}>
-              {item.result === 'right' ? '✓ 맞힘' : isPartial ? '△ 거의 맞음' : '✗ 틀림'}
-            </Text>
-          )
+          const mark = <Text color={item.result === 'right' ? 'green' : item.verdict === 'partial' ? 'yellow' : 'red'}>{resultMark(item)}</Text>
           if (i !== opened) {
             return (
               <Text key={`quiz-${i}`} wrap="truncate-end">
@@ -2044,6 +2392,7 @@ function quizView(
                 <Text dimColor>
                   {' '}
                   {i + 1}. {item.name}
+                  {item.isHinted ? ' · 힌트 봄' : ''}
                 </Text>
               </Text>
             )
@@ -2057,13 +2406,13 @@ function quizView(
                   {i + 1}. {item.name} · 방금 채점
                 </Text>
               </Text>
-              <Markdown text={`**${VERDICT_TEXT[item.verdict ?? 'wrong']}** ${item.feedback ?? ''}`} />
+              <Markdown text={`**${VERDICT_TEXT[item.verdict ?? 'wrong']}** ${item.feedback ?? ''}${isTurned(item) ? ` _(내가 ${item.result === 'right' ? '맞힘' : '틀림'}으로 바꿈)_` : ''}`} />
               {item.mine !== undefined && (
                 <Text dimColor wrap="wrap">
                   내 답: {item.mine}
                 </Text>
               )}
-              <Text color="green">모범 답</Text>
+              <Text color="green">정답</Text>
               <Markdown text={item.answer} />
               <Box flexWrap="wrap" columnGap={2}>
                 <Button
@@ -2085,6 +2434,12 @@ function quizView(
               문제 {i + 1}/{items.length}
             </Text>
             <Markdown text={item.question} />
+            {item.hint !== undefined && item.isHinted === true && (
+              <Box flexDirection="column">
+                <Text color="yellow">힌트</Text>
+                <Markdown text={item.hint} />
+              </Box>
+            )}
             {isAnswerShown(current, item) ? (
               <Box flexDirection="column" marginTop={1}>
                 <Text color="green">정답</Text>
@@ -2105,7 +2460,7 @@ function quizView(
                     label="내 답 "
                     placeholder="답을 적고 Enter: Claude가 채점"
                     submitLabel="채점받기"
-                    value={run.draft ?? ''}
+                    value={run.draft && run.draft.at === current.at && run.draft.i === i ? run.draft.text : ''}
                     onSubmit={value => void checkAnswer($, cfg, i, value)}
                   />
                 )}
@@ -2113,8 +2468,9 @@ function quizView(
                   {Input && (
                     <Button key="quiz-type" hotkey="i" plain label="답 적기" onPress={() => void $.ui.focus({ requestId: PANE, key: fieldKey(i) }).catch(() => undefined)} />
                   )}
+                  {item.hint !== undefined && item.isHinted !== true && <Button key="quiz-hint" hotkey="h" plain label="힌트" onPress={() => showHint($, i)} />}
                   <Button key="quiz-answer" hotkey="a" plain label={Input ? '정답만 보기' : '정답 보기'} onPress={() => showAnswer($, i)} />
-                  <Text dimColor>{Input ? '적어서 채점받거나, 머릿속으로 답한 뒤 정답만 봐요' : '먼저 스스로 답해 보세요'}</Text>
+                  {!Input && <Text dimColor>먼저 스스로 답해 보세요</Text>}
                 </Box>
               </Box>
             )}
@@ -2125,7 +2481,7 @@ function quizView(
         <Box marginTop={1}>
           <Text bold>
             {items.length}문제 중 {right}개 맞혔습니다
-            <Text dimColor>{right < items.length ? ' · 틀린 개념은 다음 퀴즈에 먼저 나옵니다' : ''} · s로 새 문제</Text>
+            <Text dimColor>{missesText(items) ? ` · ${missesText(items)}` : ''} · s로 새 문제</Text>
           </Text>
         </Box>
       )}
@@ -2139,33 +2495,67 @@ function taughtBy(list: readonly LearnNote[], map: Readonly<Record<string, strin
 }
 
 const HELP = [
-  '/learn 하위 명령',
+  'learn-notes 명령',
   '',
+  '**패널** (단축키는 ctrl+x tab으로 패널을 고른 뒤 누릅니다)',
   '- `/learn`: 학습 노트 패널 열기',
-  '- `/learn last`: 마지막 노트',
-  '- `/learn concepts`: 지금까지 배운 개념 (진도 · 복습할 개념 · 다음 복습 날짜)',
-  '- `/learn recap`: 오늘 배운 것 정리 (어제 · 이번주 · 최근 7일 · 2026-10-03도 됩니다) · 일지에 남김',
-  '- `/learn quiz`: 복습할 개념으로 문제 · `/learn quiz 정답`으로 답을 보고 복습으로 표시 · `/learn quiz 틀림 2`로 틀린 문제를 다음 퀴즈에 다시',
-  '- 패널의 퀴즈 보기(q): s로 문제 받기 · i로 답 적기(Enter로 Claude가 채점) · a로 정답만 보기 · o 맞힘 · x 틀림 · f 채점 바꾸기 (틀린 개념은 다음 퀴즈에 먼저)',
-  '- `/learn ask 질문`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기 · 답은 일지에도 남음',
-  '- `/learn stats`: 학습 기록 (연속 학습일 · 최근 7일 노트·개념·퀴즈 · 30일 정답률 · 날짜별 막대)',
-  '- `/learn anki`: 지금까지 낸 퀴즈 문제와 개념을 Anki 카드 파일로 (일지 폴더의 learn-notes-anki.txt)',
-  '- 패널의 노트 보기: t로 이 노트의 개념만 퀴즈 · e로 더 쉽게(비유를 넣어) 다시 쓰기',
-  '- `/learn find 말`: 모든 프로젝트의 노트에서 찾기 (요청 · 내용 · 파일 · 개념)',
-  '- `/learn days`: 이 프로젝트의 일지 날짜',
-  '- `/learn day 2026-10-03`: 그날 노트 목차 (오늘 · 어제도 됩니다)',
-  '- `/learn merge 합칠 개념 = 남길 개념`: 같은 개념인데 이름이 갈라진 것 합치기',
-  '- `/learn save`: 아직 저장 안 된 노트와 개념 모음을 파일로',
-  '- `/learn clear`: 이 프로젝트의 노트 비우기',
+  '- 노트: `p`·`n` 이전·다음 · `v` 보기 바꾸기(노트 → 전/후 → diff → 개념 모음) · `w` 다시 쓰기 · `t` 이 노트 퀴즈 · `e` 더 쉽게 · `i` 질문하기',
+  '- 퀴즈(`q`): `s` 문제 받기 · `i` 답 적기(Enter로 Claude가 채점) · `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기',
+  '',
+  '**복습**',
+  '- `/learn quiz`: 복습할 개념으로 문제 받기 (내가 만든 코드로 묻습니다)',
+  '- `/learn quiz 1 내 답`: 답을 적어 Claude에게 채점받기 · `/learn quiz 문제` · `/learn quiz 힌트` · `/learn quiz 정답`',
+  '- `/learn quiz 맞음 1` · `/learn quiz 틀림 2`: 정답을 본 뒤 스스로 채점 (이미 채점한 것도 바꿉니다)',
+  '- `/learn concepts`: 지금까지 배운 개념과 다음 복습 날짜',
+  '- `/learn recap`: 오늘 배운 것 정리 (어제 · 이번주 · 최근 7일 · 2026-10-03도 됩니다)',
+  '- `/learn stats`: 연속 학습일 · 최근 7일 · 30일 정답률',
+  '- `/learn anki`: 퀴즈 문제와 개념을 Anki 카드 파일로',
+  '',
+  '**노트**',
+  '- `/learn last`: 마지막 노트를 여기에',
+  '- `/learn ask 질문`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기',
+  '- `/learn find 말`: 모든 프로젝트의 노트에서 찾기',
+  '- `/learn day`: 오늘 노트 목차 (`어제` · `2026-10-03` · `/learn days`로 일지가 있는 날짜)',
+  '',
+  '**관리**',
+  '- `/learn merge 합칠 개념 = 남길 개념`: 이름만 다른 같은 개념 합치기 (거꾸로 하면 되돌립니다)',
+  '- `/learn save`: 아직 파일에 없는 노트 저장 · `/learn clear`: 이 프로젝트의 노트 비우기',
+  '',
+  '한글로도 됩니다: `/learn 퀴즈` · `개념` · `정리` · `기록` · `질문` · `찾기` · `일지` · `도움말`',
 ].join('\n')
+/** What an unknown subcommand gets: the few most used, and where the rest are. */
+const SHORT_HELP = '자주 쓰는 것: `/learn` (패널) · `/learn quiz` · `/learn recap` · `/learn ask 질문` · `/learn stats` · 전체 목록은 `/learn help`'
+/** Korean words for the subcommands, so `/learn 퀴즈` works as `/learn quiz` does. */
+const COMMAND_WORDS: Record<string, string> = {
+  도움말: 'help',
+  도움: 'help',
+  퀴즈: 'quiz',
+  문제: 'quiz',
+  개념: 'concepts',
+  정리: 'recap',
+  요약: 'recap',
+  기록: 'stats',
+  통계: 'stats',
+  질문: 'ask',
+  묻기: 'ask',
+  찾기: 'find',
+  검색: 'find',
+  일지: 'day',
+  날짜: 'days',
+  마지막: 'last',
+  합치기: 'merge',
+  저장: 'save',
+  비우기: 'clear',
+  안키: 'anki',
+}
 /** Lines /learn day prints at most: the reply goes into the conversation the model reads. */
 const DAY_LINES = 40
-const QUIZ_USAGE = '쓰는 법: /learn quiz (문제 받기) · /learn quiz 정답 (답 보기 · 복습으로 표시) · /learn quiz 틀림 2 (틀린 문제를 다음 퀴즈에 다시)'
+const QUIZ_USAGE =
+  '쓰는 법: /learn quiz (새 문제 받기) · /learn quiz 문제 (지금 문제 다시 보기) · /learn quiz 1 내 답 (Claude가 채점) · /learn quiz 힌트 · /learn quiz 정답 · /learn quiz 맞음 1 · /learn quiz 틀림 2 (스스로 채점)'
 const ASK_USAGE = '쓰는 법: /learn ask 질문 (예: /learn ask 왜 let 대신 const를 썼어?) · 패널에서 고른 노트(없으면 마지막 노트)에 대해 답합니다'
 const NO_QUIZ = '아직 낸 퀴즈가 없습니다. /learn quiz로 먼저 문제를 받으세요.'
 const MERGE_USAGE =
   '쓰는 법: /learn merge 합칠 개념 = 남길 개념  (예: /learn merge Destructuring = 구조 분해 할당 · = 대신 => -> → | 도 됩니다 · 거꾸로 하면 되돌립니다)'
-const USAGE = `모르는 하위 명령입니다.\n\n${HELP}`
 const EMPTY_TEXT = '아직 학습 노트가 없습니다. Claude가 파일을 고친 턴이 끝나면 생깁니다.'
 
 function noteAsText(note: LearnNote): string {

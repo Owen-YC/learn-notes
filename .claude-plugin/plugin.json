@@ -1,7 +1,7 @@
 {
   "name": "learn-notes",
-  "version": "1.3.0",
-  "description": "바이브코딩 학습 노트: Claude가 고친 코드의 전후를 잡아 턴마다 학습 노트로 정리하고 오른쪽 패널에 보여 준다",
+  "version": "1.4.0",
+  "description": "바이브코딩 학습 노트: Claude가 고친 코드의 전후를 잡아 턴마다 학습 노트로 정리하고, 내 코드로 복습 퀴즈까지 이어 준다",
   "author": {
     "name": "Owen-YC",
     "url": "https://github.com/Owen-YC"
@@ -22,13 +22,13 @@
     "autoNote": {
       "type": "boolean",
       "title": "턴이 끝나면 학습 노트 자동 작성",
-      "description": "끄면 전후 코드만 모으고, 노트는 패널에서 w(노트 쓰기)를 눌렀을 때만 쓴다 (모델 호출 비용이 들지 않는다)",
+      "description": "끄면 바뀐 코드만 모으고, 노트는 패널에서 w를 눌렀을 때만 씁니다 (그만큼 모델 호출 비용이 들지 않습니다)",
       "default": true
     },
     "model": {
       "type": "string",
       "title": "노트를 쓰는 모델",
-      "description": "haiku가 가장 싸고 빠르다",
+      "description": "노트·퀴즈·채점·질문에 쓰는 모델입니다. haiku가 가장 싸고 빠릅니다",
       "options": [
         "haiku",
         "sonnet",
@@ -39,7 +39,7 @@
     "level": {
       "type": "string",
       "title": "설명 수준",
-      "description": "beginner: 용어를 쉬운 말로 풀어 쓴다 · intermediate: 개념 위주 · advanced: 설계와 트레이드오프 위주",
+      "description": "beginner: 용어를 쉬운 말로 풀어 씁니다 · intermediate: 개념 위주 · advanced: 설계와 트레이드오프 위주",
       "options": [
         "beginner",
         "intermediate",
@@ -50,19 +50,19 @@
     "autoOpen": {
       "type": "boolean",
       "title": "첫 노트가 생기면 패널 자동으로 열기",
-      "description": "전체 화면 터미널(오른쪽에 붙는 자리)에서 144칸 이상일 때만 저절로 열린다. 그 밖에는 /learn으로 연다",
+      "description": "전체 화면 터미널에서 144칸 이상일 때만 저절로 열립니다. 그 밖에는 /learn으로 엽니다",
       "default": true
     },
     "reviewReminder": {
       "type": "boolean",
       "title": "복습 알림 (상태줄)",
-      "description": "복습할 때가 된 개념이 있으면 프롬프트 아래 상태줄에 '복습할 개념 n개'를 띄운다",
+      "description": "복습할 때가 된 개념이 있으면 프롬프트 아래 상태줄에 '복습할 개념 n개'를 띄웁니다",
       "default": true
     },
     "autoSave": {
       "type": "boolean",
       "title": "노트를 마크다운 파일로 자동 저장",
-      "description": "날짜·프로젝트별 마크다운 파일에 노트가 쌓인다",
+      "description": "날짜·프로젝트별 마크다운 파일(일지)에 노트가 쌓입니다. /learn recap·day도 이 일지를 읽습니다",
       "default": true
     },
     "saveDir": {

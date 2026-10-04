@@ -57,7 +57,25 @@ export type LearnNote = {
   concepts: string[]
   /** True once the day's learning record counted it (the first time it was written), so a rewrite does not count it again. */
   isCounted?: boolean
+  /** True while its latest writing is in no journal yet (autoSave off): /learn save writes it. */
+  isUnsaved?: boolean
+  /** The latest questions asked about this note (the pane's question field, /learn ask) with their answers. */
+  asks?: LearnAsk[]
 }
+
+/** One question about a note and the model's answer. */
+export type LearnAsk = { question: string; answer: string; at: number }
+
+/** A note's question in the pane: whether its answer is being written, and why the last one failed. */
+export type LearnAskRun = {
+  isAsking: boolean
+  error: string | null
+  /** A question whose answer did not come back, put back in the field to send again. */
+  draft: string | null
+}
+
+/** A concept's spaced-review marks (see LearnConcept), as they were before a quiz grade. */
+export type LearnQuizMarks = Pick<LearnConcept, 'reviewedAt' | 'missedAt' | 'step'>
 
 /** One concept the notes taught, kept across sessions and projects. */
 export type LearnConcept = {
@@ -78,7 +96,8 @@ export type LearnConcept = {
   missedAt?: number
   /**
    * Its spaced-review step once quizzed: due again 1, 3, 7, 14, 30 or 60 days after it was last met.
-   * A right answer moves it a step on (once a day at most), a wrong one back to 0; absent, the notes that met it again count.
+   * A right answer moves it a step on (once a day at most), a partly right one a step back, a wrong one back to 0;
+   * absent, the notes that met it again count.
    */
   step?: number
 }
@@ -89,6 +108,10 @@ export type LearnQuizItem = {
   name: string
   question: string
   answer: string
+  /** A nudge toward the answer that does not give it away, asked for with the question; absent on quizzes made before 1.4.0. */
+  hint?: string
+  /** True once the learner looked at the hint (h in the pane, /learn quiz 힌트). */
+  isHinted?: boolean
   /** True once the pane showed its answer (a). */
   isShown?: boolean
   /** How the learner graded their own answer: o and x in the pane, or /learn quiz 정답 · 틀림. */
@@ -101,6 +124,10 @@ export type LearnQuizItem = {
   verdict?: 'right' | 'partial' | 'wrong'
   /** Claude's one or two sentences on `mine`: what was right, what was missing. */
   feedback?: string
+  /** Its concept's marks from before this grade, so turning the grade the other way (f) starts from there. */
+  before?: LearnQuizMarks
+  /** True once the learner set the grade themselves over Claude's (f, /learn quiz 맞음 · 틀림): fully right or fully wrong. */
+  isLearnerGraded?: boolean
 }
 
 /** One day's learning: notes written, and quiz answers the learner graded right and wrong. */
@@ -112,11 +139,11 @@ export type LearnQuizRun = {
   error: string | null
   /** The question whose typed answer Claude is grading now, if any. */
   checking?: number | null
-  /** A typed answer whose grading failed, put back in the field to send again. */
-  draft?: string | null
+  /** A typed answer whose grading failed, put back in its question's field to send again. */
+  draft?: { at: number; i: number; text: string } | null
 }
 
-/** What the pane shows for the selected note. */
+/** What the pane shows: the selected note three ways, every concept, or the quiz. */
 export type LearnView = 'note' | 'split' | 'diff' | 'concepts' | 'quiz'
 
 /** A prompt as it entered, and whether its text is a request of its own (a person's, a schedule's) rather than a notification. */
@@ -142,6 +169,8 @@ declare module 'claude-code' {
       quiz: { at: number; items: LearnQuizItem[]; isRevealed: boolean } | null
       /** The pane's quiz request: whether one is out, and the last failure to show. */
       quizRun: LearnQuizRun
+      /** The pane's questions about notes, by note id: whose answer is being written, and the last failure to show. */
+      askRun: Record<string, LearnAskRun>
       /** Each day's notes and graded quiz answers (YYYY-MM-DD → counts), mirrored from the plugin's store for drawing. */
       activity: Record<string, LearnDayActivity>
       /** The latest prompts that entered and the last real request: read when a turn starts, kept here so a reload keeps them. */

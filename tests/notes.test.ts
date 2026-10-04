@@ -74,6 +74,13 @@ import {
   parseDiff,
   relative,
   summaryOf,
+  askPrompt,
+  codeFor,
+  markPartial,
+  marksOf,
+  quizPrompt,
+  regrade,
+  isSameRequest,
   type Hunk,
 } from '../hooks/notes'
 
@@ -277,9 +284,10 @@ describe('the note', () => {
   })
 
   test('failures read as what to do next', () => {
-    expect(failureText({ reason: 'api-error', status: 429, error: 'rate_limit' })).toBe('요청 한도에 걸렸습니다 · 잠시 뒤 [다시 쓰기]')
-    expect(failureText({ reason: 'api-error', status: 500, error: 'server_error' })).toBe('API 오류 500 · 잠시 뒤 [다시 쓰기]')
-    expect(failureText({ reason: 'aborted' })).toContain('중단됐습니다')
+    expect(failureText({ reason: 'api-error', status: 429, error: 'rate_limit' })).toBe('요청 한도에 걸렸습니다. 잠시 뒤 다시 해 보세요')
+    expect(failureText({ reason: 'api-error', status: 500, error: 'server_error' })).toBe('API 오류 500. 잠시 뒤 다시 해 보세요')
+    expect(failureText({ reason: 'api-error', status: 401, error: 'authentication_failed' })).toBe('로그인이 필요합니다 (/login)')
+    expect(failureText({ reason: 'aborted' })).toContain('멈췄습니다')
   })
 
   test('the prompt says which diffs were cut and leans on the request and answer', () => {
@@ -1005,4 +1013,125 @@ test('a typed answer\'s grade is read from the two lines asked for, bold or JSON
   const prompt = checkPrompt({ name: '클로저', question: '왜 커질까?', answer: '바깥 변수를 기억해서다.' }, '변수를 기억해서', 'beginner')
   expect(prompt).toContain('## 모범 답\n바깥 변수를 기억해서다.\n## 학습자의 답\n변수를 기억해서')
   expect(prompt).toContain('판정: (맞음 · 거의 · 틀림 중 하나)')
+})
+
+describe('1.4.0', () => {
+  const picks = quizPick({ 'c:a': { name: 'A', count: 1, firstAt: 0, lastAt: 0, blurb: '', files: [] }, 'c:b': { name: 'B', count: 1, firstAt: 1, lastAt: 1, blurb: '', files: [] } }, Date.UTC(2026, 9, 3))
+
+  test('a hint comes with its question; one that only repeats the answer is dropped', () => {
+    const items = parseQuiz(['Q1: 첫 문제', 'H1: 바깥을 떠올려 보세요', 'A1: 첫 답', 'Q2: 둘째 문제', 'H2: 둘째  답', 'A2: 둘째 답'].join('\n'), picks)
+    expect(items.map(one => one.hint)).toEqual(['바깥을 떠올려 보세요', undefined])
+    expect(items[1]!.answer).toBe('둘째 답')
+    // A quiz without hints (before 1.4.0, or a model that left them out) still reads.
+    expect(parseQuiz('Q1: 문제\nA1: 답', picks)[0]!.hint).toBeUndefined()
+  })
+
+  test('code inside a question is its code, even where a line looks like a marker (review)', () => {
+    const text = ['Q1: 아래 코드는 무엇을 보여 줄까요?', '```', "h1.textContent = '안녕'", 'a1. 주석 아님', 'Q2: 가짜', '```', 'H1: 제목 태그', 'A1: 안녕', 'Q2: 진짜 둘째', 'A2: 둘'].join('\n')
+    const [first, second] = parseQuiz(text, picks)
+    expect(first!.question).toContain("h1.textContent = '안녕'")
+    expect(first!.question).toContain('a1. 주석 아님')
+    expect(first!.question).toContain('Q2: 가짜')
+    expect(second!.question).toBe('진짜 둘째')
+    // Lowercase is never a marker.
+    expect(parseQuiz('Q1: 문제\nh1: 아님\nA1: 답', picks)[0]).toMatchObject({ question: '문제\nh1: 아님', answer: '답' })
+  })
+
+  test('the code a concept was met in: the new side around the quoted line', () => {
+    const change = { diff: '@@ -1,4 +1,5 @@\n const a = 1\n-let b = 2\n+const b = 2\n+for (const item of items) {}\n x()\n y()' }
+    expect(codeFor(change, '반복 — `for (const item of items)`')).toBe('const a = 1\nconst b = 2\nfor (const item of items) {}\nx()\ny()')
+    expect(codeFor({ diff: '@@ -1,2 +0,0 @@\n-a\n-b' }, '')).toBeUndefined()
+    const long = { diff: `@@ -1,1 +1,40 @@\n${Array.from({ length: 40 }, (_, i) => `+line${i}`).join('\n')}` }
+    expect(codeFor(long, '`line30`')!.split('\n')[0]).toBe('line25')
+    expect(codeFor(long, '')!.split('\n')).toHaveLength(16)
+  })
+
+  test('the quiz prompt shows the learner their own code and asks for a hint', () => {
+    const prompt = quizPrompt([{ ...picks[0]!, code: { file: 'cart.js', text: 'const total = 0' } }, picks[1]!], 'beginner')
+    expect(prompt).toContain('1. A — (설명 없음)\n   학습자가 만든 코드 (cart.js):\n```\nconst total = 0\n```\n2. B')
+    expect(prompt).toContain('그 코드를 그대로, 또는 조금 바꿔')
+    expect(prompt).toContain('H1: (힌트 한 문장)')
+    expect(quizPrompt(picks, 'beginner')).not.toContain('학습자가 만든 코드')
+  })
+
+  test('a partly right answer steps a concept back one, never below the first, and does not mark it missed', () => {
+    const at = Date.UTC(2026, 9, 3)
+    const one: LearnConcept = { name: 'A', count: 1, firstAt: 0, lastAt: 0, blurb: '', files: [], step: 3, missedAt: 5 }
+    expect(markPartial({ 'c:a': one }, ['c:a'], at)['c:a']).toMatchObject({ step: 2, reviewedAt: at })
+    expect(markPartial({ 'c:a': one }, ['c:a'], at)['c:a']!.missedAt).toBeUndefined()
+    expect(markPartial({ 'c:a': { ...one, step: 0 } }, ['c:a'], at)['c:a']!.step).toBe(0)
+  })
+
+  test('a grade turned around starts from the marks before it, unless something went over the concept since', () => {
+    const day = 86_400_000
+    const at = Date.UTC(2026, 9, 3)
+    const one: LearnConcept = { name: 'A', count: 1, firstAt: at - 10 * day, lastAt: at - 10 * day, blurb: '', files: [], step: 2, reviewedAt: at - 8 * day }
+    const before = marksOf(one)
+    const wrong = markMissed(markReviewed({ 'c:a': one }, ['c:a'], at), ['c:a'], at)
+    expect(wrong['c:a']).toMatchObject({ step: 0, missedAt: at })
+    // Right after all: a step on from 2, as if graded right then.
+    const right = regrade(wrong, 'c:a', before, at, markReviewed)
+    expect(right['c:a']).toMatchObject({ step: 3, reviewedAt: at })
+    expect(right['c:a']!.missedAt).toBeUndefined()
+    // Gone over since (another quiz the next day): only the new grade is applied.
+    const later = markReviewed(wrong, ['c:a'], at + day)
+    expect(regrade(later, 'c:a', before, at, markReviewed)['c:a']!.reviewedAt).toBe(at + day)
+  })
+
+  test('a follow-up question reads the last two questions and answers about the note', () => {
+    const note = { prompt: '요청', text: '노트', status: 'ready' as const, changes: [], moreFiles: 0 }
+    expect(askPrompt(note, '왜?', 'beginner')).not.toContain('앞서 이 노트에 대해')
+    const asks = [1, 2, 3].map(n => ({ question: `질문 ${n}`, answer: `답 ${n}`, at: n }))
+    const prompt = askPrompt({ ...note, asks }, '그럼?', 'beginner')
+    expect(prompt).toContain('- 질문: 질문 2\n  답: 답 2\n- 질문: 질문 3\n  답: 답 3')
+    expect(prompt).not.toContain('질문 1')
+  })
+
+  test('a CRLF line keeps its \\r out of the diff: no blank lines, a header that still counts right (review)', () => {
+    const { diff } = hunksToDiff([{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, lines: [' a\r', '-b\r', '+B\r'] }])
+    expect(diff).toBe('@@ -1,2 +1,2 @@\n a\n-b\n+B')
+  })
+
+  test('the journal keeps a request on one line, so a pasted code block cannot swallow the section (review)', () => {
+    const note = {
+      id: 'n', turnId: 't', at: Date.UTC(2026, 9, 3, 1), prompt: '이 코드 고쳐줘\n```js\nconst a = `x\n```', answer: '', changes: [], moreFiles: 0,
+      status: 'ready' as const, text: '### 한 줄 요약\n고쳤다', savedAs: null, isPast: false, concepts: [], root: '/p', updatedAt: 0,
+    }
+    const section = journalSection(note)
+    expect(section).toContain('**요청**: 이 코드 고쳐줘 ```js const a = `x ```')
+    expect(journalEntries(`# 일지\n\n${section}`)[0]!.request).toContain('이 코드 고쳐줘')
+  })
+
+  test('a stored note keeps its last three questions, each cut short', () => {
+    const asks = [1, 2, 3, 4].map(n => ({ question: `질문 ${n}`, answer: 'x'.repeat(3000), at: n }))
+    const note = {
+      id: 'n', turnId: 't', at: 1, prompt: '', answer: '', changes: [], moreFiles: 0,
+      status: 'ready' as const, text: '', savedAs: null, isPast: false, concepts: [], root: '/p', updatedAt: 0, asks,
+    }
+    const kept = forHistory(note).asks!
+    expect(kept.map(one => one.question)).toEqual(['질문 2', '질문 3', '질문 4'])
+    expect(kept[0]!.answer.length).toBeLessThanOrEqual(1500)
+  })
+})
+
+describe('1.4.0 second review', () => {
+  const picks = quizPick({ 'c:a': { name: 'A', count: 1, firstAt: 0, lastAt: 0, blurb: '', files: [] }, 'c:b': { name: 'B', count: 1, firstAt: 1, lastAt: 1, blurb: '', files: [] } }, Date.UTC(2026, 9, 3))
+
+  test('a fence opened and closed on one line, or left open, does not hide the markers after it', () => {
+    const oneLine = ['Q1: 결과는?', '```const a = [1,2].map(x => x*2)```', 'H1: map을 떠올리세요', 'A1: [2,4]', 'Q2: 둘', 'A2: 답'].join('\n')
+    expect(parseQuiz(oneLine, picks).map(one => one.answer)).toEqual(['[2,4]', '답'])
+    const open = ['Q1: 결과는?', '```js', 'console.log(1)', 'A1: 1', 'Q2: 둘', 'A2: 답'].join('\n')
+    expect(parseQuiz(open, picks)).toHaveLength(2)
+    const fenced = ['Q1: 다음은?', '```js', 'h1.textContent = 1', '```', 'A1: 1', 'Q2: 둘', 'A2: 답'].join('\n')
+    expect(parseQuiz(fenced, picks)[0]!.question).toContain('h1.textContent = 1')
+  })
+
+  test('a rewritten note is one entry though an older build wrote its request on several lines', () => {
+    const older = ['## 2026-10-03 10:00', '', '**요청**: 이 코드 고쳐줘', '```js', 'a()', '```', '', '### 한 줄 요약', '옛 노트', '', '---', ''].join('\n')
+    const newer = ['## 2026-10-03 10:00 (다시 쓴 노트)', '', '**요청**: 이 코드 고쳐줘 ```js a() ```', '', '### 한 줄 요약', '새 노트', '', '---', ''].join('\n')
+    expect(journalIndex(older + newer)).toEqual([{ time: '10:00', request: '이 코드 고쳐줘 ```js a() ```', summary: '새 노트', isRewrite: true }])
+    expect(journalEntries(older + newer)).toHaveLength(1)
+    expect(isSameRequest('같은 요청 앞부분…', '같은 요청 앞부분과 뒷부분')).toBe(true)
+    expect(isSameRequest('다른 요청', '같은 요청')).toBe(false)
+  })
 })
