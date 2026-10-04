@@ -397,6 +397,25 @@ export function relative(path: string, root: string | undefined): string {
   return p.startsWith(`${r}/`) ? p.slice(r.length + 1) : path
 }
 
+/**
+ * True for a folder no one codes in: a drive or file-system root, or Windows'
+ * own folders (where a PowerShell opened as administrator starts, C:\Windows\System32).
+ * Claude Code started there puts the code it writes in its scratchpad instead.
+ */
+export function isSystemFolder(root: string | undefined): boolean {
+  if (!root) return false
+  const p = slashed(root).replace(/\/+$/, '')
+  if (p === '' || /^[A-Za-z]:$/.test(p)) return true
+  return /^[A-Za-z]:\/(?:Windows|Program Files(?: \(x86\))?|ProgramData)(?:\/|$)/i.test(p) || /^\/(?:bin|sbin|usr|etc|System|Library|Windows)(?:\/|$)/.test(p)
+}
+
+/** The hint for a session started in a system folder: where to start it instead. */
+export function systemFolderHint(root: string): string {
+  const isWindows = /^[A-Za-z]:/.test(root)
+  const how = isWindows ? 'PowerShell에서 cd ~\\practice 뒤 claude' : '터미널에서 cd ~/practice 뒤 claude'
+  return `Claude Code가 시스템 폴더(${root})에서 켜져 있어요. 작업 폴더에서 켜면 파일이 그 폴더에 생겨요 (${how}). 그동안 Claude가 임시 폴더에 만든 파일도 노트에 담아요.`
+}
+
 /** True for a path under `dir` (either separator). */
 export function isUnder(path: string, dir: string): boolean {
   const d = slashed(dir).replace(/\/+$/, '')

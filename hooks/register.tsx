@@ -42,6 +42,8 @@ import {
   failureText,
   focus,
   isUnder,
+  isSystemFolder,
+  systemFolderHint,
   journalHeader,
   dayBefore,
   dayNoon,
@@ -238,6 +240,8 @@ async function isBookkeeping($: EngineInterface, path: string): Promise<boolean>
   if (home !== undefined && (isUnder(path, `${home}/.claude/plans`) || isUnder(path, `${home}/.claude/projects`))) return true
   const root = await $.session.root()
   if (root && isUnder(path, root)) return false
+  // Started in a system folder, Claude Code writes the learner's code in its scratchpad: that is the work, not bookkeeping.
+  if (isSystemFolder(root)) return false
   const temps = ['/tmp', '/private/tmp', '/var/tmp', '/var/folders', await $.env.get('TMPDIR'), await $.env.get('TEMP'), await $.env.get('TMP')]
   return temps.some(dir => dir !== undefined && dir !== '' && isUnder(path, dir))
 }
@@ -1468,7 +1472,9 @@ export const register: Register = (on, options) => {
         text: `이 세션은 클라우드 컴퓨터에서 돌아, 패널이 지금 보는 화면에 뜨지 않을 수 있습니다. 마지막 노트를 여기에 적습니다 (/learn last 로 언제든 다시 봅니다).\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
       }
     }
-    if (opened.isPlaced) return { text: '학습 노트 패널을 열었습니다.' }
+    const root = await $.session.root()
+    const hint = isSystemFolder(root) ? `\n\n${systemFolderHint(root)}` : ''
+    if (opened.isPlaced) return { text: `학습 노트 패널을 열었습니다.${hint}` }
     return {
       text: `패널을 그릴 화면이 없습니다 (${opened.reason}). 마지막 노트를 여기에 적습니다.\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
     }
@@ -1504,6 +1510,12 @@ export const register: Register = (on, options) => {
       )
 
     const liveBlock = running && running.changes.length > 0 ? liveView(running, isDock, cfg.isAutoNote, el) : null
+    const root = await $.session.root()
+    const systemHint = isSystemFolder(root) ? (
+      <Text color="yellow" wrap="wrap">
+        {systemFolderHint(root)}
+      </Text>
+    ) : null
 
     if (!note) {
       // No note in this project yet: concepts learned elsewhere, and a quiz on them, are still one key away.
@@ -1511,6 +1523,7 @@ export const register: Register = (on, options) => {
       const isQuiz = mode === 'quiz' && hasConcepts
       return (
         <Box flexDirection="column">
+          {systemHint}
           {liveBlock}
           {hasConcepts && (
             <Box flexWrap="wrap" columnGap={2}>
@@ -1584,6 +1597,7 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
+        {systemHint}
         {liveBlock}
         {!isWhole(mode) && (
           <Text wrap="truncate-end">

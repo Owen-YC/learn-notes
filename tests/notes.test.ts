@@ -44,6 +44,7 @@ import {
   jsonBytes,
   progressOf,
   reviewQueue,
+  isSystemFolder,
   diffHunks,
   joinPath,
   shellTargets,
@@ -981,4 +982,13 @@ describe('shell edits read off the files (PowerShell, Bash without a diff)', () 
     expect(shellTargets('ls *.js; echo $name.txt', '/p')).toEqual([])
     expect(shellTargets(Array.from({ length: 50 }, (_, i) => `f${i}.js`).join(' '), '/p')).toHaveLength(40)
   })
+})
+
+test('a system folder is a drive or file-system root, or Windows\' own folders; a home or a project is not', () => {
+  for (const root of ['C:\\Windows\\System32', 'c:\\windows', 'C:\\', 'C:', 'C:\\Program Files\\Git', 'C:\\Program Files (x86)', '/', '/usr/local', '/System/Library']) {
+    expect(isSystemFolder(root)).toBe(true)
+  }
+  for (const root of ['C:\\Users\\Owen\\practice', 'C:\\Users\\Owen', 'D:\\work\\shop', '/home/u/proj', '/Users/owen/code', undefined, '']) {
+    expect(isSystemFolder(root)).toBe(false)
+  }
 })

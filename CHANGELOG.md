@@ -1,5 +1,13 @@
 # 바뀐 것
 
+## 1.2.2 (2026-10-04)
+
+관리자 PowerShell처럼 `C:\Windows\System32`에서 Claude Code를 켰을 때도 노트가 생긴다.
+
+- 시스템 폴더(드라이브 루트, `C:\Windows`, `C:\Program Files`, `/` 등)에서 켜진 세션에서는 Claude가 코드를 임시 폴더(scratchpad)에 만든다.
+  learn-notes는 임시 폴더의 파일을 Claude의 작업 파일로 보고 빼 왔는데, 이때는 그것이 배울 코드라 노트에 담는다.
+- 그런 세션에서는 패널 맨 위와 `/learn` 답에 작업 폴더에서 켜라는 안내(`cd ~\practice` 뒤 `claude`)를 띄운다.
+
 ## 1.2.1 (2026-10-04)
 
 Windows에서 노트가 생기지 않던 것을 고쳤다.

@@ -54,7 +54,8 @@ claude plugin install learn-notes@learn-notes
 - **지우기**: `claude plugin uninstall learn-notes@learn-notes` (일지 파일 `~/.claude/learning-notes/`는 남습니다)
 - **설치 없이 한 번 써 보기**: 이 저장소를 받아 `claude --plugin-dir <저장소 경로>`로 시작합니다.
 - **Windows**: PowerShell에서 `irm https://claude.ai/install.ps1 | iex`로 Claude Code를 설치한 뒤, 위 명령을 그대로 씁니다.
-  Claude Code는 작업할 폴더에서 켜세요(`cd ~\practice` 뒤 `claude`). `C:\Windows\System32`에서 켜면 Claude가 다른 곳(바탕화면 등)에 파일을 만들게 됩니다.
+  Claude Code는 작업할 폴더에서 켜세요(`cd ~\practice` 뒤 `claude`). 관리자 PowerShell처럼 `C:\Windows\System32`에서 켜면 Claude가 파일을 임시 폴더(scratchpad)나 바탕화면에 만듭니다.
+  이때도 노트는 생기고(임시 폴더의 파일도 담습니다), 패널 맨 위에 작업 폴더에서 켜라는 안내가 뜹니다.
   `claude`를 못 찾으면 새 창을 열거나 `$env:Path += ";$HOME\.local\bin"`을 입력하세요.
 
 > 클라우드 세션(claude.ai의 웹·앱에서 여는 Claude Code 세션)에서는 패널이 보는 화면에 뜨지 않을 수 있습니다.
@@ -68,7 +69,7 @@ claude plugin install learn-notes@learn-notes
    턴이 도는 동안에는 패널 맨 위에 "● 작업 중: 파일 n개"가 실시간으로 보입니다.
    이런 것은 모으지 않습니다. 내가 배울 코드가 아니기 때문입니다.
    - Claude가 스스로 쓰는 계획 파일·메모리(`~/.claude/plans`, `~/.claude/projects`)
-   - 프로젝트 밖 임시 폴더(`/tmp`, `TMPDIR` 등)의 작업 파일
+   - 프로젝트 밖 임시 폴더(`/tmp`, `TMPDIR` 등)의 작업 파일 (단, Claude Code를 `C:\Windows\System32` 같은 시스템 폴더에서 켰다면 Claude가 코드를 임시 폴더에 만들므로 그 파일은 담습니다)
    - `git stash`·`checkout`·`restore`·`reset`·`pull`·`merge` 같은 git 명령이 디스크에 되돌리거나 가져온 내용
    이번 턴에 새로 만든 파일을 같은 턴에 다시 고치면, 지운 줄 없이 "새 파일" 하나로 마지막 내용을 보여 줍니다.
 2. 턴이 끝나면 저렴한 모델(기본 `haiku`)이 diff와 내 요청, Claude의 마지막 설명을 읽고

@@ -1845,3 +1845,23 @@ test('a Bash run the engine gave no diff for is read off the files it names', as
   await finish(w)
   expect(w.models[0]).toContain('### notes.txt (새 파일, +2 −0)')
 })
+
+test('started in a system folder, the code Claude puts in its scratchpad is noted, and the pane says where to start instead', async ($, on) => {
+  const w = world(on)
+  w.root = '/'
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await turn($, () => $.tool.call({ ...EDIT_A, file_path: '/tmp/claude-0/scratchpad/cart.mjs' }))
+  await finish(w)
+  expect(w.models).toHaveLength(1)
+  const ui = await pane($)
+  expect(await ui.find({ type: 'Text', text: /Claude Code가 시스템 폴더\(\/\)에서 켜져 있어요/ })).toBeDefined()
+  await ui.unmount()
+  expect((await learn($, '')).text).toContain('cd ~/practice 뒤 claude')
+
+  // In a project, its scratch files stay out of the notes, and there is no hint.
+  w.root = '/proj'
+  await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u9', file_path: '/tmp/claude-0/scratchpad/try.mjs' }), 't2')
+  await finish(w)
+  expect(w.models).toHaveLength(1)
+  expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다.')
+})
