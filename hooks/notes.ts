@@ -1446,6 +1446,61 @@ export function quizPrompt(picks: readonly LearnConcept[], level: Level): string
   ].join('\n')
 }
 
+export const CHECK_SYSTEM = [
+  '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 복습 퀴즈를 채점하는 튜터다.',
+  '문제와 모범 답, 학습자가 직접 적은 답을 보고 채점한다. 표현이 달라도 뜻이 같으면 맞다. 맞춤법·말투·길이는 보지 않는다.',
+  '코드는 백틱(`)으로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
+].join(' ')
+
+/** The one user message the model reads to grade a typed answer. */
+export function checkPrompt(item: Pick<LearnQuizItem, 'name' | 'question' | 'answer'>, mine: string, level: Level): string {
+  return [
+    LEVEL_TEXT[level],
+    '',
+    '## 개념',
+    item.name,
+    '## 문제',
+    item.question,
+    '## 모범 답',
+    item.answer,
+    '## 학습자의 답',
+    cut(mine, 1500),
+    '',
+    '판정은 셋 중 하나다. 맞음: 핵심을 맞게 이해했다. 거의: 방향은 맞지만 중요한 부분이 빠졌거나 일부가 틀렸다. 틀림: 틀렸거나 관계없는 답이다("모르겠다"도 틀림).',
+    '피드백은 한두 문장으로, 학습자의 답에서 맞은 점과 빠진 점을 구체적으로 짚는다. 모범 답을 그대로 옮기지 않는다.',
+    '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
+    '판정: (맞음 · 거의 · 틀림 중 하나)',
+    '피드백: (한두 문장)',
+  ].join('\n')
+}
+
+/** The grade read back from the model's reply (the two lines asked for, or a JSON object), or undefined when it is not one. */
+export function parseCheck(text: string): { verdict: 'right' | 'partial' | 'wrong'; feedback: string } | undefined {
+  const words: Record<string, 'right' | 'partial' | 'wrong'> = {
+    맞음: 'right', 정답: 'right', right: 'right', correct: 'right',
+    거의: 'partial', 부분: 'partial', 부분정답: 'partial', partial: 'partial',
+    틀림: 'wrong', 오답: 'wrong', wrong: 'wrong', incorrect: 'wrong',
+  }
+  const json = /\{[\s\S]*\}/.exec(text)?.[0]
+  if (json) {
+    try {
+      const raw: unknown = JSON.parse(json)
+      if (typeof raw === 'object' && raw !== null) {
+        const r = raw as Record<string, unknown>
+        const verdict = typeof r.verdict === 'string' ? words[r.verdict.trim().toLowerCase()] : undefined
+        if (verdict) return { verdict, feedback: cut(String(r.feedback ?? '').trim(), 600) }
+      }
+    } catch {
+      // Not JSON after all: the lines below.
+    }
+  }
+  const verdictLine = /^\s*(?:\*\*)?판정(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*([^\s*·,.(]+)/m.exec(text)?.[1]?.toLowerCase()
+  const verdict = verdictLine === undefined ? undefined : words[verdictLine]
+  if (!verdict) return undefined
+  const feedback = /^\s*(?:\*\*)?피드백(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*([\s\S]*)$/m.exec(text)?.[1]?.trim() ?? ''
+  return { verdict, feedback: cut(feedback.replace(/\n{2,}/g, '\n'), 600) }
+}
+
 /** Text cut inside a code block gets its closing fence, so it does not swallow what follows. */
 function closeFence(text: string): string {
   const fences = text.split('\n').filter(line => /^\s*```/.test(line)).length

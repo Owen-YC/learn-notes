@@ -10,6 +10,9 @@ import {
   NOTES_KEPT,
   SYSTEM,
   ASK_SYSTEM,
+  CHECK_SYSTEM,
+  checkPrompt,
+  parseCheck,
   activityFromNotes,
   addActivity,
   addToBank,
@@ -186,6 +189,8 @@ let canDock: boolean | undefined
 const inFlight = new Set<string>()
 /** True while the pane asks the model for a quiz: one at a time. */
 let isQuizMaking = false
+/** True while the model grades a typed answer: one at a time. */
+let isQuizChecking = false
 /** The status line this plugin last pinned, so an unchanged count is not pinned again; null until the first look since this load. */
 let shownReminder: string | undefined | null = null
 /** Quiz questions being graded now (quiz time and number), so a second press while the first is written does nothing. */
@@ -730,7 +735,7 @@ type Quiz = { at: number; items: LearnQuizItem[]; isRevealed: boolean }
 /** One quiz question read back from the store; undefined when it is not one. */
 function quizItemOf(one: unknown): LearnQuizItem | undefined {
   if (!isRecord(one)) return undefined
-  const { key, name, question, answer, isShown, result, gradedAt } = one
+  const { key, name, question, answer, isShown, result, gradedAt, mine, verdict, feedback } = one
   if (typeof key !== 'string' || typeof name !== 'string' || typeof question !== 'string' || typeof answer !== 'string') return undefined
   return {
     key,
@@ -740,6 +745,9 @@ function quizItemOf(one: unknown): LearnQuizItem | undefined {
     ...(isShown === true ? { isShown } : {}),
     ...(result === 'right' || result === 'wrong' ? { result } : {}),
     ...(typeof gradedAt === 'number' ? { gradedAt } : {}),
+    ...(typeof mine === 'string' ? { mine } : {}),
+    ...(verdict === 'right' || verdict === 'partial' || verdict === 'wrong' ? { verdict } : {}),
+    ...(typeof feedback === 'string' ? { feedback } : {}),
   }
 }
 
@@ -760,6 +768,9 @@ function isAnswerShown(current: Quiz, item: LearnQuizItem): boolean {
 
 /** A wrong answer: gone over now, and first in the next quiz. */
 const markWrong: typeof markReviewed = (index, keys, at) => markMissed(markReviewed(index, keys, at), keys, at)
+
+/** Claude's grade of a typed answer, as the pane says it. */
+const VERDICT_TEXT: Record<'right' | 'partial' | 'wrong', string> = { right: '맞혔어요.', partial: '거의 맞았어요.', wrong: '아쉬워요.' }
 
 const NO_CONCEPTS_FOR_QUIZ = '아직 모인 개념이 없어 퀴즈를 낼 수 없습니다. 노트가 쓰이면 "배울 개념"이 쌓입니다.'
 
@@ -830,6 +841,24 @@ async function gradeQuiz($: EngineInterface, cfg: Config, i: number, result: 'ri
   const current = await lastQuiz($)
   const item = current?.items[i]
   if (!current || !item || item.result !== undefined || !isAnswerShown(current, item)) return
+  await applyGrade($, cfg, current, i, result, {})
+}
+
+/**
+ * One question's grade, kept: its concept marked (a step on, or back to the
+ * first), the quiz saved, the day's count added; `extra` is what a graded
+ * typed answer brings (the answer, Claude's verdict and feedback).
+ */
+async function applyGrade(
+  $: EngineInterface,
+  cfg: Config,
+  current: Quiz,
+  i: number,
+  result: 'right' | 'wrong',
+  extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback'>,
+): Promise<void> {
+  const item = current.items[i]
+  if (!item) return
   const mark = `${current.at}:${i}`
   if (grading.has(mark)) return
   grading.add(mark)
@@ -842,12 +871,69 @@ async function gradeQuiz($: EngineInterface, cfg: Config, i: number, result: 'ri
     // Read again: the quiz may have moved on while the concepts were written.
     const latest = (await lastQuiz($)) ?? current
     if (latest.at !== current.at) return
-    await keepQuiz($, { ...latest, items: latest.items.map((one, j) => (j === i ? { ...one, isShown: true, result, gradedAt: now } : one)) })
+    await keepQuiz($, { ...latest, items: latest.items.map((one, j) => (j === i ? { ...one, ...extra, isShown: true, result, gradedAt: now } : one)) })
     await update($, quizRun, run => ({ ...run, error: null }))
     await recordActivity($, stamp(now).day, result === 'right' ? { right: 1 } : { wrong: 1 })
   } finally {
     grading.delete(mark)
   }
+}
+
+/** Enter in the quiz's answer field: Claude grades the learner's own answer against the model answer. */
+async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: string): Promise<void> {
+  const mine = text.trim()
+  const current = await lastQuiz($)
+  const item = current?.items[i]
+  if (!current || !item || item.result !== undefined || isAnswerShown(current, item) || isQuizChecking) return
+  if (mine === '') {
+    await update($, quizRun, run => ({ ...run, error: '답을 적은 뒤 Enter를 눌러 주세요. 모르겠으면 a로 정답만 볼 수 있어요.' }))
+    return
+  }
+  isQuizChecking = true
+  try {
+    await update($, quizRun, run => ({ ...run, checking: i, error: null }))
+    let reply
+    try {
+      reply = await $.model.complete({ model: cfg.model, system: CHECK_SYSTEM, prompt: checkPrompt(item, mine, cfg.level), maxTokens: 400, effort: 'low', timeoutMs: 60_000 })
+    } catch {
+      await update($, quizRun, run => ({ ...run, error: `'${cfg.model}' 모델을 부를 수 없습니다 · /config에서 다른 모델을 골라 보세요` }))
+      return
+    }
+    if (!reply.isAnswered) {
+      await update($, quizRun, run => ({ ...run, error: `채점하지 못했습니다: ${failureText(reply).replace(/ · .*$/, '')}` }))
+      return
+    }
+    const graded = parseCheck(reply.text)
+    if (!graded) {
+      await update($, quizRun, run => ({ ...run, error: '채점 결과를 읽지 못했습니다. 다시 Enter를 눌러 보세요.' }))
+      return
+    }
+    // Almost right still comes back soon: the concept is not solid yet.
+    await applyGrade($, cfg, current, i, graded.verdict === 'right' ? 'right' : 'wrong', { mine: cut(mine, 1500), ...graded })
+    await update($, quizRun, run => ({ ...run, draft: null }))
+    return
+  } catch (error) {
+    $.ui.log(`learn-notes: 답을 채점하지 못했습니다 (${String(error)})`, { to: 'debug' })
+    await update($, quizRun, run => ({ ...run, error: '채점하지 못했습니다. 잠시 뒤 다시 해 보세요.' }))
+  } finally {
+    isQuizChecking = false
+    // A grade that did not come back leaves the answer in the field to send again.
+    await update($, quizRun, run => ({ ...run, checking: null, draft: run.error !== null ? mine : null }))
+  }
+}
+
+/** The pane's f: the learner turns Claude's grade of their typed answer the other way. */
+async function flipGrade($: EngineInterface, cfg: Config, i: number): Promise<void> {
+  const current = await lastQuiz($)
+  const item = current?.items[i]
+  if (!current || !item || item.result === undefined || item.verdict === undefined) return
+  const result = item.result === 'right' ? 'wrong' : 'right'
+  const now = await $.clock.now()
+  if (!(await markConcepts($, cfg, result === 'right' ? markReviewed : markWrong, [item.key], now))) return
+  await keepQuiz($, { ...current, items: current.items.map((one, j) => (j === i ? { ...one, result } : one)) })
+  // The answer moves from one count to the other on the day it was graded.
+  const day = stamp(item.gradedAt ?? now).day
+  await recordActivity($, day, result === 'right' ? { right: 1, wrong: -1 } : { right: -1, wrong: 1 })
 }
 
 /** The quiz as it stands now, in the session and the store. */
@@ -1033,7 +1119,7 @@ export const register: Register = (on, options) => {
     await seedActivity($)
     await remind($, cfg)
     // A quiz request a reload cut off is not coming back; the last quiz is there for the pane to draw.
-    if (!isQuizMaking) await update($, quizRun, () => ({ isMaking: false, error: null }))
+    if (!isQuizMaking && !isQuizChecking) await update($, quizRun, () => ({ isMaking: false, error: null, checking: null }))
     if ((await read($, quiz)) === null) {
       const last = await lastQuiz($)
       if (last) await update($, quiz, () => last)
@@ -1650,7 +1736,7 @@ export const register: Register = (on, options) => {
         </Box>
         {e.surface === 'terminal' && !e.props.isFocused && (
           <Text dimColor wrap="truncate-end">
-            ctrl+x tab으로 패널을 고르면 {mode === 'quiz' ? 'v·s·a·o·x' : mode === 'concepts' ? 'v' : mode === 'note' && note.status === 'ready' ? 'p·n·v·w·q·t·e' : 'p·n·v·w·q'} 키를 쓸 수 있습니다
+            ctrl+x tab으로 패널을 고르면 {mode === 'quiz' ? 'v·s·i·a·o·x·f' : mode === 'concepts' ? 'v' : mode === 'note' && note.status === 'ready' ? 'p·n·v·w·q·t·e' : 'p·n·v·w·q'} 키를 쓸 수 있습니다
           </Text>
         )}
         {!isWhole(mode) && (
@@ -1914,10 +2000,16 @@ function quizView(
   el: ElementTable,
 ) {
   const { Box, Text, Markdown, Button } = el
+  // The mobile app draws no text field yet: there the answer is shown and graded by hand.
+  const Input = 'Input' in el ? el.Input : undefined
   const items = current?.items ?? []
   const graded = items.filter(item => item.result !== undefined)
   const right = graded.filter(item => item.result === 'right').length
   const at = items.findIndex(item => item.result === undefined)
+  // The answer graded last, when Claude graded it, stays open with its feedback until the next one is graded.
+  const lastAt = graded.length === 0 ? -1 : items.indexOf(graded.reduce((a, b) => ((b.gradedAt ?? 0) >= (a.gradedAt ?? 0) ? b : a)))
+  const opened = lastAt !== -1 && items[lastAt]?.verdict !== undefined ? lastAt : -1
+  const fieldKey = (i: number) => `quiz-mine-${current?.at ?? 0}-${i}`
   return (
     <Box flexDirection="column">
       <Text bold wrap="truncate-end">
@@ -1931,20 +2023,59 @@ function quizView(
       </Text>
       {!hasConcepts && <Text dimColor>{NO_CONCEPTS_FOR_QUIZ}</Text>}
       {hasConcepts && items.length === 0 && !run.isMaking && (
-        <Text dimColor>복습할 때가 된 개념(틀린 것 먼저)으로 문제를 냅니다. s로 시작해서, 먼저 스스로 답해 보고 a로 정답을 본 뒤 o(맞힘)·x(틀림)를 고르세요.</Text>
+        <Text dimColor>
+          복습할 때가 된 개념(틀린 것 먼저)으로 문제를 냅니다. s로 시작해서, 답을 적어 Enter로 Claude에게 채점받거나(i로 입력칸), a로 정답만 보고 o(맞힘)·x(틀림)를 고르세요.
+        </Text>
       )}
       {run.isMaking && <Text color="cyan">문제를 만드는 중입니다…</Text>}
       {run.error !== null && <Text color="red">{run.error}</Text>}
       {items.map((item, i) => {
         if (item.result !== undefined) {
-          return (
-            <Text key={`quiz-${i}`} wrap="truncate-end">
-              <Text color={item.result === 'right' ? 'green' : 'red'}>{item.result === 'right' ? '✓ 맞힘' : '✗ 틀림'}</Text>
-              <Text dimColor>
-                {' '}
-                {i + 1}. {item.name}
-              </Text>
+          const isPartial = item.result === 'wrong' && item.verdict === 'partial'
+          const mark = (
+            <Text color={item.result === 'right' ? 'green' : isPartial ? 'yellow' : 'red'}>
+              {item.result === 'right' ? '✓ 맞힘' : isPartial ? '△ 거의 맞음' : '✗ 틀림'}
             </Text>
+          )
+          if (i !== opened) {
+            return (
+              <Text key={`quiz-${i}`} wrap="truncate-end">
+                {mark}
+                <Text dimColor>
+                  {' '}
+                  {i + 1}. {item.name}
+                </Text>
+              </Text>
+            )
+          }
+          return (
+            <Box key={`quiz-${i}`} flexDirection="column" marginTop={1}>
+              <Text wrap="truncate-end">
+                {mark}
+                <Text dimColor>
+                  {' '}
+                  {i + 1}. {item.name} · 방금 채점
+                </Text>
+              </Text>
+              <Markdown text={`**${VERDICT_TEXT[item.verdict ?? 'wrong']}** ${item.feedback ?? ''}`} />
+              {item.mine !== undefined && (
+                <Text dimColor wrap="wrap">
+                  내 답: {item.mine}
+                </Text>
+              )}
+              <Text color="green">모범 답</Text>
+              <Markdown text={item.answer} />
+              <Box flexWrap="wrap" columnGap={2}>
+                <Button
+                  key="quiz-flip"
+                  hotkey="f"
+                  plain
+                  dimColor
+                  label={`채점 바꾸기 (${item.result === 'right' ? '틀림으로' : '맞힘으로'})`}
+                  onPress={() => flipGrade($, cfg, i)}
+                />
+              </Box>
+            </Box>
           )
         }
         if (i !== at || !current) return null
@@ -1964,10 +2095,27 @@ function quizView(
                   <Button key="quiz-wrong" hotkey="x" plain label="틀렸어요" onPress={() => gradeQuiz($, cfg, i, 'wrong')} />
                 </Box>
               </Box>
+            ) : run.checking === i ? (
+              <Text color="cyan">채점하는 중입니다…</Text>
             ) : (
-              <Box flexWrap="wrap" columnGap={2} marginTop={1}>
-                <Button key="quiz-answer" hotkey="a" plain label="정답 보기" onPress={() => showAnswer($, i)} />
-                <Text dimColor>먼저 스스로 답해 보세요</Text>
+              <Box flexDirection="column" marginTop={1}>
+                {Input && (
+                  <Input
+                    key={fieldKey(i)}
+                    label="내 답 "
+                    placeholder="답을 적고 Enter: Claude가 채점"
+                    submitLabel="채점받기"
+                    value={run.draft ?? ''}
+                    onSubmit={value => void checkAnswer($, cfg, i, value)}
+                  />
+                )}
+                <Box flexWrap="wrap" columnGap={2}>
+                  {Input && (
+                    <Button key="quiz-type" hotkey="i" plain label="답 적기" onPress={() => void $.ui.focus({ requestId: PANE, key: fieldKey(i) }).catch(() => undefined)} />
+                  )}
+                  <Button key="quiz-answer" hotkey="a" plain label={Input ? '정답만 보기' : '정답 보기'} onPress={() => showAnswer($, i)} />
+                  <Text dimColor>{Input ? '적어서 채점받거나, 머릿속으로 답한 뒤 정답만 봐요' : '먼저 스스로 답해 보세요'}</Text>
+                </Box>
               </Box>
             )}
           </Box>
@@ -1998,7 +2146,7 @@ const HELP = [
   '- `/learn concepts`: 지금까지 배운 개념 (진도 · 복습할 개념 · 다음 복습 날짜)',
   '- `/learn recap`: 오늘 배운 것 정리 (어제 · 이번주 · 최근 7일 · 2026-10-03도 됩니다) · 일지에 남김',
   '- `/learn quiz`: 복습할 개념으로 문제 · `/learn quiz 정답`으로 답을 보고 복습으로 표시 · `/learn quiz 틀림 2`로 틀린 문제를 다음 퀴즈에 다시',
-  '- 패널의 퀴즈 보기(q): s로 문제 받기 · a로 정답 보기 · o 맞힘 · x 틀림 (틀린 개념은 다음 퀴즈에 먼저)',
+  '- 패널의 퀴즈 보기(q): s로 문제 받기 · i로 답 적기(Enter로 Claude가 채점) · a로 정답만 보기 · o 맞힘 · x 틀림 · f 채점 바꾸기 (틀린 개념은 다음 퀴즈에 먼저)',
   '- `/learn ask 질문`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기 · 답은 일지에도 남음',
   '- `/learn stats`: 학습 기록 (연속 학습일 · 최근 7일 노트·개념·퀴즈 · 30일 정답률 · 날짜별 막대)',
   '- `/learn anki`: 지금까지 낸 퀴즈 문제와 개념을 Anki 카드 파일로 (일지 폴더의 learn-notes-anki.txt)',

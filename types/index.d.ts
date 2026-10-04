@@ -95,13 +95,26 @@ export type LearnQuizItem = {
   result?: 'right' | 'wrong'
   /** Milliseconds since the epoch when it was graded: a later 틀림 moves that day's count. */
   gradedAt?: number
+  /** The learner's own answer, when they typed one and had Claude grade it. */
+  mine?: string
+  /** Claude's grade of `mine`: right, partly right (counted wrong, so it comes back soon), or wrong. */
+  verdict?: 'right' | 'partial' | 'wrong'
+  /** Claude's one or two sentences on `mine`: what was right, what was missing. */
+  feedback?: string
 }
 
 /** One day's learning: notes written, and quiz answers the learner graded right and wrong. */
 export type LearnDayActivity = { notes: number; right: number; wrong: number }
 
 /** A quiz the pane is asking the model for, and why the last try failed. */
-export type LearnQuizRun = { isMaking: boolean; error: string | null }
+export type LearnQuizRun = {
+  isMaking: boolean
+  error: string | null
+  /** The question whose typed answer Claude is grading now, if any. */
+  checking?: number | null
+  /** A typed answer whose grading failed, put back in the field to send again. */
+  draft?: string | null
+}
 
 /** What the pane shows for the selected note. */
 export type LearnView = 'note' | 'split' | 'diff' | 'concepts' | 'quiz'

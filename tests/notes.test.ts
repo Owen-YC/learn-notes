@@ -44,6 +44,8 @@ import {
   jsonBytes,
   progressOf,
   reviewQueue,
+  parseCheck,
+  checkPrompt,
   isSystemFolder,
   diffHunks,
   joinPath,
@@ -991,4 +993,16 @@ test('a system folder is a drive or file-system root, or Windows\' own folders; 
   for (const root of ['C:\\Users\\Owen\\practice', 'C:\\Users\\Owen', 'D:\\work\\shop', '/home/u/proj', '/Users/owen/code', undefined, '']) {
     expect(isSystemFolder(root)).toBe(false)
   }
+})
+
+test('a typed answer\'s grade is read from the two lines asked for, bold or JSON too', () => {
+  expect(parseCheck('판정: 맞음\n피드백: 핵심을 짚었어요. `left`를 썼다는 점도 좋아요.')).toEqual({ verdict: 'right', feedback: '핵심을 짚었어요. `left`를 썼다는 점도 좋아요.' })
+  expect(parseCheck('**판정:** 거의\n**피드백:** 순서 이야기가 빠졌어요.')).toEqual({ verdict: 'partial', feedback: '순서 이야기가 빠졌어요.' })
+  expect(parseCheck('판정：틀림 (관계없는 답)\n피드백: 아쉬워요.')?.verdict).toBe('wrong')
+  expect(parseCheck('```json\n{"verdict": "partial", "feedback": "거의요"}\n```')).toEqual({ verdict: 'partial', feedback: '거의요' })
+  expect(parseCheck('잘 모르겠어요')).toBeUndefined()
+  expect(parseCheck('판정: 아마도\n피드백: ...')).toBeUndefined()
+  const prompt = checkPrompt({ name: '클로저', question: '왜 커질까?', answer: '바깥 변수를 기억해서다.' }, '변수를 기억해서', 'beginner')
+  expect(prompt).toContain('## 모범 답\n바깥 변수를 기억해서다.\n## 학습자의 답\n변수를 기억해서')
+  expect(prompt).toContain('판정: (맞음 · 거의 · 틀림 중 하나)')
 })

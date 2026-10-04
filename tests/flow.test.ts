@@ -1865,3 +1865,62 @@ test('started in a system folder, the code Claude puts in its scratchpad is note
   expect(w.models).toHaveLength(1)
   expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다.')
 })
+
+/** The answer field of question `i` in the pane's quiz, keyed by the quiz it belongs to. */
+function mineKey(store: Map<string, unknown>, i: number) {
+  return `quiz-mine-${(store.get('quiz') as { at: number }).at}-${i}`
+}
+
+test('a typed answer is graded by the model: the grade, feedback and model answer stay open, and the next question follows', async ($, on) => {
+  const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  w.answer = THREE_QUESTIONS
+  const ui = await pane($)
+  await ui.press({ key: 'quiz' })
+  await ui.press({ key: 'quiz-new' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Input', key: mineKey(store, 0) })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '정답만 보기' })).toBeDefined()
+
+  // Enter with nothing typed says what to do.
+  await ui.input({ key: mineKey(store, 0), text: '   ' })
+  expect(await ui.find({ type: 'Text', text: /답을 적은 뒤 Enter를 눌러 주세요/ })).toBeDefined()
+
+  w.answer = '판정: 맞음\n피드백: 핵심을 짚었어요.'
+  await ui.input({ key: mineKey(store, 0), text: '바깥 변수를 기억해서' })
+  await w.clock.settle()
+  const asked = w.models.at(-1)!
+  expect(asked).toContain('## 문제\n문제 하나')
+  expect(asked).toContain('## 모범 답\n답 하나')
+  expect(asked).toContain('## 학습자의 답\n바깥 변수를 기억해서')
+  expect(await ui.find({ type: 'Text', text: /✓ 맞힘 1\. .* · 방금 채점/ })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: '**맞혔어요.** 핵심을 짚었어요.' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '내 답: 바깥 변수를 기억해서' })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: '답 하나' })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: '문제 둘' })).toBeDefined()
+  expect(store.get('quiz')).toMatchObject({ items: [{ result: 'right', verdict: 'right', mine: '바깥 변수를 기억해서', feedback: '핵심을 짚었어요.' }, {}, {}] })
+  expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 1, wrong: 0 } })
+
+  // Almost right counts wrong (it comes back first), shown as such; f turns it right.
+  w.answer = '판정: 거의\n피드백: 순서 이야기가 빠졌어요.'
+  await ui.input({ key: mineKey(store, 1), text: '대충 순서대로' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Text', text: /△ 거의 맞음 2\. .* · 방금 채점/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /✓ 맞힘 1\./ })).toBeDefined()
+  const second = (store.get('quiz') as { items: { name: string }[] }).items[1]!.name
+  const missedNow = () => Object.values(store.get('concepts') as Record<string, { name: string; missedAt?: number }>).find(one => one.name === second)!.missedAt
+  expect(missedNow()).toBe(NOW)
+  await ui.press({ key: 'quiz-flip' })
+  expect(await ui.find({ type: 'Text', text: /✓ 맞힘 2\. .* · 방금 채점/ })).toBeDefined()
+  expect(missedNow()).toBeUndefined()
+  expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 2, wrong: 0 } })
+
+  // A reply that is no grade: said, and the answer stays in the field to send again.
+  w.answer = '음, 글쎄요'
+  await ui.input({ key: mineKey(store, 2), text: '모르겠어요' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Text', text: /채점 결과를 읽지 못했습니다/ })).toBeDefined()
+  expect((await ui.find({ type: 'Input', key: mineKey(store, 2) }))?.props.value).toBe('모르겠어요')
+  await ui.unmount()
+})
