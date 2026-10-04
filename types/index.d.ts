@@ -93,6 +93,9 @@ export type LearnQuizItem = {
   result?: 'right' | 'wrong'
 }
 
+/** One day's learning: notes written, and quiz answers the learner graded right and wrong. */
+export type LearnDayActivity = { notes: number; right: number; wrong: number }
+
 /** A quiz the pane is asking the model for, and why the last try failed. */
 export type LearnQuizRun = { isMaking: boolean; error: string | null }
 
@@ -122,6 +125,8 @@ declare module 'claude-code' {
       quiz: { at: number; items: LearnQuizItem[]; isRevealed: boolean } | null
       /** The pane's quiz request: whether one is out, and the last failure to show. */
       quizRun: LearnQuizRun
+      /** Each day's notes and graded quiz answers (YYYY-MM-DD → counts), mirrored from the plugin's store for drawing. */
+      activity: Record<string, LearnDayActivity>
       /** The latest prompts that entered and the last real request: read when a turn starts, kept here so a reload keeps them. */
       submitted: { list: LearnSubmit[]; lastRequest: string | null }
     }

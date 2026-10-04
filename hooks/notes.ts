@@ -1,7 +1,7 @@
 // Pure helpers: hunks to diff text and back, the prompt for a note, the
 // journal's markdown. No `$` here, so tests reach every branch directly.
 
-import type { LearnChange, LearnConcept, LearnNote, LearnQuizItem, LearnSubmit } from '../types'
+import type { LearnChange, LearnConcept, LearnDayActivity, LearnNote, LearnQuizItem, LearnSubmit } from '../types'
 
 export type Hunk = {
   oldStart: number
@@ -1357,4 +1357,127 @@ function quizMarks(a: Partial<LearnConcept>, b: Partial<LearnConcept>): Pick<Lea
     ...(isMiss ? { missedAt } : {}),
     ...(typeof step === 'number' ? { step } : {}),
   }
+}
+
+/** One day's learning (see LearnDayActivity). */
+export type DayActivity = LearnDayActivity
+
+/** Days of activity the store keeps, the newest. */
+export const ACTIVITY_DAYS = 120
+
+const isDay = (day: string) => /^\d{4}-\d{2}-\d{2}$/.test(day)
+const count = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : 0)
+
+/** The newest ACTIVITY_DAYS days of a record. */
+function keepLatest(record: Record<string, DayActivity>): Record<string, DayActivity> {
+  const days = Object.keys(record).sort().slice(-ACTIVITY_DAYS)
+  return Object.fromEntries(days.map(day => [day, record[day]!]))
+}
+
+/** The activity record read back from the store: bad days dropped, the newest ACTIVITY_DAYS kept. */
+export function cleanActivity(raw: unknown): Record<string, DayActivity> {
+  const record: Record<string, DayActivity> = {}
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return record
+  for (const [day, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isDay(day) || typeof value !== 'object' || value === null) continue
+    const one = value as Partial<DayActivity>
+    record[day] = { notes: count(one.notes), right: count(one.right), wrong: count(one.wrong) }
+  }
+  return keepLatest(record)
+}
+
+/** The record with `delta` added on `day`; no count goes below zero. */
+export function addActivity(record: Readonly<Record<string, DayActivity>>, day: string, delta: Partial<DayActivity>): Record<string, DayActivity> {
+  const prior = Object.prototype.hasOwnProperty.call(record, day) ? record[day]! : { notes: 0, right: 0, wrong: 0 }
+  const next = {
+    notes: Math.max(0, prior.notes + (delta.notes ?? 0)),
+    right: Math.max(0, prior.right + (delta.right ?? 0)),
+    wrong: Math.max(0, prior.wrong + (delta.wrong ?? 0)),
+  }
+  return keepLatest({ ...record, [day]: next })
+}
+
+/** A first record made from the notes still kept: each written note on its day. */
+export function activityFromNotes(list: readonly Pick<LearnNote, 'at' | 'status'>[]): Record<string, DayActivity> {
+  let record: Record<string, DayActivity> = {}
+  for (const note of list) if (note.status === 'ready') record = addActivity(record, stamp(note.at).day, { notes: 1 })
+  return record
+}
+
+const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토']
+
+/** `now`'s day and the `n - 1` days before it, the newest first, as `YYYY-MM-DD` with the weekday. */
+export function daysBack(now: number, n: number): { day: string; weekday: string }[] {
+  const out: { day: string; weekday: string }[] = []
+  const d = new Date(now)
+  for (let i = 0; i < n; i += 1) {
+    out.push({ day: stamp(d.getTime()).day, weekday: WEEKDAYS[d.getDay()]! })
+    d.setDate(d.getDate() - 1)
+  }
+  return out
+}
+
+export type LearnStats = {
+  /** Days in a row with a note or a graded answer, up to today (or yesterday, while today has none yet). */
+  streak: number
+  /** The longest such run the record holds. */
+  best: number
+  isTodayActive: boolean
+  /** The last seven days, today included. */
+  week: DayActivity
+  /** Graded answers in the last thirty days. */
+  month: { right: number; wrong: number }
+  /** The last seven days, the oldest first. */
+  days: { day: string; weekday: string; one: DayActivity }[]
+}
+
+const isActive = (one: DayActivity | undefined) => one !== undefined && one.notes + one.right + one.wrong > 0
+
+export function statsOf(record: Readonly<Record<string, DayActivity>>, now: number): LearnStats {
+  const at = (day: string) => (Object.prototype.hasOwnProperty.call(record, day) ? record[day] : undefined)
+  const back = daysBack(now, ACTIVITY_DAYS + 1)
+  const isTodayActive = isActive(at(back[0]!.day))
+  let streak = 0
+  for (const { day } of back.slice(isTodayActive ? 0 : 1)) {
+    if (!isActive(at(day))) break
+    streak += 1
+  }
+  let best = 0
+  let run = 0
+  for (const { day } of [...back].reverse()) {
+    run = isActive(at(day)) ? run + 1 : 0
+    best = Math.max(best, run)
+  }
+  const sum = (days: readonly { day: string }[]) =>
+    days.reduce(
+      (total, { day }) => {
+        const one = at(day)
+        return one ? { notes: total.notes + one.notes, right: total.right + one.right, wrong: total.wrong + one.wrong } : total
+      },
+      { notes: 0, right: 0, wrong: 0 },
+    )
+  const week = sum(back.slice(0, 7))
+  const month = sum(back.slice(0, 30))
+  return {
+    streak,
+    best,
+    isTodayActive,
+    week,
+    month: { right: month.right, wrong: month.wrong },
+    days: back
+      .slice(0, 7)
+      .reverse()
+      .map(({ day, weekday }) => ({ day, weekday, one: at(day) ?? { notes: 0, right: 0, wrong: 0 } })),
+  }
+}
+
+/** One line of the learner's progress: the run of days, the week's notes, the week's quiz answers. */
+export function statsLine(stats: LearnStats): string {
+  const parts = [
+    stats.streak > 0 ? `연속 ${stats.streak}일째${stats.isTodayActive ? '' : ' (오늘도 하면 이어짐)'}` : '오늘 시작해 보세요',
+    `최근 7일 노트 ${stats.week.notes}개`,
+  ]
+  const graded = stats.week.right + stats.week.wrong
+  if (graded > 0) parts.push(`퀴즈 ${stats.week.right}/${graded} 맞힘`)
+  return parts.join(' · ')
 }

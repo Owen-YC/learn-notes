@@ -1552,7 +1552,7 @@ test('the pane quiz asks once while the model answers, and says why when it coul
   await ui.unmount()
 })
 
-test('a quiz from /learn quiz is in the pane, and 정답 and 틀림 there show in it', async ($, on) => {
+test('a quiz from /learn quiz is in the pane: 정답 counts the unanswered right, and 틀림 turns one wrong', async ($, on) => {
   const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
   const w = world(on, 'ok', null, true, store)
   await start($)
@@ -1560,20 +1560,60 @@ test('a quiz from /learn quiz is in the pane, and 정답 and 틀림 there show i
   expect((await learn($, 'quiz')).text).toContain('퀴즈 보기(q)')
   const ui = await pane($)
   await ui.press({ key: 'quiz' })
-  expect(await ui.find({ type: 'Button', key: 'quiz-answer' })).toBeDefined()
-  await learn($, 'quiz 정답')
-  expect(await ui.find({ type: 'Markdown', text: '답 하나' })).toBeDefined()
-  expect(await ui.find({ type: 'Button', key: 'quiz-right' })).toBeDefined()
-  await learn($, 'quiz 틀림 1')
+  // One graded in the pane first: 정답 leaves it as it is.
+  await ui.press({ key: 'quiz-answer' })
+  await ui.press({ key: 'quiz-wrong' })
+  expect((await learn($, 'quiz 정답')).text).toContain('복습으로 표시했습니다')
   expect(await ui.find({ type: 'Text', text: /^✗ 틀림 1\. / })).toBeDefined()
-  expect(await ui.find({ type: 'Markdown', text: '답 둘' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^✓ 맞힘 2\. / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /3문제 중 2개 맞혔습니다/ })).toBeDefined()
+  expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 2, wrong: 1 } })
+  await learn($, 'quiz 틀림 3')
+  expect(await ui.find({ type: 'Text', text: /^✗ 틀림 3\. / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /3문제 중 1개 맞혔습니다/ })).toBeDefined()
+  expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 1, wrong: 2 } })
   await ui.unmount()
 
   // The next session's pane has it too.
   await start($)
   const again = await pane($)
-  expect(await again.find({ type: 'Text', text: /3문제 중 1개 채점/ })).toBeDefined()
+  expect(await again.find({ type: 'Text', text: /3문제 중 3개 채점/ })).toBeDefined()
   await again.unmount()
+})
+
+test('the day\'s notes and answers make the run of days, shown in the concepts view and /learn stats', async ($, on) => {
+  const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+  // Two days before, nothing yesterday: today starts a new run of one.
+  store.set('activity', { '2026-10-01': { notes: 2, right: 0, wrong: 0 }, '2026-09-30': { notes: 1, right: 1, wrong: 0 }, bad: 1 })
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  expect((await learn($, 'stats')).text).toContain('학습 기록 · 오늘 시작해 보세요 (가장 길게 2일)')
+  await turn($, () => $.tool.call(EDIT_A))
+  await finish(w)
+  // A rewrite is not a second note.
+  const ui = await pane($)
+  await ui.press({ key: 'write' })
+  await w.clock.settle()
+  expect((store.get('activity') as Record<string, unknown>)['2026-10-03']).toEqual({ notes: 1, right: 0, wrong: 0 })
+  for (let i = 0; i < 3; i += 1) await ui.press({ key: 'view' })
+  expect(await ui.find({ type: 'Text', text: '연속 1일째 · 최근 7일 노트 4개' })).toBeDefined()
+  await ui.unmount()
+  const stats = (await learn($, 'stats')).text
+  expect(stats).toContain('학습 기록 · 연속 1일째 (가장 길게 2일)')
+  expect(stats).toContain('- 최근 7일: 노트 4개')
+  expect(stats).toContain('- 최근 30일 퀴즈 정답률: 100% (1/1)')
+  expect(stats).toContain('- 10-03 토 ■ 노트 1')
+  expect(stats).toContain('- 10-02 금 · 노트 0')
+})
+
+test('a first record is made from the notes earlier sessions kept', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const yesterday = NOW - 86_400_000
+  store.set('history', { '/proj': { at: yesterday, notes: [{ id: 'old', turnId: 'old', at: yesterday, prompt: '어제 요청', answer: '', changes: [], moreFiles: 0, status: 'ready', text: NOTE_TEXT, savedAs: 'ready', isPast: false, concepts: [], updatedAt: yesterday }] } })
+  world(on, 'ok', null, true, store)
+  await start($)
+  expect((await learn($, 'stats')).text).toContain('연속 1일째')
+  expect((await learn($, 'stats')).text).toContain('오늘도 하면 이어집니다')
 })
 
 test('the review reminder goes away once nothing is due, and stays off when turned off', async ($, on) => {

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementTable, EngineInterface, Register } from 'claude-code'
 
-import type { LearnChange, LearnConcept, LearnLive, LearnNote, LearnQuizItem, LearnQuizRun, LearnSubmit, LearnView } from '../types'
+import type { LearnChange, LearnConcept, LearnDayActivity, LearnLive, LearnNote, LearnQuizItem, LearnQuizRun, LearnSubmit, LearnView } from '../types'
 import {
   HISTORY_PER_PROJECT,
   HISTORY_PROJECTS,
@@ -10,6 +10,11 @@ import {
   NOTES_KEPT,
   SYSTEM,
   ASK_SYSTEM,
+  activityFromNotes,
+  addActivity,
+  cleanActivity,
+  statsLine,
+  statsOf,
   askPrompt,
   askSection,
   beforeAfter,
@@ -91,6 +96,7 @@ const paneRoot = atom({ plugin: 'learn-notes', key: 'root' } as const, null)
 const aliases = atom({ plugin: 'learn-notes', key: 'aliases' } as const, {})
 const quiz = atom({ plugin: 'learn-notes', key: 'quiz' } as const, null)
 const quizRun = atom({ plugin: 'learn-notes', key: 'quizRun' } as const, { isMaking: false, error: null })
+const activity = atom({ plugin: 'learn-notes', key: 'activity' } as const, {})
 const submitted = atom({ plugin: 'learn-notes', key: 'submitted' } as const, { list: [], lastRequest: null })
 
 /** `$.store` keys: notes per project for the next session, the concept index, merges and the last quiz. */
@@ -101,6 +107,8 @@ const ALIASES_KEY = 'aliases'
 const QUIZ_KEY = 'quiz'
 /** What each merge folded away, so merging back splits the two again: merged-away key → its record. */
 const MERGES_KEY = 'merges'
+/** Each day's notes and graded answers, for the run of days and the week's progress. */
+const ACTIVITY_KEY = 'activity'
 
 type MergeRecord = { concept: LearnConcept; into: string; both: number }
 
@@ -599,6 +607,27 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
   return run
 }
 
+/** The activity record as the store has it; a first one is made from the notes still kept. */
+async function storedActivity($: EngineInterface): Promise<Record<string, LearnDayActivity>> {
+  const raw = await $.store.get(ACTIVITY_KEY)
+  return raw === undefined ? activityFromNotes(await allNotes($)) : cleanActivity(raw)
+}
+
+/** Counts a written note or graded answers on `day`, in the store and the pane's mirror; never fails the caller. */
+function recordActivity($: EngineInterface, day: string, delta: Partial<LearnDayActivity>): Promise<void> {
+  const run = storing.then(async () => {
+    try {
+      const next = addActivity(await storedActivity($), day, delta)
+      await $.store.set(ACTIVITY_KEY, next)
+      await update($, activity, () => next)
+    } catch (error) {
+      $.ui.log(`learn-notes: 학습 기록을 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+    }
+  })
+  storing = run
+  return run
+}
+
 /**
  * Pins "복습할 개념 n개" under the prompt while any concept is due for review,
  * and takes it down when none is (or the reminder is off in /config).
@@ -758,6 +787,7 @@ async function gradeQuiz($: EngineInterface, cfg: Config, i: number, result: 'ri
   if (latest.at !== current.at) return
   await keepQuiz($, { ...latest, items: latest.items.map((one, j) => (j === i ? { ...one, isShown: true, result } : one)) })
   await update($, quizRun, run => ({ ...run, error: null }))
+  await recordActivity($, stamp(now).day, result === 'right' ? { right: 1 } : { wrong: 1 })
 }
 
 /** The quiz as it stands now, in the session and the store. */
@@ -790,6 +820,8 @@ async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite:
   if (inFlight.has(id)) return
   inFlight.add(id)
   try {
+    // A note counts toward the day's learning the first time it is written, not on a rewrite.
+    const wasReady = (await read($, notes)).find(one => one.id === id)?.status === 'ready'
     const note = await setNote($, id, { status: 'writing', text: '' })
     if (!note) return
     let patch: Partial<LearnNote>
@@ -813,6 +845,7 @@ async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite:
     if (done.status === 'ready') {
       const keys = await learnConcepts($, cfg, done)
       done = (await setNote($, id, { concepts: keys })) ?? { ...done, concepts: keys }
+      if (!wasReady) await recordActivity($, stamp(done.at).day, { notes: 1 })
     }
     if (cfg.isAutoSave) await save($, cfg, done, isRewrite)
     await persist($)
@@ -865,6 +898,8 @@ export const register: Register = (on, options) => {
     })
     isInteractive = e.isInteractive
     await loadHistory($)
+    const record = await storedActivity($).catch(() => ({}))
+    await update($, activity, () => record)
     await remind($, cfg)
     // A quiz request a reload cut off is not coming back; the last quiz is there for the pane to draw.
     if (!isQuizMaking) await update($, quizRun, () => ({ isMaking: false, error: null }))
@@ -1054,7 +1089,10 @@ export const register: Register = (on, options) => {
         const ungraded = current.items.filter(item => item.result === undefined)
         const isMarked =
           !current.isRevealed && ungraded.length > 0 && (await markConcepts($, cfg, markReviewed, ungraded.map(item => item.key), now))
-        await keepQuiz($, { ...current, isRevealed: true })
+        // Seen and not said wrong: right, until /learn quiz 틀림 says otherwise.
+        const items = isMarked ? current.items.map(item => (item.result === undefined ? { ...item, isShown: true, result: 'right' as const } : item)) : current.items
+        await keepQuiz($, { ...current, isRevealed: true, items })
+        if (isMarked) await recordActivity($, stamp(now).day, { right: ungraded.length })
         const lines = current.items.map((item, i) => listItem(i + 1, `${item.answer}\n(개념: ${item.name})`))
         const marked = isMarked ? `\n\n복습으로 표시했습니다: ${ungraded.map(item => item.name).join(' · ')}` : ''
         const hint = `\n\n틀린 문제는 /learn quiz 틀림 ${current.items.length > 1 ? '2' : '1'}처럼 번호로 알려 주면 다음 퀴즈에 먼저 나옵니다.`
@@ -1073,8 +1111,11 @@ export const register: Register = (on, options) => {
         if (!(await markConcepts($, cfg, markMissed, items.map(item => item.key), now))) {
           return { text: '틀린 문제를 적지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.' }
         }
-        // The pane's quiz shows them graded too.
+        // The pane's quiz shows them graded too; an answer counted right turns wrong in the day's tally.
+        const flipped = items.filter(item => item.result === 'right').length
+        const fresh = items.filter(item => item.result === undefined).length
         await keepQuiz($, { ...current, items: current.items.map((item, i) => (numbers.includes(i + 1) ? { ...item, result: 'wrong' as const } : item)) })
+        if (flipped + fresh > 0) await recordActivity($, stamp(now).day, { right: -flipped, wrong: flipped + fresh })
         return { text: `복습할 개념 맨 앞에 올렸습니다: ${items.map(item => item.name).join(' · ')}. 다음 퀴즈에 먼저 나옵니다.` }
       }
       if (rest !== '') return { text: QUIZ_USAGE }
@@ -1083,6 +1124,32 @@ export const register: Register = (on, options) => {
       const lines = made.items.map((item, i) => listItem(i + 1, item.question))
       return {
         text: `복습 퀴즈 · ${made.items.length}문제\n\n${lines.join('\n\n')}\n\n먼저 스스로 답해 보고, /learn quiz 정답으로 확인하세요. 패널(/learn)의 퀴즈 보기(q)에서는 한 문제씩 답을 보고 맞음·틀림을 고를 수 있습니다.`,
+      }
+    }
+    if (arg === 'stats') {
+      const now = await $.clock.now()
+      const record = await storedActivity($)
+      const stats = statsOf(record, now)
+      const index = await read($, concepts)
+      const { fresh, again } = progressOf(index, now)
+      const due = dueConcepts(index, now)
+      const graded = stats.month.right + stats.month.wrong
+      const bar = (n: number) => (n === 0 ? '·' : '■'.repeat(Math.min(n, 10)) + (n > 10 ? '+' : ''))
+      const days = stats.days.map(({ day, weekday, one }) => {
+        const quiz = one.right + one.wrong > 0 ? ` · 퀴즈 ${one.right}/${one.right + one.wrong}` : ''
+        return `- ${day.slice(5)} ${weekday} ${bar(one.notes)} 노트 ${one.notes}${quiz}`
+      })
+      return {
+        text: [
+          `학습 기록 · ${stats.streak > 0 ? `연속 ${stats.streak}일째` : '오늘 시작해 보세요'}${stats.best > stats.streak ? ` (가장 길게 ${stats.best}일)` : ''}${stats.streak > 0 && !stats.isTodayActive ? ' · 오늘도 하면 이어집니다' : ''}`,
+          '',
+          `- 최근 7일: 노트 ${stats.week.notes}개 · 새 개념 ${fresh}개 · 다시 만난 개념 ${again}개${stats.week.right + stats.week.wrong > 0 ? ` · 퀴즈 ${stats.week.right}/${stats.week.right + stats.week.wrong} 맞힘` : ''}`,
+          `- 최근 30일 퀴즈 정답률: ${graded > 0 ? `${Math.round((stats.month.right / graded) * 100)}% (${stats.month.right}/${graded})` : '아직 채점한 문제가 없습니다'}`,
+          `- 복습할 개념: ${due.length > 0 ? `${due.length}개 · 패널에서 q, 또는 /learn quiz` : '지금은 없습니다'}`,
+          '',
+          '최근 7일',
+          ...days,
+        ].join('\n'),
       }
     }
     if (arg === 'ask') {
@@ -1241,6 +1308,7 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const isDock = e.props.placement === 'dock'
     const hasConcepts = Object.keys(index).length > 0
+    const progress = statsLine(statsOf(await read($, activity), now))
     const current = await read($, quiz)
     const run = await read($, quizRun)
     const quizBody = mode === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, el) : null
@@ -1278,7 +1346,7 @@ export const register: Register = (on, options) => {
           )}
           {isConcepts || isQuiz ? (
             <Box marginTop={1} flexDirection="column">
-              {isQuiz ? quizBody : conceptsView($, index, map, list, now, cfg.isAutoSave, el)}
+              {isQuiz ? quizBody : conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)}
             </Box>
           ) : (
             <Box flexDirection="column">
@@ -1304,7 +1372,7 @@ export const register: Register = (on, options) => {
       mode === 'quiz' ? (
         quizBody
       ) : mode === 'concepts' ? (
-        conceptsView($, index, map, list, now, cfg.isAutoSave, el)
+        conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)
       ) : mode === 'note' ? (
         <Box flexDirection="column">
           {noteBody(note, isBusy, el)}
@@ -1554,6 +1622,7 @@ function conceptsView(
   list: readonly LearnNote[],
   now: number,
   isAutoSave: boolean,
+  progress: string,
   el: ElementTable,
 ) {
   const { Box, Text, Markdown, Button } = el
@@ -1602,6 +1671,9 @@ function conceptsView(
     <Box flexDirection="column">
       <Text bold>
         지금까지 배운 개념 {ranked.length}개 <Text dimColor>· 최근 7일 새 개념 {fresh}개 · 복습 {again}개</Text>
+      </Text>
+      <Text color="cyan" wrap="wrap">
+        {progress}
       </Text>
       {queue.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
@@ -1734,6 +1806,7 @@ const HELP = [
   '- `/learn quiz`: 복습할 개념으로 문제 · `/learn quiz 정답`으로 답을 보고 복습으로 표시 · `/learn quiz 틀림 2`로 틀린 문제를 다음 퀴즈에 다시',
   '- 패널의 퀴즈 보기(q): s로 문제 받기 · a로 정답 보기 · o 맞힘 · x 틀림 (틀린 개념은 다음 퀴즈에 먼저)',
   '- `/learn ask 질문`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기 · 답은 일지에도 남음',
+  '- `/learn stats`: 학습 기록 (연속 학습일 · 최근 7일 노트·개념·퀴즈 · 30일 정답률 · 날짜별 막대)',
   '- 패널의 노트 보기: t로 이 노트의 개념만 퀴즈 · e로 더 쉽게(비유를 넣어) 다시 쓰기',
   '- `/learn find 말`: 모든 프로젝트의 노트에서 찾기 (요청 · 내용 · 파일 · 개념)',
   '- `/learn days`: 이 프로젝트의 일지 날짜',
