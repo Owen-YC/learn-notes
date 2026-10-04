@@ -5,9 +5,9 @@ Claude가 코드를 고치면 **바뀌기 전과 후**를 모아 두었다가, �
 [Claude Code](https://code.claude.com) 모드(mod)입니다. 배운 개념은 프로젝트를 넘어 쌓이고,
 잊을 때쯤 다시 묻는 **간격 반복 퀴즈**, 하루·한 주 정리, 연속 학습일 같은 **학습 기록**, **Anki 카드 내보내기**까지 이어집니다.
 
-![learn-notes 사용 모습: /learn으로 패널을 열고, 코딩을 요청하면 실시간 변경 → 학습 노트 → 전/후 → diff → 개념 모음 → 지난 노트 → 패널 퀴즈(문제 → 정답 → 맞음·틀림) → 정리로 이어진다](docs/images/demo.gif)
+![learn-notes 사용 모습: /learn으로 패널을 열고, 코딩을 요청하면 실시간 변경 → 학습 노트 → 전/후 → diff → 개념 모음 → 지난 노트 → 패널 퀴즈(문제 → 정답 → 맞음·틀림) → 정리 → /learn ask·stats로 이어진다](docs/images/demo.gif)
 
-<sub>사용 흐름을 37초로 보여 주는 데모입니다. 장면마다 모드의 테스트 키트로 엔진이 실제로 그린 화면을 이어 붙였고, 노트 본문은 haiku가 실제로 쓴 글입니다.</sub>
+<sub>사용 흐름을 42초로 보여 주는 데모입니다. 장면마다 모드의 테스트 키트로 엔진이 실제로 그린 화면을 이어 붙였고, 노트 본문과 `/learn ask`의 답은 haiku가 실제로 쓴 글입니다.</sub>
 
 > **English**: A Claude Code mod for learning while you vibe-code. Every turn in which Claude edits files,
 > it collects the before/after diffs and has a small model (haiku by default) write a short study note:
