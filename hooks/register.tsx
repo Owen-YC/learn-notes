@@ -1394,16 +1394,18 @@ export const register: Register = (on, options) => {
     const current = await read($, quiz)
     const run = await read($, quizRun)
     const quizBody = mode === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, el) : null
-    const quizButtons =
-      mode === 'quiz' ? (
-        quizNewButton($, cfg, current !== null, run.isMaking, hasConcepts, el)
-      ) : (
-        <Button key="quiz" hotkey="q" plain label="퀴즈" onPress={() => update($, view, () => 'quiz')} />
-      )
 
     const found = wanted === null ? -1 : list.findIndex(one => one.id === wanted)
     const at = found === -1 ? list.length - 1 : found
     const note = list[at]
+
+    // q jumps to the quiz from any view but the one whose v already goes there.
+    const quizButtons =
+      mode === 'quiz' ? (
+        quizNewButton($, cfg, current !== null, run.isMaking, hasConcepts, el)
+      ) : note && VIEW_NEXT[mode] === 'quiz' ? null : (
+        <Button key="quiz" hotkey="q" plain label="퀴즈" onPress={() => update($, view, () => 'quiz')} />
+      )
 
     const liveBlock = running && running.changes.length > 0 ? liveView(running, isDock, cfg.isAutoNote, el) : null
 
@@ -1538,7 +1540,7 @@ export const register: Register = (on, options) => {
         </Box>
         {e.surface === 'terminal' && !e.props.isFocused && (
           <Text dimColor wrap="truncate-end">
-            ctrl+x tab으로 패널을 고르면 {mode === 'quiz' ? 'v·s·a·o·x' : mode === 'concepts' ? 'v·q' : mode === 'note' && note.status === 'ready' ? 'p·n·v·w·q·t·e' : 'p·n·v·w·q'} 키를 쓸 수 있습니다
+            ctrl+x tab으로 패널을 고르면 {mode === 'quiz' ? 'v·s·a·o·x' : mode === 'concepts' ? 'v' : mode === 'note' && note.status === 'ready' ? 'p·n·v·w·q·t·e' : 'p·n·v·w·q'} 키를 쓸 수 있습니다
           </Text>
         )}
         {!isWhole(mode) && (

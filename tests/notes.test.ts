@@ -44,6 +44,7 @@ import {
   jsonBytes,
   progressOf,
   reviewQueue,
+  isDue,
   addToBank,
   ankiHtml,
   ankiText,
@@ -880,6 +881,12 @@ describe('spaced review', () => {
     // Never quizzed, but three notes met it: step 2, due a week after the last.
     expect(dueText({ ...one, count: 3 }, now + 2 * day)).toBe('5일 뒤')
     expect(dueText({ ...one, count: 3 }, now + 9 * day)).toBe('2일 지남')
+    // Reviews go by the day: due later today is due now, and the queue and "오늘" agree.
+    const laterToday = { ...one, lastAt: now - day + 3_600_000 }
+    expect(dueAt(laterToday)).toBeGreaterThan(now)
+    expect(isDue(laterToday, now)).toBe(true)
+    expect(dueText(laterToday, now)).toBe('오늘')
+    expect(reviewQueue({ 'c:클로저': laterToday }, now)).toHaveLength(1)
   })
 
   test('the step survives the store and a merge with an older copy', () => {

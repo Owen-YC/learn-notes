@@ -918,6 +918,9 @@ test('a concept met once and not since comes back for review, and the reminder s
   for (let i = 0; i < 3; i += 1) await ui.press({ key: 'view' })
   expect(await ui.find({ type: 'Text', text: /최근 7일 새 개념 1개 · 복습 0개/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /복습할 개념 1개/ })).toBeDefined()
+  // v already goes to the quiz from here: no second key for it.
+  expect(await ui.find({ type: 'Button', key: 'quiz' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', text: '퀴즈 보기' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /클로저 · 31일 지남/ })).toBeDefined()
   // Learned just now: due tomorrow.
   expect(await ui.find({ type: 'Text', text: /for\.\.\.of 반복문 ×1 · .* · 다음 복습 내일/ })).toBeDefined()

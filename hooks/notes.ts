@@ -792,9 +792,14 @@ export function dueAt(one: LearnConcept): number {
   return lastSeen(one) + REVIEW_DAYS[stepOf(one)]! * DAY
 }
 
-/** Every concept due for review now: wrong answers first (the oldest miss first), then the longest overdue. */
+/** True when a concept is due for review by the end of `now`'s day: reviews go by the day, not the hour. */
+export function isDue(one: LearnConcept, now: number): boolean {
+  return startOfDay(dueAt(one)) <= startOfDay(now)
+}
+
+/** Every concept due for review today: wrong answers first (the oldest miss first), then the longest overdue. */
 export function dueConcepts(index: Readonly<Record<string, LearnConcept>>, now: number): RankedConcept[] {
-  const due = rankConcepts(index).filter(one => dueAt(one) <= now)
+  const due = rankConcepts(index).filter(one => isDue(one, now))
   const missed = due.filter(isMissed).sort((a, b) => (a.missedAt ?? 0) - (b.missedAt ?? 0))
   const rest = due.filter(one => !isMissed(one)).sort((a, b) => dueAt(a) - dueAt(b))
   return [...missed, ...rest]
@@ -1315,7 +1320,7 @@ export function markReviewed(index: Readonly<Record<string, LearnConcept>>, keys
     // A step on only when it was due, and once a day at most: going over it early (a note's own
     // quiz, a quiz filled out with concepts not due yet) or again the same day keeps its step.
     const isSameDay = one.reviewedAt !== undefined && at - one.reviewedAt < DAY / 2
-    const isEarly = at < dueAt(one)
+    const isEarly = !isDue(one, at)
     const step = isSameDay || isEarly ? stepOf(one) : Math.min(stepOf(one) + 1, TOP_STEP)
     next[key] = { ...unmarked(one), reviewedAt: Math.max(one.reviewedAt ?? 0, at), step }
   }
