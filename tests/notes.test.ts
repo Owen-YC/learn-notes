@@ -1,0 +1,825 @@
+import { describe, expect, test } from 'claude-code/testing'
+
+import {
+  FILES_PER_NOTE,
+  beforeAfter,
+  changeOf,
+  clean,
+  closeTicks,
+  isMissed,
+  listItem,
+  markMissed,
+  markReviewed,
+  parseQuiz,
+  quizPick,
+  baseNames,
+  conceptsMarkdown,
+  filesFor,
+  recapPrompt,
+  recapRange,
+  applyHunks,
+  isGitMove,
+  isRequestOrigin,
+  rememberSubmit,
+  turnRequest,
+  dayBefore,
+  journalFileOf,
+  rootTag,
+  journalEntries,
+  journalIndex,
+  mergeConcepts,
+  noteEntry,
+  noteLine,
+  recapAgain,
+  parseMerge,
+  resolveKey,
+  searchNotes,
+  conceptKey,
+  conceptsOf,
+  countConcepts,
+  cleanConcepts,
+  fitHistory,
+  forHistory,
+  jsonBytes,
+  progressOf,
+  reviewQueue,
+  creationHunk,
+  expandHome,
+  failureText,
+  fenceFor,
+  focus,
+  hunksToDiff,
+  journalPath,
+  journalSection,
+  merge,
+  notePrompt,
+  parseDiff,
+  relative,
+  summaryOf,
+  type Hunk,
+} from '../hooks/notes'
+
+const HUNK: Hunk = {
+  oldStart: 3,
+  oldLines: 3,
+  newStart: 3,
+  newLines: 3,
+  lines: [' const a = 1', '-let b = 2', '+const b = 2', ' export { a, b }'],
+}
+
+describe('diff text', () => {
+  test('whole hunks round-trip through the text', () => {
+    const { diff, isCut } = hunksToDiff([HUNK])
+    expect(isCut).toBe(false)
+    expect(diff.startsWith('@@ -3,3 +3,3 @@\n')).toBe(true)
+    expect(parseDiff(diff)).toEqual([HUNK])
+  })
+
+  test('a hunk too long alone keeps its head and a recounted header', () => {
+    const lines = Array.from({ length: 200 }, (_, i) => (i % 2 === 0 ? `+added line ${i}` : ` kept line ${i}`))
+    const big: Hunk = { oldStart: 1, oldLines: 100, newStart: 1, newLines: 200, lines }
+    const { diff, isCut } = hunksToDiff([big], 600)
+    expect(isCut).toBe(true)
+    expect(diff.length).toBeLessThanOrEqual(600)
+    const [back] = parseDiff(diff)
+    const added = back!.lines.filter(line => line.startsWith('+')).length
+    const context = back!.lines.filter(line => line.startsWith(' ')).length
+    expect(back!.newLines).toBe(added + context)
+    expect(back!.oldLines).toBe(context)
+  })
+
+  test('a big replacement keeps both its removals and its additions', () => {
+    const lines = [
+      ...Array.from({ length: 150 }, (_, i) => `-old line number ${i}`),
+      ...Array.from({ length: 150 }, (_, i) => `+new line number ${i}`),
+    ]
+    const { diff, isCut } = hunksToDiff([{ oldStart: 1, oldLines: 150, newStart: 1, newLines: 150, lines }])
+    expect(isCut).toBe(true)
+    const [back] = parseDiff(diff)
+    const { before, after } = beforeAfter(back!)
+    expect(before).toContain('old line number 0')
+    expect(after).toContain('new line number 0')
+    expect(back!.oldLines).toBe(back!.lines.filter(line => line.startsWith('-')).length)
+    expect(back!.newLines).toBe(back!.lines.filter(line => line.startsWith('+')).length)
+  })
+
+  test('one line longer than the budget still leaves a diff', () => {
+    const long = `+${'x'.repeat(9000)}`
+    const { diff, isCut } = hunksToDiff([{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 1, lines: [long] }])
+    expect(isCut).toBe(true)
+    expect(diff.length).toBeLessThan(4100)
+    expect(parseDiff(diff)[0]!.newLines).toBe(1)
+  })
+
+  test('later hunks that do not fit are dropped whole', () => {
+    const { diff, isCut } = hunksToDiff([HUNK, { ...HUNK, oldStart: 40, newStart: 40 }], 80)
+    expect(isCut).toBe(true)
+    expect(parseDiff(diff)).toHaveLength(1)
+  })
+
+  test('control characters and carriage returns are dropped', () => {
+    expect(clean('a\r\nb\u0007c\td')).toBe('a\nbc\td')
+  })
+
+  test('before and after come apart from one hunk', () => {
+    expect(beforeAfter(HUNK)).toEqual({
+      before: 'const a = 1\nlet b = 2\nexport { a, b }',
+      after: 'const a = 1\nconst b = 2\nexport { a, b }',
+    })
+  })
+
+  test('focus keeps the change and one line around it, renumbered', () => {
+    const h: Hunk = {
+      oldStart: 10,
+      oldLines: 7,
+      newStart: 10,
+      newLines: 7,
+      lines: [' a', ' b', ' c', '-d', '+D', ' e', ' f', ' g'],
+    }
+    expect(focus(h)).toEqual({ oldStart: 12, oldLines: 3, newStart: 12, newLines: 3, lines: [' c', '-d', '+D', ' e'] })
+  })
+
+  test('a fence is longer than any backtick run in the diff', () => {
+    expect(fenceFor('plain')).toBe('```')
+    expect(fenceFor(' ```\n+````js')).toBe('`````')
+  })
+
+  test('a journal section keeps a diff with fences inside its own fence', () => {
+    const md = changeOf({
+      path: '/proj/README.md',
+      root: '/proj',
+      tool: 'Edit',
+      kind: 'update',
+      hunks: [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, lines: [' ```', '-old', '+new'] }],
+    })
+    const section = journalSection({
+      id: 'n',
+      turnId: 't',
+      at: 0,
+      prompt: '',
+      answer: '',
+      changes: [md],
+      moreFiles: 0,
+      status: 'ready',
+      text: 'note',
+      savedAs: null,
+      isPast: false,
+      concepts: [],
+      root: '/proj',
+      updatedAt: 0,
+    })
+    expect(section).toContain('````diff\n')
+  })
+
+  test('a new file is one all-added hunk', () => {
+    const h = creationHunk('one\ntwo\n')
+    expect(h).toEqual({ oldStart: 0, oldLines: 0, newStart: 1, newLines: 2, lines: ['+one', '+two'] })
+  })
+})
+
+describe('changes', () => {
+  const change = (path: string) =>
+    changeOf({ path, root: '/proj', tool: 'Edit', kind: 'update', hunks: [HUNK] })
+
+  test('paths inside the project read relative', () => {
+    expect(change('/proj/src/a.ts').file).toBe('src/a.ts')
+    expect(change('/elsewhere/b.ts').file).toBe('/elsewhere/b.ts')
+    expect(change('/proj/src/a.ts')).toMatchObject({ added: 1, removed: 1 })
+  })
+
+  test('windows paths read relative too', () => {
+    expect(relative('C:\\proj\\src\\a.ts', 'C:\\proj')).toBe('src/a.ts')
+    expect(relative('/proj2/a.ts', '/proj')).toBe('/proj2/a.ts')
+  })
+
+  test('a tool with no diff makes a change marked as cut', () => {
+    const none = changeOf({ path: '/proj/big.ts', root: '/proj', tool: 'Write', kind: 'update', hunks: [] })
+    expect(none).toMatchObject({ diff: '', isCut: true, added: 0, removed: 0 })
+  })
+
+  test('a second edit of a file joins its first', () => {
+    const first = merge([], change('/proj/a.ts')).changes
+    const { changes } = merge(first, change('/proj/a.ts'))
+    expect(changes).toHaveLength(1)
+    expect(changes[0]).toMatchObject({ added: 2, removed: 2 })
+    expect(parseDiff(changes[0]!.diff)).toHaveLength(2)
+  })
+
+  test('files past the limit are counted, not kept', () => {
+    let list = merge([], change('/proj/0.ts')).changes
+    for (let i = 1; i < FILES_PER_NOTE; i += 1) list = merge(list, change(`/proj/${i}.ts`)).changes
+    const over = merge(list, change('/proj/over.ts'))
+    expect(over.dropped).toBe('/proj/over.ts')
+    expect(over.changes).toHaveLength(FILES_PER_NOTE)
+  })
+})
+
+describe('the note', () => {
+  test('the prompt carries the request, the diff and the five headings', () => {
+    const text = notePrompt(
+      {
+        prompt: '버튼 색을 바꿔줘',
+        answer: '색을 바꿨습니다',
+        changes: [changeOf({ path: '/proj/a.ts', root: '/proj', tool: 'Edit', kind: 'update', hunks: [HUNK] })],
+        moreFiles: 2,
+      },
+      'beginner',
+    )
+    expect(text).toContain('버튼 색을 바꿔줘')
+    expect(text).toContain('+const b = 2')
+    expect(text).toContain('### a.ts (수정, +1 −1)')
+    expect(text).toContain('파일 2개가 더')
+    for (const heading of ['한 줄 요약', '무엇이 바뀌었나', '왜 이렇게 바꿨을까', '배울 개념', '직접 확인해 볼 것']) {
+      expect(text).toContain(`### ${heading}`)
+    }
+  })
+
+  test('the summary is the first line under its heading', () => {
+    expect(summaryOf('### 한 줄 요약\n\n- 상태를 한 곳으로 모았다\n### 무엇이 바뀌었나\n...')).toBe('상태를 한 곳으로 모았다')
+    expect(summaryOf('')).toBe('')
+  })
+
+  test('the journal is one file per day and project', () => {
+    const path = journalPath('/home/u/.claude/learning-notes/', Date.UTC(2026, 9, 3, 3), '/work/my app')
+    expect(path).toMatch(/^\/home\/u\/\.claude\/learning-notes\/2026-10-0[23]_my_app_[0-9a-z]{5}\.md$/)
+    expect(journalPath('/n', Date.UTC(2026, 9, 3, 3), 'C:\\Users\\me\\proj', 2)).toMatch(/^\/n\/2026-10-0[23]_proj_[0-9a-z]{5}~2\.md$/)
+  })
+
+  test('a save folder under ~ reads as the home folder', () => {
+    expect(expandHome('~/notes', '/home/u')).toBe('/home/u/notes')
+    expect(expandHome('~', '/home/u/')).toBe('/home/u')
+    expect(expandHome('/abs/~x', '/home/u')).toBe('/abs/~x')
+    expect(expandHome('~/notes', undefined)).toBe('~/notes')
+  })
+
+  test('a blurb cut inside inline code gets the code closed', () => {
+    expect(closeTicks('`a` and `b')).toBe('`a` and `b`')
+    expect(closeTicks('`a` and `b…')).toBe('`a` and `b`…')
+    expect(closeTicks('`a` done')).toBe('`a` done')
+  })
+
+  test('failures read as what to do next', () => {
+    expect(failureText({ reason: 'api-error', status: 429, error: 'rate_limit' })).toBe('요청 한도에 걸렸습니다 · 잠시 뒤 [다시 쓰기]')
+    expect(failureText({ reason: 'api-error', status: 500, error: 'server_error' })).toBe('API 오류 500 · 잠시 뒤 [다시 쓰기]')
+    expect(failureText({ reason: 'aborted' })).toContain('중단됐습니다')
+  })
+
+  test('the prompt says which diffs were cut and leans on the request and answer', () => {
+    const big = changeOf({
+      path: '/proj/big.ts',
+      root: '/proj',
+      tool: 'Write',
+      kind: 'create',
+      hunks: [creationHunk(Array.from({ length: 400 }, (_, i) => `const value${i} = compute(${i}) // a longer line`).join('\n'))],
+    })
+    const text = notePrompt({ prompt: 'p', answer: 'a', changes: [big], moreFiles: 0 }, 'beginner')
+    expect(text).toContain('길어서 앞부분만 실음')
+  })
+})
+
+describe('concepts', () => {
+  const names = (text: string) => conceptsOf(text).map(one => one.name)
+
+  test('one concept keeps one key across spellings, glosses and dashes', () => {
+    expect(conceptKey('구조 분해 할당 (Destructuring)')).toBe(conceptKey('구조 분해 할당'))
+    expect(conceptKey('for...of 반복문')).toBe(conceptKey('for-of 반복문'))
+    expect(conceptKey('for…of 반복문')).toBe(conceptKey('for...of 반복문'))
+    expect(conceptKey('AND 연산자 (&&)')).toBe('c:and연산자')
+    expect(conceptKey('constructor')).toBe('c:constructor')
+  })
+
+  test('the section is found under the headings models write', () => {
+    for (const heading of ['### 배울 개념', '## 배울 개념', '### 4. 배울 개념', '### 📚 배울 개념', '**배울 개념**', '##### 배울 개념들']) {
+      expect(names(`${heading}\n- **클로저**: 설명`)).toEqual(['클로저'])
+    }
+  })
+
+  test('names come out clean of review marks and trailing colons', () => {
+    const text = [
+      '### 배울 개념',
+      '- **(복습) 클로저**: a',
+      '- **화살표 함수 [복습]**: b',
+      '- **구조 분해 할당:** c',
+      '- **useState** *(복습)*: d',
+      '1. **for...of 반복문 (복습)**: e',
+      '+ **템플릿 리터럴**: f',
+    ].join('\n')
+    const found = conceptsOf(text)
+    expect(found.map(one => one.name)).toEqual(['클로저', '화살표 함수', '구조 분해 할당', 'useState', 'for...of 반복문', '템플릿 리터럴'])
+    expect(found[3]!.blurb).toBe('d')
+  })
+
+  test('sub-bullets, code blocks and the next section are not concepts', () => {
+    const text = [
+      '### 배울 개념',
+      '- **클로저**: 함수가 바깥 변수를 기억한다',
+      '  - **예시**: 카운터',
+      '  - **주의할 점**: 메모리',
+      '```js',
+      '- **코드 안**: 아님',
+      '```',
+      '직접 확인해 볼 것:',
+      '- **실행**: 아님',
+    ].join('\n')
+    expect(names(text)).toEqual(['클로저'])
+  })
+
+  test('a bold label line ends the section too', () => {
+    expect(names('### 배울 개념\n- **A**: a\n**직접 확인해 볼 것**\n- **B**: b')).toEqual(['A'])
+  })
+
+  test('rewriting an older note moves neither date the wrong way', () => {
+    const later = Date.UTC(2026, 9, 2)
+    const earlier = Date.UTC(2026, 8, 1)
+    const index = countConcepts({}, [{ key: 'c:x', name: 'X', blurb: 'new' }], [], later, [])
+    const again = countConcepts(index, [{ key: 'c:x', name: 'X', blurb: 'old' }], [], earlier, [])
+    expect(again['c:x']).toMatchObject({ count: 2, firstAt: earlier, lastAt: later, blurb: 'new' })
+  })
+
+  test('a stored index from an older build or a bad write is cleaned', () => {
+    const cleaned = cleanConcepts({
+      'for...of반복문': { name: 'for...of 반복문', count: 2, firstAt: 1, lastAt: 5, blurb: 'b', files: ['a.ts'] },
+      'c:forof반복문': { name: 'for-of 반복문', count: 1, firstAt: 3, lastAt: 9, blurb: '', files: [] },
+      constructor: { name: undefined, count: null },
+      bad: 'x',
+    })
+    expect(Object.keys(cleaned)).toEqual(['c:forof반복문'])
+    expect(cleaned['c:forof반복문']).toMatchObject({ name: 'for...of 반복문', count: 3, firstAt: 1, lastAt: 9 })
+  })
+
+  test('progress counts the last week, and the review queue holds what was met once long ago', () => {
+    const now = Date.UTC(2026, 9, 3)
+    const day = 86_400_000
+    const index = {
+      'c:a': { name: 'A', count: 1, firstAt: now - day, lastAt: now - day, blurb: '', files: [] },
+      'c:b': { name: 'B', count: 3, firstAt: now - 30 * day, lastAt: now - 2 * day, blurb: '', files: [] },
+      'c:c': { name: 'C', count: 1, firstAt: now - 20 * day, lastAt: now - 20 * day, blurb: '', files: [] },
+      'c:d': { name: 'D', count: 1, firstAt: now - 9 * day, lastAt: now - 9 * day, blurb: '', files: [] },
+    }
+    expect(progressOf(index, now)).toEqual({ fresh: 1, again: 1 })
+    const twice = { ...index, 'c:e': { name: 'E', count: 2, firstAt: now - 2 * day, lastAt: now - day, blurb: '', files: [] } }
+    expect(progressOf(twice, now)).toEqual({ fresh: 2, again: 2 })
+    expect(reviewQueue(index, now).map(one => one.name)).toEqual(['C', 'D'])
+  })
+})
+
+describe('history', () => {
+  test('a stored note keeps a short text and short diffs', () => {
+    const long = Array.from({ length: 300 }, (_, i) => `+line ${i} with some code in it`)
+    const note = {
+      id: 'n', turnId: 't', at: 0, prompt: 'p'.repeat(2000), answer: '', moreFiles: 0, status: 'ready' as const,
+      text: '가'.repeat(9000), savedAs: null, isPast: false, concepts: [], root: '/proj', updatedAt: 0,
+      changes: [changeOf({ path: '/proj/a.ts', root: '/proj', tool: 'Write', kind: 'create', hunks: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 300, lines: long }] })],
+    }
+    const kept = forHistory(note)
+    expect(kept.text.length).toBeLessThanOrEqual(3000)
+    expect(kept.prompt.length).toBeLessThanOrEqual(600)
+    expect(kept.changes[0]!.diff.length).toBeLessThanOrEqual(800)
+    expect(kept.changes[0]!.isCut).toBe(true)
+  })
+
+  test('fitting the budget drops the least recent other project, then the oldest own notes', () => {
+    const note = (id: string) => ({ id, at: 1, text: 'x'.repeat(1000) }) as never
+    const history = {
+      '/a': { at: 1, notes: [note('a1')] },
+      '/b': { at: 2, notes: [note('b1')] },
+      '/me': { at: 3, notes: [note('m1'), note('m2'), note('m3')] },
+    }
+    const one = fitHistory(history, '/me', jsonBytes(history) - 10)
+    expect(Object.keys(one)).toEqual(['/b', '/me'])
+    const tight = fitHistory(history, '/me', 2200)
+    expect(Object.keys(tight)).toEqual(['/me'])
+    expect(tight['/me']!.notes.map((n: { id: string }) => n.id)).toEqual(['m2', 'm3'])
+  })
+})
+
+describe('finding and merging', () => {
+  const note = (id: string, at: number, extra: Partial<Parameters<typeof noteLine>[0]> = {}) => ({
+    id, turnId: id, at, prompt: '', answer: '', moreFiles: 0, status: 'ready' as const, text: '',
+    savedAs: null, isPast: false, concepts: [] as string[], root: '/home/me/shop', updatedAt: at,
+    changes: [changeOf({ path: '/home/me/shop/src/cart.js', root: '/home/me/shop', tool: 'Edit', kind: 'update', hunks: [HUNK] })],
+    ...extra,
+  })
+
+  test('search matches request, text, file and concept, the newest first, ignoring case', () => {
+    const list = [
+      note('a', 1, { prompt: 'Login 버튼 고쳐줘' }),
+      note('b', 2, { text: '### 한 줄 요약\nlogin 처리를 바꿨다' }),
+      note('c', 3, { concepts: ['c:forof반복문'] }),
+    ]
+    expect(searchNotes(list, 'LOGIN').map(n => n.id)).toEqual(['b', 'a'])
+    expect(searchNotes(list, 'for-of 반복문').map(n => n.id)).toEqual(['c'])
+    expect(searchNotes(list, 'cart.js')).toHaveLength(3)
+    expect(searchNotes(list, '  ')).toEqual([])
+  })
+
+  test('a note line says when, which project, the file and the summary', () => {
+    const now = Date.UTC(2026, 9, 3, 5)
+    const line = noteLine(note('a', now, { text: '### 한 줄 요약\n합계를 고쳤다', moreFiles: 2 }), now)
+    expect(line).toMatch(/^\d\d:\d\d · shop · src\/cart\.js 외 2개 — 합계를 고쳤다$/)
+    expect(noteLine(note('b', now, { status: 'failed', prompt: '요청\n두 줄' }), now)).toMatch(/— 요청 두 줄$/)
+  })
+
+  test('a journal day reads back as time, request and summary', () => {
+    const md = [
+      '# 학습 노트 · 2026-10-03 · /proj',
+      '',
+      '## 2026-10-03 05:12',
+      '',
+      '**요청**: 첫 요청',
+      '',
+      '### 한 줄 요약',
+      '첫 요약',
+      '',
+      '## 2026-10-03 06:40 (다시 쓴 노트)',
+      '',
+      '**요청**: 둘째 요청',
+      '',
+      '_노트 없이 전후 코드만 남겼다._',
+    ].join('\n')
+    expect(journalIndex(md)).toEqual([
+      { time: '05:12', request: '첫 요청', summary: '첫 요약', isRewrite: false },
+      { time: '06:40', request: '둘째 요청', summary: '', isRewrite: true },
+    ])
+  })
+
+  test('merge arguments split on the usual arrows and bars', () => {
+    expect(parseMerge('Destructuring = 구조 분해 할당')).toEqual({ from: 'Destructuring', into: '구조 분해 할당' })
+    for (const sep of ['=>', '->', '→', '|']) expect(parseMerge(`a ${sep} b`)).toEqual({ from: 'a', into: 'b' })
+    expect(parseMerge('하나만')).toBeUndefined()
+    expect(parseMerge('a = b = c')).toBeUndefined()
+    expect(parseMerge(' = b')).toBeUndefined()
+  })
+
+  test('aliases follow a chain and stop on a loop', () => {
+    expect(resolveKey({ 'c:a': 'c:b', 'c:b': 'c:c' }, 'c:a')).toBe('c:c')
+    expect(resolveKey({ 'c:a': 'c:b', 'c:b': 'c:a' }, 'c:a')).toMatch(/^c:[ab]$/)
+    expect(resolveKey({}, 'c:x')).toBe('c:x')
+  })
+
+  test('merging adds counts and keeps the widest dates; merging into a new name renames', () => {
+    const index = {
+      'c:a': { name: 'A', count: 2, firstAt: 5, lastAt: 9, blurb: 'a', files: ['x.ts'] },
+      'c:b': { name: 'B', count: 1, firstAt: 1, lastAt: 7, blurb: 'b', files: ['y.ts'] },
+    }
+    expect(mergeConcepts(index, 'c:a', 'c:b', 'B')).toEqual({
+      'c:b': { name: 'B', count: 3, firstAt: 1, lastAt: 9, blurb: 'a', files: ['y.ts', 'x.ts'] },
+    })
+    expect(mergeConcepts(index, 'c:a', 'c:new', '새 이름')['c:new']).toMatchObject({ name: '새 이름', count: 2 })
+    expect(mergeConcepts(index, 'c:none', 'c:b', 'B')).toEqual(index)
+  })
+})
+
+describe('second review', () => {
+  test('journal names keep projects apart: shop vs shop-2, two folders named alike, Korean folders (R5)', () => {
+    const at = Date.UTC(2026, 9, 3, 3)
+    const shop = journalPath('/n', at, '/w/shop')
+    const shop2 = journalPath('/n', at, '/w/shop-2')
+    expect(shop).not.toBe(journalPath('/n', at, '/w/shop-2', 1))
+    expect(journalPath('/n', at, '/w/shop', 2)).not.toBe(shop2)
+    expect(journalFileOf(shop2.split('/').at(-1)!, '/w/shop')).toBeUndefined()
+    expect(journalFileOf(journalPath('/n', at, '/other/shop').split('/').at(-1)!, '/w/shop')).toBeUndefined()
+    expect(journalFileOf(journalPath('/n', at, '/w/shop', 3).split('/').at(-1)!, '/w/shop')).toMatchObject({ part: 3 })
+    expect(journalPath('/n', at, '/w/쇼핑몰')).toContain('_쇼핑몰_')
+    expect(journalPath('/n', at, '/w/쇼핑몰')).not.toBe(journalPath('/n', at, '/w/연습'))
+    expect(rootTag('/w/shop')).toBe(rootTag('/w/shop/'))
+    expect(rootTag('/w/shop')).toMatch(/^[0-9a-z]{5}$/)
+  })
+
+  test('a model heading of ## inside a note does not split the day (R15)', () => {
+    const md = '## 2026-10-03 05:12\n\n**요청**: 요청\n\n## 한 줄 요약\n요약이다\n'
+    expect(journalIndex(md)).toEqual([{ time: '05:12', request: '요청', summary: '요약이다', isRewrite: false }])
+  })
+
+  test('the day before is the calendar day before (R14)', () => {
+    expect(dayBefore(new Date(2026, 9, 3, 0, 30).getTime())).toBe('2026-10-02')
+    expect(dayBefore(new Date(2026, 2, 9, 0, 30).getTime())).toBe('2026-03-08')
+  })
+
+  test('merge arguments keep operator names whole when spaced (R12)', () => {
+    expect(parseMerge('화살표 함수 (=>) = Arrow function')).toEqual({ from: '화살표 함수 (=>)', into: 'Arrow function' })
+    expect(parseMerge('논리 OR (||) -> 논리합')).toEqual({ from: '논리 OR (||)', into: '논리합' })
+  })
+
+  test('find skips the placeholder words of failed notes (R16)', () => {
+    const base = {
+      turnId: 't', at: 1, prompt: '', answer: '', moreFiles: 0, savedAs: null, isPast: false, concepts: [],
+      root: '/p', updatedAt: 1, changes: [],
+    }
+    const list = [
+      { ...base, id: 'f', status: 'failed' as const, text: '세션이 끝나 노트를 다 쓰지 못했습니다 · w로 다시 쓰기' },
+      { ...base, id: 'r', status: 'ready' as const, text: '다시 렌더링한다' },
+    ]
+    expect(searchNotes(list, '다시').map(n => n.id)).toEqual(['r'])
+  })
+
+  test('an index whose merge target fell out is one row again once aliases are applied (R2)', () => {
+    const raw = {
+      'c:destructuring': { name: 'Destructuring', count: 2, firstAt: 1, lastAt: 5, blurb: '', files: [] },
+      'c:구조분해할당': { name: 'Destructuring', count: 1, firstAt: 6, lastAt: 9, blurb: '', files: [] },
+    }
+    const cleaned = cleanConcepts(raw, { 'c:destructuring': 'c:구조분해할당' })
+    expect(Object.keys(cleaned)).toEqual(['c:구조분해할당'])
+    expect(cleaned['c:구조분해할당']!.count).toBe(3)
+  })
+})
+
+describe('who asked', () => {
+  test('a request comes from a person, a schedule or a coordinating session; notifications and peers carry on', () => {
+    for (const kind of ['composer', 'bridge', 'sdk', 'channel', 'slack-ping', 'scheduled-trigger', 'coordinator', 'projects-relay'])
+      expect(isRequestOrigin({ kind })).toBe(true)
+    for (const kind of ['task-notification', 'peer', 'peer-send-message', 'plugin', 'observer', 'auto-continuation', 'unclassified'])
+      expect(isRequestOrigin({ kind })).toBe(false)
+    expect(isRequestOrigin({ kind: 'plugin', asUser: true })).toBe(true)
+    expect(isRequestOrigin(undefined)).toBe(true)
+  })
+
+  test('a turn started by something else carries on the last request', () => {
+    expect(turnRequest('고쳐줘', [{ text: '고쳐줘', isRequest: true }], '고쳐줘')).toBe('고쳐줘')
+    expect(turnRequest('<agent-message>보고</agent-message>', [{ text: '<agent-message>보고</agent-message>', isRequest: false }], '계속 해줘')).toBe(
+      '(이어서) 계속 해줘',
+    )
+    expect(turnRequest('알림', [{ text: '알림', isRequest: false }], undefined)).toBe('(알림으로 시작한 턴)')
+    // A turn whose prompt was never seen entering (an older engine) is taken as a request.
+    expect(turnRequest('직접 입력', [], undefined)).toBe('직접 입력')
+    expect(turnRequest('새 글', [{ text: '다른 글', isRequest: false }], 'x')).toBe('새 글')
+    // Two notifications queued before either turn starts: each turn finds its own.
+    const queued = [{ text: '하나', isRequest: false }, { text: '둘', isRequest: false }]
+    expect(turnRequest('하나', queued, '고쳐줘')).toBe('(이어서) 고쳐줘')
+    // The same text typed later by the person counts as theirs.
+    expect(turnRequest('하나', [...queued, { text: '하나', isRequest: true }], '고쳐줘')).toBe('하나')
+  })
+
+  test('the remembered prompts keep the newest ten, each text once', () => {
+    let list = [] as { text: string; isRequest: boolean }[]
+    for (let i = 0; i < 12; i++) list = rememberSubmit(list, { text: `t${i}`, isRequest: false })
+    expect(list.map(one => one.text)).toEqual(['t2', 't3', 't4', 't5', 't6', 't7', 't8', 't9', 't10', 't11'])
+    list = rememberSubmit(list, { text: 't5', isRequest: true })
+    expect(list.at(-1)).toEqual({ text: 't5', isRequest: true })
+    expect(list.filter(one => one.text === 't5')).toHaveLength(1)
+  })
+})
+
+describe('concept files and recaps', () => {
+  const change = (path: string, lines: string[]) =>
+    changeOf({ path: `/p/${path}`, root: '/p', tool: 'Edit', kind: 'update', hunks: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: lines.length, lines }] })
+  const changes = [change('src/a.ts', ['+const total = items.reduce((s, x) => s + x, 0)']), change('src/b.ts', ['+for (const order of orders) {'])]
+
+  test('a concept is seen in the file whose diff holds the code it quotes', () => {
+    expect(filesFor('반복문 — `for (const order of orders)`', changes)).toEqual(['src/b.ts'])
+    expect(filesFor('줄이기 — `items.reduce((s,x)=>s+x,0)`', changes)).toEqual(['src/a.ts'])
+    expect(filesFor('코드 인용 없음', changes)).toEqual(['src/a.ts'])
+    expect(filesFor('다른 코드 — `while (true)`', changes)).toEqual(['src/a.ts'])
+  })
+
+  test('concepts.md lists file names, not paths', () => {
+    expect(baseNames(['src/a.ts', 'lib/a.ts', 'src/b.ts'])).toEqual(['a.ts', 'b.ts'])
+    const md = conceptsMarkdown({ 'c:x': { name: 'X', count: 1, firstAt: 0, lastAt: 0, blurb: 'b', files: ['.claude/mods/x/hooks/notes.ts'] } })
+    expect(md).toContain('| notes.ts |')
+  })
+
+  test('recap ranges cover today, yesterday, this week from Monday, the last seven days or one date', () => {
+    const now = new Date(2026, 9, 3, 15, 0).getTime()
+    expect(recapRange('', now)).toMatchObject({ label: '오늘', days: ['2026-10-03'] })
+    expect(recapRange('어제', now)).toMatchObject({ label: '어제', days: ['2026-10-02'] })
+    // 2026-10-03 is a Saturday: this week began on Monday the 28th.
+    expect(recapRange('이번주', now)).toMatchObject({ label: '이번 주', days: ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-03'] })
+    expect(recapRange('이번 주', now)!.from).toBe(new Date(2026, 8, 28).getTime())
+    const monday = new Date(2026, 8, 28, 9).getTime()
+    expect(recapRange('이번주', monday)!.days).toEqual(['2026-09-28'])
+    expect(recapRange('최근 7일', now)!.days).toEqual(['2026-09-27', '2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-03'])
+    expect(recapRange('2026-09-30', now)).toMatchObject({ label: '2026-09-30', days: ['2026-09-30'] })
+    expect(recapRange('2026-02-30', now)).toBeUndefined()
+    expect(recapRange('내일', now)).toBeUndefined()
+  })
+
+  test('the recap prompt lists each note with its request, summary, files and concepts', () => {
+    const now = new Date(2026, 9, 3, 15, 0).getTime()
+    const range = recapRange('', now)!
+    const note = {
+      id: 'n', turnId: 't', at: now - 3_600_000, prompt: '버튼 고쳐줘', answer: '', moreFiles: 0, status: 'ready' as const,
+      text: '### 한 줄 요약\n버튼을 고쳤다', savedAs: null, isPast: false, concepts: ['c:old'], root: '/p', updatedAt: 0, changes,
+    }
+    const index = {
+      'c:new': { name: '이벤트 핸들러', count: 3, firstAt: now - 30 * 86_400_000, lastAt: now - 3_600_000, blurb: '', files: [] },
+    }
+    const text = recapPrompt(range, [noteEntry(note, index, { 'c:old': 'c:new' })], index, { 'c:old': 'c:new' }, 'beginner')
+    expect(text).toContain('요청: 버튼 고쳐줘 · 요약: 버튼을 고쳤다 · 파일: a.ts, b.ts · 개념: 이벤트 핸들러')
+    expect(text).toContain('## 이 기간에 다시 만난 개념 (예전에 배운 것)\n이벤트 핸들러 ×3')
+    for (const heading of ['한 일', '핵심 개념', '헷갈리기 쉬운 것', '다음에 해 볼 것']) expect(text).toContain(`### ${heading}`)
+  })
+})
+
+describe('quiz', () => {
+  const now = Date.UTC(2026, 9, 3)
+  const day = 86_400_000
+  const index = {
+    'c:old': { name: '클로저', count: 1, firstAt: now - 20 * day, lastAt: now - 20 * day, blurb: 'a', files: [] },
+    'c:older': { name: '호이스팅', count: 1, firstAt: now - 30 * day, lastAt: now - 30 * day, blurb: 'b', files: [] },
+    'c:often': { name: 'for...of', count: 4, firstAt: now - 40 * day, lastAt: now - 10 * day, blurb: 'c', files: [] },
+    'c:new': { name: '화살표 함수', count: 1, firstAt: now - day, lastAt: now - day, blurb: 'd', files: [] },
+  }
+
+  test('a quiz picks what is due first, then what has gone longest unseen', () => {
+    expect(quizPick(index, now).map(one => one.name)).toEqual(['호이스팅', '클로저', 'for...of'])
+    expect(quizPick({}, now)).toEqual([])
+  })
+
+  test('going over a concept in a quiz takes it off the review queue', () => {
+    const reviewed = markReviewed(index, ['c:older', 'c:none'], now)
+    expect(reviewed['c:older']!.reviewedAt).toBe(now)
+    expect(reviewQueue(reviewed, now).map(one => one.name)).toEqual(['클로저'])
+    expect(quizPick(reviewed, now)[0]!.name).toBe('클로저')
+  })
+
+  test('questions and answers are read in the forms models write them', () => {
+    const picks = quizPick(index, now)
+    const text = [
+      '**Q1:** 다음 코드에서 함수를 선언 전에 부를 수 있는 이유는?',
+      '**A1:** 선언이 위로 끌어올려지기 때문이다.',
+      'Q2. 바깥 변수를 기억하는 함수를 뭐라 할까?',
+      'A2) 클로저',
+      'Q3：배열을 하나씩 도는 문법은?',
+    ].join('\n')
+    expect(parseQuiz(text, picks)).toEqual([
+      { key: 'c:older', name: '호이스팅', question: '다음 코드에서 함수를 선언 전에 부를 수 있는 이유는?', answer: '선언이 위로 끌어올려지기 때문이다.' },
+      { key: 'c:old', name: '클로저', question: '바깥 변수를 기억하는 함수를 뭐라 할까?', answer: '클로저' },
+    ])
+    expect(parseQuiz('그냥 글', picks)).toEqual([])
+  })
+})
+
+test('a quiz question keeps the code block under its first line (real haiku output)', () => {
+  const now = Date.UTC(2026, 9, 3)
+  const picks = quizPick({ 'c:t': { name: '템플릿 리터럴', count: 1, firstAt: 0, lastAt: 0, blurb: '', files: [] } }, now)
+  const text = [
+    'Q1: 다음 코드는 어떤 결과를 출력할까요?',
+    '```',
+    'const fruit = "딸기";',
+    'console.log(`나는 ${fruit}를 좋아합니다`);',
+    '```',
+    '',
+    'A1: "나는 딸기를 좋아합니다"를 출력합니다.',
+  ].join('\n')
+  expect(parseQuiz(text, picks)).toEqual([
+    {
+      key: 'c:t',
+      name: '템플릿 리터럴',
+      question: '다음 코드는 어떤 결과를 출력할까요?\n```\nconst fruit = "딸기";\nconsole.log(`나는 ${fruit}를 좋아합니다`);\n```',
+      answer: '"나는 딸기를 좋아합니다"를 출력합니다.',
+    },
+  ])
+})
+
+test('a numbered entry keeps its code block inside the entry', () => {
+  expect(listItem(1, '출력은?\n```\nconsole.log(1)\n```')).toBe('1. 출력은?\n   ```\n   console.log(1)\n   ```')
+  expect(listItem(12, '가\n\n나')).toBe('12. 가\n\n    나')
+  expect(listItem(2, '한 줄')).toBe('2. 한 줄')
+})
+
+test('a quiz question cut inside its code block gets the closing fence', () => {
+  const picks = quizPick({ 'c:t': { name: '반복문', count: 1, firstAt: 0, lastAt: 0, blurb: '', files: [] } }, Date.UTC(2026, 9, 3))
+  const long = Array.from({ length: 200 }, (_, i) => `console.log(${i})`).join('\n')
+  const [item] = parseQuiz(`Q1: 출력은?\n\`\`\`\n${long}\n\`\`\`\nA1: 0부터 199까지`, picks)
+  expect(item!.question.length).toBeLessThan(1210)
+  expect(item!.question.endsWith('…\n```')).toBe(true)
+})
+
+test('a missed concept leads the review queue until a quiz goes over it, and merging keeps only a miss newer than the review', () => {
+  const now = Date.UTC(2026, 9, 3)
+  const index = {
+    'c:a': { name: 'A', count: 5, firstAt: now - 1, lastAt: now - 1, blurb: '', files: [] },
+    'c:b': { name: 'B', count: 1, firstAt: now - 30 * 86_400_000, lastAt: now - 30 * 86_400_000, blurb: '', files: [] },
+  }
+  expect(reviewQueue(index, now).map(one => one.name)).toEqual(['B'])
+  const missed = markMissed(index, ['c:a'], now)
+  expect(isMissed(missed['c:a']!)).toBe(true)
+  expect(reviewQueue(missed, now).map(one => one.name)).toEqual(['A', 'B'])
+  expect(quizPick(missed, now, 1).map(one => one.name)).toEqual(['A'])
+  const reviewed = markReviewed(missed, ['c:a'], now + 1)
+  expect(reviewed['c:a']!.missedAt).toBeUndefined()
+  expect(reviewQueue(reviewed, now + 1).map(one => one.name)).toEqual(['B'])
+
+  // Two copies of one concept: a miss older than the other copy's review is gone.
+  const stale = { a: { name: 'X', count: 1, firstAt: 1, lastAt: 1, blurb: '', files: [], missedAt: 5 }, b: { name: 'x', count: 1, firstAt: 2, lastAt: 2, blurb: '', files: [], reviewedAt: 9 } }
+  expect(cleanConcepts(stale)['c:x']).toEqual({ name: 'X', count: 2, firstAt: 1, lastAt: 2, blurb: '', files: [], reviewedAt: 9 })
+  const fresh = { a: { ...stale.a, missedAt: 10 }, b: stale.b }
+  expect(cleanConcepts(fresh)['c:x']!.missedAt).toBe(10)
+  const merged = mergeConcepts({ 'c:x': stale.a, 'c:y': { ...stale.b, name: 'Y' } }, 'c:x', 'c:y', 'Y')
+  expect(merged['c:y']).toEqual({ name: 'Y', count: 2, firstAt: 1, lastAt: 2, blurb: '', files: [], reviewedAt: 9 })
+})
+
+describe('recap sources', () => {
+  const journal = [
+    '# 학습 노트 · proj',
+    '',
+    '## 2026-10-02 09:00',
+    '',
+    '**요청**: 버튼 고쳐줘',
+    '',
+    '**바뀐 파일**: `src/a.ts` (수정, +1 −1) · `lib/b.ts` (새 파일, +3 −0)',
+    '',
+    '### 한 줄 요약',
+    '첫 요약',
+    '### 배울 개념',
+    '- **클로저**: 바깥 변수를 기억한다',
+    '',
+    '<details><summary>src/a.ts</summary>',
+    '',
+    '```diff',
+    '### 배울 개념',
+    '- **diff 안의 가짜 개념**: x',
+    '```',
+    '',
+    '</details>',
+    '',
+    '## 2026-10-02 정리 · 오늘 (18:00)',
+    '',
+    '### 한 일',
+    '정리 글',
+    '',
+    '## 2026-10-02 09:00 (다시 쓴 노트)',
+    '',
+    '**요청**: 버튼 고쳐줘',
+    '',
+    '**바뀐 파일**: `src/a.ts` (수정, +1 −1)',
+    '',
+    '### 한 줄 요약',
+    '다시 쓴 요약',
+    '### 배울 개념',
+    '- **이벤트 핸들러**: 클릭을 받는다',
+    '',
+    '## 2026-10-02 10:30',
+    '',
+    '**요청**: 목록 정렬',
+    '',
+    '**바뀐 파일**: `src/list.ts` (수정, +2 −0)',
+    '',
+    '_노트 없이 전후 코드만 남겼다._',
+  ].join('\n')
+
+  test('a journal reads back as notes: a rewrite replaces its note, a recap section is not one, diffs are not read', () => {
+    expect(journalEntries(journal)).toEqual([
+      { day: '2026-10-02', time: '09:00', request: '버튼 고쳐줘', summary: '다시 쓴 요약', files: ['a.ts'], concepts: [{ key: 'c:이벤트핸들러', name: '이벤트 핸들러' }] },
+      { day: '2026-10-02', time: '10:30', request: '목록 정렬', summary: '', files: ['list.ts'], concepts: [] },
+    ])
+  })
+
+  test('what came back is only what these notes taught and was first met before the range', () => {
+    const from = Date.UTC(2026, 9, 2)
+    const index = {
+      'c:클로저': { name: '클로저', count: 3, firstAt: from - 9 * 86_400_000, lastAt: from + 1, blurb: '', files: [] },
+      'c:새것': { name: '새것', count: 1, firstAt: from + 1, lastAt: from + 1, blurb: '', files: [] },
+      'c:sql조인': { name: 'SQL 조인', count: 3, firstAt: from - 9 * 86_400_000, lastAt: from + 1, blurb: '', files: [] },
+    }
+    const entries = [{ day: '2026-10-02', time: '09:00', request: '', summary: '', files: [], concepts: [{ key: 'c:클로저', name: '클로저' }, { key: 'c:새것', name: '새것' }] }]
+    expect(recapAgain(entries, index, {}, from).map(one => one.name)).toEqual(['클로저'])
+  })
+})
+
+describe('concept files', () => {
+  const change = (file: string, lines: string[]) =>
+    changeOf({ path: `/p/${file}`, root: '/p', tool: 'Edit', kind: 'update', hunks: [{ oldStart: 1, oldLines: 9, newStart: 1, newLines: 9, lines }] })!
+  const a = change('src/a.ts', [' const total = items.reduce((sum, item) => {', '-  return sum + item.price', '+  return sum + item.price * item.qty', ' }, 0)'])
+  const b = change('src/b.ts', [' import { x } from "./x"', '-let count = 0', '+const count = 0', ' export const label = "합계"'])
+  const both = [b, a]
+
+  test('a quote across a context line and an added line matches though a removed line sits between them (review R3 M4)', () => {
+    expect(filesFor('`items.reduce((sum, item) => { return sum + item.price * item.qty }`', both)).toEqual(['src/a.ts'])
+  })
+  test('a quote cut with ... or … matches piece by piece in order', () => {
+    expect(filesFor('`items.reduce((sum, item) => { ... }, 0)`', both)).toEqual(['src/a.ts'])
+    expect(filesFor('`items.reduce(…)`', both)).toEqual(['src/a.ts'])
+    // Out of order, the pieces do not make that code: the note's first file stands in.
+    expect(filesFor('`item.qty … items.reduce`', both)).toEqual(['src/b.ts'])
+  })
+  test('old code counts as well as new, and short quotes say nothing', () => {
+    expect(filesFor('`let count = 0` 대신 `const`', both)).toEqual(['src/b.ts'])
+    expect(filesFor('`if`와 `x`', both)).toEqual(['src/b.ts'])
+    expect(filesFor('`const` 선언', both)).toEqual(['src/b.ts', 'src/a.ts'])
+    expect(filesFor('``const t = `a` `` 처럼', [a, b])).toEqual(['src/a.ts'])
+  })
+})
+
+describe('real-run edges', () => {
+  test('a file made this turn and changed again stays a new file holding its latest content', () => {
+    const made = changeOf({ path: '/p/t.mjs', root: '/p', tool: 'Write', kind: 'create', hunks: [creationHunk('// run: node --test playground/\nimport a from "a"\n')] })!
+    const fixed = changeOf({ path: '/p/t.mjs', root: '/p', tool: 'Bash', kind: 'update', hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-// run: node --test playground/', '+// run: node --test playground/t.mjs'] }] })!
+    const [one] = merge([made], fixed).changes
+    expect(one).toMatchObject({ kind: 'create', added: 2, removed: 0, tool: 'Bash' })
+    expect(one!.diff).toBe('@@ -0,0 +1,2 @@\n+// run: node --test playground/t.mjs\n+import a from "a"')
+  })
+
+  test('hunks apply in place, and a hunk whose old lines are elsewhere refuses', () => {
+    expect(applyHunks(['a', 'b', 'c'], [{ oldStart: 2, oldLines: 1, newStart: 2, newLines: 2, lines: ['-b', '+B', '+B2'] }])).toEqual(['a', 'B', 'B2', 'c'])
+    expect(applyHunks(['a', 'b'], [{ oldStart: 2, oldLines: 0, newStart: 3, newLines: 1, lines: ['+c'] }])).toEqual(['a', 'b', 'c'])
+    expect(applyHunks(['a', 'b'], [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-x', '+y'] }])).toBeUndefined()
+  })
+
+  test('git commands that move content in are told from ones that do not', () => {
+    for (const command of ['git stash', 'git stash pop', 'cd /p && git checkout -- a.ts', 'git -C /p restore .', 'git pull --rebase origin main', 'git reset --hard HEAD~1', 'git --no-pager switch dev'])
+      expect(isGitMove(command)).toBe(true)
+    for (const command of ['git commit -m "merge stuff"', 'git status', 'git diff HEAD', 'git log --oneline', 'sed -i s/a/b/ x && git add x', 'echo digit stash'])
+      expect(isGitMove(command)).toBe(false)
+  })
+})

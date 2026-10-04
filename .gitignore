@@ -1,0 +1,4 @@
+# Type definitions Claude Code writes into a mod folder for the editor
+.claude-plugin/types/
+node_modules/
+.DS_Store
