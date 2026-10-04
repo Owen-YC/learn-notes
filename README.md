@@ -3,18 +3,20 @@
 Claude가 코드를 고치면 **바뀌기 전과 후**를 모아 두었다가, 턴이 끝날 때마다
 "무엇이 왜 바뀌었고 무엇을 배울 수 있는지"를 **학습 노트**로 정리해 오른쪽 패널에 보여 주는
 [Claude Code](https://code.claude.com) 모드(mod)입니다.
-노트에서 바로 묻고, 배운 개념은 프로젝트를 넘어 쌓이며, 잊을 때쯤 **내가 만든 코드로** 복습 퀴즈를 냅니다.
+코드가 하던 일과 이제 하는 일을 **전/후 한 줄씩과 예시**로 보여 주고, 바뀐 줄에서는 **바뀐 낱말까지** 표시합니다.
+노트에서 바로 묻거나 예시 하나로 코드를 따라가 보고, 배운 개념은 프로젝트를 넘어 쌓이며, 잊을 때쯤 **내가 만든 코드로** 복습 퀴즈를 냅니다.
 답을 적으면 Claude가 채점해 줍니다.
 
-![learn-notes 사용 모습: /learn으로 패널을 열고, 코딩을 요청하면 실시간 변경 → 학습 노트 → 전/후 → 개념 모음 → 지난 노트 → 노트에 질문 → 내 코드로 낸 퀴즈와 힌트 → 답 채점 → 더 쉽게 다시 쓰기 → /learn recap·quiz·ask·stats로 이어진다](docs/images/demo.gif)
+![learn-notes 사용 모습: /learn으로 패널을 열고, 코딩을 요청하면 실시간 변경 → 학습 노트(전·후·예) → 바뀐 낱말까지 표시한 전/후 → 개념 모음 → 지난 노트 → 노트에 질문 → 예시로 따라가기 → 내 코드로 낸 퀴즈와 힌트 → 답 채점 → 더 쉽게 다시 쓰기 → /learn recap·quiz·ask·stats로 이어진다](docs/images/demo.gif)
 
-<sub>사용 흐름을 49초로 보여 주는 데모입니다. 장면마다 모드의 테스트 키트로 엔진이 실제로 그린 화면을 이어 붙였고, 노트·질문의 답·퀴즈·힌트·채점·정리는 모두 이 모드의 프롬프트로 haiku가 실제로 쓴 글입니다.</sub>
+<sub>사용 흐름을 56초로 보여 주는 데모입니다. 장면마다 모드의 테스트 키트로 엔진이 실제로 그린 화면을 이어 붙였고, 노트·질문의 답·퀴즈·힌트·채점·정리는 모두 이 모드의 프롬프트로 haiku가 실제로 쓴 글입니다.</sub>
 
 > **English**: A Claude Code mod for learning while you vibe-code. Every turn in which Claude edits files,
 > it collects the before/after diffs and has a small model (haiku by default) write a short study note:
-> what changed, why, concepts to learn, and what to try yourself. Ask follow-up questions under a note,
-> and review what you learned with spaced-repetition quizzes built from your own code, graded by Claude.
-> Notes are written in Korean.
+> what the code did before and does now (with an example), why, concepts to learn, and what to try yourself.
+> The before/after view marks changed lines and the very words that changed. Ask follow-up questions under a note,
+> walk through the change on one example, and review what you learned with spaced-repetition quizzes built
+> from your own code, graded by Claude. Notes are written in Korean.
 
 | 노트 | 전/후 |
 | --- | --- |
@@ -22,7 +24,7 @@ Claude가 코드를 고치면 **바뀌기 전과 후**를 모아 두었다가, �
 | **개념 모음** | **퀴즈: 내 답을 Claude가 채점** |
 | ![배운 개념 모음](docs/images/pane-concepts.png) | ![퀴즈 채점](docs/images/pane-quiz.png) |
 
-> **팀에 소개할 때**: [안내서 PDF](docs/team/learn-notes-guide.pdf)(15쪽, 모드 개념부터 설치·기능·활용 팁까지)와 [소개 PPT](docs/team/learn-notes-intro.pptx)(22장, 발표 대본 포함)를 그대로 나눠 주세요.
+> **팀에 소개할 때**: [안내서 PDF](docs/team/learn-notes-guide.pdf)(모드 개념부터 설치·기능·활용 팁까지)와 [소개 PPT](docs/team/learn-notes-intro.pptx)(발표 대본 포함)를 나눠 주세요. 메신저에 붙여 넣을 소개 글은 [팀에 공유하기](#팀에-공유하기)에 있습니다.
 
 ## 빠른 시작
 
@@ -55,7 +57,8 @@ Claude Code **v2.1.287 이상**이 필요합니다 (`claude --version`).
 1. **모읍니다.** Claude가 `Edit`·`Write`, 또는 파일을 바꾸는 셸 명령(Bash, Windows에서는 PowerShell)을 쓸 때마다 바뀐 내용을 모읍니다. 턴이 도는 동안 패널 맨 위에 `● 작업 중: 파일 n개`가 보입니다.
 2. **노트를 씁니다.** 턴이 끝나면 저렴한 모델(기본 `haiku`)이 바뀐 코드와 내 요청, Claude의 마지막 설명을 읽고
    다섯 칸짜리 노트를 씁니다: **한 줄 요약 · 무엇이 바뀌었나 · 왜 이렇게 바꿨을까 · 배울 개념 · 직접 확인해 볼 것**.
-3. **패널에서 봅니다.** 노트, 바뀐 줄의 전/후, diff, 지금까지 배운 개념, 퀴즈를 오가며 봅니다. 지난 세션의 노트도 그대로 남아 있습니다.
+   "무엇이 바뀌었나"는 코드 설명 대신 **전**(하던 일) · **후**(이제 하는 일) · **예**(차이가 드러나는 입력과 결과) 세 줄로 씁니다.
+3. **패널에서 봅니다.** 노트, 바뀐 낱말까지 표시한 전/후, 지금까지 배운 개념, 퀴즈를 오가며 봅니다. 지난 세션의 노트도 그대로 남아 있습니다.
 4. **쌓습니다.** 노트는 날짜별 마크다운 일지(`~/.claude/learning-notes/`)에, 배운 개념은 프로젝트를 넘어 한 목록(`concepts.md`)에 쌓입니다.
 5. **복습합니다.** 개념마다 다음 복습 날짜가 있어, 때가 되면 내가 만든 코드로 문제를 냅니다. 답을 적으면 Claude가 채점합니다.
 
@@ -63,15 +66,25 @@ Claude Code **v2.1.287 이상**이 필요합니다 (`claude --version`).
 
 ### 보기 바꾸기
 
-패널 위쪽 줄에 보기 이름이 있습니다: **노트 · 전/후 · diff · 개념 모음 · 퀴즈**. 지금 보는 것은 굵게 밑줄이 쳐집니다.
+패널 위쪽 줄에 보기 이름이 있습니다: **노트 · 전/후 · 개념 모음 · 퀴즈**. 지금 보는 것은 굵게 밑줄이 쳐집니다.
 
-- `v`: 다음 보기로 (노트 → 전/후 → diff → 개념 모음 → 노트). 퀴즈에서는 노트로 돌아갑니다.
+- `v`: 다음 보기로 (노트 → 전/후 → 개념 모음 → 노트). 퀴즈에서는 노트로 돌아갑니다.
 - `q`: 어디서든 퀴즈로
 - 보기 이름을 클릭하면 바로 그 보기로 갑니다.
 - `p` · `n`: 이전 · 다음 노트 (지난 세션 노트까지)
 - `w`: 노트를 다시 씁니다. 다시 쓰다 실패하면 원래 노트는 그대로 둡니다.
 
-**전/후** 보기는 바뀐 곳마다 "− 전(원래 코드)"과 "+ 후(바뀐 코드)"를 파일의 줄 번호 그대로 보여 줍니다. **diff**는 익숙해지면 보는 원래 형식(+/− 줄)입니다.
+### 전/후: 무엇이 달라졌는지 한눈에
+
+노트의 **무엇이 바뀌었나**는 코드가 하던 일(`− 전`, 빨강)과 이제 하는 일(`+ 후`, 초록), 그 차이가 드러나는 예(`→ 예`)를 한 줄씩 보여 줍니다.
+
+**전/후** 보기는 맨 위에 그 세 줄을 다시 보여 주고, 바뀐 곳마다 원래 코드(전)와 바뀐 코드(후)를 파일의 줄 번호 그대로 놓습니다.
+
+- 바뀌지 않은 줄은 흐리게, 바뀐 줄은 앞에 `−`(전) · `+`(후)를 붙입니다.
+- 한 줄을 고친 것이면 **그 줄에서 바뀐 낱말만 굵은 색**으로 표시합니다. 예: `var n = 0` → `let n = 0`에서는 `var`와 `let`만.
+- 거의 새로 쓴 줄은 줄 전체를 색으로, 새로 만든 파일은 코드 그대로 보여 줍니다.
+
+맨 위 그림의 "전/후"가 이 보기입니다.
 
 ### 노트 아래에서 바로
 
@@ -79,10 +92,13 @@ Claude Code **v2.1.287 이상**이 필요합니다 (`claude --version`).
 
 - `t` **퀴즈**: 방금 읽은 노트의 개념만으로 문제를 받습니다.
 - `e` **더 쉽게**: 문장을 짧게, 용어를 일상어로, 개념마다 일상의 비유를 넣어 다시 씁니다. `w`로 원래 수준으로 돌아갑니다.
+- `r` **예시로 따라가기**: 예시 입력 하나로 바뀐 코드를 한 단계씩 따라갑니다. 단계마다 변수 값이 어떻게 바뀌는지, 바뀌기 전 코드였다면 어디서 결과가 갈리는지 짚어 줍니다.
 - `i` **질문하기**: 노트 아래 질문칸에 궁금한 것을 적고 Enter. 그 노트와 코드를 근거로 짧게 답하고, 답은 노트 아래에 남습니다.
   이어서 물으면 앞의 질문과 답을 읽고 답합니다. 대화창의 Claude에게 묻는 것과 달리 코드를 고치지 않고, 저렴한 모델이 답합니다.
 
-![노트 아래의 질문과 답](docs/images/pane-ask.png)
+| 예시로 따라가기 (`r`) | 노트에 질문 (`i`) |
+| --- | --- |
+| ![예시 하나로 코드를 한 단계씩 따라간 답](docs/images/pane-trace.png) | ![노트 아래의 질문과 답](docs/images/pane-ask.png) |
 
 ### 퀴즈 풀기
 
@@ -153,6 +169,67 @@ Claude Code **v2.1.287 이상**이 필요합니다 (`claude --version`).
 | `/learn clear` | 이 프로젝트의 노트 비우기(일지 파일과 개념 모음은 그대로) |
 | `/learn help` | 명령 목록 |
 
+## 팀에 공유하기
+
+팀 메신저에 그대로 붙여 넣을 수 있는 소개 글입니다.
+
+```text
+안녕하세요! 바이브코딩하면서 공부도 같이 되도록 Claude Code 모드를 하나 만들었어요. 이름은 learn-notes예요 📒
+
+🤔 모드(MOD)가 뭐예요?
+Claude Code에 기능을 덧붙이는 확장 프로그램이에요. 크롬 확장 프로그램처럼 한 번 설치하면 Claude Code 안에 새 명령과 패널이 생겨요.
+
+✨ learn-notes가 해 주는 것
+• Claude가 코드를 고치면, 턴이 끝날 때 "무엇이 왜 바뀌었고 무엇을 배울 수 있는지"를 학습 노트로 정리해 오른쪽 패널에 보여 줘요
+• 코드가 전에 하던 일과 이제 하는 일을 한 줄씩, 차이가 드러나는 예시와 함께 보여 줘요
+• 바뀌기 전/후 코드를 나란히 놓고, 바뀐 줄과 바뀐 낱말까지 색으로 표시해 줘요
+• 노트를 보다 모르는 게 있으면 노트 아래에서 바로 물어보고, 예시 하나로 코드를 한 단계씩 따라가 볼 수 있어요
+• 배운 개념은 프로젝트가 달라도 계속 쌓이고, 잊을 때쯤 "내가 만든 코드"로 복습 퀴즈를 내요. 답을 적으면 Claude가 채점해 줘요
+• 노트는 날짜별 일지(마크다운 파일)로도 저장돼서 나중에 다시 볼 수 있어요
+
+🛠 설치 (2분)
+Claude Code v2.1.287 이상이 필요해요 (claude --version 으로 확인)
+1) Claude Code 안에서 아래 두 줄 입력
+   /plugin marketplace add Owen-YC/learn-notes
+   /plugin install learn-notes@learn-notes
+2) Claude Code를 다시 켜고 /tui fullscreen (전체 화면이어야 패널이 오른쪽에 붙어요)
+3) /learn 으로 패널 열기 → 평소처럼 코딩을 요청하면 몇 초 뒤 노트가 떠요
+4) /learn help 에 명령 목록이 나오면 성공!
+
+💡 알아 두면 좋은 것
+• 패널 단축키는 ctrl+x 다음 tab으로 패널을 고른 뒤 눌러요 (마우스로 패널을 클릭해도 돼요)
+  v 보기 바꾸기 · r 예시로 따라가기 · i 질문하기 · q 퀴즈
+• Windows는 작업 폴더에서 켜 주세요: cd ~\practice 후 claude
+  (관리자 PowerShell의 기본 위치인 System32에서 켜면 파일이 임시 폴더에 생겨요)
+• 노트는 기본으로 가장 저렴한 haiku 모델이 써요. 설명 수준(초급/중급/고급)이나 자동 노트 끄기는 /config 의 learn-notes 항목에서 바꿀 수 있어요
+• 한글 명령도 돼요: /learn 퀴즈 · 개념 · 정리 · 질문 · 도움말
+
+📎 자세한 설명
+• 안내서 PDF (모드 개념부터 기능·활용 팁까지)
+  https://github.com/Owen-YC/learn-notes/blob/main/docs/team/learn-notes-guide.pdf
+• 소개 PPT (바로 내려받기)
+  https://github.com/Owen-YC/learn-notes/raw/main/docs/team/learn-notes-intro.pptx
+• 저장소·사용 데모 영상
+  https://github.com/Owen-YC/learn-notes
+
+써 보다가 막히거나 이상한 게 보이면 화면을 캡처해서 편하게 보내 주세요. 이런 기능 있으면 좋겠다는 의견도 환영이에요 🙌
+```
+
+짧게 다시 알릴 때:
+
+```text
+📒 learn-notes: Claude가 코드를 고칠 때마다 무엇이 어떻게 달라졌는지 학습 노트로 보여 주고, 내가 만든 코드로 복습 퀴즈까지 내 주는 Claude Code 모드예요.
+
+설치: Claude Code에서
+/plugin marketplace add Owen-YC/learn-notes
+/plugin install learn-notes@learn-notes
+→ 다시 켜고 /tui fullscreen → /learn
+
+안내서 PDF: https://github.com/Owen-YC/learn-notes/blob/main/docs/team/learn-notes-guide.pdf
+소개 PPT: https://github.com/Owen-YC/learn-notes/raw/main/docs/team/learn-notes-intro.pptx
+막히면 화면 캡처해서 보내 주세요!
+```
+
 ## 설정
 
 `/config`의 `learn-notes.…` 항목에서 바꿉니다. 터미널에서는 `claude plugin configure learn-notes@learn-notes`.
@@ -180,7 +257,7 @@ Claude Code **v2.1.287 이상**이 필요합니다 (`claude --version`).
 
 ## 비용과 개인정보
 
-- 파일을 바꾼 턴마다 모델 호출이 **한 번** 일어납니다(기본 haiku, 노트 하나에 바뀐 코드 최대 약 14,000자). 퀴즈 받기·답 채점·질문·더 쉽게·정리는 할 때마다 한 번씩입니다. `/learn stats`·`anki`·`concepts`는 모델을 부르지 않습니다.
+- 파일을 바꾼 턴마다 모델 호출이 **한 번** 일어납니다(기본 haiku, 노트 하나에 바뀐 코드 최대 약 14,000자). 퀴즈 받기·답 채점·질문·따라가기·더 쉽게·정리는 할 때마다 한 번씩입니다. `/learn stats`·`anki`·`concepts`는 모델을 부르지 않습니다.
 - 호출은 지금 쓰는 Claude Code 계정으로 나갑니다. 바뀐 코드와 요청 문장이 그 호출에 실리므로, 비밀값이 든 파일을 다룬다면 `autoNote`를 끄세요.
 - 노트·일지·개념 모음·학습 기록·퀴즈는 모두 내 컴퓨터에만 저장됩니다.
 
@@ -216,7 +293,7 @@ Claude Code **v2.1.287 이상**이 필요합니다 (`claude --version`).
 .claude-plugin/marketplace.json   이 저장소를 마켓플레이스로 쓰게 하는 목록
 hooks/hooks.json                  훅 모듈 위치
 hooks/register.tsx                훅: 변경 수집 · 노트 작성 · 패널 · /learn
-hooks/notes.ts                    순수 함수: diff 자르기·되읽기 · 전/후 · 프롬프트 · 일지 · 간격 반복 · Anki
+hooks/notes.ts                    순수 함수: diff 자르기·되읽기 · 전/후와 바뀐 낱말 · 프롬프트 · 일지 · 간격 반복 · Anki
 types/index.d.ts                  $.state 계약
 tests/*.test.ts                   claude plugin test로 도는 검사
 ```

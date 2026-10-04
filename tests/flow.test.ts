@@ -434,7 +434,7 @@ test('a large Write with no diff still shows, marked as having none', async ($, 
   expect(w.models[0]).toContain('### src/big.ts (수정, +0 −0, 파일이 커서 diff를 만들지 못함)')
   const ui = await pane($)
   await ui.press({ key: 'view' })
-  expect(await ui.find({ type: 'Text', text: /파일이 커서 diff를 만들지 못했습니다/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /파일이 커서 바뀐 곳을 만들지 못했습니다/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -475,7 +475,7 @@ test('no toast while the pane is on screen', async ($, on) => {
   expect(w.toasts).toHaveLength(0)
 })
 
-test('the pane walks note → before/after → diff', async ($, on) => {
+test('the pane walks note → before/after → concepts, the changed line marked and its changed word in bold', async ($, on) => {
   const w = world(on)
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
@@ -486,17 +486,23 @@ test('the pane walks note → before/after → diff', async ($, on) => {
     expect(await ui.find({ type: 'Markdown', text: /let을 const로/ })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'view', text: '전/후' })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'quiz', text: '퀴즈' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: 'diff' })).toBeUndefined()
 
     await ui.press({ key: 'view' })
+    expect(await ui.find({ type: 'Text', text: /바뀐 줄은 −·\+로, 그 줄에서 바뀐 낱말은 굵게/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /− 전 · 1~2행/ })).toBeDefined()
-    expect(await ui.find({ type: 'Code', text: 'const a = 1\nlet b = 2' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /\+ 후 · 1~2행/ })).toBeDefined()
-    expect(await ui.find({ type: 'Code', text: 'const a = 1\nconst b = 2' })).toBeDefined()
-
-    await ui.press({ key: 'view' })
-    const code = await ui.find({ type: 'Code' })
-    expect(code?.props.format).toBe('diff')
-    expect(code?.text).toContain('+const b = 2')
+    // The unchanged line is dim on both sides; the changed one is marked, only the word that changed in bold.
+    const same = await ui.findAll({ type: 'Text', text: 'const a = 1' })
+    expect(same.filter(one => one.props.dimColor === true)).toHaveLength(2)
+    expect(await ui.find({ type: 'Text', text: /^−$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^\+$/ })).toBeDefined()
+    const removed = await ui.find({ type: 'Text', text: /^let$/ })
+    expect(removed?.props).toMatchObject({ color: 'red', bold: true })
+    const added = await ui.find({ type: 'Text', text: /^const$/ })
+    expect(added?.props).toMatchObject({ color: 'green', bold: true })
+    expect(await ui.find({ type: 'Text', text: 'let b = 2' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'const b = 2' })).toBeDefined()
 
     await ui.press({ key: 'view' })
     expect(await ui.find({ type: 'Text', text: /아직 모인 개념이 없습니다/ })).toBeDefined()
@@ -511,8 +517,10 @@ test('the pane walks note → before/after → diff', async ($, on) => {
     await ui.press({ key: 'view' })
     expect(await ui.find({ type: 'Markdown', text: /let을 const로/ })).toBeDefined()
     // A click on a view's name goes straight there.
-    await ui.press({ key: 'view-diff' })
-    expect((await ui.find({ type: 'Code' }))?.props.format).toBe('diff')
+    await ui.press({ key: 'view-concepts' })
+    expect(await ui.find({ type: 'Text', text: /아직 모인 개념이 없습니다/ })).toBeDefined()
+    await ui.press({ key: 'view-split' })
+    expect(await ui.find({ type: 'Text', text: /− 전 · 1~2행/ })).toBeDefined()
     await ui.press({ key: 'view-note' })
     expect(await ui.find({ type: 'Markdown', text: /let을 const로/ })).toBeDefined()
     await ui.unmount()
@@ -757,8 +765,8 @@ test('concepts add up across notes, reach the model and the pane, and land in co
   const ui = await pane($)
   expect(await ui.find({ type: 'Text', text: /새로 배운 개념 복합 할당$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /다시 만난 개념 for\.\.\.of 반복문 ×2$/ })).toBeDefined()
-  for (let i = 0; i < 3; i += 1) await ui.press({ key: 'view' })
-  expect(await ui.find({ type: 'Text', text: /지금까지 배운 개념 3개/ })).toBeDefined()
+  for (let i = 0; i < 2; i += 1) await ui.press({ key: 'view' })
+  expect(await ui.find({ type: 'Text', text: /^배운 개념 3개 · 최근 7일 새로 \d · 다시 만남 \d$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /for\.\.\.of 반복문 ×2/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /요청:/ })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'prev' })).toBeUndefined()
@@ -841,7 +849,7 @@ test('a concept leads to the notes that taught it', async ($, on) => {
   await finish(w)
 
   const ui = await pane($)
-  for (let i = 0; i < 3; i += 1) await ui.press({ key: 'view' })
+  for (let i = 0; i < 2; i += 1) await ui.press({ key: 'view' })
   const links = await ui.findAll({ type: 'Button', text: /a\.ts|b\.ts/ })
   expect(links.map(link => link.text)).toEqual(['09:00 a.ts', '09:00 b.ts', '09:00 b.ts'].map(t => expect.stringContaining(t.slice(-4))))
   await ui.press({ key: links[0]!.key! })
@@ -916,8 +924,8 @@ test('concepts named like object built-ins are ordinary concepts', async ($, on)
   ])
   expect(w.files.get('/home/u/.claude/learning-notes/concepts.md')).toContain('| constructor | 1 |')
   const ui = await pane($)
-  for (let i = 0; i < 3; i += 1) await ui.press({ key: 'view' })
-  expect(await ui.find({ type: 'Text', text: /지금까지 배운 개념 3개/ })).toBeDefined()
+  for (let i = 0; i < 2; i += 1) await ui.press({ key: 'view' })
+  expect(await ui.find({ type: 'Text', text: /^배운 개념 3개 · 최근 7일 새로 \d · 다시 만남 \d$/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -963,8 +971,8 @@ test('a concept met once and not since comes back for review, and the reminder s
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
   const ui = await pane($)
-  for (let i = 0; i < 3; i += 1) await ui.press({ key: 'view' })
-  expect(await ui.find({ type: 'Text', text: /최근 7일 새 개념 1개 · 다시 만난 개념 0개/ })).toBeDefined()
+  for (let i = 0; i < 2; i += 1) await ui.press({ key: 'view' })
+  expect(await ui.find({ type: 'Text', text: /최근 7일 새로 1 · 다시 만남 0/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /복습할 개념 1개/ })).toBeDefined()
   // q goes to the quiz from here too, as the reminder says; v goes on to the note.
   expect(await ui.find({ type: 'Button', key: 'quiz', text: '퀴즈' })).toBeDefined()
@@ -1073,7 +1081,11 @@ test('/learn days and /learn day read the journal back as a contents list', asyn
 test('/learn help lists every subcommand, and an unknown one shows it', async ($, on) => {
   world(on)
   const help = await learn($, 'help')
-  for (const word of ['last', 'concepts', 'find', 'days', 'day', 'merge', 'save', 'clear']) expect(help.text).toContain(`/learn ${word}`)
+  for (const word of ['quiz', 'ask', 'recap', 'last', 'concepts', 'stats', 'find', 'day', 'days', 'anki', 'merge', 'save', 'clear']) expect(help.text).toContain(`/learn ${word}`)
+  // The panel's keys, the walk-through among them, and no diff view any more.
+  expect(help.text).toContain('`r` 예시로 따라가기')
+  expect(help.text).toContain('노트 → 전/후 → 개념 모음')
+  expect(help.text).not.toContain('diff')
   expect((await learn($, 'what')).text).toContain('모르는 하위 명령입니다')
 })
 
@@ -1663,7 +1675,7 @@ test('the day\'s notes and answers make the run of days, shown in the concepts v
   await ui.press({ key: 'write' })
   await w.clock.settle()
   expect((store.get('activity') as Record<string, unknown>)['2026-10-03']).toEqual({ notes: 1, right: 0, wrong: 0 })
-  for (let i = 0; i < 3; i += 1) await ui.press({ key: 'view' })
+  for (let i = 0; i < 2; i += 1) await ui.press({ key: 'view' })
   expect(await ui.find({ type: 'Text', text: '연속 1일째 · 최근 7일 노트 4개' })).toBeDefined()
   await ui.unmount()
   const stats = (await learn($, 'stats')).text
@@ -2341,4 +2353,119 @@ test('a note the journal could not take is written by the next /learn save (revi
   w.writeFails = false
   expect((await learn($, 'save')).text).toContain('노트 1개를 저장했습니다')
   expect(w.files.get(JOURNAL)).toContain('let을 const로')
+})
+
+const BEFORE_AFTER_NOTE = [
+  '### 한 줄 요약',
+  'let을 const로 바꿔 값이 다시 바뀌지 않게 했습니다.',
+  '### 무엇이 바뀌었나',
+  '- 전: `b`에 나중에 다른 값을 넣을 수 있었습니다.',
+  '- 후: `b`는 처음 값 그대로입니다.',
+  '- 예: `b = 3` → 전: 됨 / 후: 오류',
+  '### 배울 개념',
+  '- **const**: 다시 대입할 수 없는 변수 — `const b = 2`',
+].join('\n')
+
+test('a note says what the code did before and does now in the before/after colours, above the code too (1.5.0)', async ($, on) => {
+  const w = world(on)
+  w.answer = BEFORE_AFTER_NOTE
+  await turn($, () => $.tool.call(EDIT_A))
+  await finish(w)
+  const ui = await pane($)
+  expect(await ui.find({ type: 'Markdown', text: /let을 const로 바꿔/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '무엇이 바뀌었나' })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: '− 전 ' }))?.props.color).toBe('red')
+  expect((await ui.find({ type: 'Text', text: '+ 후 ' }))?.props.color).toBe('green')
+  expect((await ui.find({ type: 'Text', text: '→ 예 ' }))?.props.color).toBe('cyan')
+  expect(await ui.find({ type: 'Markdown', text: '`b`는 처음 값 그대로입니다.' })).toBeDefined()
+  // The rest of the note is as written, its concepts read as before.
+  expect(await ui.find({ type: 'Markdown', text: /### 배울 개념/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /새로 배운 개념 const/ })).toBeDefined()
+  // The same lines head the before/after view.
+  await ui.press({ key: 'view' })
+  expect(await ui.find({ type: 'Markdown', text: '`b = 3` → 전: 됨 / 후: 오류' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /− 전 · 1~2행/ })).toBeDefined()
+  await ui.press({ key: 'view' })
+  await ui.press({ key: 'view' })
+  await ui.unmount()
+})
+
+test('r follows the note\'s code on one example, kept under the note by its name (1.5.0)', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  await turn($, () => $.tool.call(EDIT_A), 't1', 'b를 상수로 바꿔줘')
+  await finish(w)
+  const ui = await pane($)
+  expect(await ui.find({ type: 'Button', key: 'trace', text: '예시로 따라가기' })).toBeDefined()
+  w.answer = '1. `const a = 1`: a는 1입니다.\n2. `const b = 2`: b는 2입니다.'
+  await ui.press({ key: 'trace' })
+  await w.clock.settle()
+  expect(w.models.at(-1)).toContain('구체적인 예시 입력 하나로 한 단계씩 따라가')
+  expect(w.models.at(-1)).toContain('+const b = 2')
+  expect(await ui.find({ type: 'Text', text: '▶ 예시로 따라가기' })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: /b는 2입니다/ })).toBeDefined()
+  // Nothing is left in the question field for r's walk-through.
+  expect((await ui.find({ type: 'Input' }))?.props.value).toBe('')
+  await ui.unmount()
+  const asks = (store.get('history') as Record<string, { notes: { asks?: { question: string }[] }[] }>)['/proj']!.notes[0]!.asks ?? []
+  expect(asks.map(one => one.question)).toEqual(['예시로 따라가기'])
+  expect(w.files.get(JOURNAL)).toContain('**물음**: 예시로 따라가기')
+
+  // A follow-up question reads the walk-through by its name.
+  const again = await pane($)
+  const key = String((await again.find({ type: 'Input' }))!.props.key)
+  await again.input({ key, text: '2단계를 더 자세히' })
+  await w.clock.settle()
+  expect(w.models.at(-1)).toContain('- 질문: 예시로 따라가기')
+  await again.unmount()
+})
+
+test('a new file shows as highlighted code on the after side, nothing before it (1.5.0)', async ($, on) => {
+  const w = world(on)
+  await turn($, () => $.tool.call({ tool: 'Write', tool_use_id: 'w1', file_path: '/proj/src/new.ts', content: 'export const x = 1\nexport const y = 2\n' }))
+  await finish(w)
+  const ui = await pane($)
+  await ui.press({ key: 'view' })
+  expect(await ui.find({ type: 'Text', text: /(없음: 새로 추가된 부분)/ })).toBeDefined()
+  const code = await ui.find({ type: 'Code' })
+  expect(code?.text).toBe('export const x = 1\nexport const y = 2')
+  expect(code?.props.startLine).toBe(1)
+  await ui.press({ key: 'view' })
+  await ui.press({ key: 'view' })
+  await ui.unmount()
+})
+
+
+test('r leaves the question field as it was, and does nothing while another answer is written (review)', async ($, on) => {
+  const w = world(on)
+  await turn($, () => $.tool.call(EDIT_A), 't1', 'b를 상수로 바꿔줘')
+  await finish(w)
+  const ui = await pane($)
+  const key = String((await ui.find({ type: 'Input' }))!.props.key)
+  // A question whose answer did not come back is put back in the field.
+  w.model = 'error'
+  await ui.input({ key, text: '왜 const야?' })
+  await w.clock.settle()
+  expect((await ui.find({ type: 'Input', key }))?.props.value).toBe('왜 const야?')
+  // r, failing or not, keeps it there.
+  await ui.press({ key: 'trace' })
+  await w.clock.settle()
+  expect((await ui.find({ type: 'Input', key }))?.props.value).toBe('왜 const야?')
+  w.model = 'ok'
+  w.answer = '1. a는 1입니다.'
+  await ui.press({ key: 'trace' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Text', text: '▶ 예시로 따라가기' })).toBeDefined()
+  expect((await ui.find({ type: 'Input', key }))?.props.value).toBe('왜 const야?')
+  // While a question is answered, r asks nothing more and leaves no walk-through in the field.
+  w.model = 'hold'
+  await ui.input({ key, text: '그럼 let은?' })
+  const calls = w.models.length
+  await ui.press({ key: 'trace' })
+  expect(w.models.length).toBe(calls)
+  expect(await ui.find({ type: 'Text', text: '답을 쓰는 중입니다…' })).toBeDefined()
+  w.release()
+  await w.clock.settle()
+  await ui.unmount()
 })

@@ -81,6 +81,10 @@ import {
   quizPrompt,
   regrade,
   isSameRequest,
+  changeSection,
+  sideBySide,
+  wordDiff,
+  PAIRS_WEIGHED,
   type Hunk,
 } from '../hooks/notes'
 
@@ -1133,5 +1137,163 @@ describe('1.4.0 second review', () => {
     expect(journalEntries(older + newer)).toHaveLength(1)
     expect(isSameRequest('같은 요청 앞부분…', '같은 요청 앞부분과 뒷부분')).toBe(true)
     expect(isSameRequest('다른 요청', '같은 요청')).toBe(false)
+  })
+})
+
+describe('1.5.0: what changed, at a glance', () => {
+  const text = (parts: readonly { text: string; isChanged: boolean }[]) => parts.map(p => (p.isChanged ? `[${p.text}]` : p.text)).join('')
+
+  test('two versions of a line are compared word by word, only the words that differ marked', () => {
+    const d = wordDiff('  var n = 0', '  let n = 0')!
+    expect(text(d.before)).toBe('  [var] n = 0')
+    expect(text(d.after)).toBe('  [let] n = 0')
+    // An added argument is one marked run, the spaces inside it included.
+    const call = wordDiff('function countPaid(orders) {', 'function countPaid(orders, minAmount = 0) {')!
+    expect(text(call.before)).toBe('function countPaid(orders) {')
+    expect(text(call.after)).toBe('function countPaid(orders[, minAmount = 0]) {')
+    // Korean words count as words.
+    expect(text(wordDiff('// 주문 수를 센다', '// 결제된 주문 수를 센다')!.after)).toBe("// [결제된] 주문 수를 센다")
+  })
+
+  test('lines too unlike are not one line edited', () => {
+    expect(wordDiff('if (orders[i].paid) n = n + 1', 'return total')).toBeUndefined()
+    expect(wordDiff('', 'x')).toBeUndefined()
+    expect(wordDiff('a '.repeat(400), 'a '.repeat(400) + 'b')).toBeUndefined()
+  })
+
+  test('a hunk splits into its two sides, numbered as in the file, each changed line paired with its new version', () => {
+    const [hunk] = parseDiff(
+      [
+        '@@ -3,6 +3,6 @@',
+        ' // 결제 완료된 주문 수를 센다',
+        '-function countPaid(orders) {',
+        '-  var n = 0',
+        '-  for (var i = 0; i < orders.length; i++) {',
+        '-    if (orders[i].paid) n = n + 1',
+        '+function countPaid(orders, minAmount = 0) {',
+        '+  let n = 0',
+        '+  for (const order of orders) {',
+        '+    if (order.paid && order.amount >= minAmount) n += 1',
+        '   }',
+      ].join('\n'),
+    )
+    const { before, after } = sideBySide(hunk!)
+    // The condition rewritten past recognition reads as one line out and another in.
+    expect(before.map(line => [line.n, line.kind])).toEqual([[3, 'same'], [4, 'edited'], [5, 'edited'], [6, 'edited'], [7, 'whole'], [8, 'same']])
+    expect(after.map(line => [line.n, line.kind])).toEqual([[3, 'same'], [4, 'edited'], [5, 'edited'], [6, 'edited'], [7, 'whole'], [8, 'same']])
+    expect(text(after[1]!.parts)).toBe('function countPaid(orders[, minAmount = 0]) {')
+    expect(text(before[2]!.parts)).toBe('  [var] n = 0')
+    expect(text(after[3]!.parts)).toBe('  for ([const order of] orders) {')
+  })
+
+  test('a line with no new version is changed whole, and an insertion has nothing before it', () => {
+    const [hunk] = parseDiff(['@@ -1,3 +1,4 @@', ' const a = 1', '-console.log(a)', '+export function total(items) {', '+  return items.length', '+}', ' const b = 2'].join('\n'))
+    const { before, after } = sideBySide(hunk!)
+    expect(before.map(line => line.kind)).toEqual(['same', 'whole', 'same'])
+    expect(after.map(line => line.kind)).toEqual(['same', 'whole', 'whole', 'whole', 'same'])
+    expect(after.map(line => line.n)).toEqual([1, 2, 3, 4, 5])
+    const [insert] = parseDiff(['@@ -2,0 +3,1 @@', '+// 새 줄'].join('\n'))
+    const sides = sideBySide(insert!)
+    expect(sides.before).toEqual([])
+    expect(sides.after).toEqual([{ n: 3, kind: 'whole', parts: [{ text: '// 새 줄', isChanged: true }] }])
+  })
+
+  test('the note asks for what the code does before and after, and an example', () => {
+    const prompt = notePrompt({ prompt: '요청', answer: '', changes: [], moreFiles: 0 }, 'beginner')
+    expect(prompt).toContain('- 전: 바뀌기 전 코드가 하던 일')
+    expect(prompt).toContain('- 후: 이제 하는 일')
+    expect(prompt).toContain('- 예: 차이가 드러나는 입력 하나와 결과')
+    expect(prompt).toContain('위의 예와 겹치지 않게')
+  })
+
+  test('a note\'s 무엇이 바뀌었나 reads as 전 / 후 / 예 lines, with the note around it kept', () => {
+    const note = [
+      '### 한 줄 요약',
+      '최소 금액 조건을 더했습니다.',
+      '',
+      '### 무엇이 바뀌었나',
+      '- **전**: 결제된 주문을 모두 셉니다.',
+      '- 후: 결제됐고 `minAmount` 이상인 주문만 셉니다.',
+      '- 예시: `countPaid(orders, 75)` → 전: 2 / 후: 1',
+      '',
+      '### 왜 이렇게 바꿨을까',
+      '요청이 그랬습니다.',
+    ].join('\n')
+    const section = changeSection(note)!
+    expect(section.head).toBe('### 한 줄 요약\n최소 금액 조건을 더했습니다.')
+    expect(section.items).toEqual([
+      { kind: 'before', text: '결제된 주문을 모두 셉니다.' },
+      { kind: 'after', text: '결제됐고 `minAmount` 이상인 주문만 셉니다.' },
+      { kind: 'example', text: '`countPaid(orders, 75)` → 전: 2 / 후: 1' },
+    ])
+    expect(section.tail).toBe('### 왜 이렇게 바꿨을까\n요청이 그랬습니다.')
+    // Several files: each name heads its own lines; other words stay as words.
+    const many = changeSection(['### 무엇이 바뀌었나', '**src/cart.js**', '- 전: 없음', '- 후: 합계를 구합니다', '`src/view.js`:', '- 전: 0을 보입니다', '- 후: 합계를 보입니다', '두 파일이 함께 바뀌었습니다.'].join('\n'))!
+    expect(many.items.map(item => item.kind)).toEqual(['file', 'before', 'after', 'file', 'before', 'after', 'text'])
+    expect(many.items[3]).toEqual({ kind: 'file', text: 'src/view.js' })
+    expect(many.tail).toBe('')
+  })
+
+  test('a note without 전 / 후 lines (written before 1.5.0) is left as written', () => {
+    expect(changeSection('### 한 줄 요약\n요약\n### 무엇이 바뀌었나\n- `src/a.ts`: `let b` → `const b`')).toBeUndefined()
+    expect(changeSection('### 한 줄 요약\n요약')).toBeUndefined()
+    // 전체 or 예를 들어 at the start of a sentence is not a label.
+    expect(changeSection('### 무엇이 바뀌었나\n전체 흐름은 같습니다.\n예를 들어 0을 넣으면 0입니다.')).toBeUndefined()
+  })
+})
+
+describe('1.5.0 review', () => {
+  const text = (parts: readonly { text: string; isChanged: boolean }[]) => parts.map(p => (p.isChanged ? `[${p.text}]` : p.text)).join('')
+
+  test('a label\'s words that start in bold keep their bold', () => {
+    const items = changeSection(['### 무엇이 바뀌었나', '- 후: **최소 금액** 이상인 주문만 셉니다', '- **예**: **75** → 전: 2 / 후: 1', '- **전:** 모두 셉니다'].join('\n'))!.items
+    expect(items).toEqual([
+      { kind: 'after', text: '**최소 금액** 이상인 주문만 셉니다' },
+      { kind: 'example', text: '**75** → 전: 2 / 후: 1' },
+      { kind: 'before', text: '모두 셉니다' },
+    ])
+  })
+
+  test('a section holding a code block shows as written, and a line indented under a label goes on with it', () => {
+    const fenced = ['### 무엇이 바뀌었나', '- 전: 없음', '- 예:', '```python', '# 평균', 'avg([1, 2])', '```', '### 왜 이렇게 바꿨을까', '이유'].join('\n')
+    expect(changeSection(fenced)).toBeUndefined()
+    const wrapped = changeSection(['### 무엇이 바뀌었나', '- 전: 결제된 주문을', '  모두 셉니다', '- 후: 금액 조건이 붙습니다', '###왜 이렇게 바꿨을까', '이유'].join('\n'))!
+    expect(wrapped.items).toEqual([
+      { kind: 'before', text: '결제된 주문을 모두 셉니다' },
+      { kind: 'after', text: '금액 조건이 붙습니다' },
+    ])
+    // A heading with no space after its marks still ends the section.
+    expect(wrapped.tail).toBe('###왜 이렇게 바꿨을까\n이유')
+  })
+
+  test('a sentence in bold is words, not a file name', () => {
+    const items = changeSection(['### 무엇이 바뀌었나', '**두 파일이 함께 바뀌었습니다**', '- 전: 0', '- 후: 1'].join('\n'))!.items
+    expect(items[0]).toEqual({ kind: 'text', text: '**두 파일이 함께 바뀌었습니다**' })
+  })
+
+  test('lines alike only in their brackets are not one line edited', () => {
+    expect(wordDiff('foo(a, b);', 'bar(c, d);')).toBeUndefined()
+    expect(wordDiff('})', '}')).toBeUndefined()
+    // The marks still count where the words make the pair.
+    expect(text(wordDiff('total(items)', 'total(items, 0.1)')!.after)).toBe('total(items[, 0.1])')
+  })
+
+  test('past the pairs it weighs, the nth removed line goes with the nth added one', () => {
+    const removed = Array.from({ length: 51 }, (_, i) => `-  const value${i} = old(${i})`)
+    const added = Array.from({ length: 50 }, (_, i) => `+  const value${i} = fresh(${i})`)
+    expect(removed.length * added.length).toBeGreaterThan(PAIRS_WEIGHED)
+    const [hunk] = parseDiff(['@@ -1,51 +1,50 @@', ...removed, ...added].join('\n'))
+    const { before, after } = sideBySide(hunk!)
+    expect(before.slice(0, 50).every(line => line.kind === 'edited')).toBe(true)
+    expect(before[50]!.kind).toBe('whole')
+    expect(text(after[4]!.parts)).toBe('  const value4 = [fresh](4)')
+  })
+
+  test('a pair that could be alike by its words but is not in order stays unpaired', () => {
+    // The same words in another order: alike as a bag, too unlike word by word.
+    const [hunk] = parseDiff(['@@ -1,1 +1,1 @@', '-alpha beta gamma delta epsilon', '+epsilon delta gamma beta alpha'].join('\n'))
+    const { before, after } = sideBySide(hunk!)
+    expect(before[0]!.kind).toBe('whole')
+    expect(after[0]!.kind).toBe('whole')
   })
 })

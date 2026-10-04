@@ -143,8 +143,8 @@ export type LearnQuizRun = {
   draft?: { at: number; i: number; text: string } | null
 }
 
-/** What the pane shows: the selected note three ways, every concept, or the quiz. */
-export type LearnView = 'note' | 'split' | 'diff' | 'concepts' | 'quiz'
+/** What the pane shows: the selected note or its code before and after, every concept, or the quiz. */
+export type LearnView = 'note' | 'split' | 'concepts' | 'quiz'
 
 /** A prompt as it entered, and whether its text is a request of its own (a person's, a schedule's) rather than a notification. */
 export type LearnSubmit = { text: string; isRequest: boolean }

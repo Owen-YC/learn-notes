@@ -30,8 +30,9 @@ import {
   statsOf,
   askPrompt,
   askSection,
-  beforeAfter,
   changeOf,
+  changeSection,
+  type ChangeItem,
   cleanConcepts,
   conceptAt,
   conceptKey,
@@ -92,6 +93,10 @@ import {
   rankConcepts,
   resolveKey,
   searchNotes,
+  sideBySide,
+  type ShownLine,
+  TRACE_LABEL,
+  TRACE_QUESTION,
   type RankedConcept,
   stamp,
   summaryOf,
@@ -157,11 +162,13 @@ function cleanAliases(raw: unknown): Record<string, string> {
 }
 type History = Record<string, HistoryEntry>
 
-// The friendly view first: the note, then before/after, then the raw diff, then every concept so far, then a quiz on them.
-const VIEWS: readonly LearnView[] = ['note', 'split', 'diff', 'concepts', 'quiz']
+// The note first, then its code before and after, then every concept so far, then a quiz on them.
+const VIEWS: readonly LearnView[] = ['note', 'split', 'concepts', 'quiz']
 // v goes round the reading views; the quiz is q's, and v goes back from it to the note.
-const VIEW_NEXT: Record<LearnView, LearnView> = { note: 'split', split: 'diff', diff: 'concepts', concepts: 'note', quiz: 'note' }
-const VIEW_LABEL: Record<LearnView, string> = { note: '노트', split: '전/후', diff: 'diff', concepts: '개념 모음', quiz: '퀴즈' }
+const VIEW_NEXT: Record<LearnView, LearnView> = { note: 'split', split: 'concepts', concepts: 'note', quiz: 'note' }
+const VIEW_LABEL: Record<LearnView, string> = { note: '노트', split: '전/후', concepts: '개념 모음', quiz: '퀴즈' }
+/** The view held in state as one of today's: 1.4.0's diff view is the before/after view now. */
+const viewOf = (raw: string): LearnView => ((VIEWS as readonly string[]).includes(raw) ? (raw as LearnView) : raw === 'diff' ? 'split' : 'note')
 /** Views about every note at once, not the selected one. */
 const isWhole = (mode: LearnView) => mode === 'concepts' || mode === 'quiz'
 
@@ -1093,12 +1100,17 @@ async function keepQuiz($: EngineInterface, next: Quiz): Promise<void> {
   }
 }
 
-/** Asks the model about a note and keeps the question and answer on it (and in the journal): the answer, or why there is none. */
+/**
+ * Asks the model about a note and keeps the question and answer on it (and in
+ * the journal): the answer, or why there is none. `label` is the words kept and
+ * shown for a question the model is asked in other words (r's walk-through).
+ */
 async function askNote(
   $: EngineInterface,
   cfg: Config,
   id: string,
   question: string,
+  label = question,
 ): Promise<{ answer: string; note: LearnNote; path: string | undefined } | { error: string }> {
   const note = (await read($, notes)).find(one => one.id === id)
   if (!note) return { error: '그 노트가 패널에 없습니다.' }
@@ -1107,18 +1119,23 @@ async function askNote(
   const answer = cut(asked.text, 4000)
   const now = await $.clock.now()
   const latest = (await read($, notes)).find(one => one.id === id) ?? note
-  await setNote($, id, { asks: [...(latest.asks ?? []), { question: cut(question, 1000), answer, at: now }].slice(-ASKS_KEPT) })
+  await setNote($, id, { asks: [...(latest.asks ?? []), { question: cut(label, 1000), answer, at: now }].slice(-ASKS_KEPT) })
   await persist($)
-  const path = cfg.isAutoSave ? await saveAsk($, cfg, note, question, answer, now) : undefined
+  const path = cfg.isAutoSave ? await saveAsk($, cfg, note, label, answer, now) : undefined
   return { answer, note, path }
 }
 
-/** Enter in a note's question field: the answer shows under the note, the pane saying so meanwhile. */
-async function askInPane($: EngineInterface, cfg: Config, id: string, text: string): Promise<void> {
+/**
+ * Enter in a note's question field, or r (its walk-through, `label` the words
+ * kept for it): the answer shows under the note, the pane saying so meanwhile.
+ */
+async function askInPane($: EngineInterface, cfg: Config, id: string, text: string, label?: string): Promise<void> {
   const question = text.trim()
   const set = (state: LearnAskRun) => update($, askRun, all => ({ ...all, [id]: state }))
+  // r leaves the field as it was: a question typed there, or one put back after a failure, stays.
+  const kept = label === undefined ? null : ((await read($, askRun))[id]?.draft ?? null)
   if (asking.has(id)) {
-    await set({ isAsking: true, error: null, draft: question })
+    if (label === undefined) await set({ isAsking: true, error: null, draft: question })
     return
   }
   if (question === '') {
@@ -1128,16 +1145,16 @@ async function askInPane($: EngineInterface, cfg: Config, id: string, text: stri
   asking.add(id)
   let error: string | null = null
   try {
-    await set({ isAsking: true, error: null, draft: null })
-    const asked = await askNote($, cfg, id, question)
+    await set({ isAsking: true, error: null, draft: kept })
+    const asked = await askNote($, cfg, id, question, label)
     if ('error' in asked) error = asked.error
   } catch (thrown) {
     $.ui.log(`learn-notes: 질문에 답하지 못했습니다 (${String(thrown)})`, { to: 'debug' })
     error = '답하지 못했습니다. 잠시 뒤 다시 해 보세요.'
   } finally {
     asking.delete(id)
-    // A question whose answer did not come back stays in the field to send again.
-    await set({ isAsking: false, error, draft: error !== null ? question : null })
+    // A question whose answer did not come back stays in the field to send again (r's is one key away).
+    await set({ isAsking: false, error, draft: label !== undefined ? kept : error !== null ? question : null })
   }
 }
 
@@ -1858,7 +1875,7 @@ export const register: Register = (on, options) => {
     const list = await read($, notes)
     const running = await read($, live)
     const wanted = await read($, selectedId)
-    const mode = await read($, view)
+    const mode = viewOf(await read($, view))
     const index = await read($, concepts)
     const map = await read($, aliases)
     const now = await $.clock.now()
@@ -1872,7 +1889,7 @@ export const register: Register = (on, options) => {
     const found = wanted === null ? -1 : list.findIndex(one => one.id === wanted)
     const at = found === -1 ? list.length - 1 : found
     const note = list[at]
-    // Before the first note, a note's own views (전/후, diff) show the note view's welcome.
+    // Before the first note, a note's own view (전/후) shows the note view's welcome.
     const shown: LearnView = note || isWhole(mode) ? mode : 'note'
 
     const liveBlock = running && running.changes.length > 0 ? liveView(running, isDock, cfg.isAutoNote, el) : null
@@ -1931,6 +1948,8 @@ export const register: Register = (on, options) => {
     const totalRemoved = note.changes.reduce((sum, c) => sum + c.removed, 0)
     const fileCount = note.changes.length + note.moreFiles
     const writeLabel = isBusy ? '쓰는 중…' : note.status === 'off' ? '노트 쓰기' : '다시 쓰기'
+    // Above the code, the note's own words on what the change does differently.
+    const summary = note.status === 'ready' ? changeSection(note.text) : undefined
 
     const body =
       shown === 'quiz' ? (
@@ -1945,8 +1964,16 @@ export const register: Register = (on, options) => {
         </Box>
       ) : (
         <Box flexDirection="column">
+          {summary && (
+            <Box flexDirection="column" marginBottom={1}>
+              {changeItems(summary.items, el)}
+            </Box>
+          )}
+          <Text dimColor wrap="wrap">
+            바뀐 줄은 −·+로, 그 줄에서 바뀐 낱말은 굵게 표시합니다
+          </Text>
           {note.changes.map(change => (
-            <Box key={`file-${change.path}`} flexDirection="column" marginBottom={1}>
+            <Box key={`file-${change.path}`} flexDirection="column" marginTop={1}>
               <Text bold wrap="truncate-start">
                 {change.file}
               </Text>
@@ -1954,16 +1981,14 @@ export const register: Register = (on, options) => {
                 {kindText(change.kind)} · +{change.added} −{change.removed}
                 {change.isCut && change.diff !== '' ? ' · 길어서 앞부분만' : ''}
               </Text>
-              {change.diff === '' ? (
-                <Text dimColor>(파일이 커서 diff를 만들지 못했습니다)</Text>
-              ) : shown === 'diff' ? (
-                diffView(change, el)
-              ) : (
-                splitView(change, el)
-              )}
+              {change.diff === '' ? <Text dimColor>(파일이 커서 바뀐 곳을 만들지 못했습니다)</Text> : splitView(change, el)}
             </Box>
           ))}
-          {note.moreFiles > 0 && <Text dimColor>그 밖에 파일 {note.moreFiles}개 (너무 많아 생략)</Text>}
+          {note.moreFiles > 0 && (
+            <Box marginTop={1}>
+              <Text dimColor>그 밖에 파일 {note.moreFiles}개 (너무 많아 생략)</Text>
+            </Box>
+          )}
         </Box>
       )
 
@@ -2014,7 +2039,7 @@ export const register: Register = (on, options) => {
 
 /**
  * The views in one row, the one shown in bold: v goes on through the note's
- * views (노트 → 전/후 → diff → 개념 모음 → 노트), q to the quiz from anywhere,
+ * views (노트 → 전/후 → 개념 모음 → 노트), q to the quiz from anywhere,
  * and a click to any of them. Before the first note: 노트 · 개념 모음 · 퀴즈.
  */
 function viewStrip($: EngineInterface, mode: LearnView, hasNote: boolean, el: ElementTable) {
@@ -2052,8 +2077,9 @@ function viewStrip($: EngineInterface, mode: LearnView, hasNote: boolean, el: El
 
 /**
  * Under a written note, what to do with it: a quiz on its concepts (t), the
- * note again in plainer words (e), and a question about it (i, the field
- * below), with the latest questions and their answers.
+ * note again in plainer words (e), its code followed step by step on one
+ * example (r), and a question about it (i, the field below), with the latest
+ * questions and their answers.
  */
 function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boolean, ask: LearnAskRun, el: ElementTable) {
   const { Box, Text, Button, Markdown } = el
@@ -2077,6 +2103,7 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boo
           />
         )}
         <Button key="easier" hotkey="e" plain dimColor={isBusy} label="더 쉽게" onPress={() => void writeNote($, cfg, note.id, note.savedAs !== null, true)} />
+        <Button key="trace" hotkey="r" plain dimColor={ask.isAsking} label={TRACE_LABEL} onPress={() => void askInPane($, cfg, note.id, TRACE_QUESTION, TRACE_LABEL)} />
         {Input && (
           <Button key="ask-type" hotkey="i" plain label="질문하기" onPress={() => void $.ui.focus({ requestId: PANE, key: fieldKey }).catch(() => undefined)} />
         )}
@@ -2084,7 +2111,7 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boo
       {(note.asks ?? []).slice(-2).map((one, i) => (
         <Box key={`asked-${i}`} flexDirection="column" marginTop={1}>
           <Text color="cyan" wrap="wrap">
-            질문 · {one.question}
+            {one.question === TRACE_LABEL ? `▶ ${TRACE_LABEL}` : `질문 · ${one.question}`}
           </Text>
           <Markdown text={one.answer} />
         </Box>
@@ -2139,18 +2166,70 @@ function liveView(running: LearnLive, isDock: boolean, isAutoNote: boolean, el: 
   )
 }
 
+/**
+ * A note as written, its "무엇이 바뀌었나" drawn as 전 / 후 / 예 lines in the
+ * before/after view's colours when the note has them in that shape.
+ */
 function noteBody(note: LearnNote, isBusy: boolean, el: ElementTable) {
-  const { Text, Markdown } = el
-  if (note.status === 'ready') return <Markdown text={note.text} />
+  const { Box, Text, Markdown } = el
+  if (note.status === 'ready') {
+    const section = changeSection(note.text)
+    if (!section) return <Markdown text={note.text} />
+    return (
+      <Box flexDirection="column">
+        {section.head !== '' && <Markdown text={section.head} />}
+        <Box flexDirection="column" marginTop={section.head !== '' ? 1 : 0}>
+          <Text bold>무엇이 바뀌었나</Text>
+          {changeItems(section.items, el)}
+        </Box>
+        {section.tail !== '' && (
+          <Box marginTop={1}>
+            <Markdown text={section.tail} />
+          </Box>
+        )}
+      </Box>
+    )
+  }
   if (note.status === 'writing' && isBusy) return <Text color="cyan">노트를 쓰는 중입니다…</Text>
   if (note.status === 'writing') return <Text color="yellow">노트를 쓰다 멈췄습니다 · w로 다시 쓰기</Text>
   if (note.status === 'failed') return <Text color="red">노트를 쓰지 못했습니다: {note.text}</Text>
   return <Text dimColor>자동 노트가 꺼져 있습니다. w로 노트를 쓰거나 v로 전후 코드를 보세요.</Text>
 }
 
-function diffView(change: LearnChange, el: ElementTable) {
-  const { Code } = el
-  return <Code source={change.diff} format="diff" path={change.path} />
+const ITEM_MARK: Record<ChangeItem['kind'], { mark: string; color?: string }> = {
+  before: { mark: '− 전', color: 'red' },
+  after: { mark: '+ 후', color: 'green' },
+  example: { mark: '→ 예', color: 'cyan' },
+  file: { mark: '' },
+  text: { mark: '' },
+}
+
+/** A note's 전 / 후 / 예 lines, each label in the before/after view's colour, a file name over the lines about it. */
+function changeItems(items: readonly ChangeItem[], el: ElementTable) {
+  const { Box, Text, Markdown } = el
+  return items.map((item, i) => {
+    if (item.kind === 'file') {
+      return (
+        <Box key={`item-${i}`} marginTop={i > 0 ? 1 : 0}>
+          <Text bold wrap="truncate-start">
+            {item.text}
+          </Text>
+        </Box>
+      )
+    }
+    if (item.kind === 'text') return <Markdown key={`item-${i}`} text={item.text} />
+    const { mark, color } = ITEM_MARK[item.kind]
+    return (
+      <Box key={`item-${i}`} flexDirection="row">
+        <Box flexShrink={0}>
+          <Text color={color}>{mark} </Text>
+        </Box>
+        <Box flexGrow={1} flexShrink={1}>
+          <Markdown text={item.text} />
+        </Box>
+      </Box>
+    )
+  })
 }
 
 function lineRange(start: number, count: number): string {
@@ -2158,36 +2237,89 @@ function lineRange(start: number, count: number): string {
   return count === 1 ? `${start}행` : `${start}~${start + count - 1}행`
 }
 
-/** Each changed spot as "전" then "후": the changed lines and one line around them, numbered as in the file. */
+type Spot = { hunk: Hunk } & ReturnType<typeof sideBySide>
+
+/** A change's spots as the before/after view draws them, by diff text: worked out once, not on every redraw. */
+const spotsByDiff = new Map<string, Spot[]>()
+const SPOTS_KEPT = 64
+
+function spotsOf(diff: string): Spot[] {
+  const known = spotsByDiff.get(diff)
+  if (known) return known
+  const spots = parseDiff(diff).map(whole => {
+    const hunk = focus(whole, 1)
+    return { hunk, ...sideBySide(hunk) }
+  })
+  if (spotsByDiff.size >= SPOTS_KEPT) spotsByDiff.delete(spotsByDiff.keys().next().value!)
+  spotsByDiff.set(diff, spots)
+  return spots
+}
+
+/** Each changed spot as "전" then "후", with one line around it, numbered as in the file. */
 function splitView(change: LearnChange, el: ElementTable) {
-  const { Box, Text, Code } = el
-  const hunks = parseDiff(change.diff)
-  const shown = hunks.slice(0, 4)
+  const { Box, Text } = el
+  const spots = spotsOf(change.diff)
+  const last = Math.max(0, ...spots.flatMap(({ before, after }) => [...before, ...after].map(line => line.n)))
+  const width = String(last).length
   return (
     <Box flexDirection="column">
-      {shown.map((whole, i) => {
-        const hunk = focus(whole, 1)
-        const { before, after } = beforeAfter(hunk)
-        return (
-          <Box key={`hunk-${i}`} flexDirection="column" marginBottom={i < shown.length - 1 ? 1 : 0}>
-            <Text color="red">− 전 · {lineRange(hunk.oldStart, hunk.oldLines)}</Text>
-            {before === '' ? (
-              <Text dimColor>  (없음: 새로 추가된 부분)</Text>
-            ) : (
-              <Code source={before} path={change.path} startLine={hunk.oldStart} />
-            )}
-            <Text color="green">+ 후 · {lineRange(hunk.newStart, hunk.newLines)}</Text>
-            {after === '' ? (
-              <Text dimColor>  (없음: 지워진 부분)</Text>
-            ) : (
-              <Code source={after} path={change.path} startLine={hunk.newStart} />
-            )}
-          </Box>
-        )
-      })}
-      {hunks.length > shown.length && <Text dimColor>바뀐 곳 {hunks.length - shown.length}군데 더 · diff 보기에서</Text>}
+      {spots.map(({ hunk, before, after }, i) => (
+        <Box key={`hunk-${i}`} flexDirection="column" marginTop={i > 0 ? 1 : 0}>
+          <Text color="red">− 전 · {lineRange(hunk.oldStart, hunk.oldLines)}</Text>
+          {before.length === 0 ? <Text dimColor>  (없음: 새로 추가된 부분)</Text> : sideLines(change, before, 'red', width, el)}
+          <Text color="green">+ 후 · {lineRange(hunk.newStart, hunk.newLines)}</Text>
+          {after.length === 0 ? <Text dimColor>  (없음: 지워진 부분)</Text> : sideLines(change, after, 'green', width, el)}
+        </Box>
+      ))}
     </Box>
   )
+}
+
+/** Code shown as text: a tab as two spaces, so the columns hold. */
+const shownText = (text: string) => text.replace(/\t/g, '  ')
+
+/**
+ * One side of a changed spot. All of it new or all of it gone (a file made or
+ * deleted) is plain highlighted code; otherwise line by line, the unchanged
+ * lines dim, a changed one marked − or + and the words that differ in bold.
+ */
+function sideLines(change: LearnChange, lines: readonly ShownLine[], color: 'red' | 'green', width: number, el: ElementTable) {
+  const { Box, Text, Code } = el
+  if (lines.every(line => line.kind === 'whole')) {
+    return <Code source={lines.map(line => line.parts.map(part => part.text).join('')).join('\n')} path={change.path} startLine={lines[0]!.n} />
+  }
+  return lines.map((line, k) => (
+    <Box key={`${color === 'red' ? 'before' : 'after'}-${k}`} flexDirection="row">
+      <Box flexShrink={0}>
+        <Text dimColor>{String(line.n).padStart(width)} </Text>
+        {line.kind === 'same' ? <Text> </Text> : <Text color={color}>{color === 'red' ? '−' : '+'}</Text>}
+        <Text> </Text>
+      </Box>
+      <Box flexGrow={1} flexShrink={1}>
+        {line.kind === 'same' ? (
+          <Text dimColor wrap="wrap">
+            {shownText(line.parts.map(part => part.text).join(''))}
+          </Text>
+        ) : line.kind === 'whole' ? (
+          <Text color={color} wrap="wrap">
+            {shownText(line.parts.map(part => part.text).join(''))}
+          </Text>
+        ) : (
+          <Text wrap="wrap">
+            {line.parts.map((part, p) =>
+              part.isChanged ? (
+                <Text key={`part-${p}`} color={color} bold>
+                  {shownText(part.text)}
+                </Text>
+              ) : (
+                shownText(part.text)
+              ),
+            )}
+          </Text>
+        )}
+      </Box>
+    </Box>
+  ))
 }
 
 /**
@@ -2298,8 +2430,12 @@ function conceptsView(
   }
   return (
     <Box flexDirection="column">
-      <Text bold>
-        지금까지 배운 개념 {ranked.length}개 <Text dimColor>· 최근 7일 새 개념 {fresh}개 · 다시 만난 개념 {again}개</Text>
+      <Text wrap="wrap">
+        <Text bold>배운 개념 {ranked.length}개</Text>
+        <Text dimColor>
+          {' '}
+          · 최근 7일 새로 {fresh} · 다시 만남 {again}
+        </Text>
       </Text>
       <Text color="cyan" wrap="wrap">
         {progress}
@@ -2319,7 +2455,7 @@ function conceptsView(
         </Box>
       )}
       <Box marginTop={1}>
-        <Text dimColor>여러 번 만난 순</Text>
+        <Text dimColor>모든 개념 · 여러 번 만난 순</Text>
       </Box>
       {shown.map(row)}
       {ranked.length > shown.length && <Text dimColor>{moreConceptsText(ranked.length - shown.length, isAutoSave)}</Text>}
@@ -2497,29 +2633,22 @@ function taughtBy(list: readonly LearnNote[], map: Readonly<Record<string, strin
 const HELP = [
   'learn-notes 명령',
   '',
-  '**패널** (단축키는 ctrl+x tab으로 패널을 고른 뒤 누릅니다)',
-  '- `/learn`: 학습 노트 패널 열기',
-  '- 노트: `p`·`n` 이전·다음 · `v` 보기 바꾸기(노트 → 전/후 → diff → 개념 모음) · `w` 다시 쓰기 · `t` 이 노트 퀴즈 · `e` 더 쉽게 · `i` 질문하기',
-  '- 퀴즈(`q`): `s` 문제 받기 · `i` 답 적기(Enter로 Claude가 채점) · `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기',
-  '',
-  '**복습**',
-  '- `/learn quiz`: 복습할 개념으로 문제 받기 (내가 만든 코드로 묻습니다)',
-  '- `/learn quiz 1 내 답`: 답을 적어 Claude에게 채점받기 · `/learn quiz 문제` · `/learn quiz 힌트` · `/learn quiz 정답`',
-  '- `/learn quiz 맞음 1` · `/learn quiz 틀림 2`: 정답을 본 뒤 스스로 채점 (이미 채점한 것도 바꿉니다)',
-  '- `/learn concepts`: 지금까지 배운 개념과 다음 복습 날짜',
-  '- `/learn recap`: 오늘 배운 것 정리 (어제 · 이번주 · 최근 7일 · 2026-10-03도 됩니다)',
-  '- `/learn stats`: 연속 학습일 · 최근 7일 · 30일 정답률',
-  '- `/learn anki`: 퀴즈 문제와 개념을 Anki 카드 파일로',
-  '',
-  '**노트**',
-  '- `/learn last`: 마지막 노트를 여기에',
+  '**자주 쓰는 것**',
+  '- `/learn`: 학습 노트 패널 열기 (단축키는 ctrl+x tab으로 패널을 고른 뒤 누릅니다)',
+  '- `/learn quiz`: 복습할 개념으로 퀴즈 받기 (내가 만든 코드로 묻습니다) · `/learn quiz 1 내 답`: Claude에게 채점받기',
   '- `/learn ask 질문`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기',
-  '- `/learn find 말`: 모든 프로젝트의 노트에서 찾기',
-  '- `/learn day`: 오늘 노트 목차 (`어제` · `2026-10-03` · `/learn days`로 일지가 있는 날짜)',
+  '- `/learn recap`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
   '',
-  '**관리**',
-  '- `/learn merge 합칠 개념 = 남길 개념`: 이름만 다른 같은 개념 합치기 (거꾸로 하면 되돌립니다)',
-  '- `/learn save`: 아직 파일에 없는 노트 저장 · `/learn clear`: 이 프로젝트의 노트 비우기',
+  '**패널 키**',
+  '- 노트: `p`·`n` 이전·다음 · `v` 보기 바꾸기(노트 → 전/후 → 개념 모음) · `w` 다시 쓰기',
+  '- 노트 아래: `t` 이 노트 퀴즈 · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기',
+  '- 퀴즈(`q`): `s` 문제 받기 · `i` 답 적기(Enter로 채점) · `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기',
+  '',
+  '**더 있는 것**',
+  '- 퀴즈: `/learn quiz 문제` 지금 문제 · `힌트` · `정답` · `맞음 1` · `틀림 2` 스스로 채점',
+  '- 기록: `/learn concepts` 배운 개념과 복습 날짜 · `/learn stats` 연속 학습일과 정답률 · `/learn find 말` 노트 찾기',
+  '- 일지: `/learn day` 오늘 노트 목차 (`어제` · `2026-10-03`도 됩니다) · `/learn days` 일지가 있는 날짜',
+  '- 관리: `/learn last` 마지막 노트 · `/learn anki` Anki 카드 · `/learn merge 합칠 개념 = 남길 개념` · `/learn save` · `/learn clear`',
   '',
   '한글로도 됩니다: `/learn 퀴즈` · `개념` · `정리` · `기록` · `질문` · `찾기` · `일지` · `도움말`',
 ].join('\n')

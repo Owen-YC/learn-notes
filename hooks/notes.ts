@@ -221,6 +221,275 @@ export function beforeAfter(h: Hunk): { before: string; after: string } {
   return { before: before.join('\n'), after: after.join('\n') }
 }
 
+/** A line of the before/after view: unchanged, changed against a line on the other side, or changed whole. */
+export type ShownLine = {
+  /** Its number in the file on its side. */
+  n: number
+  /** `same`: a context line · `edited`: paired with a line on the other side, `parts` marking the words that differ · `whole`: no counterpart. */
+  kind: 'same' | 'edited' | 'whole'
+  parts: { text: string; isChanged: boolean }[]
+}
+
+type Parts = ShownLine['parts']
+
+/**
+ * A line cut for comparison: its tokens (words, runs of space, single marks),
+ * which are words or space, the length of all but the space, and how many
+ * times each token other than space comes up.
+ */
+type Tokens = { list: string[]; isWord: boolean[]; isSpace: boolean[]; size: number; bag: Map<string, number> }
+
+function tokensOf(line: string): Tokens {
+  const list = line.match(/\s+|[\p{L}\p{N}_$]+|[^\s\p{L}\p{N}_$]/gu) ?? []
+  const isSpace = list.map(t => /^\s/.test(t))
+  const isWord = list.map(t => /^[\p{L}\p{N}_$]/u.test(t))
+  const bag = new Map<string, number>()
+  list.forEach((t, i) => {
+    if (!isSpace[i]) bag.set(t, (bag.get(t) ?? 0) + 1)
+  })
+  return { list, isWord, isSpace, size: list.reduce((sum, t, i) => sum + (isSpace[i] ? 0 : t.length), 0), bag }
+}
+
+/**
+ * How alike two lines could be at most, their tokens taken in any order: what
+ * a word-by-word comparison finds is never more, so below EDITED_AT, or with no
+ * word in common, the pair is no line edited. Cheap, for weighing every pair.
+ */
+function likenessAtMost(a: Tokens, b: Tokens): number {
+  const total = a.size + b.size
+  if (total === 0) return 0
+  const [small, large] = a.bag.size <= b.bag.size ? [a.bag, b.bag] : [b.bag, a.bag]
+  let shared = 0
+  let isWordShared = false
+  for (const [token, count] of small) {
+    const other = large.get(token)
+    if (other === undefined) continue
+    shared += Math.min(count, other) * token.length
+    if (/^[\p{L}\p{N}_$]/u.test(token)) isWordShared = true
+  }
+  return isWordShared ? (2 * shared) / total : 0
+}
+
+/** Tokens a line may hold for a word-by-word comparison; past it the line counts as changed whole. */
+const WORD_DIFF_TOKENS = 300
+
+/** Lines this alike or more read as one line edited (its words marked); less alike, as one removed and another added. */
+const EDITED_AT = 0.4
+
+/** For each token of `a` and of `b`, whether it is in their longest common run (spaces never match). */
+function commonTokens(a: Tokens, b: Tokens): { inA: boolean[]; inB: boolean[] } {
+  const cols = b.list.length + 1
+  const table = new Uint16Array((a.list.length + 1) * cols)
+  const at = (i: number, j: number) => table[i * cols + j] ?? 0
+  const same = (i: number, j: number) => !a.isSpace[i] && a.list[i] === b.list[j]
+  for (let i = a.list.length - 1; i >= 0; i--) {
+    for (let j = b.list.length - 1; j >= 0; j--) {
+      table[i * cols + j] = same(i, j) ? at(i + 1, j + 1) + 1 : Math.max(at(i + 1, j), at(i, j + 1))
+    }
+  }
+  const inA = a.list.map(() => false)
+  const inB = b.list.map(() => false)
+  let i = 0
+  let j = 0
+  while (i < a.list.length && j < b.list.length) {
+    if (same(i, j)) {
+      inA[i++] = true
+      inB[j++] = true
+    } else if (at(i + 1, j) >= at(i, j + 1)) i++
+    else j++
+  }
+  return { inA, inB }
+}
+
+/** A line's tokens as parts, neighbours of one kind joined; a space between two changed tokens counts as changed. */
+function partsOf(t: Tokens, isKept: readonly boolean[]): Parts {
+  const prev: number[] = []
+  let last = -1
+  t.list.forEach((_, i) => {
+    prev.push(last)
+    if (!t.isSpace[i]) last = i
+  })
+  const next: number[] = new Array<number>(t.list.length).fill(-1)
+  last = -1
+  for (let i = t.list.length - 1; i >= 0; i--) {
+    next[i] = last
+    if (!t.isSpace[i]) last = i
+  }
+  const parts: Parts = []
+  t.list.forEach((text, i) => {
+    const isChanged = !t.isSpace[i] ? !isKept[i] : prev[i]! !== -1 && next[i]! !== -1 && !isKept[prev[i]!] && !isKept[next[i]!]
+    const tail = parts.at(-1)
+    if (tail && tail.isChanged === isChanged) tail.text += text
+    else parts.push({ text, isChanged })
+  })
+  return parts
+}
+
+type WordDiff = { before: Parts; after: Parts; likeness: number }
+
+/**
+ * Two lines compared word by word: how alike they are (twice the length of the
+ * tokens they share over all of theirs, spaces aside) and each side's tokens
+ * marked. Undefined when too unlike, too long, or sharing no word at all (other
+ * names in the same brackets are another line, not this one edited).
+ */
+function compare(a: Tokens, b: Tokens): WordDiff | undefined {
+  if (a.list.length > WORD_DIFF_TOKENS || b.list.length > WORD_DIFF_TOKENS) return undefined
+  const total = a.size + b.size
+  // Even at best too unlike: no table to fill.
+  if (likenessAtMost(a, b) < EDITED_AT) return undefined
+  const { inA, inB } = commonTokens(a, b)
+  if (!a.isWord.some((isWord, i) => isWord && inA[i])) return undefined
+  const likeness = (2 * a.list.reduce((sum, t, i) => sum + (inA[i] ? t.length : 0), 0)) / total
+  if (likeness < EDITED_AT) return undefined
+  return { before: partsOf(a, inA), after: partsOf(b, inB), likeness }
+}
+
+/** Two lines compared word by word; undefined when they are too unlike (or too long) to read as one line edited. */
+export function wordDiff(before: string, after: string): { before: Parts; after: Parts } | undefined {
+  const d = compare(tokensOf(before), tokensOf(after))
+  return d && { before: d.before, after: d.after }
+}
+
+/** Pairs to weigh at most when matching one change's removed lines to its added ones; past it the nth goes with the nth. */
+export const PAIRS_WEIGHED = 2500
+
+/**
+ * One change's removed lines matched in order to its added ones (removed index
+ * → added index and their word diff): every pair weighed by how alike it could
+ * be, the pairing in order with the most of that chosen, and only the chosen
+ * pairs compared word by word (one that turns out too unlike stays unpaired).
+ */
+function pairLines(removed: readonly string[], added: readonly string[]): Map<number, { j: number; diff: WordDiff }> {
+  const pairs = new Map<number, { j: number; diff: WordDiff }>()
+  const olds = removed.map(tokensOf)
+  const news = added.map(tokensOf)
+  const chosen: [number, number][] = []
+  if (olds.length * news.length > PAIRS_WEIGHED) {
+    for (let i = 0; i < Math.min(olds.length, news.length); i++) chosen.push([i, i])
+  } else {
+    const weight = olds.map(one => news.map(other => {
+      const most = likenessAtMost(one, other)
+      return most < EDITED_AT ? 0 : most
+    }))
+    const cols = news.length + 1
+    const best = new Float64Array((olds.length + 1) * cols)
+    const at = (i: number, j: number) => best[i * cols + j] ?? 0
+    for (let i = olds.length - 1; i >= 0; i--) {
+      for (let j = news.length - 1; j >= 0; j--) {
+        const w = weight[i]![j]!
+        best[i * cols + j] = Math.max(at(i + 1, j), at(i, j + 1), w > 0 ? at(i + 1, j + 1) + w : 0)
+      }
+    }
+    let i = 0
+    let j = 0
+    while (i < olds.length && j < news.length) {
+      const w = weight[i]![j]!
+      if (w > 0 && at(i, j) === at(i + 1, j + 1) + w) chosen.push([i++, j++])
+      else if (at(i + 1, j) >= at(i, j + 1)) i++
+      else j++
+    }
+  }
+  for (const [i, j] of chosen) {
+    const diff = compare(olds[i]!, news[j]!)
+    if (diff) pairs.set(i, { j, diff })
+  }
+  return pairs
+}
+
+/**
+ * A hunk as the before/after view draws it: each side's lines numbered as in
+ * the file; a changed line that has a new version on the other side is marked
+ * down to the words that differ, one without is marked whole.
+ */
+export function sideBySide(h: Hunk): { before: ShownLine[]; after: ShownLine[] } {
+  const before: ShownLine[] = []
+  const after: ShownLine[] = []
+  let oldN = h.oldStart
+  let newN = h.newStart
+  const lines = h.lines.filter(line => !line.startsWith('\\'))
+  const isChange = (line: string) => line.startsWith('-') || line.startsWith('+')
+  let at = 0
+  while (at < lines.length) {
+    if (!isChange(lines[at]!)) {
+      const parts = [{ text: lines[at]!.slice(1), isChanged: false }]
+      before.push({ n: oldN++, kind: 'same', parts })
+      after.push({ n: newN++, kind: 'same', parts })
+      at++
+      continue
+    }
+    // One change: its removed and added lines, up to the next unchanged line.
+    const removed: string[] = []
+    const added: string[] = []
+    for (; at < lines.length && isChange(lines[at]!); at++) {
+      const line = lines[at]!
+      ;(line.startsWith('-') ? removed : added).push(line.slice(1))
+    }
+    const pairs = pairLines(removed, added)
+    const partner = new Map([...pairs.values()].map(pair => [pair.j, pair.diff.after]))
+    removed.forEach((text, i) => {
+      const pair = pairs.get(i)
+      before.push({ n: oldN++, kind: pair ? 'edited' : 'whole', parts: pair ? pair.diff.before : [{ text, isChanged: true }] })
+    })
+    added.forEach((text, j) => {
+      const parts = partner.get(j)
+      after.push({ n: newN++, kind: parts ? 'edited' : 'whole', parts: parts ?? [{ text, isChanged: true }] })
+    })
+  }
+  return { before, after }
+}
+
+/** One line of a note's "무엇이 바뀌었나": what the code did before, what it does now, an example, a file the next lines are about, or other words. */
+export type ChangeItem = { kind: 'before' | 'after' | 'example' | 'file' | 'text'; text: string }
+
+const CHANGE_HEADING = /^#{1,4}\s*무엇이 (?:바뀌었나|달라졌나)/
+/** The next heading after the section, `###왜` (no space) included. */
+const ANY_HEADING = /^#{1,4}\s*[^\s#]/
+const FENCE = /^(`{3,}|~{3,})/
+/** 전·후·예 with the colon inside the bold (`**전:** …`), then outside or without it (`**전**: …`, `전: …`); 예시 for 예. */
+const LABEL_IN_BOLD = /^\*\*(전|후|예)시?\s*[:：]\s*\*\*\s*(.*)$/
+const LABEL = /^(?:\*\*)?(전|후|예)시?(?:\*\*)?\s*[:：]\s*(.*)$/
+/** A file the next lines are about: a name or path alone in bold or backticks. */
+const FILE_LINE = /^(?:\*\*`?|`)([^*`\s]*[./][^*`\s]*)(?:`?\*\*|`)\s*:?$/
+
+/**
+ * A note split around its "무엇이 바뀌었나" section, the section read as
+ * 전 / 후 / 예 lines; undefined when it has no 전 or 후 line (a note from
+ * before 1.5.0, a reply that kept no shape) or holds a code block, so the note
+ * shows as written. A line indented under a labelled one goes on with it.
+ */
+export function changeSection(text: string): { head: string; items: ChangeItem[]; tail: string } | undefined {
+  const lines = text.split('\n')
+  const start = lines.findIndex(line => CHANGE_HEADING.test(line.trim()))
+  if (start === -1) return undefined
+  const rest = lines.slice(start + 1)
+  const end = rest.findIndex(line => ANY_HEADING.test(line.trim()) || FENCE.test(line.trim()))
+  if (end !== -1 && FENCE.test(rest[end]!.trim())) return undefined
+  const items: ChangeItem[] = []
+  for (const raw of end === -1 ? rest : rest.slice(0, end)) {
+    const line = raw.trim().replace(/^[-*]\s+/, '')
+    if (line === '') continue
+    const labelled = LABEL_IN_BOLD.exec(line) ?? LABEL.exec(line)
+    if (labelled) {
+      items.push({ kind: labelled[1] === '전' ? 'before' : labelled[1] === '후' ? 'after' : 'example', text: labelled[2]!.trim() })
+      continue
+    }
+    const last = items.at(-1)
+    if (/^\s/.test(raw) && last && last.kind !== 'file') {
+      last.text = `${last.text} ${line}`.trim()
+      continue
+    }
+    const file = FILE_LINE.exec(line)
+    items.push(file ? { kind: 'file', text: file[1]! } : { kind: 'text', text: line })
+  }
+  if (!items.some(item => item.kind === 'before' || item.kind === 'after')) return undefined
+  return {
+    head: lines.slice(0, start).join('\n').trimEnd(),
+    items,
+    tail: end === -1 ? '' : rest.slice(end).join('\n').trim(),
+  }
+}
+
 /** A new file's whole text as one all-added hunk. */
 export function creationHunk(content: string): Hunk {
   const body = clean(content).replace(/\n$/, '')
@@ -610,12 +879,15 @@ export function notePrompt(
     '아래 다섯 제목을 이 순서 그대로 쓰고, 다 합쳐 350단어를 넘기지 마라.',
     '### 한 줄 요약',
     '### 무엇이 바뀌었나',
-    '(파일별로 "전 → 후"를 한두 줄씩)',
+    '(코드가 하는 일이 어떻게 달라졌는지 아래 세 줄로 쓴다. 문법 설명은 배울 개념에서 한다. 중요한 파일이 여럿이면 파일마다 "**파일 이름**" 줄 아래에 이 세 줄을 쓰되 파일은 셋까지만)',
+    '- 전: 바뀌기 전 코드가 하던 일 한 문장 (새로 만든 코드면 "없음")',
+    '- 후: 이제 하는 일 한 문장',
+    '- 예: 차이가 드러나는 입력 하나와 결과, `호출이나 입력` → 전: 결과 / 후: 결과 (diff만으로 결과를 확실히 알 수 없으면 이 줄은 뺀다)',
     '### 왜 이렇게 바꿨을까',
     '### 배울 개념',
     '(1~3개. "- **개념 이름**: 설명 — 그 개념이 쓰인 코드 한 줄을 백틱으로 인용". 줄 번호는 쓰지 마라)',
     '### 직접 확인해 볼 것',
-    '(실행하거나 바꿔 보며 확인할 수 있는 것 1~2개)',
+    '(실행하거나 바꿔 보며 확인할 수 있는 것 1~2개. 위의 예와 겹치지 않게)',
   ].join('\n')
 }
 
@@ -625,6 +897,15 @@ export const ASK_SYSTEM = [
   '질문에 바로 답하고, 필요하면 짧은 예시 코드를 하나 보인다. 노트와 diff에 없는 것은 일반론이라고 밝힌다. 200단어를 넘기지 않는다.',
   '코드는 백틱으로 감싸고, 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
   TONE,
+].join(' ')
+
+/** What `r` under a note asks: its changed code followed step by step on one example, kept under the note as this label. */
+export const TRACE_LABEL = '예시로 따라가기'
+export const TRACE_QUESTION = [
+  '바뀐 코드를 구체적인 예시 입력 하나로 한 단계씩 따라가 주세요.',
+  '번호 목록으로, 단계마다 어느 줄이 실행되고 변수 값이 어떻게 바뀌는지 적고 마지막에 결과를 적어 주세요.',
+  '바뀌기 전 코드였다면 어느 단계에서 결과가 달라지는지 한 줄로 짚어 주세요.',
+  '따라갈 실행 흐름이 없는 변경(설정, 스타일, 문서 등)이면 그렇다고 한 줄로 말하고, 바뀐 결과가 화면이나 동작에서 어떻게 보이는지 설명해 주세요.',
 ].join(' ')
 
 /** Questions a note keeps with their answers, the newest; older ones stay in the journal. */
