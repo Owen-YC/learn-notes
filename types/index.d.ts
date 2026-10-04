@@ -76,16 +76,23 @@ export type LearnConcept = {
   missedAt?: number
 }
 
-/** One quiz question about a concept; the answer stays hidden until /learn quiz 정답. */
+/** One quiz question about a concept; the answer stays hidden until /learn quiz 정답, or a in the pane's quiz. */
 export type LearnQuizItem = {
   key: string
   name: string
   question: string
   answer: string
+  /** True once the pane showed its answer (a). */
+  isShown?: boolean
+  /** How the learner graded their own answer: o and x in the pane, or /learn quiz 틀림. */
+  result?: 'right' | 'wrong'
 }
 
+/** A quiz the pane is asking the model for, and why the last try failed. */
+export type LearnQuizRun = { isMaking: boolean; error: string | null }
+
 /** What the pane shows for the selected note. */
-export type LearnView = 'note' | 'split' | 'diff' | 'concepts'
+export type LearnView = 'note' | 'split' | 'diff' | 'concepts' | 'quiz'
 
 /** A prompt as it entered, and whether its text is a request of its own (a person's, a schedule's) rather than a notification. */
 export type LearnSubmit = { text: string; isRequest: boolean }
@@ -108,6 +115,8 @@ declare module 'claude-code' {
       aliases: Record<string, string>
       /** The last /learn quiz: its questions, and whether the answers were shown. */
       quiz: { at: number; items: LearnQuizItem[]; isRevealed: boolean } | null
+      /** The pane's quiz request: whether one is out, and the last failure to show. */
+      quizRun: LearnQuizRun
       /** The latest prompts that entered and the last real request: read when a turn starts, kept here so a reload keeps them. */
       submitted: { list: LearnSubmit[]; lastRequest: string | null }
     }
