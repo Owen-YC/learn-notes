@@ -1645,7 +1645,8 @@ test('with the review reminder off nothing is pinned', { options: { reviewRemind
   await start($)
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
-  expect(w.statuses).toEqual([])
+  // Only ever cleared: a line an earlier load pinned does not linger.
+  expect(w.statuses).toEqual([undefined])
 })
 
 test('t in the note view quizzes on that note\'s concepts only', async ($, on) => {
@@ -1731,4 +1732,43 @@ test('/learn anki says so when there is nothing to export', async ($, on) => {
   world(on)
   await start($)
   expect((await learn($, 'anki')).text).toContain('내보낼 카드가 없습니다')
+})
+
+test('the first activity record is made once at start, so the first note written after it counts once', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  expect(store.get('activity')).toEqual({})
+  await turn($, () => $.tool.call(EDIT_A))
+  await finish(w)
+  expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 1, right: 0, wrong: 0 } })
+  expect((store.get('history') as Record<string, { notes: { isCounted?: boolean }[] }>)['/proj']!.notes[0]!.isCounted).toBe(true)
+})
+
+test('pressing o twice while the first is written counts one answer', async ($, on) => {
+  const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  w.answer = THREE_QUESTIONS
+  const ui = await pane($)
+  await ui.press({ key: 'quiz' })
+  await ui.press({ key: 'quiz-new' })
+  await w.clock.settle()
+  await ui.press({ key: 'quiz-answer' })
+  await Promise.all([ui.press({ key: 'quiz-right' }), ui.press({ key: 'quiz-right' })])
+  await w.clock.settle()
+  expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 1, wrong: 0 } })
+  await ui.unmount()
+})
+
+test('틀림 the day after 정답 moves the count on the day it was answered', async ($, on) => {
+  const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  w.answer = THREE_QUESTIONS
+  await learn($, 'quiz')
+  await learn($, 'quiz 정답')
+  await w.clock.advance(86_400_000)
+  await learn($, 'quiz 틀림 2')
+  expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 2, wrong: 1 } })
 })

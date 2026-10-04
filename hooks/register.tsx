@@ -181,8 +181,10 @@ let canDock: boolean | undefined
 const inFlight = new Set<string>()
 /** True while the pane asks the model for a quiz: one at a time. */
 let isQuizMaking = false
-/** The status line this plugin last pinned, so an unchanged count is not pinned again. */
-let shownReminder: string | undefined
+/** The status line this plugin last pinned, so an unchanged count is not pinned again; null until the first look since this load. */
+let shownReminder: string | undefined | null = null
+/** Quiz questions being graded now (quiz time and number), so a second press while the first is written does nothing. */
+const grading = new Set<string>()
 /** Saves run one after another: each reads the journal and writes it whole. */
 let saving: Promise<unknown> = Promise.resolve()
 /** Store writes likewise: each reads a whole value and writes it back. */
@@ -305,11 +307,12 @@ async function isPaneVisible($: EngineInterface): Promise<boolean> {
   return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced && pane.isShown)
 }
 
-/** Appends a /learn ask question and answer to today's journal of the note's project, after any save still running. */
+/** Appends a /learn ask question and answer to the journal the note is in, after any save still running. */
 function saveAsk($: EngineInterface, cfg: Config, note: LearnNote, question: string, answer: string, at: number): Promise<string | undefined> {
   const run = saving.then(async () => {
     try {
-      return await appendJournal($, cfg, note.root || (await $.session.root()), at, askSection(note, question, answer, at))
+      // Into the journal of the note's own day: asking never makes a journal day with no notes.
+      return await appendJournal($, cfg, note.root || (await $.session.root()), note.at, askSection(note, question, answer, at))
     } catch (error) {
       $.ui.log(`learn-notes: 질문과 답을 파일에 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
       return undefined
@@ -634,11 +637,31 @@ function bankQuestions($: EngineInterface, items: readonly LearnQuizItem[], at: 
   return run
 }
 
+/**
+ * Mirrors the activity record for drawing; the first time ever, makes it from
+ * the notes still kept and stores it, so the counts that follow add to it
+ * instead of to a record that already holds them.
+ */
+function seedActivity($: EngineInterface): Promise<void> {
+  const run = storing.then(async () => {
+    try {
+      const raw = await $.store.get(ACTIVITY_KEY)
+      const record = raw === undefined ? activityFromNotes(await allNotes($)) : cleanActivity(raw)
+      if (raw === undefined) await $.store.set(ACTIVITY_KEY, record)
+      await update($, activity, () => record)
+    } catch (error) {
+      $.ui.log(`learn-notes: 학습 기록을 읽지 못했습니다 (${String(error)})`, { to: 'debug' })
+    }
+  })
+  storing = run
+  return run
+}
+
 /** Counts a written note or graded answers on `day`, in the store and the pane's mirror; never fails the caller. */
 function recordActivity($: EngineInterface, day: string, delta: Partial<LearnDayActivity>): Promise<void> {
   const run = storing.then(async () => {
     try {
-      const next = addActivity(await storedActivity($), day, delta)
+      const next = addActivity(cleanActivity(await $.store.get(ACTIVITY_KEY)), day, delta)
       await $.store.set(ACTIVITY_KEY, next)
       await update($, activity, () => next)
     } catch (error) {
@@ -700,7 +723,7 @@ type Quiz = { at: number; items: LearnQuizItem[]; isRevealed: boolean }
 /** One quiz question read back from the store; undefined when it is not one. */
 function quizItemOf(one: unknown): LearnQuizItem | undefined {
   if (!isRecord(one)) return undefined
-  const { key, name, question, answer, isShown, result } = one
+  const { key, name, question, answer, isShown, result, gradedAt } = one
   if (typeof key !== 'string' || typeof name !== 'string' || typeof question !== 'string' || typeof answer !== 'string') return undefined
   return {
     key,
@@ -709,6 +732,7 @@ function quizItemOf(one: unknown): LearnQuizItem | undefined {
     answer,
     ...(isShown === true ? { isShown } : {}),
     ...(result === 'right' || result === 'wrong' ? { result } : {}),
+    ...(typeof gradedAt === 'number' ? { gradedAt } : {}),
   }
 }
 
@@ -799,17 +823,24 @@ async function gradeQuiz($: EngineInterface, cfg: Config, i: number, result: 'ri
   const current = await lastQuiz($)
   const item = current?.items[i]
   if (!current || !item || item.result !== undefined || !isAnswerShown(current, item)) return
-  const now = await $.clock.now()
-  if (!(await markConcepts($, cfg, result === 'right' ? markReviewed : markWrong, [item.key], now))) {
-    await update($, quizRun, run => ({ ...run, error: '채점을 적지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.' }))
-    return
+  const mark = `${current.at}:${i}`
+  if (grading.has(mark)) return
+  grading.add(mark)
+  try {
+    const now = await $.clock.now()
+    if (!(await markConcepts($, cfg, result === 'right' ? markReviewed : markWrong, [item.key], now))) {
+      await update($, quizRun, run => ({ ...run, error: '채점을 적지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.' }))
+      return
+    }
+    // Read again: the quiz may have moved on while the concepts were written.
+    const latest = (await lastQuiz($)) ?? current
+    if (latest.at !== current.at) return
+    await keepQuiz($, { ...latest, items: latest.items.map((one, j) => (j === i ? { ...one, isShown: true, result, gradedAt: now } : one)) })
+    await update($, quizRun, run => ({ ...run, error: null }))
+    await recordActivity($, stamp(now).day, result === 'right' ? { right: 1 } : { wrong: 1 })
+  } finally {
+    grading.delete(mark)
   }
-  // Read again: the quiz may have moved on while the concepts were written.
-  const latest = (await lastQuiz($)) ?? current
-  if (latest.at !== current.at) return
-  await keepQuiz($, { ...latest, items: latest.items.map((one, j) => (j === i ? { ...one, isShown: true, result } : one)) })
-  await update($, quizRun, run => ({ ...run, error: null }))
-  await recordActivity($, stamp(now).day, result === 'right' ? { right: 1 } : { wrong: 1 })
 }
 
 /** The quiz as it stands now, in the session and the store. */
@@ -842,8 +873,9 @@ async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite:
   if (inFlight.has(id)) return
   inFlight.add(id)
   try {
-    // A note counts toward the day's learning the first time it is written, not on a rewrite.
-    const wasReady = (await read($, notes)).find(one => one.id === id)?.status === 'ready'
+    // A note counts toward the day's learning the first time it is written, never on a rewrite.
+    const prior = (await read($, notes)).find(one => one.id === id)
+    const isCounted = prior?.isCounted === true || prior?.status === 'ready'
     const note = await setNote($, id, { status: 'writing', text: '' })
     if (!note) return
     let patch: Partial<LearnNote>
@@ -867,7 +899,8 @@ async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite:
     if (done.status === 'ready') {
       const keys = await learnConcepts($, cfg, done)
       done = (await setNote($, id, { concepts: keys })) ?? { ...done, concepts: keys }
-      if (!wasReady) await recordActivity($, stamp(done.at).day, { notes: 1 })
+      if (!isCounted) await recordActivity($, stamp(done.at).day, { notes: 1 })
+      if (!done.isCounted) done = (await setNote($, id, { isCounted: true })) ?? { ...done, isCounted: true }
     }
     if (cfg.isAutoSave) await save($, cfg, done, isRewrite)
     await persist($)
@@ -920,8 +953,7 @@ export const register: Register = (on, options) => {
     })
     isInteractive = e.isInteractive
     await loadHistory($)
-    const record = await storedActivity($).catch(() => ({}))
-    await update($, activity, () => record)
+    await seedActivity($)
     await remind($, cfg)
     // A quiz request a reload cut off is not coming back; the last quiz is there for the pane to draw.
     if (!isQuizMaking) await update($, quizRun, () => ({ isMaking: false, error: null }))
@@ -1112,7 +1144,9 @@ export const register: Register = (on, options) => {
         const isMarked =
           !current.isRevealed && ungraded.length > 0 && (await markConcepts($, cfg, markReviewed, ungraded.map(item => item.key), now))
         // Seen and not said wrong: right, until /learn quiz 틀림 says otherwise.
-        const items = isMarked ? current.items.map(item => (item.result === undefined ? { ...item, isShown: true, result: 'right' as const } : item)) : current.items
+        const items = isMarked
+          ? current.items.map(item => (item.result === undefined ? { ...item, isShown: true, result: 'right' as const, gradedAt: now } : item))
+          : current.items
         await keepQuiz($, { ...current, isRevealed: true, items })
         if (isMarked) await recordActivity($, stamp(now).day, { right: ungraded.length })
         const lines = current.items.map((item, i) => listItem(i + 1, `${item.answer}\n(개념: ${item.name})`))
@@ -1133,11 +1167,17 @@ export const register: Register = (on, options) => {
         if (!(await markConcepts($, cfg, markMissed, items.map(item => item.key), now))) {
           return { text: '틀린 문제를 적지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.' }
         }
-        // The pane's quiz shows them graded too; an answer counted right turns wrong in the day's tally.
-        const flipped = items.filter(item => item.result === 'right').length
+        // The pane's quiz shows them graded too. An answer counted right turns wrong on the day it was counted.
+        const flipped = items.filter(item => item.result === 'right')
         const fresh = items.filter(item => item.result === undefined).length
-        await keepQuiz($, { ...current, items: current.items.map((item, i) => (numbers.includes(i + 1) ? { ...item, result: 'wrong' as const } : item)) })
-        if (flipped + fresh > 0) await recordActivity($, stamp(now).day, { right: -flipped, wrong: flipped + fresh })
+        await keepQuiz($, {
+          ...current,
+          items: current.items.map((item, i) =>
+            numbers.includes(i + 1) && item.result !== 'wrong' ? { ...item, result: 'wrong' as const, gradedAt: item.gradedAt ?? now } : item,
+          ),
+        })
+        for (const item of flipped) await recordActivity($, stamp(item.gradedAt ?? now).day, { right: -1, wrong: 1 })
+        if (fresh > 0) await recordActivity($, stamp(now).day, { wrong: fresh })
         return { text: `복습할 개념 맨 앞에 올렸습니다: ${items.map(item => item.name).join(' · ')}. 다음 퀴즈에 먼저 나옵니다.` }
       }
       if (rest !== '') return { text: QUIZ_USAGE }
@@ -1779,7 +1819,7 @@ function quizView(
       </Text>
       {!hasConcepts && <Text dimColor>{NO_CONCEPTS_FOR_QUIZ}</Text>}
       {hasConcepts && items.length === 0 && !run.isMaking && (
-        <Text dimColor>틀렸던 개념과 오래 안 본 개념으로 문제를 냅니다. s로 시작해서, 먼저 스스로 답해 보고 a로 정답을 본 뒤 o(맞힘)·x(틀림)를 고르세요.</Text>
+        <Text dimColor>복습할 때가 된 개념(틀린 것 먼저)으로 문제를 냅니다. s로 시작해서, 먼저 스스로 답해 보고 a로 정답을 본 뒤 o(맞힘)·x(틀림)를 고르세요.</Text>
       )}
       {run.isMaking && <Text color="cyan">문제를 만드는 중입니다…</Text>}
       {run.error !== null && <Text color="red">{run.error}</Text>}

@@ -55,6 +55,8 @@ export type LearnNote = {
    * A key from before a /learn merge stays as written: read it through the alias map (resolveKey).
    */
   concepts: string[]
+  /** True once the day's learning record counted it (the first time it was written), so a rewrite does not count it again. */
+  isCounted?: boolean
 }
 
 /** One concept the notes taught, kept across sessions and projects. */
@@ -89,8 +91,10 @@ export type LearnQuizItem = {
   answer: string
   /** True once the pane showed its answer (a). */
   isShown?: boolean
-  /** How the learner graded their own answer: o and x in the pane, or /learn quiz 틀림. */
+  /** How the learner graded their own answer: o and x in the pane, or /learn quiz 정답 · 틀림. */
   result?: 'right' | 'wrong'
+  /** Milliseconds since the epoch when it was graded: a later 틀림 moves that day's count. */
+  gradedAt?: number
 }
 
 /** One day's learning: notes written, and quiz answers the learner graded right and wrong. */

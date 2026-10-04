@@ -1312,9 +1312,11 @@ export function markReviewed(index: Readonly<Record<string, LearnConcept>>, keys
   for (const key of keys) {
     const one = conceptAt(next, key)
     if (!one) continue
-    // A step a day at most: going over it again the same day (or pressing twice) does not move it on.
+    // A step on only when it was due, and once a day at most: going over it early (a note's own
+    // quiz, a quiz filled out with concepts not due yet) or again the same day keeps its step.
     const isSameDay = one.reviewedAt !== undefined && at - one.reviewedAt < DAY / 2
-    const step = isSameDay ? stepOf(one) : Math.min(stepOf(one) + 1, TOP_STEP)
+    const isEarly = at < dueAt(one)
+    const step = isSameDay || isEarly ? stepOf(one) : Math.min(stepOf(one) + 1, TOP_STEP)
     next[key] = { ...unmarked(one), reviewedAt: Math.max(one.reviewedAt ?? 0, at), step }
   }
   return next
@@ -1487,7 +1489,7 @@ export type BankItem = { key: string; name: string; question: string; answer: st
 
 /** Questions the bank keeps, the newest; each question and answer is cut to BANK_TEXT so the bank stays small in the store. */
 export const BANK_KEPT = 300
-const BANK_TEXT = 800
+const BANK_TEXT = 400
 
 /** The question bank read back from the store: bad entries dropped, each question once, the newest BANK_KEPT. */
 export function cleanBank(raw: unknown): BankItem[] {
@@ -1517,7 +1519,8 @@ export function addToBank(bank: readonly BankItem[], items: readonly (Omit<BankI
   return [...byQuestion.values()].slice(-BANK_KEPT)
 }
 
-const html = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+// `"` would open a quoted field and a leading `#` a comment line in Anki's import: both go as entities.
+const html = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/#/g, '&#35;')
 
 /** Markdown as one line of the HTML Anki shows: code blocks, inline code, bold, line breaks; never a tab or a newline. */
 export function ankiHtml(markdown: string): string {
@@ -1565,6 +1568,7 @@ export function ankiText(bank: readonly BankItem[], index: Readonly<Record<strin
     const files = one.files.length > 0 ? `<br><br><small>파일: ${html(one.files.map(file => file.split('/').at(-1) ?? file).join(', '))}</small>` : ''
     rows.push([`<b>${html(one.name)}</b><br>무엇이고, 어디에 썼나요?`, `${ankiHtml(one.blurb)}${files}`, 'learn-notes 개념'].join('\t'))
   }
-  const head = ['#separator:tab', '#html:true', '#notetype:Basic', '#deck:learn-notes', '#tags column:3', '']
+  // No #notetype: Anki's default (Basic, 기본 in Korean) takes the two fields.
+  const head = ['#separator:tab', '#html:true', '#deck:learn-notes', '#tags column:3', '']
   return { text: head.join('\n') + rows.join('\n') + (rows.length > 0 ? '\n' : ''), questions: bank.length, concepts: concepts.length }
 }

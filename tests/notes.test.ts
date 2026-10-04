@@ -855,6 +855,10 @@ describe('spaced review', () => {
       at = dueAt(index['c:클로저']!)
     }
     expect(seen).toEqual([1, 2, 3, 4, 5, 5, 5])
+    // Going over it before it is due keeps its step (a note's own quiz, a quiz filled out with what is not due).
+    const early = markReviewed({ 'c:클로저': one }, ['c:클로저'], now + day / 2 + 1)
+    expect(stepOf(early['c:클로저']!)).toBe(0)
+    expect(dueAt(early['c:클로저']!)).toBe(now + day / 2 + 1 + day)
     // Going over it again the same day (or a second press) does not move it on.
     const once = markReviewed({ 'c:클로저': one }, ['c:클로저'], now + day)
     const twice = markReviewed(once, ['c:클로저'], now + day + 60_000)
@@ -915,9 +919,12 @@ describe('anki', () => {
     const out = ankiText(bank, index)
     expect(out).toMatchObject({ questions: 1, concepts: 1 })
     const lines = out.text.split('\n')
-    expect(lines.slice(0, 5)).toEqual(['#separator:tab', '#html:true', '#notetype:Basic', '#deck:learn-notes', '#tags column:3'])
-    expect(lines[5]).toBe('<code>count</code>는 왜 남을까?\t바깥 변수를 기억해서다.<br><br><small>개념: 클로저</small>\tlearn-notes 퀴즈')
-    expect(lines[6]).toBe('<b>클로저</b><br>무엇이고, 어디에 썼나요?\t함수가 바깥 변수를 기억한다 — <code>count += 1</code><br><br><small>파일: counter.js</small>\tlearn-notes 개념')
-    expect(lines.slice(5).every(line => line === '' || line.split('\t').length === 3)).toBe(true)
+    expect(lines.slice(0, 4)).toEqual(['#separator:tab', '#html:true', '#deck:learn-notes', '#tags column:3'])
+    expect(lines[4]).toBe('<code>count</code>는 왜 남을까?\t바깥 변수를 기억해서다.<br><br><small>개념: 클로저</small>\tlearn-notes 퀴즈')
+    expect(lines[5]).toBe('<b>클로저</b><br>무엇이고, 어디에 썼나요?\t함수가 바깥 변수를 기억한다 — <code>count += 1</code><br><br><small>파일: counter.js</small>\tlearn-notes 개념')
+    expect(lines.slice(4).every(line => line === '' || line.split('\t').length === 3)).toBe(true)
+    // A leading # (a comment line to Anki) and a " (a quoted field) never reach the file as they are.
+    const odd = ankiText([{ key: 'c:x', name: 'x', question: '#id 선택자는?', answer: '"use strict"를 쓴다', at: 1 }], {}).text.split('\n')[4]!
+    expect(odd).toBe('&#35;id 선택자는?\t&quot;use strict&quot;를 쓴다<br><br><small>개념: x</small>\tlearn-notes 퀴즈')
   })
 })
