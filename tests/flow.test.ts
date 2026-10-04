@@ -164,7 +164,13 @@ function world(
       ? { result: { type: 'update', filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } }
       : { result: { type: 'create', filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } },
   )
-  on('tool.call', { tool: 'Bash' }, (_$, e) => ({
+  on('tool.call', { tool: 'Bash' }, (_$, e) => {
+    if (e.command.includes('nodiff')) {
+      // A run the engine could not diff (Git Bash on Windows, a folder outside git): it wrote a file all the same.
+      w.files.set('/proj/notes.txt', '첫 줄\n둘째 줄\n')
+      return { result: { stdout: '', stderr: '', interrupted: false } }
+    }
+    return {
     result: {
       stdout: '',
       stderr: '',
@@ -179,7 +185,8 @@ function world(
         moreFiles: e.command.includes('many') ? 3 : 0,
       },
     },
-  }))
+    }
+  })
   return w
 }
 
@@ -1774,4 +1781,67 @@ test('틀림 the day after 정답 moves the count on the day it was answered', a
   await w.clock.advance(86_400_000)
   await learn($, 'quiz 틀림 2')
   expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 2, wrong: 1 } })
+})
+
+// The engine under test runs on POSIX, so its fs reads a drive path as relative: the folder is a POSIX one here,
+// and Windows paths are covered where shellTargets is tested.
+const DESK = '/home/u/Desktop/cart-total'
+
+/** The PowerShell tool as Claude Code on Windows runs it: here it writes what the command would on the mocked disk. */
+function powershell(on: On, w: World, write: (command: string) => void) {
+  on('tool.call', (_$, e) => {
+    if ((e.tool as string) !== 'PowerShell') return { result: '' }
+    write(String((e as unknown as { command: string }).command))
+    return { result: { stdout: '', stderr: '', interrupted: false } }
+  })
+  return w
+}
+
+test('files made and changed with the PowerShell tool become a note (Windows without Git Bash)', async ($, on) => {
+  const w = world(on)
+  powershell(on, w, command => {
+    if (command.includes('Set-Content -Path cart.js')) {
+      w.files.set(`${DESK}/cart.js`, 'function cartTotal(items) {\r\n  return items.reduce((s, i) => s + i.price * i.quantity, 0)\r\n}\r\n')
+      w.files.set(`${DESK}/cart.test.js`, "const { cartTotal } = require('./cart')\r\n")
+    }
+  })
+  await start($)
+  await turn($, () =>
+    $.tool.call({
+      tool: 'PowerShell',
+      tool_use_id: 'p1',
+      command: `New-Item -ItemType Directory -Force -Path "${DESK}" | Out-Null; Set-Location ${DESK}; Set-Content -Path cart.js -Value @'\nfunction cartTotal(items) { ... }\n'@; Set-Content -Path cart.test.js -Value "..."; node --test cart.test.js`,
+    } as never),
+  )
+  await finish(w)
+  const note = (await learn($, 'last')).text
+  expect(note).toContain('/home/u/Desktop/cart-total/cart.js (+3 −0)')
+  expect(note).toContain('cart.test.js (+1 −0)')
+  expect(w.models[0]).toContain('+  return items.reduce((s, i) => s + i.price * i.quantity, 0)')
+  expect(w.models[0]).not.toContain('\r')
+})
+
+test('a PowerShell edit of an existing file shows its changed lines only', async ($, on) => {
+  const w = world(on)
+  w.files.set(`${DESK}/cart.js`, 'a\r\nb\r\nc\r\nd\r\n')
+  powershell(on, w, () => w.files.set(`${DESK}/cart.js`, 'a\r\nB\r\nc\r\nd\r\n'))
+  await start($)
+  await turn($, () =>
+    $.tool.call({ tool: 'PowerShell', tool_use_id: 'p2', command: `(Get-Content ${DESK}/cart.js) -replace 'b', 'B' | Set-Content ${DESK}/cart.js` } as never),
+  )
+  await finish(w)
+  expect(w.models[0]).toContain('cart.js (수정, +1 −1)')
+  expect(w.models[0]).toContain('@@ -1,4 +1,4 @@\n a\n-b\n+B\n c\n d')
+  // A command that names no file it changed, or only reads, makes no note.
+  await turn($, () => $.tool.call({ tool: 'PowerShell', tool_use_id: 'p3', command: `Get-Content ${DESK}/cart.js` } as never), 't2')
+  await finish(w)
+  expect(w.models).toHaveLength(1)
+})
+
+test('a Bash run the engine gave no diff for is read off the files it names', async ($, on) => {
+  const w = world(on)
+  await start($)
+  await turn($, () => $.tool.call({ tool: 'Bash', tool_use_id: 'b9', command: "printf '첫 줄\\n둘째 줄\\n' > /proj/notes.txt # nodiff" }))
+  await finish(w)
+  expect(w.models[0]).toContain('### notes.txt (새 파일, +2 −0)')
 })

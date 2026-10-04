@@ -54,6 +54,7 @@ claude plugin install learn-notes@learn-notes
 - **지우기**: `claude plugin uninstall learn-notes@learn-notes` (일지 파일 `~/.claude/learning-notes/`는 남습니다)
 - **설치 없이 한 번 써 보기**: 이 저장소를 받아 `claude --plugin-dir <저장소 경로>`로 시작합니다.
 - **Windows**: PowerShell에서 `irm https://claude.ai/install.ps1 | iex`로 Claude Code를 설치한 뒤, 위 명령을 그대로 씁니다.
+  Claude Code는 작업할 폴더에서 켜세요(`cd ~\practice` 뒤 `claude`). `C:\Windows\System32`에서 켜면 Claude가 다른 곳(바탕화면 등)에 파일을 만들게 됩니다.
   `claude`를 못 찾으면 새 창을 열거나 `$env:Path += ";$HOME\.local\bin"`을 입력하세요.
 
 > 클라우드 세션(claude.ai의 웹·앱에서 여는 Claude Code 세션)에서는 패널이 보는 화면에 뜨지 않을 수 있습니다.
@@ -61,7 +62,8 @@ claude plugin install learn-notes@learn-notes
 
 ## 무엇을 하나
 
-1. Claude가 `Edit`·`Write`(그리고 파일을 바꾼 셸 명령)를 쓸 때마다 그 변경의 diff를 모읍니다.
+1. Claude가 `Edit`·`Write`(그리고 파일을 바꾼 셸 명령: Bash, Windows에서는 PowerShell)를 쓸 때마다 그 변경의 diff를 모읍니다.
+   셸 명령은 Claude Code가 diff를 주지 않으면(Windows의 PowerShell 등) 명령에 이름이 나온 파일을 명령 전후로 읽어 비교합니다. 스크립트 안에서만 쓰는 파일처럼 명령에 이름이 드러나지 않는 변경은 잡지 못합니다.
    노트의 "요청"은 사람이 보낸 요청입니다. 작업 알림이나 다른 세션의 메시지로 시작한 턴은 마지막 요청에 "(이어서)"를 붙여 보입니다.
    턴이 도는 동안에는 패널 맨 위에 "● 작업 중: 파일 n개"가 실시간으로 보입니다.
    이런 것은 모으지 않습니다. 내가 배울 코드가 아니기 때문입니다.

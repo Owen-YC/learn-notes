@@ -29,6 +29,9 @@ import {
   conceptsOf,
   countConcepts,
   creationHunk,
+  deletionHunk,
+  diffHunks,
+  shellTargets,
   cut,
   expandHome,
   fitHistory,
@@ -913,6 +916,76 @@ async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite:
   }
 }
 
+/** Shell commands that may write files: the ones whose named files are read before they run. */
+const WRITES = />|\btee\b|\bsed\s+-i|\b(?:cp|mv|rm|touch|install|python3?|node|perl|ruby|dd|patch|unzip|tar)\b|Set-Content|Out-File|Add-Content|New-Item|Copy-Item|Move-Item|Remove-Item|Rename-Item|WriteAll|Expand-Archive/i
+
+/** A shell command's per-file diff as the engine gives it, when it gave a usable one. */
+type ShellEdits = { files: { filePath: string; hunks: Hunk[]; created?: true; deleted?: true }[]; moreFiles: number }
+
+/** The engine's own diff out of a shell result of any tool (`bashEditDiff`), or undefined when it gave none it could make. */
+function shellEdits(raw: unknown): ShellEdits | undefined {
+  if (!isRecord(raw) || !Array.isArray(raw.files) || raw.unavailable === true || raw.skipped === true) return undefined
+  const files = raw.files.filter(
+    (file): file is ShellEdits['files'][number] => isRecord(file) && typeof file.filePath === 'string' && Array.isArray(file.hunks),
+  )
+  return { files, moreFiles: typeof raw.moreFiles === 'number' ? raw.moreFiles : 0 }
+}
+
+/** Folds a shell command's engine-made diff into the running turn. */
+async function collectEdits($: EngineInterface, tool: 'Bash' | 'PowerShell', edits: ShellEdits): Promise<void> {
+  const root = await $.session.root()
+  for (const file of edits.files) {
+    if (file.hunks.length === 0 || (await isBookkeeping($, file.filePath))) continue
+    const kind = file.created ? 'create' : file.deleted ? 'delete' : 'update'
+    await collect($, changeOf({ path: file.filePath, root, tool, kind, hunks: file.hunks }))
+  }
+  if (edits.moreFiles > 0) await countUnlisted($, edits.moreFiles)
+}
+
+/** Bytes past which a file is not read to diff it. */
+const DIFF_READ_MAX = 300_000
+
+/** A file's text for diffing: null while it does not exist, undefined when it cannot be read (a folder, too big, refused). */
+async function readForDiff($: EngineInterface, path: string): Promise<string | null | undefined> {
+  try {
+    if (!(await $.fs.exists(path))) return null
+    const stat = await $.fs.stat(path)
+    if (stat.kind !== 'file' || stat.size > DIFF_READ_MAX) return undefined
+    return String(await $.fs.read(path))
+  } catch {
+    return undefined
+  }
+}
+
+/** The files a shell command names, each read as it is before the command runs (see shellTargets). */
+async function readTargets($: EngineInterface, command: string): Promise<Map<string, string | null | undefined> | undefined> {
+  try {
+    const root = await $.session.root()
+    const cwd = await $.session.cwd().catch(() => root)
+    const before = new Map<string, string | null | undefined>()
+    for (const path of shellTargets(command, cwd || root, await homeDir($))) before.set(path, await readForDiff($, path))
+    return before
+  } catch (error) {
+    $.ui.log(`learn-notes: 명령이 바꿀 파일을 미리 읽지 못했습니다 (${String(error)})`, { to: 'debug' })
+    return undefined
+  }
+}
+
+/** What a shell command changed among the files it named, read off the files themselves after it ran. */
+async function collectShellChanges($: EngineInterface, tool: 'Bash' | 'PowerShell', before: Map<string, string | null | undefined>): Promise<void> {
+  const root = await $.session.root()
+  for (const [path, old] of before) {
+    if (old === undefined) continue
+    const now = await readForDiff($, path)
+    if (now === undefined || now === old || (await isBookkeeping($, path))) continue
+    const kind = old === null ? 'create' : now === null ? 'delete' : 'update'
+    const hunks = old === null ? [creationHunk(now ?? '')] : now === null ? [deletionHunk(old)] : diffHunks(old, now)
+    // Only line ends changed (CRLF ↔ LF): nothing a learner would read as an edit.
+    if (kind === 'update' && hunks.length === 0) continue
+    await collect($, changeOf({ path, root, tool, kind, hunks }))
+  }
+}
+
 /** Folds one tool's change into the running turn. */
 async function collect($: EngineInterface, change: LearnChange): Promise<void> {
   await update($, live, prior => {
@@ -1028,21 +1101,44 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    // A command that may write gets the files it names read first, for when the engine gives no diff of its own.
+    const before = WRITES.test(e.command) && !isGitMove(e.command) ? await readTargets($, e.command) : undefined
     const ran = await next(e)
     try {
-      if (ran.deny !== undefined || ran.isError || !ran.result || !('stdout' in ran.result)) return ran
-      const edits = ran.result.bashEditDiff
       // What a stash, checkout or pull put on disk is not an edit made this turn.
-      if (!edits || isGitMove(e.command)) return ran
-      const root = await $.session.root()
-      for (const file of edits.files) {
-        if (file.hunks.length === 0 || (await isBookkeeping($, file.filePath))) continue
-        const kind = file.created ? 'create' : file.deleted ? 'delete' : 'update'
-        await collect($, changeOf({ path: file.filePath, root, tool: 'Bash', kind, hunks: file.hunks }))
+      if (ran.deny !== undefined || isGitMove(e.command)) return ran
+      const result: unknown = ran.result
+      const edits = isRecord(result) ? shellEdits(result.bashEditDiff) : undefined
+      if (edits) {
+        if (!ran.isError) await collectEdits($, 'Bash', edits)
+      } else if (before) {
+        await collectShellChanges($, 'Bash', before)
       }
-      if (edits.moreFiles > 0) await countUnlisted($, edits.moreFiles)
     } catch (error) {
       $.ui.log(`learn-notes: 셸 명령의 변경을 잡지 못했습니다 (${String(error)})`, { to: 'debug' })
+    }
+    return ran
+  })
+
+  // Claude Code on Windows runs commands with its PowerShell tool (always without Git Bash). Not every
+  // build names it, so it is matched by name here; its edits are read the same way as Bash's.
+  on('tool.call', async ($, e, next) => {
+    if ((e.tool as string) !== 'PowerShell') return next(e)
+    const input: unknown = e
+    const command = isRecord(input) && typeof input.command === 'string' ? input.command : ''
+    const before = command !== '' && !isGitMove(command) ? await readTargets($, command) : undefined
+    const ran = await next(e)
+    try {
+      if (ran.deny !== undefined) return ran
+      const result: unknown = ran.result
+      const edits = isRecord(result) ? shellEdits(result.bashEditDiff) : undefined
+      if (edits) {
+        if (!ran.isError) await collectEdits($, 'PowerShell', edits)
+      } else if (before) {
+        await collectShellChanges($, 'PowerShell', before)
+      }
+    } catch (error) {
+      $.ui.log(`learn-notes: PowerShell 명령의 변경을 잡지 못했습니다 (${String(error)})`, { to: 'debug' })
     }
     return ran
   })

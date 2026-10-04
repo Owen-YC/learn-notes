@@ -227,6 +227,164 @@ export function creationHunk(content: string): Hunk {
   return { oldStart: 0, oldLines: 0, newStart: 1, newLines: lines.length, lines }
 }
 
+/** A deleted file's content as one hunk of removed lines. */
+export function deletionHunk(content: string): Hunk {
+  const body = clean(content).replace(/\n$/, '')
+  const lines = body === '' ? [] : body.split('\n').map(line => `-${line}`)
+  return { oldStart: 1, oldLines: lines.length, newStart: 0, newLines: 0, lines }
+}
+
+/** Cells of the line table diffHunks fills at most; past it the changed middle shows as all removed, then all added. */
+const DIFF_CELLS = 1_000_000
+
+/**
+ * The unified-diff hunks from `before` to `after`, `context` lines around each
+ * change: a shell command's edit, read off the file itself (the PowerShell tool
+ * and a Bash run without the engine's own diff give none). Line ends are read
+ * alike (CRLF or LF).
+ */
+export function diffHunks(before: string, after: string, context = 3): Hunk[] {
+  const split = (text: string) => {
+    const body = clean(text).replace(/\n$/, '')
+    return body === '' ? [] : body.split('\n')
+  }
+  const a = split(before)
+  const b = split(after)
+  let head = 0
+  while (head < a.length && head < b.length && a[head] === b[head]) head += 1
+  let endA = a.length
+  let endB = b.length
+  while (endA > head && endB > head && a[endA - 1] === b[endB - 1]) {
+    endA -= 1
+    endB -= 1
+  }
+  const midA = a.slice(head, endA)
+  const midB = b.slice(head, endB)
+  type Op = { t: ' ' | '-' | '+'; text: string }
+  const middle: Op[] = []
+  if (midA.length * midB.length > DIFF_CELLS) {
+    middle.push(...midA.map(text => ({ t: '-' as const, text })), ...midB.map(text => ({ t: '+' as const, text })))
+  } else {
+    // Longest common subsequence, filled from the end so the walk below goes forward.
+    const width = midB.length + 1
+    const table = new Int32Array((midA.length + 1) * width)
+    for (let i = midA.length - 1; i >= 0; i -= 1) {
+      for (let j = midB.length - 1; j >= 0; j -= 1) {
+        table[i * width + j] = midA[i] === midB[j] ? table[(i + 1) * width + j + 1]! + 1 : Math.max(table[(i + 1) * width + j]!, table[i * width + j + 1]!)
+      }
+    }
+    let i = 0
+    let j = 0
+    while (i < midA.length || j < midB.length) {
+      if (i < midA.length && j < midB.length && midA[i] === midB[j]) {
+        middle.push({ t: ' ', text: midA[i]! })
+        i += 1
+        j += 1
+      } else if (i < midA.length && (j === midB.length || table[(i + 1) * width + j]! >= table[i * width + j + 1]!)) {
+        // Removed lines before added ones, as diffs read.
+        middle.push({ t: '-', text: midA[i]! })
+        i += 1
+      } else {
+        middle.push({ t: '+', text: midB[j]! })
+        j += 1
+      }
+    }
+  }
+  const ops: Op[] = [...a.slice(0, head).map(text => ({ t: ' ' as const, text })), ...middle, ...a.slice(endA).map(text => ({ t: ' ' as const, text }))]
+  const oldAt: number[] = []
+  const newAt: number[] = []
+  let o = 1
+  let n = 1
+  for (const op of ops) {
+    oldAt.push(o)
+    newAt.push(n)
+    if (op.t !== '+') o += 1
+    if (op.t !== '-') n += 1
+  }
+  const changed = ops.flatMap((op, k) => (op.t === ' ' ? [] : [k]))
+  if (changed.length === 0) return []
+  const groups: [number, number][] = []
+  let start = changed[0]!
+  let end = changed[0]!
+  for (const k of changed.slice(1)) {
+    if (k - end <= 2 * context + 1) end = k
+    else {
+      groups.push([start, end])
+      start = end = k
+    }
+  }
+  groups.push([start, end])
+  return groups.map(([first, last]) => {
+    const from = Math.max(0, first - context)
+    const to = Math.min(ops.length - 1, last + context)
+    const slice = ops.slice(from, to + 1)
+    const oldLines = slice.filter(op => op.t !== '+').length
+    const newLines = slice.filter(op => op.t !== '-').length
+    return {
+      oldStart: oldLines > 0 ? oldAt[from]! : oldAt[from]! - 1,
+      oldLines,
+      newStart: newLines > 0 ? newAt[from]! : newAt[from]! - 1,
+      newLines,
+      lines: slice.map(op => `${op.t}${op.text}`),
+    }
+  })
+}
+
+/** Extensions of the files a shell command is taken to name (code, text, config): `item.price` in a script body is not one. */
+const FILE_EXT = new Set(
+  'js mjs cjs ts mts cts tsx jsx json jsonc md mdx txt html htm css scss sass less py pyi rb go rs java kt kts cs csx fs cpp cc cxx c h hpp hh php swift sh bash zsh ps1 psm1 psd1 bat cmd yml yaml toml ini cfg conf xml sql vue svelte astro csv tsv env gradle dart lua r ex exs erl hs ml scala clj sol tf graphql gql proto ipynb'.split(' '),
+)
+
+function isAbsolutePath(path: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('/') || path.startsWith('\\\\')
+}
+
+/** `path` joined onto `dir` when relative, `.` and `..` resolved, in the directory's own separator; `~` and `$HOME`/`$env:USERPROFILE` read as `home`. */
+export function joinPath(dir: string, path: string, home?: string): string {
+  let p = path
+  if (home && /^(?:~|\$HOME|\$env:USERPROFILE|\$env:HOME)(?=[\\/]|$)/i.test(p)) p = home + p.replace(/^(?:~|\$HOME|\$env:USERPROFILE|\$env:HOME)/i, '')
+  const base = isAbsolutePath(p) ? p : `${dir.replace(/[\\/]+$/, '')}/${p}`
+  const isWindows = /^[A-Za-z]:/.test(base) || base.startsWith('\\\\') || (!base.startsWith('/') && base.includes('\\'))
+  const sep = isWindows ? '\\' : '/'
+  const lead = /^[A-Za-z]:/.test(base) ? base.slice(0, 2) : base.startsWith('\\\\') ? '\\\\' : base.startsWith('/') ? '' : ''
+  const rest = lead === '\\\\' ? base.slice(2) : lead !== '' ? base.slice(2) : base
+  const parts: string[] = []
+  for (const part of rest.split(/[\\/]+/)) {
+    if (part === '' || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  return lead === '\\\\' ? `\\\\${parts.join(sep)}` : `${lead}${sep}${parts.join(sep)}`
+}
+
+/**
+ * The files a shell command names, as absolute paths: each word or quoted
+ * string ending in a known file extension, read against the directory the
+ * command is in at that point (`cd`, `Set-Location`, `pushd` followed). Read
+ * before and after the command, they tell what it changed.
+ */
+export function shellTargets(command: string, cwd: string, home?: string, max = 40): string[] {
+  const found: string[] = []
+  let dir = cwd
+  for (const raw of command.split(/\r?\n|;|&&|\|\||\|/)) {
+    const part = raw.trim()
+    const cd = /^(?:cd|chdir|pushd|Set-Location|sl)\s+(?:-(?:Literal)?Path\s+)?(["']?)([^"']+?)\1\s*$/i.exec(part)
+    if (cd) {
+      if (cd[2] !== '-' && cd[2] !== '~-') dir = joinPath(dir, cd[2]!, home)
+      continue
+    }
+    for (const m of part.matchAll(/"([^"\n]+)"|'([^'\n]+)'|([^\s"'`<>|;,(){}=]+)/g)) {
+      const token = (m[1] ?? m[2] ?? m[3] ?? '').replace(/^>+/, '').trim()
+      const ext = /\.([A-Za-z0-9]{1,8})$/.exec(token)?.[1]?.toLowerCase()
+      if (!ext || !FILE_EXT.has(ext) || token.startsWith('-') || /^[a-z][a-z0-9+.-]*:\/\//i.test(token) || /[*?$]/.test(token.replace(/^\$(?:HOME|env:USERPROFILE|env:HOME)/i, ''))) continue
+      const path = joinPath(dir, token, home)
+      if (!found.includes(path)) found.push(path)
+      if (found.length >= max) return found
+    }
+  }
+  return found
+}
+
 function slashed(path: string): string {
   return path.replace(/\\/g, '/')
 }

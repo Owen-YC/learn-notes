@@ -1,5 +1,14 @@
 # 바뀐 것
 
+## 1.2.1 (2026-10-04)
+
+Windows에서 노트가 생기지 않던 것을 고쳤다.
+
+- Git Bash가 없는 Windows에서 Claude Code는 셸 명령을 **PowerShell 도구**로 돌린다. learn-notes는 Bash 도구만 지켜보고 있어서,
+  Claude가 PowerShell 명령으로 파일을 만들거나 고치면 그 턴의 노트가 생기지 않았다. 이제 PowerShell 명령도 지켜본다.
+- 셸 명령의 diff를 Claude Code가 주지 않으면(PowerShell, git 밖 폴더의 Bash 등), 명령에 이름이 나온 파일을 명령 전후로 읽어 줄 단위로 비교한다.
+  `cd`·`Set-Location`으로 옮긴 폴더, `~`·`$env:USERPROFILE`, Windows 경로와 CRLF 줄끝을 읽는다.
+
 ## 1.2.0 (2026-10-04)
 
 배우는 사람 쪽 기능을 넷 더했다.

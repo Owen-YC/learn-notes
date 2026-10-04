@@ -5,7 +5,7 @@ export type LearnChange = {
   /** The absolute path the tool wrote. */
   path: string
   /** Which tool made it. */
-  tool: 'Edit' | 'Write' | 'Bash'
+  tool: 'Edit' | 'Write' | 'Bash' | 'PowerShell'
   kind: 'create' | 'update' | 'delete'
   added: number
   removed: number

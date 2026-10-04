@@ -44,6 +44,10 @@ import {
   jsonBytes,
   progressOf,
   reviewQueue,
+  diffHunks,
+  joinPath,
+  shellTargets,
+  deletionHunk,
   isDue,
   addToBank,
   ankiHtml,
@@ -933,5 +937,48 @@ describe('anki', () => {
     // A leading # (a comment line to Anki) and a " (a quoted field) never reach the file as they are.
     const odd = ankiText([{ key: 'c:x', name: 'x', question: '#id 선택자는?', answer: '"use strict"를 쓴다', at: 1 }], {}).text.split('\n')[4]!
     expect(odd).toBe('&#35;id 선택자는?\t&quot;use strict&quot;를 쓴다<br><br><small>개념: x</small>\tlearn-notes 퀴즈')
+  })
+})
+
+describe('shell edits read off the files (PowerShell, Bash without a diff)', () => {
+  test('a line diff gives the changed lines with three around them, removals first, CRLF read as LF', () => {
+    const before = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].join('\r\n') + '\r\n'
+    const after = ['a', 'b', 'c', 'd', 'E', 'f', 'g', 'h', 'i', 'j'].join('\n') + '\n'
+    expect(diffHunks(before, after)).toEqual([{ oldStart: 2, oldLines: 7, newStart: 2, newLines: 7, lines: [' b', ' c', ' d', '-e', '+E', ' f', ' g', ' h'] }])
+    expect(diffHunks('x\r\ny\r\n', 'x\ny\n')).toEqual([])
+    expect(diffHunks('1\n2\n3\n', '0\n1\n3\n4\n', 1)).toEqual([{ oldStart: 1, oldLines: 3, newStart: 1, newLines: 4, lines: ['+0', ' 1', '-2', ' 3', '+4'] }])
+    // Changes far apart are two hunks.
+    const long = Array.from({ length: 30 }, (_, i) => `line ${i}`)
+    const changed = long.map((line, i) => (i === 2 || i === 25 ? `${line}!` : line))
+    expect(diffHunks(long.join('\n'), changed.join('\n')).map(h => [h.oldStart, h.oldLines])).toEqual([[1, 6], [23, 7]])
+    expect(deletionHunk('a\nb\n')).toEqual({ oldStart: 1, oldLines: 2, newStart: 0, newLines: 0, lines: ['-a', '-b'] })
+  })
+
+  test('paths join in the folder\'s own separator, with . .. ~ and $env:USERPROFILE read', () => {
+    expect(joinPath('C:\\Windows\\System32', '..\\..\\Users\\Owen\\Desktop\\cart.js')).toBe('C:\\Users\\Owen\\Desktop\\cart.js')
+    expect(joinPath('C:\\Windows\\System32', '~\\Desktop\\a.js', 'C:\\Users\\Owen')).toBe('C:\\Users\\Owen\\Desktop\\a.js')
+    expect(joinPath('C:\\x', '$env:USERPROFILE\\Desktop\\a.js', 'C:\\Users\\Owen')).toBe('C:\\Users\\Owen\\Desktop\\a.js')
+    expect(joinPath('/home/u/proj', './src/../a.ts')).toBe('/home/u/proj/a.ts')
+    expect(joinPath('/home/u/proj', 'D:/work/b.py')).toBe('D:\\work\\b.py')
+  })
+
+  test('a PowerShell command names its files, read against the folder it moved to; script bodies and URLs are not files', () => {
+    const ps = [
+      'New-Item -ItemType Directory -Force -Path "C:\\Users\\Owen\\Desktop\\cart-total" | Out-Null',
+      'Set-Location C:\\Users\\Owen\\Desktop\\cart-total',
+      "Set-Content -Path cart.js -Value @'",
+      'function cartTotal(items) { return items.reduce((s, i) => s + i.price * i.quantity, 0) }',
+      'module.exports = { cartTotal }',
+      "'@",
+      'node --test cart.test.js; Invoke-WebRequest https://example.com/x.js',
+    ].join('\n')
+    expect(shellTargets(ps, 'C:\\Windows\\System32')).toEqual(['C:\\Users\\Owen\\Desktop\\cart-total\\cart.js', 'C:\\Users\\Owen\\Desktop\\cart-total\\cart.test.js'])
+    expect(shellTargets(`cd src && sed -i 's/a/b/' util.ts > ../out.txt; cat > "my file.md" <<EOF`, '/home/u/proj')).toEqual([
+      '/home/u/proj/src/util.ts',
+      '/home/u/proj/out.txt',
+      '/home/u/proj/src/my file.md',
+    ])
+    expect(shellTargets('ls *.js; echo $name.txt', '/p')).toEqual([])
+    expect(shellTargets(Array.from({ length: 50 }, (_, i) => `f${i}.js`).join(' '), '/p')).toHaveLength(40)
   })
 })
