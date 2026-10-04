@@ -44,6 +44,11 @@ import {
   jsonBytes,
   progressOf,
   reviewQueue,
+  addToBank,
+  ankiHtml,
+  ankiText,
+  BANK_KEPT,
+  cleanBank,
   dueText,
   dueAt,
   stepOf,
@@ -879,5 +884,40 @@ describe('spaced review', () => {
     expect(cleanConcepts({ x: { ...one, step: 99 } })['c:클로저']!.step).toBe(5)
     const merged = mergeConcepts({ 'c:a': { ...one, name: 'A' }, ...{ 'c:클로저': stepped['c:클로저']! } }, 'c:a', 'c:클로저', '클로저')
     expect(merged['c:클로저']!.step).toBe(1)
+  })
+})
+
+describe('anki', () => {
+  test('markdown becomes one line of HTML: code blocks, inline code, bold, no tabs or newlines', () => {
+    const text = ankiHtml('**왜** `a < b`일까?\n```js\nif (a\t< b) {\n  go()\n}\n```\n끝')
+    expect(text).toBe('<b>왜</b> <code>a &lt; b</code>일까?<br><pre><code>if (a  &lt; b) {<br>  go()<br>}</code></pre><br>끝')
+    expect(text).not.toMatch(/[\t\n]/)
+  })
+
+  test('the bank keeps each question once, the newest copy, and at most BANK_KEPT', () => {
+    const one = { key: 'c:a', name: 'A', question: 'Q?', answer: '답' }
+    let bank = addToBank([], [one, { ...one, answer: '' }], 1)
+    expect(bank).toEqual([{ ...one, at: 1 }])
+    bank = addToBank(bank, [{ ...one, answer: '새 답' }], 2)
+    expect(bank).toEqual([{ ...one, answer: '새 답', at: 2 }])
+    const many = addToBank([], Array.from({ length: BANK_KEPT + 5 }, (_, i) => ({ ...one, question: `Q${i}` })), 3)
+    expect(many).toHaveLength(BANK_KEPT)
+    expect(many[0]!.question).toBe('Q5')
+    expect(cleanBank([{ bad: 1 }, { ...one, at: 4 }, 'x'])).toEqual([{ ...one, at: 4 }])
+  })
+
+  test('the file has Anki\'s header, a card per question, then a card per explained concept', () => {
+    const bank = [{ key: 'c:a', name: '클로저', question: '`count`는 왜 남을까?', answer: '바깥 변수를 기억해서다.', at: 1 }]
+    const index = {
+      'c:a': { name: '클로저', count: 2, firstAt: 1, lastAt: 2, blurb: '함수가 바깥 변수를 기억한다 — `count += 1`', files: ['src/counter.js'] },
+      'c:b': { name: '빈 설명', count: 1, firstAt: 1, lastAt: 1, blurb: '', files: [] },
+    }
+    const out = ankiText(bank, index)
+    expect(out).toMatchObject({ questions: 1, concepts: 1 })
+    const lines = out.text.split('\n')
+    expect(lines.slice(0, 5)).toEqual(['#separator:tab', '#html:true', '#notetype:Basic', '#deck:learn-notes', '#tags column:3'])
+    expect(lines[5]).toBe('<code>count</code>는 왜 남을까?\t바깥 변수를 기억해서다.<br><br><small>개념: 클로저</small>\tlearn-notes 퀴즈')
+    expect(lines[6]).toBe('<b>클로저</b><br>무엇이고, 어디에 썼나요?\t함수가 바깥 변수를 기억한다 — <code>count += 1</code><br><br><small>파일: counter.js</small>\tlearn-notes 개념')
+    expect(lines.slice(5).every(line => line === '' || line.split('\t').length === 3)).toBe(true)
   })
 })

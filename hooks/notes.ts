@@ -1481,3 +1481,90 @@ export function statsLine(stats: LearnStats): string {
   if (graded > 0) parts.push(`퀴즈 ${stats.week.right}/${graded} 맞힘`)
   return parts.join(' · ')
 }
+
+/** One question a quiz asked, kept for exporting as a flash card. */
+export type BankItem = { key: string; name: string; question: string; answer: string; at: number }
+
+/** Questions the bank keeps, the newest; each question and answer is cut to BANK_TEXT so the bank stays small in the store. */
+export const BANK_KEPT = 300
+const BANK_TEXT = 800
+
+/** The question bank read back from the store: bad entries dropped, each question once, the newest BANK_KEPT. */
+export function cleanBank(raw: unknown): BankItem[] {
+  if (!Array.isArray(raw)) return []
+  const items = raw.filter(
+    (one): one is BankItem =>
+      typeof one === 'object' &&
+      one !== null &&
+      typeof one.key === 'string' &&
+      typeof one.name === 'string' &&
+      typeof one.question === 'string' &&
+      typeof one.answer === 'string' &&
+      typeof one.at === 'number',
+  )
+  return addToBank([], items, 0)
+}
+
+/** The bank with `items` added (a question asked again replaces the older copy), the newest BANK_KEPT kept. */
+export function addToBank(bank: readonly BankItem[], items: readonly (Omit<BankItem, 'at'> & { at?: number })[], at: number): BankItem[] {
+  const byQuestion = new Map<string, BankItem>()
+  for (const one of [...bank, ...items.map(item => ({ ...item, at: item.at ?? at }))]) {
+    const q = one.question.trim()
+    if (q === '' || one.answer.trim() === '') continue
+    byQuestion.delete(q)
+    byQuestion.set(q, { key: one.key, name: one.name, question: closeFence(cut(one.question, BANK_TEXT)), answer: closeFence(cut(one.answer, BANK_TEXT)), at: one.at })
+  }
+  return [...byQuestion.values()].slice(-BANK_KEPT)
+}
+
+const html = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+/** Markdown as one line of the HTML Anki shows: code blocks, inline code, bold, line breaks; never a tab or a newline. */
+export function ankiHtml(markdown: string): string {
+  const out: string[] = []
+  let fence: string[] | null = null
+  for (const line of markdown.replace(/\t/g, '  ').split('\n')) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      if (fence) {
+        out.push(`<pre><code>${fence.map(html).join('<br>')}</code></pre>`)
+        fence = null
+      } else fence = []
+      continue
+    }
+    if (fence) {
+      fence.push(line)
+      continue
+    }
+    let text = ''
+    let i = 0
+    const re = /``(.+?)``|`([^`]+)`/g
+    let m
+    while ((m = re.exec(line))) {
+      text += html(line.slice(i, m.index)).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>') + `<code>${html(m[1] ?? m[2]!)}</code>`
+      i = re.lastIndex
+    }
+    out.push(text + html(line.slice(i)).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>'))
+  }
+  if (fence) out.push(`<pre><code>${fence.map(html).join('<br>')}</code></pre>`)
+  return out.join('<br>').replace(/(<br>){3,}/g, '<br><br>').replace(/^(<br>)+|(<br>)+$/g, '')
+}
+
+/**
+ * The bank and the concept index as an Anki import file (tab-separated, with
+ * the header lines Anki reads): a card per question asked, then a card per
+ * concept with an explanation. A card's front is its question or its concept's
+ * name, so importing again updates cards instead of adding copies.
+ */
+export function ankiText(bank: readonly BankItem[], index: Readonly<Record<string, LearnConcept>>): { text: string; questions: number; concepts: number } {
+  const rows: string[] = []
+  for (const one of bank) {
+    rows.push([ankiHtml(one.question), `${ankiHtml(one.answer)}<br><br><small>개념: ${html(one.name)}</small>`, 'learn-notes 퀴즈'].join('\t'))
+  }
+  const concepts = rankConcepts(index).filter(one => one.blurb.trim() !== '')
+  for (const one of concepts) {
+    const files = one.files.length > 0 ? `<br><br><small>파일: ${html(one.files.map(file => file.split('/').at(-1) ?? file).join(', '))}</small>` : ''
+    rows.push([`<b>${html(one.name)}</b><br>무엇이고, 어디에 썼나요?`, `${ankiHtml(one.blurb)}${files}`, 'learn-notes 개념'].join('\t'))
+  }
+  const head = ['#separator:tab', '#html:true', '#notetype:Basic', '#deck:learn-notes', '#tags column:3', '']
+  return { text: head.join('\n') + rows.join('\n') + (rows.length > 0 ? '\n' : ''), questions: bank.length, concepts: concepts.length }
+}

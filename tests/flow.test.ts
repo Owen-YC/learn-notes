@@ -1707,3 +1707,28 @@ test('/learn ask answers about the chosen note, and keeps the question out of th
   // The day's contents still count one note.
   expect((await learn($, 'day 오늘')).text).not.toContain('질문')
 })
+
+test('/learn anki writes every question asked and every explained concept as Anki cards', async ($, on) => {
+  const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  w.answer = THREE_QUESTIONS
+  await learn($, 'quiz')
+  w.answer = ['Q1: 문제 하나', 'A1: 고친 답', 'Q2: 새 문제', 'A2: 새 답'].join('\n')
+  await w.clock.advance(60_000)
+  await learn($, 'quiz')
+  expect(store.get('quizBank')).toHaveLength(4)
+  const reply = await learn($, 'anki')
+  const path = '/home/u/.claude/learning-notes/learn-notes-anki.txt'
+  expect(reply.text).toContain(`Anki 카드 7장을 썼습니다 (퀴즈 문제 4 · 개념 3): ${path}`)
+  const file = w.files.get(path)!
+  expect(file.startsWith('#separator:tab\n#html:true\n')).toBe(true)
+  expect(file).toContain('문제 하나\t고친 답<br><br><small>개념:')
+  expect(file).not.toContain('답 하나')
+})
+
+test('/learn anki says so when there is nothing to export', async ($, on) => {
+  world(on)
+  await start($)
+  expect((await learn($, 'anki')).text).toContain('내보낼 카드가 없습니다')
+})

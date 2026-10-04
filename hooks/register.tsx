@@ -12,6 +12,9 @@ import {
   ASK_SYSTEM,
   activityFromNotes,
   addActivity,
+  addToBank,
+  ankiText,
+  cleanBank,
   cleanActivity,
   statsLine,
   statsOf,
@@ -109,6 +112,10 @@ const QUIZ_KEY = 'quiz'
 const MERGES_KEY = 'merges'
 /** Each day's notes and graded answers, for the run of days and the week's progress. */
 const ACTIVITY_KEY = 'activity'
+/** Every question a quiz asked (the newest 300), for /learn anki. */
+const BANK_KEY = 'quizBank'
+/** The Anki import file /learn anki writes, in the journal folder. */
+const ANKI_FILE = 'learn-notes-anki.txt'
 
 type MergeRecord = { concept: LearnConcept; into: string; both: number }
 
@@ -613,6 +620,20 @@ async function storedActivity($: EngineInterface): Promise<Record<string, LearnD
   return raw === undefined ? activityFromNotes(await allNotes($)) : cleanActivity(raw)
 }
 
+/** Adds a new quiz's questions to the bank /learn anki exports; never fails the caller. */
+function bankQuestions($: EngineInterface, items: readonly LearnQuizItem[], at: number): Promise<void> {
+  const run = storing.then(async () => {
+    try {
+      const bank = addToBank(cleanBank(await $.store.get(BANK_KEY)), items.map(({ key, name, question, answer }) => ({ key, name, question, answer })), at)
+      await $.store.set(BANK_KEY, bank)
+    } catch (error) {
+      $.ui.log(`learn-notes: 퀴즈 문제를 모아 두지 못했습니다 (${String(error)})`, { to: 'debug' })
+    }
+  })
+  storing = run
+  return run
+}
+
 /** Counts a written note or graded answers on `day`, in the store and the pane's mirror; never fails the caller. */
 function recordActivity($: EngineInterface, day: string, delta: Partial<LearnDayActivity>): Promise<void> {
   const run = storing.then(async () => {
@@ -745,6 +766,7 @@ async function makeQuiz(
   if (items.length === 0) return { error: '퀴즈를 내지 못했습니다: 모델의 답을 문제로 읽지 못했습니다. 다시 해 보세요.' }
   await keepQuiz($, { at: now, items, isRevealed: false })
   await update($, quizRun, run => ({ ...run, error: null }))
+  await bankQuestions($, items, now)
   return { items }
 }
 
@@ -1124,6 +1146,26 @@ export const register: Register = (on, options) => {
       const lines = made.items.map((item, i) => listItem(i + 1, item.question))
       return {
         text: `복습 퀴즈 · ${made.items.length}문제\n\n${lines.join('\n\n')}\n\n먼저 스스로 답해 보고, /learn quiz 정답으로 확인하세요. 패널(/learn)의 퀴즈 보기(q)에서는 한 문제씩 답을 보고 맞음·틀림을 고를 수 있습니다.`,
+      }
+    }
+    if (arg === 'anki') {
+      const bank = cleanBank(await $.store.get(BANK_KEY).catch(() => undefined))
+      const out = ankiText(bank, await read($, concepts))
+      if (out.questions + out.concepts === 0) return { text: '내보낼 카드가 없습니다. 노트가 쓰여 개념이 쌓이거나 퀴즈를 받으면 카드가 생깁니다.' }
+      const path = `${(await journalDir($, cfg)).replace(/[\\/]+$/, '')}/${ANKI_FILE}`
+      try {
+        await $.fs.write(path, out.text)
+      } catch (error) {
+        $.ui.log(`learn-notes: Anki 파일을 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
+        return { text: `Anki 파일을 쓰지 못했습니다 (${path}). /config에서 저장 폴더를 확인하세요.` }
+      }
+      return {
+        text: [
+          `Anki 카드 ${out.questions + out.concepts}장을 썼습니다 (퀴즈 문제 ${out.questions} · 개념 ${out.concepts}): ${path}`,
+          '',
+          'Anki(데스크톱)에서 파일 → 가져오기로 이 파일을 고르면 learn-notes 덱에 들어갑니다. 휴대폰 AnkiDroid·AnkiMobile은 동기화하면 같이 보입니다.',
+          '다시 내보내 가져와도 앞면(문제·개념 이름)이 같은 카드는 새로 늘지 않고 고쳐집니다.',
+        ].join('\n'),
       }
     }
     if (arg === 'stats') {
@@ -1807,6 +1849,7 @@ const HELP = [
   '- 패널의 퀴즈 보기(q): s로 문제 받기 · a로 정답 보기 · o 맞힘 · x 틀림 (틀린 개념은 다음 퀴즈에 먼저)',
   '- `/learn ask 질문`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기 · 답은 일지에도 남음',
   '- `/learn stats`: 학습 기록 (연속 학습일 · 최근 7일 노트·개념·퀴즈 · 30일 정답률 · 날짜별 막대)',
+  '- `/learn anki`: 지금까지 낸 퀴즈 문제와 개념을 Anki 카드 파일로 (일지 폴더의 learn-notes-anki.txt)',
   '- 패널의 노트 보기: t로 이 노트의 개념만 퀴즈 · e로 더 쉽게(비유를 넣어) 다시 쓰기',
   '- `/learn find 말`: 모든 프로젝트의 노트에서 찾기 (요청 · 내용 · 파일 · 개념)',
   '- `/learn days`: 이 프로젝트의 일지 날짜',
