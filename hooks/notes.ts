@@ -1828,9 +1828,11 @@ export function cleanConcepts(raw: unknown, aliases: Readonly<Record<string, str
 
 /**
  * The index with one note's concepts counted: `taught` adds one each, `untaught`
- * (keys a rewrite of the note no longer names) takes one away. A note older
- * than what the index knows moves neither date forward. The least recent fall
- * out past CONCEPTS_KEPT.
+ * (keys a rewrite of the note no longer names) takes one away, never the last
+ * one of a concept marked known (notes are told not to teach it, so a rewrite
+ * leaves it out). A note older than what the index knows moves neither date
+ * forward. Past CONCEPTS_KEPT the least recent fall out, the known ones only
+ * after every one still being learned: no note meets them again to keep them recent.
  */
 export function countConcepts(
   index: Readonly<Record<string, LearnConcept>>,
@@ -1843,8 +1845,8 @@ export function countConcepts(
   for (const key of untaught) {
     const prior = conceptAt(next, key)
     if (!prior) continue
-    if (prior.count <= 1) delete next[key]
-    else next[key] = { ...prior, count: prior.count - 1 }
+    if (prior.count > 1) next[key] = { ...prior, count: prior.count - 1 }
+    else if (!isKnown(prior)) delete next[key]
   }
   for (const one of taught) {
     const prior = conceptAt(next, one.key)
@@ -1862,7 +1864,9 @@ export function countConcepts(
   }
   const keys = Object.keys(next)
   if (keys.length > CONCEPTS_KEPT) {
-    const order = keys.sort((a, b) => next[a]!.lastAt - next[b]!.lastAt)
+    // This note's own concepts go last of all, so a store full of known ones never drops what was just taught.
+    const rank = (key: string) => (taught.some(one => one.key === key) ? 2 : isKnown(next[key]!) ? 1 : 0)
+    const order = keys.sort((a, b) => rank(a) - rank(b) || next[a]!.lastAt - next[b]!.lastAt)
     for (const key of order.slice(0, keys.length - CONCEPTS_KEPT)) delete next[key]
   }
   return next

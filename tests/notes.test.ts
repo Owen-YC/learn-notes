@@ -118,6 +118,7 @@ import {
   markHelped,
   stamp,
   todayReview,
+  CONCEPTS_KEPT,
   type Hunk,
 } from '../hooks/notes'
 
@@ -1986,6 +1987,27 @@ describe('1.6.0: reviews go by recall, and a concept known leaves them', () => {
     expect(mergeConcepts({ 'c:a': a }, 'c:a', 'c:new', '새 이름')['c:new']!.knownAt).toBe(now)
     // A note that meets it again leaves it known.
     expect(countConcepts({ 'c:a': a }, [{ key: 'c:a', name: 'A', blurb: '' }], [], now + day, [])['c:a']!.knownAt).toBe(now)
+  })
+
+  test('a rewrite that leaves a known concept out (as told) never drops it, and the store keeps known ones past the ones still learned', () => {
+    const known = { ...one, name: 'A', knownAt: now }
+    // Its last note rewritten without it: still there, still known; one met twice is counted down.
+    expect(countConcepts({ 'c:a': known }, [], ['c:a'], now + day, [])['c:a']).toEqual(known)
+    expect(countConcepts({ 'c:a': { ...known, count: 2 } }, [], ['c:a'], now + day, [])['c:a']).toEqual(known)
+    expect(countConcepts({ 'c:b': { ...one, name: 'B' } }, [], ['c:b'], now + day, [])).toEqual({})
+    // Full: the least recently met still being learned falls out, not the older known one, never the one just taught.
+    const full: Record<string, LearnConcept> = { 'c:known': { ...known, lastAt: 0, firstAt: 0 } }
+    for (let i = 0; i < CONCEPTS_KEPT - 1; i += 1) full[`c:${i}`] = { ...one, name: `개념 ${i}`, firstAt: i + 1, lastAt: i + 1 }
+    const next = countConcepts(full, [{ key: 'c:new', name: '새 개념', blurb: '' }], [], now, [])
+    expect(Object.keys(next)).toHaveLength(CONCEPTS_KEPT)
+    expect(next['c:known']).toBeDefined()
+    expect(next['c:0']).toBeUndefined()
+    expect(next['c:new']).toBeDefined()
+    // Every other one known: the new one stays and the oldest known one goes.
+    const allKnown = Object.fromEntries(Object.entries(full).map(([key, c]) => [key, { ...c, knownAt: now }]))
+    const kept = countConcepts(allKnown, [{ key: 'c:new', name: '새 개념', blurb: '' }], [], now, [])
+    expect(kept['c:new']).toBeDefined()
+    expect(kept['c:known']).toBeUndefined()
   })
 
   test('a known concept leaves the reviews, the quiz and the week\'s counts', () => {

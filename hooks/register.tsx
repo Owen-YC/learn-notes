@@ -2939,10 +2939,15 @@ function reviewText(one: LearnConcept, now: number): string {
   return one.reviewedAt === undefined ? '아직 떠올려 본 적 없음' : `다음 복습 ${dueText(one, now)}`
 }
 
+/** Names the known concepts' line shows at most, as many as the list above it: /learn concepts' reply goes into the conversation. */
+const KNOWN_SHOWN = 30
+
 /** The concepts marked known, folded into one line under a concepts list: how many, the most recently met first. */
 function knownLine(index: Readonly<Record<string, LearnConcept>>): string | undefined {
   const known = Object.values(index).filter(isKnown).sort((a, b) => b.lastAt - a.lastAt)
-  return known.length > 0 ? `아는 개념 ${known.length}개 · ${known.map(one => one.name).join(', ')}` : undefined
+  if (known.length === 0) return undefined
+  const names = known.slice(0, KNOWN_SHOWN).map(one => one.name).join(', ')
+  return `아는 개념 ${known.length}개 · ${names}${known.length > KNOWN_SHOWN ? ` 외 ${known.length - KNOWN_SHOWN}개` : ''}`
 }
 
 /**

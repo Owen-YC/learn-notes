@@ -3256,6 +3256,45 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
     await ui.unmount()
   })
 
+  test('the known concepts\' line names thirty at most: /learn concepts goes into the conversation', async ($, on) => {
+    const known = Object.fromEntries(
+      Array.from({ length: 35 }, (_, i) => [`c:아는${i}`, { name: `아는${i}`, count: 1, firstAt: NOW - (i + 1) * DAY, lastAt: NOW - (i + 1) * DAY, blurb: '', files: [], knownAt: NOW - DAY }]),
+    )
+    const store = new Map<string, unknown>([['concepts', known]])
+    world(on, 'ok', null, true, store)
+    await start($)
+    const listed = (await learn($, 'concepts')).text
+    expect(listed).toContain('아는 개념 35개 · 아는0, 아는1, ')
+    expect(listed).toContain(', 아는29 외 5개 · 되돌리기: /learn 모른다 이름')
+    expect(listed).not.toContain('아는30')
+  })
+
+  test('a rewrite told not to teach a known concept leaves it known, not gone', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = CONCEPT_NOTE(['for...of 반복문', '기본 매개변수'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    await learn($, '안다 기본 매개변수')
+    // e: the prompt says the learner knows it, so the plainer note leaves it out.
+    const ui = await pane($)
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await ui.press({ key: 'easier' })
+    await w.clock.settle()
+    expect(w.models.at(-1)).toContain('## 학습자가 이미 아는 개념 (배울 개념에 넣지 마라. 꼭 필요하면 왜 칸에서 한 마디만)\n기본 매개변수\n')
+    const kept = stepOfName(store, '기본 매개변수')
+    expect(kept).toBeDefined()
+    expect(kept.knownAt).toBeGreaterThanOrEqual(NOW)
+    expect((await learn($, 'concepts')).text).toContain('아는 개념 1개 · 기본 매개변수')
+    // The next note is still told not to teach it.
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await turn($, () => $.tool.call(EDIT_A), 't2')
+    await finish(w)
+    expect(w.models.at(-1)).toContain('## 학습자가 이미 아는 개념 (배울 개념에 넣지 마라. 꼭 필요하면 왜 칸에서 한 마디만)\n기본 매개변수\n')
+    await ui.unmount()
+  })
+
   test('right again at the last step graduates a concept: the quiz says so, and it leaves the quizzes', async ($, on) => {
     const store = new Map<string, unknown>([['concepts', quizzed(5, ['구조 분해 할당'])]])
     const w = world(on, 'ok', null, true, store)
