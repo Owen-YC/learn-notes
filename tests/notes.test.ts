@@ -111,6 +111,13 @@ import {
   tokenText,
   usageLine,
   TEAM_BUDGET,
+  DAILY_REVIEW,
+  dueConcepts,
+  isKnown,
+  knownNames,
+  markHelped,
+  stamp,
+  todayReview,
   type Hunk,
 } from '../hooks/notes'
 
@@ -461,7 +468,7 @@ describe('concepts', () => {
     expect(cleaned['c:forof반복문']).toMatchObject({ name: 'for...of 반복문', count: 3, firstAt: 1, lastAt: 9 })
   })
 
-  test('progress counts the last week, and the review queue holds what is due, the longest overdue first', () => {
+  test('progress counts the last week, and the review queue holds what is due, the most recently learned first while never quizzed', () => {
     const now = Date.UTC(2026, 9, 3)
     const day = 86_400_000
     const index = {
@@ -473,8 +480,8 @@ describe('concepts', () => {
     expect(progressOf(index, now)).toEqual({ fresh: 1, again: 1 })
     const twice = { ...index, 'c:e': { name: 'E', count: 2, firstAt: now - 2 * day, lastAt: now - day, blurb: '', files: [] } }
     expect(progressOf(twice, now)).toEqual({ fresh: 2, again: 2 })
-    // Met once: due a day after. Met three times: step 2, due a week after (B, five days from now).
-    expect(reviewQueue(index, now).map(one => one.name)).toEqual(['C', 'D', 'A'])
+    // Never quizzed: due a day after it was first met, or three days after for one met again (B), however often.
+    expect(reviewQueue(index, now).map(one => one.name)).toEqual(['A', 'D', 'C', 'B'])
   })
 })
 
@@ -735,9 +742,9 @@ describe('quiz', () => {
     'c:new': { name: '화살표 함수', count: 1, firstAt: now - day, lastAt: now - day, blurb: 'd', files: [] },
   }
 
-  test('a quiz picks what is due first, the longest overdue first, then what falls due soonest', () => {
-    expect(quizPick(index, now).map(one => one.name)).toEqual(['호이스팅', '클로저', '화살표 함수'])
-    expect(quizPick(index, now, 4).map(one => one.name)).toEqual(['호이스팅', '클로저', '화살표 함수', 'for...of'])
+  test('a quiz picks what is due first, never quizzed the most recently learned first, then what falls due soonest', () => {
+    expect(quizPick(index, now).map(one => one.name)).toEqual(['화살표 함수', '클로저', '호이스팅'])
+    expect(quizPick(index, now, 4).map(one => one.name)).toEqual(['화살표 함수', '클로저', '호이스팅', 'for...of'])
     expect(quizPick({}, now)).toEqual([])
   })
 
@@ -746,8 +753,8 @@ describe('quiz', () => {
     expect(reviewed['c:older']!.reviewedAt).toBe(now)
     expect(reviewed['c:older']!.step).toBe(1)
     expect(dueText(reviewed['c:older']!, now)).toBe('3일 뒤')
-    expect(reviewQueue(reviewed, now).map(one => one.name)).toEqual(['클로저', '화살표 함수'])
-    expect(quizPick(reviewed, now)[0]!.name).toBe('클로저')
+    expect(reviewQueue(reviewed, now).map(one => one.name)).toEqual(['화살표 함수', '클로저', 'for...of'])
+    expect(quizPick(reviewed, now)[0]!.name).toBe('화살표 함수')
   })
 
   test('questions and answers are read in the forms models write them', () => {
@@ -760,7 +767,7 @@ describe('quiz', () => {
       'Q3：배열을 하나씩 도는 문법은?',
     ].join('\n')
     expect(parseQuiz(text, picks)).toEqual([
-      { key: 'c:older', name: '호이스팅', question: '다음 코드에서 함수를 선언 전에 부를 수 있는 이유는?', answer: '선언이 위로 끌어올려지기 때문이다.' },
+      { key: 'c:new', name: '화살표 함수', question: '다음 코드에서 함수를 선언 전에 부를 수 있는 이유는?', answer: '선언이 위로 끌어올려지기 때문이다.' },
       { key: 'c:old', name: '클로저', question: '바깥 변수를 기억하는 함수를 뭐라 할까?', answer: '클로저' },
     ])
     expect(parseQuiz('그냥 글', picks)).toEqual([])
@@ -970,7 +977,7 @@ describe('spaced review', () => {
     expect(dueAt(twice['c:클로저']!)).toBe(now + day + 60_000 + 3 * day)
   })
 
-  test('a wrong answer sends it back to the first step and makes it due now; met again in notes counts as steps', () => {
+  test('a wrong answer sends it back to the first step and makes it due now; met again in notes counts one step at most', () => {
     const reviewed = markReviewed(markReviewed({ 'c:클로저': one }, ['c:클로저'], now + day), ['c:클로저'], now + 5 * day)
     expect(stepOf(reviewed['c:클로저']!)).toBe(2)
     const missed = markMissed(reviewed, ['c:클로저'], now + 6 * day)
@@ -981,11 +988,13 @@ describe('spaced review', () => {
     const back = markReviewed(missed, ['c:클로저'], now + 7 * day)
     expect(stepOf(back['c:클로저']!)).toBe(1)
     expect(back['c:클로저']!.missedAt).toBeUndefined()
-    // Never quizzed, but three notes met it: step 2, due a week after the last.
-    expect(dueText({ ...one, count: 3 }, now + 2 * day)).toBe('5일 뒤')
-    expect(dueText({ ...one, count: 3 }, now + 9 * day)).toBe('2일 지남')
+    // Never quizzed, but three notes met it: step 1 at most, due three days after it was first met.
+    expect(stepOf({ ...one, count: 3 })).toBe(1)
+    expect(dueAt({ ...one, count: 3 })).toBe(now + 3 * day)
+    expect(dueText({ ...one, count: 3 }, now + 2 * day)).toBe('내일')
+    expect(dueText({ ...one, count: 3 }, now + 9 * day)).toBe('6일 지남')
     // Reviews go by the day: due later today is due now, and the queue and "오늘" agree.
-    const laterToday = { ...one, lastAt: now - day + 3_600_000 }
+    const laterToday = { ...one, firstAt: now - day + 3_600_000, lastAt: now - day + 3_600_000 }
     expect(dueAt(laterToday)).toBeGreaterThan(now)
     expect(isDue(laterToday, now)).toBe(true)
     expect(dueText(laterToday, now)).toBe('오늘')
@@ -1104,7 +1113,8 @@ test('a typed answer\'s grade is read from the two lines asked for, bold or JSON
 })
 
 describe('1.4.0', () => {
-  const picks = quizPick({ 'c:a': { name: 'A', count: 1, firstAt: 0, lastAt: 0, blurb: '', files: [] }, 'c:b': { name: 'B', count: 1, firstAt: 1, lastAt: 1, blurb: '', files: [] } }, Date.UTC(2026, 9, 3))
+  // Both never quizzed and due: the more recently learned (A) comes first.
+  const picks = quizPick({ 'c:a': { name: 'A', count: 1, firstAt: 1, lastAt: 1, blurb: '', files: [] }, 'c:b': { name: 'B', count: 1, firstAt: 0, lastAt: 0, blurb: '', files: [] } }, Date.UTC(2026, 9, 3))
 
   test('a hint comes with its question; one that only repeats the answer is dropped', () => {
     const items = parseQuiz(['Q1: 첫 문제', 'H1: 바깥을 떠올려 보세요', 'A1: 첫 답', 'Q2: 둘째 문제', 'H2: 둘째  답', 'A2: 둘째 답'].join('\n'), picks)
@@ -1852,5 +1862,163 @@ describe('1.6.0: the team file', () => {
     expect(asked).toContain('질문이 이 규칙이나 용어와 닿으면 근거로 삼아 답한다')
     expect(asked).toContain('- API 호출은 fetcher로 감쌉니다')
     expect(askPrompt(note, '왜?', 'beginner')).not.toContain('팀 규칙')
+  })
+})
+
+describe('1.6.0: reviews go by recall, and a concept known leaves them', () => {
+  const day = 86_400_000
+  const now = Date.UTC(2026, 9, 3, 3)
+  const one: LearnConcept = { name: '클로저', count: 1, firstAt: now - 2 * day, lastAt: now - 2 * day, blurb: '', files: [] }
+
+  test('meeting a concept again in a note moves its review date neither way; a quiz does', () => {
+    const index = { 'c:클로저': one }
+    const before = dueAt(index['c:클로저'])
+    // Met again today (count 2, a later lastAt): due three days after it was first met, from then on.
+    const again = countConcepts(index, [{ key: 'c:클로저', name: '클로저', blurb: '' }], [], now, [])['c:클로저']!
+    expect(again.lastAt).toBe(now)
+    expect(dueAt(again)).toBe(one.firstAt + 3 * day)
+    const thrice = countConcepts({ 'c:클로저': again }, [{ key: 'c:클로저', name: '클로저', blurb: '' }], [], now + day, [])['c:클로저']!
+    expect(stepOf(thrice)).toBe(1)
+    expect(dueAt(thrice)).toBe(dueAt(again))
+    expect(before).toBe(one.firstAt + day)
+    // Quizzed when due: counted from the quiz, a step on.
+    const reviewed = markReviewed({ 'c:클로저': thrice }, ['c:클로저'], now + day)['c:클로저']!
+    expect(reviewed.step).toBe(2)
+    expect(dueAt(reviewed)).toBe(now + 8 * day)
+    // A note meeting it after the quiz leaves the quiz's date.
+    const later = countConcepts({ 'c:클로저': reviewed }, [{ key: 'c:클로저', name: '클로저', blurb: '' }], [], now + 3 * day, [])['c:클로저']!
+    expect(later.count).toBe(4)
+    expect(dueAt(later)).toBe(now + 8 * day)
+  })
+
+  test('right after a hint or the answer keeps the step, and clears a miss', () => {
+    const stepped: LearnConcept = { ...one, step: 3, reviewedAt: now - 20 * day }
+    const helped = markHelped({ 'c:a': stepped }, ['c:a'], now)['c:a']!
+    expect(helped).toMatchObject({ step: 3, reviewedAt: now })
+    expect(dueAt(helped)).toBe(now + 14 * day)
+    const missed = markMissed({ 'c:a': stepped }, ['c:a'], now - day)
+    const back = markHelped(missed, ['c:a'], now)['c:a']!
+    expect(back).toMatchObject({ step: 0, reviewedAt: now })
+    expect(back.missedAt).toBeUndefined()
+    // Never quizzed, met once: the first step, kept.
+    expect(markHelped({ 'c:a': one }, ['c:a'], now)['c:a']).toMatchObject({ step: 0, reviewedAt: now })
+    expect(markHelped({ 'c:a': one }, ['c:none'], now)).toEqual({ 'c:a': one })
+  })
+
+  test('what is due: the misses, then the quizzed (longest overdue first), then the never quizzed (latest learned first)', () => {
+    const index: Record<string, LearnConcept> = {
+      'c:old': { ...one, name: '오래 전', firstAt: now - 40 * day, lastAt: now - 40 * day },
+      'c:new': { ...one, name: '어제', firstAt: now - day, lastAt: now - day },
+      'c:mid': { ...one, name: '열흘 전', firstAt: now - 10 * day, lastAt: now - 10 * day },
+      'c:q1': { ...one, name: '퀴즈 일찍', step: 1, reviewedAt: now - 20 * day },
+      'c:q2': { ...one, name: '퀴즈 늦게', step: 1, reviewedAt: now - 5 * day },
+      'c:miss2': { ...one, name: '나중 틀림', step: 0, reviewedAt: now - day, missedAt: now - day },
+      'c:miss1': { ...one, name: '먼저 틀림', step: 0, reviewedAt: now - 3 * day, missedAt: now - 3 * day },
+      'c:soon': { ...one, name: '아직', step: 2, reviewedAt: now - day },
+      'c:known': { ...one, name: '아는 것', firstAt: now - 50 * day, lastAt: now - 50 * day, knownAt: now - 2 * day },
+    }
+    expect(dueConcepts(index, now).map(c => c.name)).toEqual(['먼저 틀림', '나중 틀림', '퀴즈 일찍', '퀴즈 늦게', '어제', '열흘 전', '오래 전'])
+    // A quiz fills up with what falls due next, never with a known concept.
+    expect(quizPick(index, now, 9).map(c => c.name)).toEqual(['먼저 틀림', '나중 틀림', '퀴즈 일찍', '퀴즈 늦게', '어제', '열흘 전', '오래 전', '아직'])
+  })
+
+  test("today's review is the concepts due, ten a day at most less the answers graded today", () => {
+    expect(DAILY_REVIEW).toBe(10)
+    const many: Record<string, LearnConcept> = {}
+    for (let i = 0; i < 25; i += 1) many[`c:${i}`] = { ...one, name: `개념 ${i}` }
+    const today = stamp(now).day
+    expect(todayReview(many, {}, now)).toEqual({ due: 25, left: 10 })
+    expect(todayReview(many, { [today]: { notes: 4, right: 2, wrong: 1 } }, now)).toEqual({ due: 25, left: 7 })
+    expect(todayReview(many, { [today]: { notes: 0, right: 8, wrong: 2 } }, now)).toEqual({ due: 25, left: 0 })
+    expect(todayReview(many, { [today]: { notes: 0, right: 30, wrong: 0 } }, now)).toEqual({ due: 25, left: 0 })
+    // Yesterday's answers leave today alone; fewer due than ten, all of them.
+    expect(todayReview(many, { [dayBefore(now)]: { notes: 0, right: 9, wrong: 0 } }, now).left).toBe(10)
+    expect(todayReview({ 'c:a': one, 'c:b': { ...one, name: 'B' } }, { [today]: { notes: 0, right: 3, wrong: 0 } }, now)).toEqual({ due: 2, left: 2 })
+    // A known concept is not due.
+    expect(todayReview({ 'c:a': { ...one, knownAt: now } }, {}, now)).toEqual({ due: 0, left: 0 })
+  })
+
+  test('right again at the last step, when due, marks it known; early, the same day or a step below does not', () => {
+    const top: LearnConcept = { ...one, step: 5, reviewedAt: now - 61 * day }
+    const graduated = markReviewed({ 'c:a': top }, ['c:a'], now)['c:a']!
+    expect(graduated).toMatchObject({ step: 5, reviewedAt: now, knownAt: now })
+    expect(isKnown(graduated)).toBe(true)
+    expect(markReviewed({ 'c:a': { ...top, reviewedAt: now - 10 * day } }, ['c:a'], now)['c:a']!.knownAt).toBeUndefined()
+    expect(markReviewed({ 'c:a': { ...top, step: 4, reviewedAt: now - 31 * day } }, ['c:a'], now)['c:a']).toMatchObject({ step: 5 })
+    expect(markReviewed({ 'c:a': { ...top, step: 4, reviewedAt: now - 31 * day } }, ['c:a'], now)['c:a']!.knownAt).toBeUndefined()
+    // With help it keeps the step and stays unknown.
+    expect(markHelped({ 'c:a': top }, ['c:a'], now)['c:a']!.knownAt).toBeUndefined()
+    // A wrong or partly right answer takes a known mark off.
+    expect(markMissed({ 'c:a': graduated }, ['c:a'], now + day)['c:a']!.knownAt).toBeUndefined()
+    expect(markPartial({ 'c:a': graduated }, ['c:a'], now + day)['c:a']!.knownAt).toBeUndefined()
+    // Going over it again early (a note's own quiz) keeps it.
+    expect(markReviewed({ 'c:a': graduated }, ['c:a'], now + day)['c:a']!.knownAt).toBe(now)
+  })
+
+  test('a graduation turned wrong takes the known mark off, and turned right again puts it back', () => {
+    const top: LearnConcept = { ...one, step: 5, reviewedAt: now - 61 * day }
+    const before = marksOf(top)
+    expect(before.knownAt).toBeUndefined()
+    const right = markReviewed({ 'c:a': top }, ['c:a'], now)
+    const wrong = regrade(right, 'c:a', before, now, (index, keys, at) => markMissed(markReviewed(index, keys, at), keys, at))
+    expect(wrong['c:a']).toMatchObject({ step: 0, missedAt: now })
+    expect(wrong['c:a']!.knownAt).toBeUndefined()
+    expect(regrade(wrong, 'c:a', before, now, markReviewed)['c:a']).toMatchObject({ step: 5, knownAt: now })
+    // Known before the grade (a note's own quiz): its mark is part of what is put back.
+    const known: LearnConcept = { ...one, step: 2, reviewedAt: now - 10 * day, knownAt: now - 5 * day }
+    expect(marksOf(known).knownAt).toBe(now - 5 * day)
+    const missed = markMissed(markReviewed({ 'c:a': known }, ['c:a'], now), ['c:a'], now)
+    expect(missed['c:a']!.knownAt).toBeUndefined()
+    expect(regrade(missed, 'c:a', marksOf(known), now, markHelped)['c:a']!.knownAt).toBe(now - 5 * day)
+  })
+
+  test('the known mark survives the store, and two copies stay known only when both were', () => {
+    const known = { ...one, knownAt: now }
+    expect(cleanConcepts(JSON.parse(JSON.stringify({ 'c:클로저': known })))['c:클로저']!.knownAt).toBe(now)
+    expect(cleanConcepts({ x: { ...known, knownAt: 'yes' } })['c:클로저']!.knownAt).toBeUndefined()
+    expect(cleanConcepts({ a: known, b: { ...one, name: '클로저 ' } })['c:클로저']!.knownAt).toBeUndefined()
+    expect(cleanConcepts({ a: known, b: { ...known, name: '클로저 ', knownAt: now + 1 } })['c:클로저']!.knownAt).toBe(now + 1)
+    const a = { ...known, name: 'A' }
+    const b = { ...one, name: 'B' }
+    expect(mergeConcepts({ 'c:a': a, 'c:b': b }, 'c:a', 'c:b', 'B')['c:b']!.knownAt).toBeUndefined()
+    expect(mergeConcepts({ 'c:a': a, 'c:b': { ...b, knownAt: now - day } }, 'c:a', 'c:b', 'B')['c:b']!.knownAt).toBe(now)
+    // A rename keeps it.
+    expect(mergeConcepts({ 'c:a': a }, 'c:a', 'c:new', '새 이름')['c:new']!.knownAt).toBe(now)
+    // A note that meets it again leaves it known.
+    expect(countConcepts({ 'c:a': a }, [{ key: 'c:a', name: 'A', blurb: '' }], [], now + day, [])['c:a']!.knownAt).toBe(now)
+  })
+
+  test('a known concept leaves the reviews, the quiz and the week\'s counts', () => {
+    const index: Record<string, LearnConcept> = {
+      'c:a': { ...one, name: 'A', firstAt: now - day, lastAt: now - day, knownAt: now },
+      'c:b': { ...one, name: 'B', firstAt: now - day, lastAt: now - day },
+    }
+    expect(dueConcepts(index, now).map(c => c.name)).toEqual(['B'])
+    expect(quizPick(index, now).map(c => c.name)).toEqual(['B'])
+    expect(quizPick({ 'c:a': index['c:a']! }, now)).toEqual([])
+    expect(progressOf(index, now)).toEqual({ fresh: 1, again: 0 })
+  })
+
+  test('the note prompt keeps known concepts out and names practiced ones in a line', () => {
+    const index: Record<string, LearnConcept> = {
+      'c:a': { ...one, name: 'const 선언', knownAt: now },
+      'c:b': { ...one, name: '화살표 함수', step: 3, reviewedAt: now - day },
+      'c:c': { ...one, name: '클로저', step: 4, reviewedAt: now - day, missedAt: now },
+      'c:d': { ...one, name: 'map', lastAt: now },
+    }
+    const names = knownNames(index)
+    expect(names).toEqual({ known: ['const 선언'], practiced: ['화살표 함수'], rest: ['map', '클로저'] })
+    const change = changeOf({ path: '/proj/a.ts', root: '/proj', tool: 'Edit', kind: 'update', hunks: [HUNK] })
+    const prompt = notePrompt({ prompt: 'p', answer: '', changes: [change], moreFiles: 0 }, 'beginner', names)
+    expect(prompt).toContain('## 학습자가 이미 아는 개념 (배울 개념에 넣지 마라. 꼭 필요하면 왜 칸에서 한 마디만)\nconst 선언\n')
+    expect(prompt).toContain('## 퀴즈로 익힌 개념 (이름 뒤에 (복습)만 달고 한 줄로)\n화살표 함수\n')
+    expect(prompt).toContain('## 이미 배운 개념 (지난 노트들에서)\nmap, 클로저\n')
+    expect(prompt.indexOf('이미 아는 개념')).toBeLessThan(prompt.indexOf('퀴즈로 익힌 개념'))
+    expect(prompt.indexOf('퀴즈로 익힌 개념')).toBeLessThan(prompt.indexOf('## 이미 배운 개념'))
+    // Nothing known or practiced: neither block.
+    const plain = notePrompt({ prompt: 'p', answer: '', changes: [change], moreFiles: 0 }, 'beginner', knownNames({ 'c:d': index['c:d']! }))
+    expect(plain).not.toContain('이미 아는 개념')
+    expect(plain).not.toContain('퀴즈로 익힌 개념')
+    expect(plain).toContain('## 이미 배운 개념 (지난 노트들에서)\nmap\n')
   })
 })

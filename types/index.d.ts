@@ -92,8 +92,8 @@ export type LearnAskRun = {
   draft: string | null
 }
 
-/** A concept's spaced-review marks (see LearnConcept), as they were before a quiz grade. */
-export type LearnQuizMarks = Pick<LearnConcept, 'reviewedAt' | 'missedAt' | 'step'>
+/** A concept's spaced-review marks (see LearnConcept), as they were before a quiz grade; a grade at the last step can mark it known. */
+export type LearnQuizMarks = Pick<LearnConcept, 'reviewedAt' | 'missedAt' | 'step' | 'knownAt'>
 
 /** One concept the notes taught, kept across sessions and projects. */
 export type LearnConcept = {
@@ -113,11 +113,17 @@ export type LearnConcept = {
   /** Milliseconds since the epoch when the learner said they got its quiz question wrong (/learn quiz 틀림); cleared when a later quiz goes over it. */
   missedAt?: number
   /**
-   * Its spaced-review step once quizzed: due again 1, 3, 7, 14, 30 or 60 days after it was last met.
-   * A right answer moves it a step on (once a day at most), a partly right one a step back, a wrong one back to 0;
-   * absent, the notes that met it again count.
+   * Its spaced-review step once quizzed: due again 1, 3, 7, 14, 30 or 60 days after it was last quizzed (first met,
+   * while never quizzed). A right answer moves it a step on (once a day at most), one after a hint or the answer keeps
+   * it, a partly right one a step back, a wrong one back to 0; absent, 0 for a concept met once and 1 for one met again.
    */
   step?: number
+  /**
+   * Milliseconds since the epoch when it was marked known: right again at the last step, or /learn 안다. A known
+   * concept is left out of reviews, quizzes and the concepts list, and the next notes do not teach it again;
+   * /learn 모른다 or a wrong answer takes the mark off.
+   */
+  knownAt?: number
 }
 
 /** One quiz question about a concept; the answer stays hidden until /learn quiz 정답, or a in the pane's quiz. */

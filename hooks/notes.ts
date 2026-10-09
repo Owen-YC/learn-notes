@@ -1272,18 +1272,22 @@ const EASIER_TEXT =
 
 /**
  * The one user message the model reads for a note; `isEasier` asks for the
- * plainest words and an everyday comparison per concept. `team`: the
- * repository's team file, its rules and terms put before the concepts already
- * learned, so a concept the team has a term for is named as the team names it.
+ * plainest words and an everyday comparison per concept. `known`: the concepts
+ * met before (see knownNames; a plain list is all `rest`), the ones the learner
+ * knows kept out of what the note teaches and the ones practiced in quizzes
+ * named in a line. `team`: the repository's team file, its rules and terms put
+ * before the concepts already learned, so a concept the team has a term for is
+ * named as the team names it.
  */
 export function notePrompt(
   note: Pick<LearnNote, 'prompt' | 'answer' | 'changes' | 'moreFiles' | 'withheld'>,
   level: Level,
-  known: readonly string[] = [],
+  known: readonly string[] | KnownNames = [],
   isEasier = false,
   team?: TeamFile,
 ): string {
   const hasRules = (team?.rules.length ?? 0) > 0
+  const names: KnownNames = 'rest' in known ? known : { known: [], practiced: [], rest: [...known] }
   return [
     LEVEL_TEXT[level],
     ...(isEasier ? [EASIER_TEXT] : []),
@@ -1298,10 +1302,21 @@ export function notePrompt(
     ...diffBlocks(note, PROMPT_DIFF_BUDGET),
     '',
     ...teamSection(team),
-    ...(known.length > 0
+    ...(names.known.length > 0
+      ? ['## 학습자가 이미 아는 개념 (배울 개념에 넣지 마라. 꼭 필요하면 왜 칸에서 한 마디만)', names.known.join(', '), '']
+      : []),
+    ...(names.practiced.length > 0
+      ? [
+          '## 퀴즈로 익힌 개념 (이름 뒤에 (복습)만 달고 한 줄로)',
+          names.practiced.join(', '),
+          '이번 diff에 이 개념이 쓰였으면 배울 개념에 이름을 글자 그대로 쓰고 (복습)을 붙여 설명은 한 줄로 짧게 짚어라. 남는 자리는 새 개념에 준다.',
+          '',
+        ]
+      : []),
+    ...(names.rest.length > 0
       ? [
           '## 이미 배운 개념 (지난 노트들에서)',
-          known.join(', '),
+          names.rest.join(', '),
           '이번 diff의 개념이 위 목록에 있으면 이름을 글자 그대로 쓰고 이름 뒤에 (복습)을 붙여라. 목록에 없는 개념만 새 이름을 지어라.',
           '',
         ]
@@ -1787,9 +1802,26 @@ export function cleanConcepts(raw: unknown, aliases: Readonly<Record<string, str
       ...(typeof one.missedAt === 'number' ? { missedAt: one.missedAt } : {}),
       ...(typeof one.step === 'number' && Number.isFinite(one.step) ? { step: Math.max(0, Math.min(REVIEW_DAYS.length - 1, Math.floor(one.step))) } : {}),
     })
+    const knownAt = typeof one.knownAt === 'number' && Number.isFinite(one.knownAt) ? one.knownAt : undefined
     index[key] = prior
-      ? { ...unmarked(prior), count: prior.count + one.count, firstAt: Math.min(prior.firstAt, firstAt), lastAt: Math.max(prior.lastAt, lastAt), ...marks }
-      : { name: one.name, count: Math.floor(one.count), firstAt, lastAt, blurb: typeof one.blurb === 'string' ? one.blurb : '', files, ...marks }
+      ? {
+          ...withoutKnown(unmarked(prior)),
+          count: prior.count + one.count,
+          firstAt: Math.min(prior.firstAt, firstAt),
+          lastAt: Math.max(prior.lastAt, lastAt),
+          ...marks,
+          ...knownOf(prior.knownAt, knownAt),
+        }
+      : {
+          name: one.name,
+          count: Math.floor(one.count),
+          firstAt,
+          lastAt,
+          blurb: typeof one.blurb === 'string' ? one.blurb : '',
+          files,
+          ...marks,
+          ...(knownAt !== undefined ? { knownAt } : {}),
+        }
   }
   return index
 }
@@ -1845,12 +1877,31 @@ export function rankConcepts(index: Readonly<Record<string, LearnConcept>>): Ran
     .sort((a, b) => b.count - a.count || b.lastAt - a.lastAt)
 }
 
-/** The names the model should reuse: the most recently met first. */
-export function knownNames(index: Readonly<Record<string, LearnConcept>>): string[] {
-  return Object.values(index)
-    .sort((a, b) => b.lastAt - a.lastAt)
-    .slice(0, KNOWN_IN_PROMPT)
-    .map(one => one.name)
+/**
+ * The names a note's prompt carries, the most recently met first in each:
+ * concepts the learner knows (not to be taught again), concepts practiced in
+ * quizzes (named in one line), and the rest (reused by name).
+ */
+export type KnownNames = { known: string[]; practiced: string[]; rest: string[] }
+
+/** The step from which a concept never missed since counts as practiced: right in three quizzes in a row. */
+const PRACTICED_STEP = 3
+
+/** The names the model should reuse, by how well the learner knows them (see KnownNames); at most KNOWN_IN_PROMPT of each. */
+export function knownNames(index: Readonly<Record<string, LearnConcept>>): KnownNames {
+  const recent = Object.values(index).sort((a, b) => b.lastAt - a.lastAt)
+  const learning = recent.filter(one => !isKnown(one)).slice(0, KNOWN_IN_PROMPT)
+  const isPracticed = (one: LearnConcept) => stepOf(one) >= PRACTICED_STEP && !isMissed(one)
+  return {
+    known: recent.filter(isKnown).slice(0, KNOWN_IN_PROMPT).map(one => one.name),
+    practiced: learning.filter(isPracticed).map(one => one.name),
+    rest: learning.filter(one => !isPracticed(one)).map(one => one.name),
+  }
+}
+
+/** True for a concept marked known: right again at the last step, or /learn 안다. */
+export function isKnown(one: LearnConcept): boolean {
+  return typeof one.knownAt === 'number'
 }
 
 const WEEK = 7 * 86_400_000
@@ -1858,13 +1909,13 @@ const WEEK = 7 * 86_400_000
 /**
  * The last seven days: concepts met for the first time in them, and concepts
  * met again in them (a later note taught one already known). One learned on
- * Monday and met again on Tuesday counts in both.
+ * Monday and met again on Tuesday counts in both; one marked known in neither.
  */
 export function progressOf(index: Readonly<Record<string, LearnConcept>>, now: number): { fresh: number; again: number } {
   let fresh = 0
   let again = 0
   for (const one of Object.values(index)) {
-    if (one.lastAt < now - WEEK) continue
+    if (one.lastAt < now - WEEK || isKnown(one)) continue
     if (one.firstAt >= now - WEEK) fresh += 1
     if (one.count > 1 && one.lastAt > one.firstAt) again += 1
   }
@@ -1876,16 +1927,24 @@ export const REVIEW_DAYS: readonly number[] = [1, 3, 7, 14, 30, 60]
 const DAY = 86_400_000
 const TOP_STEP = REVIEW_DAYS.length - 1
 
-/** A concept's review step: the one quizzes gave it, else one more for each time a note met it again. */
+/**
+ * A concept's review step: the one quizzes gave it; never quizzed, the first
+ * for a concept met once and the second for one met again, however often:
+ * meeting it in notes is not recalling it.
+ */
 export function stepOf(one: LearnConcept): number {
   if (typeof one.step === 'number') return Math.max(0, Math.min(TOP_STEP, Math.floor(one.step)))
-  return Math.max(0, Math.min(TOP_STEP, one.count - 1))
+  return Math.min(1, Math.max(0, one.count - 1))
 }
 
-/** When a concept is due for review: right away after a wrong answer, else its step's days after it was last met. */
+/**
+ * When a concept is due for review: right away after a wrong answer, else its
+ * step's days after the last quiz that went over it (after it was first met,
+ * while never quizzed). A later note that meets it again moves nothing.
+ */
 export function dueAt(one: LearnConcept): number {
   if (isMissed(one)) return one.missedAt ?? 0
-  return lastSeen(one) + REVIEW_DAYS[stepOf(one)]! * DAY
+  return (one.reviewedAt ?? one.firstAt) + REVIEW_DAYS[stepOf(one)]! * DAY
 }
 
 /** True when a concept is due for review by the end of `now`'s day: reviews go by the day, not the hour. */
@@ -1893,12 +1952,37 @@ export function isDue(one: LearnConcept, now: number): boolean {
   return startOfDay(dueAt(one)) <= startOfDay(now)
 }
 
-/** Every concept due for review today: wrong answers first (the oldest miss first), then the longest overdue. */
+/**
+ * Every concept due for review today, none marked known: wrong answers first
+ * (the oldest miss first), then the ones quizzed before (the longest overdue
+ * first), then the ones never quizzed (the most recently learned first, so a
+ * pile of old ones does not bury what was learned yesterday).
+ */
 export function dueConcepts(index: Readonly<Record<string, LearnConcept>>, now: number): RankedConcept[] {
-  const due = rankConcepts(index).filter(one => isDue(one, now))
+  const due = rankConcepts(index).filter(one => !isKnown(one) && isDue(one, now))
   const missed = due.filter(isMissed).sort((a, b) => (a.missedAt ?? 0) - (b.missedAt ?? 0))
-  const rest = due.filter(one => !isMissed(one)).sort((a, b) => dueAt(a) - dueAt(b))
-  return [...missed, ...rest]
+  const quizzed = due.filter(one => !isMissed(one) && one.reviewedAt !== undefined).sort((a, b) => dueAt(a) - dueAt(b))
+  const fresh = due.filter(one => !isMissed(one) && one.reviewedAt === undefined).sort((a, b) => b.firstAt - a.firstAt)
+  return [...missed, ...quizzed, ...fresh]
+}
+
+/** Questions a day's review asks for at most: past them the reminder rests until tomorrow. */
+export const DAILY_REVIEW = 10
+
+/**
+ * Today's review: every concept due (`due`), and how many of them are left for
+ * today (`left`), DAILY_REVIEW less the answers graded today.
+ */
+export function todayReview(
+  index: Readonly<Record<string, LearnConcept>>,
+  activity: Readonly<Record<string, LearnDayActivity>>,
+  now: number,
+): { due: number; left: number } {
+  const due = dueConcepts(index, now).length
+  const day = stamp(now).day
+  const today = Object.prototype.hasOwnProperty.call(activity, day) ? activity[day] : undefined
+  const graded = today ? today.right + today.wrong : 0
+  return { due, left: Math.max(0, Math.min(due, DAILY_REVIEW - graded)) }
 }
 
 /** The first few concepts due for review (see dueConcepts). */
@@ -1924,7 +2008,7 @@ export function isMissed(one: LearnConcept): boolean {
   return typeof one.missedAt === 'number'
 }
 
-/** When the learner last met a concept: in a note, or going over it in a quiz. */
+/** When the learner last met a concept, in a note or going over it in a quiz: for showing, never for the review date. */
 export function lastSeen(one: LearnConcept): number {
   return Math.max(one.lastAt, one.reviewedAt ?? 0)
 }
@@ -2072,8 +2156,8 @@ export function resolveKey(aliases: Readonly<Record<string, string>>, key: strin
 
 /**
  * The index with concept `from` folded into `into`: counts added, the earliest
- * first date and the latest last date kept, files joined; `into` keeps its
- * name, or takes `name` when it did not exist yet (a rename).
+ * first date and the latest last date kept, files joined, known only when both
+ * were; `into` keeps its name, or takes `name` when it did not exist yet (a rename).
  */
 export function mergeConcepts(
   index: Readonly<Record<string, LearnConcept>>,
@@ -2088,13 +2172,14 @@ export function mergeConcepts(
   delete next[from]
   next[into] = b
     ? {
-        ...unmarked(b),
+        ...withoutKnown(unmarked(b)),
         count: a.count + b.count,
         firstAt: Math.min(a.firstAt, b.firstAt),
         lastAt: Math.max(a.lastAt, b.lastAt),
         blurb: b.lastAt >= a.lastAt ? b.blurb || a.blurb : a.blurb || b.blurb,
         files: [...b.files, ...a.files].filter((file, i, all) => all.indexOf(file) === i).slice(0, 5),
         ...quizMarks(a, b),
+        ...knownOf(a.knownAt, b.knownAt),
       }
     : { ...a, name }
   return next
@@ -2368,11 +2453,11 @@ export function codeFor(change: Pick<LearnChange, 'diff'>, blurb: string): strin
   return kept.length > 0 ? kept.join('\n') : undefined
 }
 
-/** Concepts for a quiz: the ones due for a second look first, then the longest unseen; at most `size`. */
+/** Concepts for a quiz, none marked known: the ones due for a second look first, then the ones due soonest; at most `size`. */
 export function quizPick(index: Readonly<Record<string, LearnConcept>>, now: number, size = 3): RankedConcept[] {
   const due = reviewQueue(index, now, size)
   const rest = rankConcepts(index)
-    .filter(one => !due.some(other => other.key === one.key))
+    .filter(one => !isKnown(one) && !due.some(other => other.key === one.key))
     .sort((a, b) => dueAt(a) - dueAt(b))
   return [...due, ...rest].slice(0, size)
 }
@@ -2546,7 +2631,10 @@ function quizItems(parts: Map<string, string[]>, picks: readonly RankedConcept[]
   return items
 }
 
-/** The index with the quizzed concepts marked as gone over at `at`. */
+/**
+ * The index with the quizzed concepts marked as gone over at `at`. One right
+ * again at the last step, when it was due, is marked known (graduated).
+ */
 export function markReviewed(index: Readonly<Record<string, LearnConcept>>, keys: readonly string[], at: number): Record<string, LearnConcept> {
   const next: Record<string, LearnConcept> = { ...index }
   for (const key of keys) {
@@ -2556,45 +2644,65 @@ export function markReviewed(index: Readonly<Record<string, LearnConcept>>, keys
     // quiz, a quiz filled out with concepts not due yet) or again the same day keeps its step.
     const isSameDay = one.reviewedAt !== undefined && at - one.reviewedAt < DAY / 2
     const isEarly = !isDue(one, at)
-    const step = isSameDay || isEarly ? stepOf(one) : Math.min(stepOf(one) + 1, TOP_STEP)
-    next[key] = { ...unmarked(one), reviewedAt: Math.max(one.reviewedAt ?? 0, at), step }
+    const isStep = !isSameDay && !isEarly
+    const step = isStep ? Math.min(stepOf(one) + 1, TOP_STEP) : stepOf(one)
+    const isGraduated = isStep && stepOf(one) === TOP_STEP
+    next[key] = { ...unmarked(one), reviewedAt: Math.max(one.reviewedAt ?? 0, at), step, ...(isGraduated ? { knownAt: at } : {}) }
   }
   return next
 }
 
-/** The index with the learner's wrong quiz answers marked, so those concepts come first in the next quiz. */
+/**
+ * The index with right answers given after a hint or the answer itself marked:
+ * gone over now, its step kept (so it comes back after as long again), a miss cleared.
+ */
+export function markHelped(index: Readonly<Record<string, LearnConcept>>, keys: readonly string[], at: number): Record<string, LearnConcept> {
+  const next: Record<string, LearnConcept> = { ...index }
+  for (const key of keys) {
+    const one = conceptAt(next, key)
+    if (one) next[key] = { ...unmarked(one), reviewedAt: Math.max(one.reviewedAt ?? 0, at), step: stepOf(one) }
+  }
+  return next
+}
+
+/**
+ * The index with the learner's wrong quiz answers marked, so those concepts
+ * come first in the next quiz; one marked known is known no more.
+ */
 export function markMissed(index: Readonly<Record<string, LearnConcept>>, keys: readonly string[], at: number): Record<string, LearnConcept> {
   const next: Record<string, LearnConcept> = { ...index }
   for (const key of keys) {
     const one = conceptAt(next, key)
-    if (one) next[key] = { ...one, missedAt: at, step: 0 }
+    if (one) next[key] = { ...withoutKnown(one), missedAt: at, step: 0 }
   }
   return next
 }
 
 /**
  * The index with partly right answers marked: gone over now, and a step back
- * (never below the first), so it comes back sooner without counting as forgotten.
+ * (never below the first), so it comes back sooner without counting as
+ * forgotten; one marked known is known no more.
  */
 export function markPartial(index: Readonly<Record<string, LearnConcept>>, keys: readonly string[], at: number): Record<string, LearnConcept> {
   const next: Record<string, LearnConcept> = { ...index }
   for (const key of keys) {
     const one = conceptAt(next, key)
-    if (one) next[key] = { ...unmarked(one), reviewedAt: Math.max(one.reviewedAt ?? 0, at), step: Math.max(0, stepOf(one) - 1) }
+    if (one) next[key] = { ...withoutKnown(unmarked(one)), reviewedAt: Math.max(one.reviewedAt ?? 0, at), step: Math.max(0, stepOf(one) - 1) }
   }
   return next
 }
 
-/** A concept's quiz marks as they stand, to put back if the grade that follows is turned the other way. */
+/** A concept's quiz marks as they stand, its known mark too, to put back if the grade that follows is turned the other way. */
 export function marksOf(one: LearnConcept): LearnQuizMarks {
   return {
     ...(one.reviewedAt !== undefined ? { reviewedAt: one.reviewedAt } : {}),
     ...(one.missedAt !== undefined ? { missedAt: one.missedAt } : {}),
     ...(one.step !== undefined ? { step: one.step } : {}),
+    ...(one.knownAt !== undefined ? { knownAt: one.knownAt } : {}),
   }
 }
 
-/** How a grade marks a concept: markReviewed, markPartial, markMissed or a mix. */
+/** How a grade marks a concept: markReviewed, markHelped, markPartial, markMissed or a mix. */
 export type Mark = (index: Readonly<Record<string, LearnConcept>>, keys: readonly string[], at: number) => Record<string, LearnConcept>
 
 /**
@@ -2606,16 +2714,31 @@ export function regrade(index: Readonly<Record<string, LearnConcept>>, key: stri
   const one = conceptAt(index, key)
   if (!one) return { ...index }
   const isUntouched = before !== undefined && one.reviewedAt === at
-  return mark(isUntouched ? { ...index, [key]: { ...unmarked(one), ...before } } : index, [key], at)
+  if (!isUntouched) return mark(index, [key], at)
+  // The known mark the first grade gave (right at the last step) goes with it; one from before is in `before`.
+  const base = one.knownAt === at ? withoutKnown(unmarked(one)) : unmarked(one)
+  return mark({ ...index, [key]: { ...base, ...before } }, [key], at)
 }
 
-/** A concept without its quiz marks, for putting the right ones back. */
+/** A concept without its quiz marks, for putting the right ones back; its known mark is no quiz mark and stays. */
 function unmarked(one: LearnConcept): LearnConcept {
   const rest = { ...one }
   delete rest.reviewedAt
   delete rest.missedAt
   delete rest.step
   return rest
+}
+
+/** A concept without its known mark. */
+function withoutKnown(one: LearnConcept): LearnConcept {
+  const rest = { ...one }
+  delete rest.knownAt
+  return rest
+}
+
+/** The known mark of one concept out of two copies of it: known only when both were, the later mark kept. */
+function knownOf(a: number | undefined, b: number | undefined): Pick<LearnConcept, 'knownAt'> {
+  return a !== undefined && b !== undefined ? { knownAt: Math.max(a, b) } : {}
 }
 
 /**

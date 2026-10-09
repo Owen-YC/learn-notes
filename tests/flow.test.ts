@@ -1054,11 +1054,13 @@ test('a concept met once and not since comes back for review, and the reminder s
   expect(await ui.find({ type: 'Button', key: 'quiz', text: '퀴즈' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'view', text: '노트' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /클로저 · 31일 지남/ })).toBeDefined()
-  // Learned just now: due tomorrow.
-  expect(await ui.find({ type: 'Text', text: /for\.\.\.of 반복문 ×1 · 최근 .* · 다음 복습 내일/ })).toBeDefined()
+  // Learned just now and never quizzed: due tomorrow, said as never recalled yet.
+  expect(await ui.find({ type: 'Text', text: /for\.\.\.of 반복문 ×1 · 최근 .* · 아직 떠올려 본 적 없음$/ })).toBeDefined()
   await ui.unmount()
-  expect((await learn($, 'concepts')).text).toContain('복습할 개념 1개: 클로저')
-  expect(w.statuses.at(-1)).toBe('학습 노트 · 복습할 개념 1개 · /learn 패널에서 q')
+  const listed = (await learn($, 'concepts')).text
+  expect(listed).toContain('복습할 개념 1개: 클로저')
+  expect(listed).toContain('**for...of 반복문** ×1 · 최근 2026-10-03 · 아직 떠올려 본 적 없음: ')
+  expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
 })
 
 test('/learn find looks through every project, and puts this project\'s newest hit in the pane', async ($, on) => {
@@ -1526,7 +1528,8 @@ test('/learn quiz asks about concepts due for review; 정답 shows the answers a
   const reviewedAt = () => (store.get('concepts') as Record<string, { reviewedAt?: number }>)['c:클로저']!.reviewedAt
   expect(reviewedAt()).toBeUndefined()
   expect(store.get('activity')).toEqual({})
-  expect((await learn($, 'quiz 맞음 1')).text).toBe('맞힌 것으로 적었습니다: 1. 클로저. 다음 복습까지 간격이 늘어납니다.')
+  // Graded right once its answer was seen: recalled with help, so the interval stays.
+  expect((await learn($, 'quiz 맞음 1')).text).toBe('맞힌 것으로 적었습니다: 1. 클로저. 정답을 보고 맞혀 복습 간격은 그대로입니다.')
   expect(reviewedAt()).toBe(NOW)
   expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 1, wrong: 0 } })
   expect((await learn($, 'quiz 맞음 1')).text).toBe('이미 맞음으로 적혀 있습니다.')
@@ -1777,7 +1780,7 @@ test('the review reminder goes away once nothing is due, and stays off when turn
   store.set('concepts', { 'c:클로저': { name: '클로저', count: 1, firstAt: NOW - 3 * 86_400_000, lastAt: NOW - 3 * 86_400_000, blurb: '함수가 바깥 변수를 기억한다', files: [] } })
   const w = world(on, 'ok', null, true, store)
   await start($)
-  expect(w.statuses).toEqual(['학습 노트 · 복습할 개념 1개 · /learn 패널에서 q'])
+  expect(w.statuses).toEqual(['학습 노트 · 오늘 복습 1개 · /learn 뒤 q'])
   w.answer = 'Q1: counter()가 왜 커질까?\nA1: 바깥 변수를 기억해서다.'
   const ui = await pane($)
   await ui.press({ key: 'quiz' })
@@ -1786,11 +1789,11 @@ test('the review reminder goes away once nothing is due, and stays off when turn
   await ui.press({ key: 'quiz-answer' })
   await ui.press({ key: 'quiz-right' })
   expect(w.statuses.at(-1)).toBeUndefined()
-  // Three days on it is due again.
+  // Right after seeing the answer keeps the first step: due again the next day, so three days on it is.
   await w.clock.advance(3 * 86_400_000)
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
-  expect(w.statuses.at(-1)).toBe('학습 노트 · 복습할 개념 1개 · /learn 패널에서 q')
+  expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
   await ui.unmount()
 })
 
@@ -2092,14 +2095,15 @@ test('a typed answer is graded by the model: the grade, feedback and model answe
   expect(await ui.find({ type: 'Text', text: /△ 거의 맞음 2\. .* · 방금 채점/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /✓ 맞힘 1\./ })).toBeDefined()
   expect(concept().missedAt).toBeUndefined()
-  // Never quizzed and met three times in notes (클로저, second as it falls due second): step 2; partly right steps it back to 1.
-  expect(second).toBe('클로저')
-  expect(concept().step).toBe(1)
+  // Never quizzed and met twice in notes (구조 분해, second as it falls due second): step 1; partly right steps it back to 0.
+  expect(second).toBe('구조 분해')
+  expect(concept().step).toBe(0)
   await Promise.all([ui.press({ key: 'quiz-flip' }), ui.press({ key: 'quiz-flip' })])
   await w.clock.settle()
   expect(await ui.find({ type: 'Text', text: /✓ 맞힘 2\. .* · 방금 채점/ })).toBeDefined()
   expect(await ui.find({ type: 'Markdown', text: /\(내가 맞힘으로 바꿈\)/ })).toBeDefined()
-  expect(concept().step).toBe(2)
+  // Not due yet: going over it early keeps the step it had.
+  expect(concept().step).toBe(1)
   // Two quick presses turn it once.
   expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 2, wrong: 0 } })
 
@@ -2152,7 +2156,8 @@ test('/learn quiz 1 내 답: Claude grades a typed answer in the conversation, w
 
   w.answer = '판정: 맞음\n피드백: 정확합니다.'
   const graded = await learn($, 'quiz 1 바깥 변수를 기억해서')
-  expect(graded.text).toContain('1번 ✓ 맞힘 · 맞혔습니다. 정확합니다.')
+  // Right after its hint: said so, and its concept keeps its step.
+  expect(graded.text).toContain('1번 ✓ 맞힘 · 힌트 봄 · 맞혔습니다. 정확합니다.')
   expect(graded.text).toContain('정답\n답 하나')
   expect(graded.text).toContain('채점이 이상하면 바꾸세요: /learn quiz 틀림 1')
   expect(graded.text).toContain('다음 문제: /learn quiz 2 내 답')
@@ -2162,8 +2167,8 @@ test('/learn quiz 1 내 답: Claude grades a typed answer in the conversation, w
 
   w.answer = '판정: 틀림\n피드백: 아닙니다.'
   const last = await learn($, 'quiz 2번 모르겠어요')
-  expect(last.text).toContain('2번 ✗ 틀림 · 아쉽지만 틀렸습니다. 아닙니다.')
-  expect(last.text).toContain('다 풀었습니다: 2문제 중 1개 맞힘. 틀린 개념은 다음 퀴즈에 먼저 나옵니다.')
+  expect(last.text).toContain('2번 ✗ 틀림 · 힌트 봄 · 아쉽지만 틀렸습니다. 아닙니다.')
+  expect(last.text).toContain('다 풀었습니다: 2문제 중 1개 맞힘. 틀린 개념은 다음 퀴즈에 먼저 나옵니다. 힌트나 정답을 보고 맞힌 개념은 같은 간격 뒤 다시 나옵니다.')
   expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 1, wrong: 1 } })
   expect((await learn($, 'quiz 힌트')).text).toContain('힌트를 볼 문제가 없습니다')
 })
@@ -3080,6 +3085,199 @@ describe('1.6.0: the team file', () => {
     await start($)
     const ui = await pane($)
     expect(await ui.find({ type: 'Text', text: '이 저장소의 팀 규칙 파일을 읽었습니다 (규칙 1 · 용어 1 · 빼기 1)' })).toBeDefined()
+    await ui.unmount()
+  })
+})
+
+describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', () => {
+  const DAY = 86_400_000
+  /** Concepts quizzed before, each at `step`, all due by now: the first the longest overdue. */
+  const quizzed = (step: number, names: string[]) =>
+    Object.fromEntries(
+      names.map((name, i) => [
+        `c:${name}`,
+        { name, count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${name} 설명`, files: [], step, reviewedAt: NOW - (61 - i) * DAY },
+      ]),
+    )
+  const stepOfName = (store: Map<string, unknown>, name: string) =>
+    Object.values(store.get('concepts') as Record<string, { name: string; step?: number; reviewedAt?: number; knownAt?: number }>).find(one => one.name === name)!
+  /** Concepts never quizzed, all due by now. */
+  const many = (n: number) =>
+    Object.fromEntries(
+      Array.from({ length: n }, (_, i) => [`c:개념${i}`, { name: `개념${i}`, count: 1, firstAt: NOW - (5 + i) * DAY, lastAt: NOW - (5 + i) * DAY, blurb: '', files: [] }]),
+    )
+
+  test('a hint keeps a right answer\'s step, as the answer seen does; only a right answer recalled alone moves it on', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', quizzed(2, ['클로저', '구조 분해', 'map'])]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = ['Q1: 문제 하나', 'H1: 바깥을 떠올려 보세요', 'A1: 답 하나', 'Q2: 문제 둘', 'H2: 둘째 힌트', 'A2: 답 둘', 'Q3: 문제 셋', 'A3: 답 셋'].join('\n')
+    const ui = await pane($)
+    await ui.press({ key: 'quiz' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    // The longest overdue first: 클로저, then 구조 분해, then map.
+    expect(w.models.at(-1)).toContain('1. 클로저 —')
+    await ui.press({ key: 'quiz-hint' })
+    w.answer = '판정: 맞음\n피드백: 핵심을 짚었어요.'
+    await ui.input({ key: mineKey(store, 0), text: '바깥 변수를 기억해서' })
+    await w.clock.settle()
+    expect(stepOfName(store, '클로저')).toMatchObject({ step: 2, reviewedAt: NOW })
+    expect(await ui.find({ type: 'Text', text: /✓ 맞힘 1\. 클로저 · 힌트 봄 · 방금 채점/ })).toBeDefined()
+    // Typed with no hint: a step on.
+    await ui.input({ key: mineKey(store, 1), text: '순서대로 꺼내서' })
+    await w.clock.settle()
+    expect(stepOfName(store, '구조 분해')).toMatchObject({ step: 3, reviewedAt: NOW })
+    expect(await ui.find({ type: 'Text', text: /✓ 맞힘 1\. 클로저 · 힌트 봄$/ })).toBeDefined()
+    // The answer seen, then graded right: the step stays.
+    await ui.press({ key: 'quiz-answer' })
+    await ui.press({ key: 'quiz-right' })
+    expect(stepOfName(store, 'map')).toMatchObject({ step: 2, reviewedAt: NOW })
+    expect(await ui.find({ type: 'Text', text: /✓ 맞힘 3\. map · 정답 봄$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /3문제 중 3개 맞혔습니다 · 힌트나 정답을 보고 맞힌 개념은 같은 간격 뒤 다시 나옵니다 · 오늘 복습을 마쳤습니다$/ })).toBeDefined()
+    // Turned wrong and back right, the answer seen: back to where the helped grade left it.
+    await learn($, 'quiz 틀림 3')
+    expect(stepOfName(store, 'map').step).toBe(0)
+    expect((await learn($, 'quiz 맞음 3')).text).toBe('맞힌 것으로 적었습니다: 3. map. 정답을 보고 맞혀 복습 간격은 그대로입니다.')
+    expect(stepOfName(store, 'map').step).toBe(2)
+    await ui.unmount()
+  })
+
+  test('the reminder counts today\'s share, ten at most, and rests once ten answers are graded today', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', many(25)]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 10개 · /learn 뒤 q')
+    // Every concept due is still counted where they are all listed.
+    expect((await learn($, 'concepts')).text).toContain('복습할 개념 25개: 개념0, 개념1, 개념2, 개념3, 개념4 …')
+    expect((await learn($, 'stats')).text).toContain('- 복습할 개념: 25개 · 오늘 10개 (하루 10개까지) · 패널에서 q, 또는 /learn quiz')
+  })
+
+  test('ten answers graded today take the reminder down', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', many(25)]])
+    store.set('activity', { [stamp(NOW).day]: { notes: 0, right: 8, wrong: 2 } })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(w.statuses.at(-1)).toBeUndefined()
+    expect((await learn($, 'stats')).text).toContain('- 복습할 개념: 25개 · 오늘 몫은 마쳤습니다')
+  })
+
+  test('the answer that makes ten today takes the reminder down, and the quiz says the day\'s review is done', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', many(25)]])
+    store.set('activity', { [stamp(NOW).day]: { notes: 0, right: 8, wrong: 0 } })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 2개 · /learn 뒤 q')
+    w.answer = THREE_QUESTIONS
+    const ui = await pane($)
+    await ui.press({ key: 'quiz' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    // The most recently learned first: none of them quizzed yet.
+    expect(w.models.at(-1)).toContain('1. 개념0 —')
+    await ui.press({ key: 'quiz-answer' })
+    await ui.press({ key: 'quiz-right' })
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
+    await ui.press({ key: 'quiz-answer' })
+    await ui.press({ key: 'quiz-wrong' })
+    expect(w.statuses.at(-1)).toBeUndefined()
+    await ui.press({ key: 'quiz-answer' })
+    await ui.press({ key: 'quiz-right' })
+    expect(await ui.find({ type: 'Text', text: /3문제 중 2개 맞혔습니다 · .* · 오늘 복습을 마쳤습니다 · 남은 개념은 내일 나옵니다$/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('/learn 안다 takes a concept out of the reviews and the next note; /learn 모른다 puts it back', async ($, on) => {
+    const store = new Map<string, unknown>()
+    store.set('concepts', {
+      'c:const선언': { name: 'const 선언', count: 1, firstAt: NOW - 5 * DAY, lastAt: NOW - 5 * DAY, blurb: '다시 바꾸지 않을 값', files: [] },
+      'c:화살표함수': { name: '화살표 함수', count: 1, firstAt: NOW, lastAt: NOW, blurb: '짧게 쓰는 함수', files: [] },
+    })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
+    expect((await learn($, '안다')).text).toContain('쓰는 법: /learn 안다 개념 이름')
+    const known = await learn($, '안다 const 선언, 없는 개념')
+    expect(known.text).toContain('아는 개념으로 표시했습니다: const 선언. 복습과 퀴즈에서 빠지고, 다음 노트부터 배울 개념에 넣지 않습니다.')
+    expect(known.text).toContain("없는 개념입니다: '없는 개념'")
+    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(stepOfName(store, 'const 선언').knownAt).toBe(NOW)
+    expect((await learn($, 'know const 선언')).text).toBe('이미 아는 개념입니다: const 선언')
+    expect(w.models).toHaveLength(0)
+
+    // The next note is told not to teach it.
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.models.at(-1)).toContain('## 학습자가 이미 아는 개념 (배울 개념에 넣지 마라. 꼭 필요하면 왜 칸에서 한 마디만)\nconst 선언\n')
+    expect(w.models.at(-1)).toContain('## 이미 배운 개념 (지난 노트들에서)\n화살표 함수\n')
+
+    // Folded into one line under the concepts, out of the list.
+    const ui = await pane($)
+    for (let i = 0; i < 2; i += 1) await ui.press({ key: 'view' })
+    expect(await ui.find({ type: 'Text', text: /^배운 개념 3개/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '아는 개념 1개 · const 선언' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^const 선언 ×1/ })).toBeUndefined()
+    const listed = (await learn($, 'concepts')).text
+    expect(listed).toContain('지금까지 배운 개념 3개')
+    expect(listed).not.toContain('**const 선언**')
+    expect(listed).toContain('아는 개념 1개 · const 선언 · 되돌리기: /learn 모른다 이름')
+
+    expect((await learn($, '모른다 const 선언')).text).toBe('아는 개념 표시를 지웠습니다: const 선언. 다시 복습과 퀴즈에 나옵니다.')
+    expect(stepOfName(store, 'const 선언').knownAt).toBeUndefined()
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
+    expect(await ui.find({ type: 'Text', text: /^아는 개념/ })).toBeUndefined()
+    expect((await learn($, 'unknow const 선언')).text).toBe('아는 개념으로 표시하지 않은 개념입니다: const 선언')
+    await ui.unmount()
+  })
+
+  test('a note\'s own quiz leaves out the concepts the learner knows', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = CONCEPT_NOTE(['for...of 반복문', '기본 매개변수'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    await learn($, '안다 기본 매개변수')
+    const ui = await pane($)
+    w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    await ui.press({ key: 'note-quiz' })
+    await w.clock.settle()
+    expect(w.models.at(-1)).toContain('1. for...of 반복문 —')
+    expect(w.models.at(-1)).not.toContain('기본 매개변수')
+    await learn($, '안다 for...of 반복문')
+    // v goes back from the quiz to the note.
+    await ui.press({ key: 'view' })
+    const calls = w.models.length
+    await ui.press({ key: 'note-quiz' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(calls)
+    expect(await ui.find({ type: 'Text', text: /이 노트의 개념은 모두 아는 개념이라/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('right again at the last step graduates a concept: the quiz says so, and it leaves the quizzes', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', quizzed(5, ['구조 분해 할당'])]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    const ui = await pane($)
+    await ui.press({ key: 'quiz' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    w.answer = '판정: 맞음\n피드백: 정확합니다.'
+    await ui.input({ key: mineKey(store, 0), text: '꺼내서 이름 붙이기' })
+    await w.clock.settle()
+    expect(stepOfName(store, '구조 분해 할당')).toMatchObject({ step: 5, knownAt: NOW })
+    expect(await ui.find({ type: 'Text', text: '졸업: 구조 분해 할당 · 아는 개념으로 옮겨 복습에서 뺍니다' })).toBeDefined()
+    expect(w.statuses.at(-1)).toBeUndefined()
+    // Every concept known: no quiz to make, and how to take one back.
+    expect((await learn($, 'quiz')).text).toBe('모든 개념이 아는 개념이라 퀴즈에 낼 개념이 없습니다. 되돌리려면 /learn 모른다 개념 이름.')
+    // Turned wrong after all: known no more.
+    await ui.press({ key: 'quiz-flip' })
+    await w.clock.settle()
+    expect(stepOfName(store, '구조 분해 할당').knownAt).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^졸업/ })).toBeUndefined()
     await ui.unmount()
   })
 })

@@ -13,6 +13,7 @@ import {
   ASKS_KEPT,
   CHECK_SYSTEM,
   codeFor,
+  markHelped,
   markPartial,
   marksOf,
   regrade,
@@ -80,6 +81,9 @@ import {
   knownNames,
   listItem,
   isMissed,
+  isKnown,
+  DAILY_REVIEW,
+  todayReview,
   dueConcepts,
   dueText,
   markMissed,
@@ -726,6 +730,71 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
   })
 }
 
+type KnownResult = { done: string[]; already: string[]; missing: string[] } | { error: string }
+
+/**
+ * /learn 안다 · 모른다: marks the named concepts known (`toKnown`) or takes
+ * the mark off, against the store as it is now; a name merged away counts as
+ * the concept it went into. No model call.
+ */
+function markKnownStored($: EngineInterface, cfg: Config, names: readonly string[], toKnown: boolean): Promise<KnownResult> {
+  return enqueue('storing', async (): Promise<KnownResult> => {
+    try {
+      const map = cleanAliases(await $.store.get(ALIASES_KEY))
+      const index = cleanConcepts(await $.store.get(CONCEPTS_KEY), map)
+      const at = await $.clock.now()
+      const next: Record<string, LearnConcept> = { ...index }
+      const result = { done: [] as string[], already: [] as string[], missing: [] as string[] }
+      const seen = new Set<string>()
+      for (const name of names) {
+        const key = resolveKey(map, conceptKey(name))
+        const one = conceptAt(next, key)
+        if (!one) {
+          result.missing.push(name)
+          continue
+        }
+        if (seen.has(key)) continue
+        seen.add(key)
+        if ((one.knownAt !== undefined) === toKnown) {
+          result.already.push(one.name)
+          continue
+        }
+        const marked = { ...one }
+        if (toKnown) marked.knownAt = at
+        else delete marked.knownAt
+        next[key] = marked
+        result.done.push(one.name)
+      }
+      if (result.done.length > 0) {
+        await $.store.set(CONCEPTS_KEY, next)
+        await update($, concepts, () => next)
+        await remind($, cfg)
+        if (cfg.isAutoSave) await saveConcepts($, cfg, next)
+      }
+      return result
+    } catch (error) {
+      $.ui.log(`learn-notes: 아는 개념 표시를 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+      return { error: '아는 개념 표시를 남기지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.' }
+    }
+  })
+}
+
+/** What /learn 안다 · 모른다 answer: what was marked, what already was, and the names no concept has. */
+function knownReply(result: KnownResult, toKnown: boolean): string {
+  if ('error' in result) return result.error
+  const lines: string[] = []
+  if (result.done.length > 0) {
+    lines.push(
+      toKnown
+        ? `아는 개념으로 표시했습니다: ${result.done.join(' · ')}. 복습과 퀴즈에서 빠지고, 다음 노트부터 배울 개념에 넣지 않습니다. 되돌리기: /learn 모른다 ${result.done[0]}`
+        : `아는 개념 표시를 지웠습니다: ${result.done.join(' · ')}. 다시 복습과 퀴즈에 나옵니다.`,
+    )
+  }
+  if (result.already.length > 0) lines.push(`${toKnown ? '이미 아는 개념입니다' : '아는 개념으로 표시하지 않은 개념입니다'}: ${result.already.join(' · ')}`)
+  if (result.missing.length > 0) lines.push(`없는 개념입니다: ${result.missing.map(name => `'${name}'`).join(', ')}. /learn concepts로 이름을 확인하세요.`)
+  return lines.join('\n')
+}
+
 /** The activity record as the store has it; a first one is made from the notes still kept. */
 async function storedActivity($: EngineInterface): Promise<Record<string, LearnDayActivity>> {
   const raw = await $.store.get(ACTIVITY_KEY)
@@ -858,12 +927,13 @@ function isFirstLimitToast($: EngineInterface, day: string): Promise<boolean> {
 }
 
 /**
- * Pins "복습할 개념 n개" under the prompt while any concept is due for review,
- * and takes it down when none is (or the reminder is off in /config).
+ * Pins "오늘 복습 n개" under the prompt while today's review has questions
+ * left (DAILY_REVIEW a day at most, see todayReview), and takes it down when
+ * none are (or the reminder is off in /config).
  */
 async function remind($: EngineInterface, cfg: Config): Promise<void> {
-  const due = cfg.isReviewReminder ? dueConcepts(await read($, concepts), await $.clock.now()).length : 0
-  const text = due > 0 ? `학습 노트 · 복습할 개념 ${due}개 · /learn 패널에서 q` : undefined
+  const left = cfg.isReviewReminder ? todayReview(await read($, concepts), await read($, activity), await $.clock.now()).left : 0
+  const text = left > 0 ? `학습 노트 · 오늘 복습 ${left}개 · /learn 뒤 q` : undefined
   if (text === shownReminder) return
   shownReminder = text
   $.ui.status(text)
@@ -926,6 +996,7 @@ function marksFrom(raw: unknown): LearnQuizMarks | undefined {
     ...(typeof raw.reviewedAt === 'number' ? { reviewedAt: raw.reviewedAt } : {}),
     ...(typeof raw.missedAt === 'number' ? { missedAt: raw.missedAt } : {}),
     ...(typeof raw.step === 'number' ? { step: raw.step } : {}),
+    ...(typeof raw.knownAt === 'number' ? { knownAt: raw.knownAt } : {}),
   }
 }
 
@@ -975,9 +1046,54 @@ function isOpen(current: Quiz, item: LearnQuizItem): boolean {
 /** A wrong answer: gone over now, back to the first step, and first in the next quiz. */
 const markWrong: Mark = (index, keys, at) => markMissed(markReviewed(index, keys, at), keys, at)
 
-/** How a grade marks its concept: right a step on, partly right a step back, wrong back to the first. */
-function markFor(result: 'right' | 'wrong', verdict: LearnQuizItem['verdict']): Mark {
-  return result === 'right' ? markReviewed : verdict === 'partial' ? markPartial : markWrong
+/**
+ * How a grade marks its concept: right a step on (after a hint or the answer
+ * seen, the step kept), partly right a step back, wrong back to the first.
+ */
+function markFor(result: 'right' | 'wrong', verdict: LearnQuizItem['verdict'], isHelped: boolean): Mark {
+  if (result === 'right') return isHelped ? markHelped : markReviewed
+  return verdict === 'partial' ? markPartial : markWrong
+}
+
+/**
+ * True when a graded question's answer leaned on help: its hint was seen, or
+ * the learner graded it themselves, which they do only once its answer is seen.
+ */
+function isHelpedGrade(item: LearnQuizItem): boolean {
+  return item.isHinted === true || item.mine === undefined
+}
+
+/** A graded question's help, after its mark: · 힌트 봄, and · 정답 봄 for one graded right after seeing its answer. */
+function helpText(item: LearnQuizItem): string {
+  return `${item.isHinted === true ? ' · 힌트 봄' : ''}${item.result === 'right' && item.mine === undefined ? ' · 정답 봄' : ''}`
+}
+
+/**
+ * The concepts a quiz's right answers marked known (right again at the last
+ * step), as the index has them now: a mark taken off since is not shown.
+ */
+function graduatedIn(items: readonly LearnQuizItem[], index: Readonly<Record<string, LearnConcept>>, map: Readonly<Record<string, string>>): string[] {
+  return items.flatMap(item => {
+    if (item.result !== 'right' || item.gradedAt === undefined) return []
+    const one = conceptAt(index, resolveKey(map, item.key))
+    return one && one.knownAt === item.gradedAt ? [one.name] : []
+  })
+}
+
+/** What a quiz says of the concepts it graduated, and how to take one back. */
+function graduatedText(names: readonly string[]): string {
+  return `졸업: ${names.join(' · ')} · 아는 개념으로 옮겨 복습과 퀴즈에서 뺍니다 (되돌리기: /learn 모른다 ${names[0]})`
+}
+
+/** Today's share of the review, for where every concept due is counted: `오늘 n개`, or that today's is done. */
+function todayText(review: { due: number; left: number }): string {
+  return review.left > 0 ? `오늘 ${review.left}개 (하루 ${DAILY_REVIEW}개까지)` : '오늘 몫은 마쳤습니다'
+}
+
+/** What a finished quiz says of today's review once it is done: undefined while questions are left for today. */
+function reviewDoneText(review: { due: number; left: number }): string | undefined {
+  if (review.left > 0) return undefined
+  return review.due > 0 ? '오늘 복습을 마쳤습니다 · 남은 개념은 내일 나옵니다' : '오늘 복습을 마쳤습니다'
 }
 
 /** Claude's grade of a typed answer, as the pane and /learn quiz say it. */
@@ -999,14 +1115,21 @@ function resultMark(item: LearnQuizItem): string {
   return item.result === 'right' ? '✓ 맞힘' : isPartly(item) ? '△ 거의 맞음' : '✗ 틀림'
 }
 
-/** What happens to the concepts a finished quiz missed: the wrong first next time, the partly right a little sooner. */
-function missesText(items: readonly LearnQuizItem[]): string {
-  if (items.some(item => item.result === 'wrong' && !isPartly(item))) return '틀린 개념은 다음 퀴즈에 먼저 나옵니다'
-  if (items.some(isPartly)) return '거의 맞힌 개념은 조금 일찍 다시 나옵니다'
-  return ''
+/**
+ * What happens to the concepts a finished quiz missed (the wrong first next
+ * time, the partly right a little sooner), and to the ones right after a hint
+ * or the answer (back after as long again).
+ */
+function missesText(items: readonly LearnQuizItem[], separator = ' · '): string {
+  const parts: string[] = []
+  if (items.some(item => item.result === 'wrong' && !isPartly(item))) parts.push('틀린 개념은 다음 퀴즈에 먼저 나옵니다')
+  else if (items.some(isPartly)) parts.push('거의 맞힌 개념은 조금 일찍 다시 나옵니다')
+  if (items.some(item => item.result === 'right' && isHelpedGrade(item))) parts.push('힌트나 정답을 보고 맞힌 개념은 같은 간격 뒤 다시 나옵니다')
+  return parts.join(separator)
 }
 
 const NO_CONCEPTS_FOR_QUIZ = '아직 모인 개념이 없어 퀴즈를 낼 수 없습니다. 노트가 쓰이면 "배울 개념"이 쌓입니다.'
+const ALL_KNOWN_TEXT = '모든 개념이 아는 개념이라 퀴즈에 낼 개념이 없습니다. 되돌리려면 /learn 모른다 개념 이름.'
 const CHECKING_TEXT = '답을 채점하고 있습니다. 채점이 끝난 뒤 새 문제를 받으세요.'
 const MOVED_TEXT = '그사이 새 퀴즈가 나와 이 답은 채점하지 않았습니다.'
 const GRADE_NOT_KEPT = '채점을 적지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.'
@@ -1057,8 +1180,9 @@ async function withCode($: EngineInterface, picks: readonly RankedConcept[], map
 
 /**
  * Asks the model for a new quiz and keeps it; or says why there is none. The
- * concepts due first, or `only` these (a note's, for t in the pane), each
- * asked about the code the learner made with it where a note still holds it.
+ * concepts due first, or `only` these (a note's, for t in the pane), never one
+ * marked known, each asked about the code the learner made with it where a
+ * note still holds it.
  */
 async function makeQuiz(
   $: EngineInterface,
@@ -1068,17 +1192,19 @@ async function makeQuiz(
 ): Promise<{ items: LearnQuizItem[] } | { error: string }> {
   const index = await read($, concepts)
   const map = await read($, aliases)
-  const chosen = only
-    ? only
-        .map(key => resolveKey(map, key))
-        .filter((key, i, all) => all.indexOf(key) === i)
-        .flatMap(key => {
-          const one = conceptAt(index, key)
-          return one ? [{ ...one, key }] : []
-        })
-        .slice(0, 3)
-    : quizPick(index, now)
-  if (chosen.length === 0) return { error: only ? '이 노트에는 배울 개념이 없어 퀴즈를 낼 수 없습니다.' : NO_CONCEPTS_FOR_QUIZ }
+  const taught = (only ?? [])
+    .map(key => resolveKey(map, key))
+    .filter((key, i, all) => all.indexOf(key) === i)
+    .flatMap(key => {
+      const one = conceptAt(index, key)
+      return one ? [{ ...one, key }] : []
+    })
+  // A concept the learner knows is asked about in no quiz, a note's own neither.
+  const chosen = only ? taught.filter(one => !isKnown(one)).slice(0, 3) : quizPick(index, now)
+  if (chosen.length === 0) {
+    if (only) return { error: taught.length > 0 ? '이 노트의 개념은 모두 아는 개념이라 퀴즈를 낼 수 없습니다. 되돌리려면 /learn 모른다 개념 이름.' : '이 노트에는 배울 개념이 없어 퀴즈를 낼 수 없습니다.' }
+    return { error: Object.keys(index).length > 0 ? ALL_KNOWN_TEXT : NO_CONCEPTS_FOR_QUIZ }
+  }
   const picks = await withCode($, chosen, map)
   const asked = await askModel($, cfg, { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: 1400 })
   if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
@@ -1135,8 +1261,9 @@ async function gradeQuiz($: EngineInterface, cfg: Config, i: number, result: 'ri
 }
 
 /**
- * One question's first grade, kept: its concept marked (a step on, a step back
- * for a partly right typed answer, or back to the first), its marks from
+ * One question's first grade, kept: its concept marked (a step on, kept for a
+ * right answer after its hint or answer, a step back for a partly right typed
+ * answer, or back to the first), its marks from
  * before kept on the question for turning the grade around, the quiz saved,
  * the day's count added. `extra` is what a graded typed answer brings.
  */
@@ -1158,7 +1285,9 @@ async function applyGrade(
     const item = fresh.items[i]
     if (!item || item.result !== undefined) return 'busy'
     const now = await $.clock.now()
-    const before = await markConcepts($, cfg, markFor(result, extra.verdict), [item.key], now)
+    // Right after its hint, or graded by the learner once its answer showed: recalled with help, so its step stays.
+    const isHelped = isHelpedGrade({ ...item, ...extra })
+    const before = await markConcepts($, cfg, markFor(result, extra.verdict, isHelped), [item.key], now)
     if (!before) return 'failed'
     // Read again: the quiz may have moved on while the concepts were written.
     const latest = (await lastQuiz($)) ?? fresh
@@ -1170,6 +1299,8 @@ async function applyGrade(
     })
     await update($, quizRun, run => ({ ...run, error: null }))
     await recordActivity($, stamp(now).day, result === 'right' ? { right: 1 } : { wrong: 1 })
+    // One more answer today: the day's review may be done.
+    await remind($, cfg)
     return 'kept'
   } finally {
     grading.delete(mark)
@@ -1193,8 +1324,9 @@ async function regradeQuiz($: EngineInterface, cfg: Config, current: Quiz, i: nu
     const item = fresh.items[i]
     if (!item || item.result === undefined || (item.result === result && !isPartly(item))) return 'busy'
     const at = item.gradedAt ?? (await $.clock.now())
-    // The learner's own word: fully right or fully wrong, never "partly".
-    const mark: Mark = (index, keys) => regrade(index, keys[0]!, item.before, at, result === 'right' ? markReviewed : markWrong)
+    // The learner's own word: fully right or fully wrong, never "partly"; right after help keeps the step.
+    const right = isHelpedGrade(item) ? markHelped : markReviewed
+    const mark: Mark = (index, keys) => regrade(index, keys[0]!, item.before, at, result === 'right' ? right : markWrong)
     if (!(await markConcepts($, cfg, mark, [item.key], at))) return 'failed'
     const latest = (await lastQuiz($)) ?? fresh
     if (latest.at === current.at) {
@@ -1736,6 +1868,8 @@ async function quizCommand($: EngineInterface, cfg: Config, rest: string): Promi
       return `${unseen.join(', ')}번은 아직 정답을 보지 않았습니다. 답을 적어 채점받기: /learn quiz ${unseen[0]} 내 답 · 정답 보기: /learn quiz 정답`
     }
     const changed: string[] = []
+    const changedAt: number[] = []
+    let helped = 0
     for (const n of numbers) {
       const latest = (await lastQuiz($)) ?? current
       if (latest.at !== current.at) return MOVED_TEXT
@@ -1744,12 +1878,24 @@ async function quizCommand($: EngineInterface, cfg: Config, rest: string): Promi
       const done = item.result === undefined ? await applyGrade($, cfg, latest, n - 1, result, {}) : await regradeQuiz($, cfg, latest, n - 1, result)
       if (done === 'failed') return GRADE_NOT_KEPT
       if (done === 'moved') return MOVED_TEXT
-      if (done === 'kept') changed.push(`${n}. ${item.name}`)
+      if (done === 'kept') {
+        changed.push(`${n}. ${item.name}`)
+        changedAt.push(n - 1)
+        if (isHelpedGrade(item)) helped += 1
+      }
     }
     if (changed.length === 0) return `이미 ${word}으로 적혀 있습니다.`
-    return result === 'right'
-      ? `맞힌 것으로 적었습니다: ${changed.join(' · ')}. 다음 복습까지 간격이 늘어납니다.`
-      : `틀린 것으로 적었습니다: ${changed.join(' · ')}. 복습할 개념 맨 앞에 올라 다음 퀴즈에 먼저 나옵니다.`
+    if (result === 'wrong') return `틀린 것으로 적었습니다: ${changed.join(' · ')}. 복습할 개념 맨 앞에 올라 다음 퀴즈에 먼저 나옵니다.`
+    // Graded after the answer showed: recalled with help, so the interval stays (a typed answer turned right moves on).
+    const spacing =
+      helped === changed.length
+        ? '정답을 보고 맞혀 복습 간격은 그대로입니다.'
+        : helped === 0
+          ? '다음 복습까지 간격이 늘어납니다.'
+          : '직접 맞힌 문제는 간격이 늘고, 정답을 보고 맞힌 문제는 그대로입니다.'
+    const items = ((await lastQuiz($))?.items ?? []).filter((_, i) => changedAt.includes(i))
+    const graduated = graduatedIn(items, await read($, concepts), await read($, aliases))
+    return `맞힌 것으로 적었습니다: ${changed.join(' · ')}. ${spacing}${graduated.length > 0 ? `\n\n${graduatedText(graduated)}` : ''}`
   }
   const typed = /^(\d+)\s*번?\s*[.):]?\s+([\s\S]+)$/.exec(rest)
   if (typed) {
@@ -1769,20 +1915,24 @@ async function quizCommand($: EngineInterface, cfg: Config, rest: string): Promi
       const after = (await lastQuiz($)) ?? current
       const next = after.items.findIndex(one => isOpen(after, one))
       const right = after.items.filter(one => one.result === 'right').length
+      const index = await read($, concepts)
+      const finished = reviewDoneText(todayReview(index, await read($, activity), await $.clock.now()))
       const tail =
         next !== -1
           ? `다음 문제: /learn quiz ${next + 1} 내 답${after.items[next]!.hint && !after.items[next]!.isHinted ? ' · 막히면 /learn quiz 힌트' : ''}`
           : after.items.every(one => one.result !== undefined)
-            ? `다 풀었습니다: ${after.items.length}문제 중 ${right}개 맞힘.${missesText(after.items) ? ` ${missesText(after.items)}.` : ''}`
+            ? `다 풀었습니다: ${after.items.length}문제 중 ${right}개 맞힘.${missesText(after.items) ? ` ${missesText(after.items, '. ')}.` : ''}${finished ? ` ${finished}.` : ''}`
             : ''
       const done = graded.item
+      const graduated = graduatedIn([done], index, await read($, aliases))
       return [
-        `${n}번 ${resultMark(done)} · ${VERDICT_TEXT[done.verdict ?? 'wrong']} ${done.feedback ?? ''}`.trim(),
+        `${n}번 ${resultMark(done)}${helpText(done)} · ${VERDICT_TEXT[done.verdict ?? 'wrong']} ${done.feedback ?? ''}`.trim(),
         '',
         '정답',
         done.answer,
         '',
         `채점이 이상하면 바꾸세요: /learn quiz ${done.result === 'right' ? '틀림' : '맞음'} ${n}`,
+        ...(graduated.length > 0 ? ['', graduatedText(graduated)] : []),
         ...(tail ? ['', tail] : []),
       ].join('\n')
     } finally {
@@ -2033,6 +2183,16 @@ export const register: Register = (on, options) => {
       }
     }
     if (arg === 'quiz') return { text: await quizCommand($, cfg, rest) }
+    if (arg === 'know' || arg === 'unknow') {
+      const toKnown = arg === 'know'
+      // Names may hold spaces: one concept per comma.
+      const names = rest
+        .split(/[,，、]/)
+        .map(name => name.trim())
+        .filter(name => name !== '')
+      if (names.length === 0) return { text: KNOW_USAGE }
+      return { text: knownReply(await markKnownStored($, cfg, names, toKnown), toKnown) }
+    }
     if (arg === 'anki') {
       const bank = cleanBank(await $.store.get(BANK_KEY).catch(() => undefined))
       const out = ankiText(bank, await read($, concepts))
@@ -2072,7 +2232,7 @@ export const register: Register = (on, options) => {
           '',
           `- 최근 7일: 노트 ${stats.week.notes}개 · 새 개념 ${fresh}개 · 다시 만난 개념 ${again}개${stats.week.right + stats.week.wrong > 0 ? ` · 퀴즈 ${stats.week.right}/${stats.week.right + stats.week.wrong} 맞힘` : ''}`,
           `- 최근 30일 퀴즈 정답률: ${graded > 0 ? `${Math.round((stats.month.right / graded) * 100)}% (${stats.month.right}/${graded})` : '아직 채점한 문제가 없습니다'}`,
-          `- 복습할 개념: ${due.length > 0 ? `${due.length}개 · 패널에서 q, 또는 /learn quiz` : '지금은 없습니다'}`,
+          `- 복습할 개념: ${due.length > 0 ? `${due.length}개 · ${todayText(todayReview(index, record, now))} · 패널에서 q, 또는 /learn quiz` : '지금은 없습니다'}`,
           '',
           '최근 7일',
           ...days,
@@ -2156,20 +2316,24 @@ export const register: Register = (on, options) => {
       return { text: last ? noteAsText(last) : EMPTY_TEXT }
     }
     if (arg === 'concepts') {
-      const ranked = rankConcepts(await read($, concepts))
-      if (ranked.length === 0) return { text: '아직 모인 개념이 없습니다. 노트가 쓰이면 "배울 개념"이 여기에 쌓입니다.' }
+      const index = await read($, concepts)
+      const total = Object.keys(index).length
+      if (total === 0) return { text: '아직 모인 개념이 없습니다. 노트가 쓰이면 "배울 개념"이 여기에 쌓입니다.' }
+      const ranked = rankConcepts(index).filter(one => !isKnown(one))
       const now = await $.clock.now()
-      const { fresh, again } = progressOf(await read($, concepts), now)
-      const due = dueConcepts(await read($, concepts), now)
+      const { fresh, again } = progressOf(index, now)
+      const due = dueConcepts(index, now)
       const queue = due.slice(0, 5)
-      const lines = ranked.slice(0, 30).map(one => `- **${one.name}** ×${one.count} · 최근 ${stamp(one.lastAt).day} · 다음 복습 ${dueText(one, now)}: ${one.blurb}`)
+      const lines = ranked.slice(0, 30).map(one => `- **${one.name}** ×${one.count} · 최근 ${stamp(one.lastAt).day} · ${reviewText(one, now)}: ${one.blurb}`)
       const review =
         queue.length > 0
           ? `\n\n복습할 개념 ${due.length}개: ${queue.map(one => (isMissed(one) ? `${one.name} (퀴즈 틀림)` : one.name)).join(', ')}${due.length > queue.length ? ' …' : ''} · 패널에서 q, 또는 /learn quiz`
           : ''
       const more = ranked.length > 30 ? `\n\n${moreConceptsText(ranked.length - 30, cfg.isAutoSave)}.` : ''
+      const known = knownLine(index)
+      const list = lines.length > 0 ? `\n\n${lines.join('\n')}` : ''
       return {
-        text: `지금까지 배운 개념 ${ranked.length}개 · 최근 7일 새 개념 ${fresh}개 · 다시 만난 개념 ${again}개${review}\n\n${lines.join('\n')}${more}`,
+        text: `지금까지 배운 개념 ${total}개 · 최근 7일 새 개념 ${fresh}개 · 다시 만난 개념 ${again}개${review}${list}${more}${known ? `\n\n${known} · 되돌리기: /learn 모른다 이름` : ''}`,
       }
     }
     if (arg === 'clear') {
@@ -2236,8 +2400,11 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const isDock = e.props.placement === 'dock'
     const hasConcepts = Object.keys(index).length > 0
-    const progress = statsLine(statsOf(await read($, activity), now))
+    const days = await read($, activity)
+    const progress = statsLine(statsOf(days, now))
     const current = await read($, quiz)
+    // Today's review, and the concepts the quiz on show graduated.
+    const review = { ...todayReview(index, days, now), graduated: graduatedIn(current?.items ?? [], index, map) }
     const run = await read($, quizRun)
     const asks = await read($, askRun)
 
@@ -2297,7 +2464,7 @@ export const register: Register = (on, options) => {
           {hasConcepts && keysHint}
           {hasConcepts && shown !== 'note' ? (
             <Box marginTop={1} flexDirection="column">
-              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, el) : conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)}
+              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, review, el) : conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)}
             </Box>
           ) : (
             welcome
@@ -2318,7 +2485,7 @@ export const register: Register = (on, options) => {
 
     const body =
       shown === 'quiz' ? (
-        quizView($, cfg, current, run, hasConcepts, now, el)
+        quizView($, cfg, current, run, hasConcepts, now, review, el)
       ) : shown === 'concepts' ? (
         conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)
       ) : shown === 'note' ? (
@@ -2766,10 +2933,22 @@ function moreConceptsText(count: number, isAutoSave: boolean): string {
   return isAutoSave ? `그 밖에 ${count}개는 일지 폴더의 concepts.md에 있습니다` : `그 밖에 ${count}개 · /learn save로 concepts.md에 모두 저장`
 }
 
+/** When a concept comes back, as a concepts list says it: never quizzed, missed, or the next review. */
+function reviewText(one: LearnConcept, now: number): string {
+  if (isMissed(one)) return '퀴즈 틀림'
+  return one.reviewedAt === undefined ? '아직 떠올려 본 적 없음' : `다음 복습 ${dueText(one, now)}`
+}
+
+/** The concepts marked known, folded into one line under a concepts list: how many, the most recently met first. */
+function knownLine(index: Readonly<Record<string, LearnConcept>>): string | undefined {
+  const known = Object.values(index).filter(isKnown).sort((a, b) => b.lastAt - a.lastAt)
+  return known.length > 0 ? `아는 개념 ${known.length}개 · ${known.map(one => one.name).join(', ')}` : undefined
+}
+
 /**
  * Every concept the notes have taught: this week's progress, the ones worth a
- * second look, then all of them, the most met first, each with the notes in
- * the pane that taught it.
+ * second look, then all of them but the ones known, the most met first, each
+ * with the notes in the pane that taught it; the known ones folded into a line.
  */
 function conceptsView(
   $: EngineInterface,
@@ -2782,10 +2961,12 @@ function conceptsView(
   el: ElementTable,
 ) {
   const { Box, Text, Markdown, Button } = el
-  const ranked = rankConcepts(index)
-  if (ranked.length === 0) {
+  const total = Object.keys(index).length
+  if (total === 0) {
     return <Text dimColor>아직 모인 개념이 없습니다. 노트가 쓰이면 "배울 개념"이 여기에 쌓입니다.</Text>
   }
+  const ranked = rankConcepts(index).filter(one => !isKnown(one))
+  const known = knownLine(index)
   const { fresh, again } = progressOf(index, now)
   const due = dueConcepts(index, now)
   const queue = due.slice(0, 5)
@@ -2801,8 +2982,7 @@ function conceptsView(
           <Text dimColor>
             {' '}
             ×{one.count} · 최근 {when(one.lastAt, now)}
-            {one.reviewedAt !== undefined ? ` · 퀴즈 ${when(one.reviewedAt, now)}` : ''}
-            {isMissed(one) ? ' · 퀴즈 틀림' : ` · 다음 복습 ${dueText(one, now)}`}
+            {one.reviewedAt !== undefined ? ` · 퀴즈 ${when(one.reviewedAt, now)}` : ''} · {reviewText(one, now)}
           </Text>
         </Text>
         {one.blurb !== '' && <Markdown text={one.blurb} dimColor />}
@@ -2826,7 +3006,7 @@ function conceptsView(
   return (
     <Box flexDirection="column">
       <Text wrap="wrap">
-        <Text bold>배운 개념 {ranked.length}개</Text>
+        <Text bold>배운 개념 {total}개</Text>
         <Text dimColor>
           {' '}
           · 최근 7일 새로 {fresh} · 다시 만남 {again}
@@ -2849,11 +3029,20 @@ function conceptsView(
           {due.length > queue.length && <Text dimColor>{'  '}그 밖에 {due.length - queue.length}개</Text>}
         </Box>
       )}
-      <Box marginTop={1}>
-        <Text dimColor>모든 개념 · 여러 번 만난 순</Text>
-      </Box>
+      {ranked.length > 0 && (
+        <Box marginTop={1}>
+          <Text dimColor>모든 개념 · 여러 번 만난 순</Text>
+        </Box>
+      )}
       {shown.map(row)}
       {ranked.length > shown.length && <Text dimColor>{moreConceptsText(ranked.length - shown.length, isAutoSave)}</Text>}
+      {known && (
+        <Box marginTop={1}>
+          <Text dimColor wrap="truncate-end">
+            {known}
+          </Text>
+        </Box>
+      )}
     </Box>
   )
 }
@@ -2871,6 +3060,7 @@ function quizView(
   run: LearnQuizRun,
   hasConcepts: boolean,
   now: number,
+  review: { due: number; left: number; graduated: readonly string[] },
   el: ElementTable,
 ) {
   const { Box, Text, Markdown, Button } = el
@@ -2923,7 +3113,7 @@ function quizView(
                 <Text dimColor>
                   {' '}
                   {i + 1}. {item.name}
-                  {item.isHinted ? ' · 힌트 봄' : ''}
+                  {helpText(item)}
                 </Text>
               </Text>
             )
@@ -2934,7 +3124,8 @@ function quizView(
                 {mark}
                 <Text dimColor>
                   {' '}
-                  {i + 1}. {item.name} · 방금 채점
+                  {i + 1}. {item.name}
+                  {helpText(item)} · 방금 채점
                 </Text>
               </Text>
               <Markdown text={`**${VERDICT_TEXT[item.verdict ?? 'wrong']}** ${item.feedback ?? ''}${isTurned(item) ? ` _(내가 ${item.result === 'right' ? '맞힘' : '틀림'}으로 바꿈)_` : ''}`} />
@@ -3009,11 +3200,19 @@ function quizView(
         )
       })}
       {items.length > 0 && at === -1 && (
-        <Box marginTop={1}>
-          <Text bold>
+        <Box marginTop={1} flexDirection="column">
+          <Text bold wrap="wrap">
             {items.length}문제 중 {right}개 맞혔습니다
-            <Text dimColor>{missesText(items) ? ` · ${missesText(items)}` : ''} · s로 새 문제</Text>
+            <Text dimColor>
+              {missesText(items) ? ` · ${missesText(items)}` : ''} · {reviewDoneText(review) ?? 's로 새 문제'}
+            </Text>
           </Text>
+          {review.graduated.length > 0 && (
+            <Text color="green" wrap="wrap">
+              졸업: {review.graduated.join(' · ')}
+              <Text dimColor> · 아는 개념으로 옮겨 복습에서 뺍니다</Text>
+            </Text>
+          )}
         </Box>
       )}
     </Box>
@@ -3043,6 +3242,7 @@ const HELP = [
   '**더 있는 것**',
   '- 퀴즈: `/learn quiz 문제` 지금 문제 · `힌트` · `정답` · `맞음 1` · `틀림 2` 스스로 채점',
   '- 기록: `/learn concepts` 배운 개념과 복습 날짜 · `/learn stats` 연속 학습일과 정답률 · `/learn find 말` 노트 찾기',
+  '- 아는 개념: `/learn 안다 이름` 복습·퀴즈에서 빼기 (쉼표로 여럿) · `/learn 모른다 이름` 되돌리기',
   '- 일지: `/learn day` 오늘 노트 목차 (`어제` · `2026-10-03`도 됩니다) · `/learn days` 일지가 있는 날짜',
   '- 관리: `/learn last` 마지막 노트 · `/learn anki` Anki 카드 · `/learn merge 합칠 개념 = 남길 개념` · `/learn save` · `/learn clear`',
   '',
@@ -3069,6 +3269,8 @@ const COMMAND_WORDS: Record<string, string> = {
   날짜: 'days',
   마지막: 'last',
   합치기: 'merge',
+  안다: 'know',
+  모른다: 'unknow',
   저장: 'save',
   비우기: 'clear',
   안키: 'anki',
@@ -3079,6 +3281,8 @@ const QUIZ_USAGE =
   '쓰는 법: /learn quiz (새 문제 받기) · /learn quiz 문제 (지금 문제 다시 보기) · /learn quiz 1 내 답 (Claude가 채점) · /learn quiz 힌트 · /learn quiz 정답 · /learn quiz 맞음 1 · /learn quiz 틀림 2 (스스로 채점)'
 const ASK_USAGE = '쓰는 법: /learn ask 질문 (예: /learn ask 왜 let 대신 const를 썼어?) · 패널에서 고른 노트(없으면 마지막 노트)에 대해 답합니다'
 const NO_QUIZ = '아직 낸 퀴즈가 없습니다. /learn quiz로 먼저 문제를 받으세요.'
+const KNOW_USAGE =
+  '쓰는 법: /learn 안다 개념 이름 (쉼표로 여럿, 예: /learn 안다 const 선언, 화살표 함수) · 되돌리기: /learn 모른다 개념 이름 · 아는 개념은 복습과 퀴즈에서 빠집니다'
 const MERGE_USAGE =
   '쓰는 법: /learn merge 합칠 개념 = 남길 개념  (예: /learn merge Destructuring = 구조 분해 할당 · = 대신 => -> → | 도 됩니다 · 거꾸로 하면 되돌립니다)'
 const EMPTY_TEXT = '아직 학습 노트가 없습니다. Claude가 파일을 고친 턴이 끝나면 생깁니다.'
