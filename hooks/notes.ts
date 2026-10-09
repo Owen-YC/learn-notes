@@ -1,7 +1,18 @@
 // Pure helpers: hunks to diff text and back, the prompt for a note, the
 // journal's markdown. No `$` here, so tests reach every branch directly.
 
-import type { LearnAsk, LearnChange, LearnConcept, LearnDayActivity, LearnNote, LearnQuizItem, LearnQuizMarks, LearnSubmit, LearnWithheld } from '../types'
+import type {
+  LearnAsk,
+  LearnChange,
+  LearnConcept,
+  LearnDayActivity,
+  LearnDayUsage,
+  LearnNote,
+  LearnQuizItem,
+  LearnQuizMarks,
+  LearnSubmit,
+  LearnWithheld,
+} from '../types'
 
 export type Hunk = {
   oldStart: number
@@ -755,25 +766,59 @@ export function isGeneratedFile(file: string): boolean {
   return dirs.some(part => GENERATED_ANYWHERE.has(part)) || (dirs[0] !== undefined && GENERATED_TOP.has(dirs[0]))
 }
 
-/** A glob as a whole-string pattern: `**` any folders, `*` within one name, `?` one character; either case. */
-function globPattern(glob: string): RegExp {
-  let source = ''
+/** One step of a glob: `**` then a slash (no folder or any folders), `**` (anything), `*` (within one name), `?` (one character) or a character. */
+type GlobStep = { kind: 'dirs' | 'any' | 'star' | 'one' } | { kind: 'char'; char: string }
+
+function globSteps(glob: string): GlobStep[] {
+  const steps: GlobStep[] = []
   for (let i = 0; i < glob.length; i += 1) {
     const char = glob[i]!
     if (char === '*' && glob[i + 1] === '*') {
       // `**/` stands for no folder too; a `**` elsewhere for anything.
-      if (glob[i + 2] === '/') {
-        source += '(?:.*/)?'
-        i += 2
-      } else {
-        source += '.*'
-        i += 1
-      }
-    } else if (char === '*') source += '[^/]*'
-    else if (char === '?') source += '[^/]'
-    else source += char.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      const isDirs = glob[i + 2] === '/'
+      i += isDirs ? 2 : 1
+      steps.push({ kind: isDirs ? 'dirs' : 'any' })
+    } else if (char === '*') steps.push({ kind: 'star' })
+    else if (char === '?') steps.push({ kind: 'one' })
+    else steps.push({ kind: 'char', char: char.toLowerCase() })
   }
-  return new RegExp(`^${source}$`, 'i')
+  return steps
+}
+
+/**
+ * True when the whole of `text` matches `glob` (see globSteps), either case.
+ * Walked step by step over the places in `text` it can stand at, so it takes
+ * time in proportion to their sizes: a pattern from a repository's team file
+ * cannot make it backtrack for ever, as a regular expression could.
+ */
+function globMatch(glob: string, text: string): boolean {
+  const lower = text.toLowerCase()
+  const n = lower.length
+  let at: boolean[] = Array.from({ length: n + 1 }, (_, i) => i === 0)
+  for (const step of globSteps(glob)) {
+    const next: boolean[] = new Array(n + 1).fill(false)
+    let isOpen = false
+    for (let j = 0; j <= n; j += 1) {
+      if (step.kind === 'char' || step.kind === 'one') {
+        if (j > 0 && at[j - 1] && (step.kind === 'char' ? lower[j - 1] === step.char : lower[j - 1] !== '/')) next[j] = true
+      } else if (step.kind === 'star') {
+        // From any place reached, on to the end of that name.
+        isOpen = isOpen || at[j]!
+        next[j] = isOpen
+        if (lower[j] === '/') isOpen = false
+      } else if (step.kind === 'any') {
+        isOpen = isOpen || at[j]!
+        next[j] = isOpen
+      } else {
+        // No folder, or any run of them ending in `/`.
+        next[j] = at[j]! || (isOpen && lower[j - 1] === '/')
+        isOpen = isOpen || at[j]!
+      }
+    }
+    at = next
+    if (!at.includes(true)) return false
+  }
+  return at[n]!
 }
 
 /**
@@ -791,12 +836,11 @@ export function matchesPattern(file: string, patterns: readonly string[]): boole
     const pattern = written.replace(/\/+$/, '')
     if (pattern === '') return false
     if (!pattern.includes('/')) {
-      const re = globPattern(pattern)
-      return (written.endsWith('/') ? names.slice(0, -1) : names).some(name => re.test(name))
+      return (written.endsWith('/') ? names.slice(0, -1) : names).some(name => globMatch(pattern, name))
     }
     // A leading `/` is the project's top, as in .gitignore; a file outside the project matches only a whole path.
     const from = isOutside ? pattern : pattern.replace(/^\/+/, '')
-    return globPattern(from).test(path) || globPattern(`${from}/**`).test(path)
+    return globMatch(from, path) || globMatch(`${from}/**`, path)
   })
 }
 
@@ -1104,6 +1148,45 @@ export function applyHunks(lines: readonly string[], hunks: readonly Hunk[]): st
 }
 
 /**
+ * Files whose code does the same whatever its spaces and line breaks: Python
+ * and YAML are not among them, their indentation being meaning.
+ */
+const FORMAT_FREE = /\.(?:js|jsx|ts|tsx|mjs|cjs|css|scss|json|html|vue|svelte)$/i
+
+/**
+ * One side of a hunk as its code reads, spaces and line breaks aside: every
+ * run of them dropped, but one kept where it parts two words (`return a`, or
+ * `'안녕 하세요'` in a string), so a space taken out of a string still counts.
+ * In a stylesheet a space before a selector's `.`, `#`, `:`, `[`, `*` or `&`
+ * is kept too: `a .b` and `a.b` pick different elements.
+ */
+function codeOnly(lines: readonly string[], isStyle: boolean): string {
+  const flat = lines.join('\n').replace(/\s+/g, ' ')
+  const kept = isStyle ? flat.replace(/([^\s{};,>+~(]) (?=[.#:[*&])/g, '$1\u0001') : flat
+  return kept.replace(/ ?([^\p{L}\p{N}_$ ]) ?/gu, '$1').trim()
+}
+
+/**
+ * True when a change only moved spaces and line breaks in a file where that
+ * changes nothing the code does (FORMAT_FREE): an update whose every hunk
+ * reads the same before and after, spaces and line breaks aside (codeOnly).
+ * A diff cut short, missing or with a secret masked in it is never taken for one.
+ */
+export function isFormatOnly(change: Pick<LearnChange, 'kind' | 'path' | 'diff' | 'isCut' | 'redacted'>): boolean {
+  if (change.kind !== 'update' || change.isCut || change.diff === '' || (change.redacted ?? 0) > 0 || change.diff.includes(REDACTED)) return false
+  if (!FORMAT_FREE.test(change.path)) return false
+  const hunks = parseDiff(change.diff)
+  const isStyle = /\.s?css$/i.test(change.path)
+  return (
+    hunks.length > 0 &&
+    hunks.every(h => {
+      const side = (mark: string) => h.lines.filter(line => line.startsWith(mark)).map(line => line.slice(1))
+      return codeOnly(side('-'), isStyle) === codeOnly(side('+'), isStyle)
+    })
+  )
+}
+
+/**
  * True for a git command that moves content in or back (a stash, a checkout,
  * a pull): what it changes on disk is not an edit anyone made this turn.
  */
@@ -1184,13 +1267,20 @@ function diffBlocks(note: Pick<LearnNote, 'changes' | 'moreFiles' | 'withheld'>,
 const EASIER_TEXT =
   '이번에는 앞서 쓴 노트가 어려웠다는 요청이다. 합니다체는 그대로 지키면서 문장을 짧게 끊고, 전문 용어는 하나도 빼지 말고 일상어로 풀어 쓰고, 배울 개념마다 일상의 비유를 하나씩 들어라. 코드 인용은 그대로 둔다.'
 
-/** The one user message the model reads for a note; `isEasier` asks for the plainest words and an everyday comparison per concept. */
+/**
+ * The one user message the model reads for a note; `isEasier` asks for the
+ * plainest words and an everyday comparison per concept. `team`: the
+ * repository's team file, its rules and terms put before the concepts already
+ * learned, so a concept the team has a term for is named as the team names it.
+ */
 export function notePrompt(
   note: Pick<LearnNote, 'prompt' | 'answer' | 'changes' | 'moreFiles' | 'withheld'>,
   level: Level,
   known: readonly string[] = [],
   isEasier = false,
+  team?: TeamFile,
 ): string {
+  const hasRules = (team?.rules.length ?? 0) > 0
   return [
     LEVEL_TEXT[level],
     ...(isEasier ? [EASIER_TEXT] : []),
@@ -1204,6 +1294,7 @@ export function notePrompt(
     '## 바뀐 코드',
     ...diffBlocks(note, PROMPT_DIFF_BUDGET),
     '',
+    ...teamSection(team),
     ...(known.length > 0
       ? [
           '## 이미 배운 개념 (지난 노트들에서)',
@@ -1220,6 +1311,7 @@ export function notePrompt(
     '- 후: 이제 하는 일 한 문장',
     '- 예: 차이가 드러나는 입력 하나와 결과, `호출이나 입력` → 전: 결과 / 후: 결과 (diff만으로 결과를 확실히 알 수 없으면 이 줄은 뺀다)',
     '### 왜 이렇게 바꿨을까',
+    ...(hasRules ? ['(팀 규칙과 직접 닿으면 이 절 끝에 "팀 규칙: …" 또는 "팀 규칙과 다를 수 있음: …" 한 줄을 더한다)'] : []),
     '### 배울 개념',
     '(1~3개. "- **개념 이름**: 설명 — 그 개념이 쓰인 코드 한 줄을 백틱으로 인용". 줄 번호는 쓰지 마라)',
     '### 직접 확인해 볼 것',
@@ -1252,12 +1344,14 @@ export const ASKS_KEPT = 3
 /**
  * The one user message the model reads for a question about a note: the
  * question, the note's last questions and answers (so a follow-up reads in
- * context), then the note and its code.
+ * context), the team's rules and terms when the repository has them, then the
+ * note and its code.
  */
 export function askPrompt(
   note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles' | 'asks' | 'withheld'>,
   question: string,
   level: Level,
+  team?: TeamFile,
 ): string {
   const earlier = (note.asks ?? []).slice(-2)
   return [
@@ -1269,6 +1363,7 @@ export function askPrompt(
     ...(earlier.length > 0
       ? ['## 앞서 이 노트에 대해 나눈 질문과 답 (이어지는 질문일 수 있다)', ...earlier.flatMap(one => [`- 질문: ${cut(one.question, 300)}`, `  답: ${cut(one.answer.replace(/\s+/g, ' '), 600)}`]), '']
       : []),
+    ...teamSection(team, 'ask'),
     '## 그 노트의 요청',
     note.prompt === '' ? '(요청 문장 없음)' : cut(note.prompt, 1000),
     '',
@@ -1378,6 +1473,12 @@ export function dayBefore(now: number): string {
   return stamp(d.getTime()).day
 }
 
+/** Why a note was left unwritten (LearnNote.skip), as its journal section says. */
+const SKIP_JOURNAL: Record<NonNullable<LearnNote['skip']>, string> = {
+  format: '띄어쓰기·줄바꿈만 바뀌어',
+  limit: '하루 자동 노트 한도에 닿아',
+}
+
 /** One note as a journal section. */
 export function journalSection(note: LearnNote, isRewrite = false): string {
   const { day, time } = stamp(note.at)
@@ -1388,7 +1489,7 @@ export function journalSection(note: LearnNote, isRewrite = false): string {
       ? note.text
       : note.status === 'failed'
         ? `_노트를 쓰지 못했다: ${note.text}_`
-        : '_노트 없이 전후 코드만 남겼다._'
+        : `_${note.skip ? `${SKIP_JOURNAL[note.skip]} ` : ''}노트 없이 전후 코드만 남겼다._`
   const diffs = note.changes.map(c => {
     if (c.diff === '') return `<details><summary>${c.file}</summary>\n\n_파일이 커서 diff를 만들지 못했다._\n\n</details>`
     const fence = fenceFor(c.diff)
@@ -1507,28 +1608,156 @@ export function conceptsOf(text: string, max = 160): { key: string; name: string
   const lines = text.split('\n')
   const found: { key: string; name: string; blurb: string }[] = []
   for (const i of conceptLineIndexes(lines)) {
-    const raw = lines[i]!
-    const closed = CONCEPT_LINE.exec(raw)
-    const open = closed ? null : OPEN_BOLD_LINE.exec(raw)
-    const m = closed ?? (open && [open[0], open[2]!, open[4]!])
-    if (!m) continue
-    const name = cut(
-      m[1]!
-        .replace(/[`*]/g, '')
-        .replace(REVIEW_MARK, '')
-        .replace(/[\s:：.,·—–-]+$/, '')
-        .trim(),
-      40,
-    )
-    const key = conceptKey(name)
-    if (name === '' || key === 'c:' || found.some(one => one.key === key)) continue
-    const blurb = m[2]!
-      .replace(/^[*_]*\s*[(\[（［]\s*(?:복습|다시)\s*[)\]）］]\s*[*_]*\s*/, '')
-      .replace(/^[:：]\s*/, '')
-      .replace(/^[—–-]\s*/, '')
-    found.push({ key, name, blurb: closeTicks(cut(blurb, max)) })
+    const one = conceptOnLine(lines[i]!, max)
+    if (one && !found.some(other => other.key === one.key)) found.push(one)
   }
   return found
+}
+
+/** The concept a concept line names, as conceptsOf reads it (bold name, then its explanation); undefined when it names none. */
+function conceptOnLine(raw: string, max: number): { key: string; name: string; blurb: string } | undefined {
+  const closed = CONCEPT_LINE.exec(raw)
+  const open = closed ? null : OPEN_BOLD_LINE.exec(raw)
+  const m = closed ?? (open && [open[0], open[2]!, open[4]!])
+  if (!m) return undefined
+  const name = cut(
+    m[1]!
+      .replace(/[`*]/g, '')
+      .replace(REVIEW_MARK, '')
+      .replace(/[\s:：.,·—–-]+$/, '')
+      .trim(),
+    40,
+  )
+  const key = conceptKey(name)
+  if (name === '' || key === 'c:') return undefined
+  const blurb = m[2]!
+    .replace(/^[*_]*\s*[(\[（［]\s*(?:복습|다시)\s*[)\]）］]\s*[*_]*\s*/, '')
+    .replace(/^[:：]\s*/, '')
+    .replace(/^[—–-]\s*/, '')
+  return { key, name, blurb: closeTicks(cut(blurb, max)) }
+}
+
+/** Where a repository keeps its team file, from its top: rules, terms and files to leave out, for every teammate's notes. */
+export const TEAM_FILE = '.claude/learn-notes.md'
+/** Characters of rules and terms a prompt carries at most: the file is the repository's, not the learner's. */
+export const TEAM_BUDGET = 3000
+
+/** A team file as read (parseTeamFile): its rules, its terms, the path patterns it leaves out, and whether the rules and terms were cut. */
+export type TeamFile = { rules: string[]; terms: { name: string; blurb: string }[]; exclude: string[]; isCut: boolean }
+
+/** Which part of a team file a heading starts: the words checked in this order, so `## 용어 규칙` is terms. */
+function teamPart(title: string): 'rules' | 'terms' | 'exclude' | undefined {
+  if (/빼기|exclude/i.test(title)) return 'exclude'
+  if (/용어|glossary|terms?\b/i.test(title)) return 'terms'
+  if (/규칙|rules?\b/i.test(title)) return 'rules'
+  return undefined
+}
+
+/** A line with its list mark (`-`, `*`, `1.`) taken off. */
+function unbulleted(line: string): string {
+  return line.replace(/^\s*(?:[-*+•]|\d+[.)])\s+/, '').trim()
+}
+
+/**
+ * A team file (`.claude/learn-notes.md`) read: the lines under a `## 규칙`
+ * heading as rules, the `- **이름**: 설명` lines under `## 용어` as terms (read
+ * as a note's concept lines are, an unclosed bold too), the path patterns
+ * under `## 빼기` (a line each or comma-separated, in backticks when they hold
+ * a space, words after one taken as its explanation; in a code block too).
+ * Lines under no such heading, comments and other code blocks are passed
+ * over. The rules and then the terms are kept to TEAM_BUDGET characters together.
+ */
+export function parseTeamFile(markdown: string): TeamFile {
+  const lines = clean(markdown).replace(/<!--[\s\S]*?(?:-->|$)/g, '').split('\n')
+  const rules: string[] = []
+  const terms: { key: string; name: string; blurb: string }[] = []
+  const exclude: string[] = []
+  let part: ReturnType<typeof teamPart>
+  let isInCode = false
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (FENCE.test(line)) {
+      isInCode = !isInCode
+      continue
+    }
+    if (!isInCode && /^#{1,6}\s/.test(line)) {
+      part = teamPart(line.replace(/^#+\s*/, ''))
+      continue
+    }
+    if (line === '' || part === undefined) continue
+    if (part === 'exclude') {
+      // `quoted` patterns as written, else each comma-separated word: words after one explain it.
+      const body = unbulleted(line)
+      const quoted = [...body.matchAll(/`([^`]+)`/g)].map(m => m[1]!)
+      const words = quoted.length > 0 ? quoted : body.split(',').map(one => one.trim().split(/\s+/)[0] ?? '')
+      for (const word of words) {
+        const pattern = word.trim()
+        // A `#` line in a code block is a comment there, as in .gitignore.
+        if (pattern !== '' && !pattern.startsWith('#') && exclude.length < 200 && !exclude.includes(pattern)) exclude.push(pattern)
+      }
+    } else if (isInCode) {
+      continue
+    } else if (part === 'rules') {
+      const rule = unbulleted(line)
+      if (rule !== '') rules.push(cut(rule, 300))
+    } else {
+      const term = conceptOnLine(raw, 300)
+      if (term && !terms.some(one => one.key === term.key)) terms.push(term)
+    }
+  }
+  let left = TEAM_BUDGET
+  let isCut = false
+  const keptRules: string[] = []
+  for (const rule of rules) {
+    if (left < 20) {
+      isCut = true
+      break
+    }
+    const kept = cut(rule, left)
+    isCut ||= kept !== rule
+    keptRules.push(kept)
+    left -= kept.length
+  }
+  const keptTerms: { name: string; blurb: string }[] = []
+  for (const { name, blurb } of terms) {
+    if (isCut || left < name.length + 20) {
+      isCut = true
+      break
+    }
+    const kept = blurb === '' ? '' : closeTicks(cut(blurb, left - name.length))
+    isCut ||= kept !== blurb
+    keptTerms.push({ name, blurb: kept })
+    left -= name.length + kept.length
+  }
+  return { rules: keptRules, terms: keptTerms, exclude, isCut }
+}
+
+/** How a note's model is to use the team's rules and terms. */
+const TEAM_FOR_NOTE =
+  '팀이 정한 참고 자료다. 바뀐 코드와 직접 닿고 확실할 때만 "팀 규칙:" 또는 "팀 규칙과 다를 수 있음:" 한 줄로 짚는다. 배울 개념이 용어에 있으면 그 이름을 글자 그대로 쓴다'
+/** How a question's model is to use them. */
+const TEAM_FOR_ASK =
+  '팀이 정한 참고 자료다. 질문이 이 규칙이나 용어와 닿으면 근거로 삼아 답한다. 규칙과 달라 보이는 코드는 단정하지 말고 "팀 규칙과 다를 수 있음"이라고 말한다'
+
+/** A team file's rules and terms as a prompt section, how to use them in its heading; nothing when it has neither. */
+export function teamSection(team: TeamFile | undefined, use: 'note' | 'ask' = 'note'): string[] {
+  if (!team || team.rules.length + team.terms.length === 0) return []
+  return [
+    `## 이 저장소의 팀 규칙과 용어 (${use === 'note' ? TEAM_FOR_NOTE : TEAM_FOR_ASK})`,
+    ...(team.rules.length > 0 ? ['규칙', ...team.rules.map(rule => `- ${rule}`)] : []),
+    ...(team.terms.length > 0 ? ['용어', ...team.terms.map(one => `- **${one.name}**${one.blurb === '' ? '' : `: ${one.blurb}`}`)] : []),
+    '',
+  ]
+}
+
+/** What the pane says of a team file it read: how many rules and terms, or that it found none to read. */
+export function teamText(team: TeamFile): string {
+  const { rules, terms, exclude } = team
+  if (rules.length + terms.length + exclude.length === 0) {
+    return `이 저장소의 팀 규칙 파일(${TEAM_FILE})에서 읽은 것이 없습니다 · 제목을 ## 규칙 · ## 용어 · ## 빼기로 씁니다`
+  }
+  const parts = [`규칙 ${rules.length}`, `용어 ${terms.length}`, ...(exclude.length > 0 ? [`빼기 ${exclude.length}`] : [])]
+  return `이 저장소의 팀 규칙 파일을 읽었습니다 (${parts.join(' · ')})${team.isCut ? ` · 규칙과 용어는 앞 ${String(TEAM_BUDGET).replace(/\B(?=(\d{3})+$)/g, ',')}자만` : ''}`
 }
 
 /** The concept under `key`, only if the index itself holds it (never an inherited property). */
@@ -2413,7 +2642,7 @@ const isDay = (day: string) => /^\d{4}-\d{2}-\d{2}$/.test(day)
 const count = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : 0)
 
 /** The newest ACTIVITY_DAYS days of a record. */
-function keepLatest(record: Record<string, LearnDayActivity>): Record<string, LearnDayActivity> {
+function keepLatest<T>(record: Record<string, T>): Record<string, T> {
   const days = Object.keys(record).sort().slice(-ACTIVITY_DAYS)
   return Object.fromEntries(days.map(day => [day, record[day]!]))
 }
@@ -2439,6 +2668,66 @@ export function addActivity(record: Readonly<Record<string, LearnDayActivity>>, 
     wrong: Math.max(0, prior.wrong + (delta.wrong ?? 0)),
   }
   return keepLatest({ ...record, [day]: next })
+}
+
+/** The usage record read back from the store: bad days dropped, the newest ACTIVITY_DAYS kept. */
+export function cleanUsage(raw: unknown): Record<string, LearnDayUsage> {
+  const record: Record<string, LearnDayUsage> = {}
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return record
+  for (const [day, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isDay(day) || typeof value !== 'object' || value === null) continue
+    const one = value as Partial<LearnDayUsage>
+    record[day] = { calls: count(one.calls), auto: count(one.auto), input: count(one.input), output: count(one.output) }
+  }
+  return keepLatest(record)
+}
+
+/** The usage record with `delta` added on `day`; the newest ACTIVITY_DAYS days kept. */
+export function addUsage(record: Readonly<Record<string, LearnDayUsage>>, day: string, delta: Partial<LearnDayUsage>): Record<string, LearnDayUsage> {
+  const prior = Object.prototype.hasOwnProperty.call(record, day) ? record[day]! : { calls: 0, auto: 0, input: 0, output: 0 }
+  const next = {
+    calls: prior.calls + count(delta.calls),
+    auto: prior.auto + count(delta.auto),
+    input: prior.input + count(delta.input),
+    output: prior.output + count(delta.output),
+  }
+  return keepLatest({ ...record, [day]: next })
+}
+
+/** A token count the way it is said: `850`, `약 3천`, `약 1.2만`, `약 18만`. */
+export function tokenText(n: number): string {
+  if (n < 1000) return String(n)
+  const thousands = Math.round(n / 1000)
+  if (thousands < 10) return `약 ${thousands}천`
+  const man = n / 10_000
+  if (man < 10) return `약 ${Math.round(man * 10) / 10}만`
+  if (man < 10_000) return `약 ${Math.round(man)}만`
+  return `약 ${Math.round(n / 10_000_000) / 10}억`
+}
+
+/**
+ * One line on what the plugin's model calls came to: today's calls (the
+ * automatic notes among them), then the last seven days' calls and tokens.
+ * No price: what a token costs differs by account.
+ */
+export function usageLine(record: Readonly<Record<string, LearnDayUsage>>, now: number): string {
+  const at = (day: string) => (Object.prototype.hasOwnProperty.call(record, day) ? record[day] : undefined)
+  const days = daysBack(now, 7)
+  const today = at(days[0]!.day) ?? { calls: 0, auto: 0, input: 0, output: 0 }
+  const week = days.reduce(
+    (total, { day }) => {
+      const one = at(day)
+      return one ? { calls: total.calls + one.calls, input: total.input + one.input, output: total.output + one.output } : total
+    },
+    { calls: 0, input: 0, output: 0 },
+  )
+  if (week.calls === 0) return '학습 노트의 모델 호출: 최근 7일 동안 없습니다'
+  return [
+    `학습 노트의 모델 호출: 오늘 ${today.calls}번${today.auto > 0 ? ` (자동 노트 ${today.auto})` : ''}`,
+    `최근 7일 ${week.calls}번`,
+    `입력 ${tokenText(week.input)}`,
+    `출력 ${tokenText(week.output)} 토큰`,
+  ].join(' · ')
 }
 
 /** A first record made from the notes still kept: each written note on its day. */

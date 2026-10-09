@@ -101,6 +101,16 @@ import {
   redactText,
   withheldOf,
   withheldText,
+  ACTIVITY_DAYS,
+  addUsage,
+  cleanUsage,
+  isFormatOnly,
+  parseTeamFile,
+  teamSection,
+  teamText,
+  tokenText,
+  usageLine,
+  TEAM_BUDGET,
   type Hunk,
 } from '../hooks/notes'
 
@@ -1650,5 +1660,192 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
     }
     expect(journalSection(note)).toContain('**뺀 파일**: .env (비밀값이 들 수 있는 파일) · package-lock.json (잠금·생성 파일)')
     expect(journalSection({ ...note, withheld: undefined })).not.toContain('뺀 파일')
+  })
+})
+
+describe('1.6.0: cost guardrails', () => {
+  const edit = (path: string, lines: string[], kind: 'update' | 'create' = 'update') =>
+    changeOf({ path, root: '/proj', tool: 'Edit', kind, hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines }] })
+
+  test('a change of spaces and line breaks alone, in a file where they change nothing, is told apart', () => {
+    expect(isFormatOnly(edit('/proj/src/a.ts', ['-  return a', '+    return a']))).toBe(true)
+    // Lines joined or split, spaces around punctuation, a blank line gone.
+    expect(isFormatOnly(edit('/proj/src/a.ts', ['-foo(a,b)', '+foo(', '+  a,', '+  b', '+)']))).toBe(true)
+    expect(isFormatOnly(edit('/proj/src/a.css', ['-a{color:red}', '+a {', '+  color: red', '+}']))).toBe(true)
+    expect(isFormatOnly(edit('/proj/src/a.json', [' {', '-', '-  "a": 1', '+    "a": 1']))).toBe(true)
+    // In a stylesheet the space before a selector part picks other elements; around a declaration it does not.
+    expect(isFormatOnly(edit('/proj/src/a.css', ['-a .b{margin:0 .5em}', '+a .b {', '+  margin: 0 .5em', '+}']))).toBe(true)
+    expect(isFormatOnly(edit('/proj/src/a.scss', ['-a .b {}', '+a.b {}']))).toBe(false)
+    expect(isFormatOnly(edit('/proj/src/a.scss', ['-&:hover {}', '+& :hover {}']))).toBe(false)
+    expect(isFormatOnly(edit('/proj/src/a.ts', ['-a .b', '+a.b']))).toBe(true)
+    expect(isFormatOnly(edit('/proj/src/a.ts', ['-var x = 1', '+let x = 1']))).toBe(false)
+    expect(isFormatOnly(edit('/proj/src/a.ts', ['-foo(a,b)', '+foo(a,b,)']))).toBe(false)
+    // A space taken out between two words (in a string, too) is a change.
+    expect(isFormatOnly(edit('/proj/src/a.ts', ["-say('Hello world')", "+say('Helloworld')"]))).toBe(false)
+    expect(isFormatOnly(edit('/proj/src/a.ts', ["-say('안녕 하세요')", "+say('안녕하세요')"]))).toBe(false)
+    // Python and YAML: indentation is meaning there.
+    expect(isFormatOnly(edit('/proj/app.py', ['-  return a', '+    return a']))).toBe(false)
+    expect(isFormatOnly(edit('/proj/ci.yaml', ['-  run: x', '+    run: x']))).toBe(false)
+    // A new file, a diff cut short or a masked secret is never taken for one.
+    expect(isFormatOnly(edit('/proj/src/a.ts', ['+  return a'], 'create'))).toBe(false)
+    expect(isFormatOnly({ ...edit('/proj/src/a.ts', ['-  return a', '+    return a']), isCut: true })).toBe(false)
+    expect(isFormatOnly(edit('/proj/src/a.ts', ['-const k = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"', '+const k = "sk-ant-api03-BBBBBBBBBBBBBBBBBBBB"']))).toBe(false)
+    expect(isFormatOnly({ kind: 'update', path: '/proj/a.ts', diff: '', isCut: false })).toBe(false)
+  })
+
+  test('the usage record adds up a day, keeps the newest days and reads back only what it can', () => {
+    let record = addUsage({}, '2026-10-03', { calls: 1, auto: 1, input: 1200, output: 300 })
+    record = addUsage(record, '2026-10-03', { calls: 1, input: 800, output: 100 })
+    expect(record['2026-10-03']).toEqual({ calls: 2, auto: 1, input: 2000, output: 400 })
+    const days: Record<string, { calls: number; auto: number; input: number; output: number }> = {}
+    for (let i = 0; i < ACTIVITY_DAYS + 5; i += 1) days[new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10)] = { calls: 1, auto: 0, input: 1, output: 1 }
+    const kept = addUsage(days, '2026-12-31', { calls: 1 })
+    expect(Object.keys(kept)).toHaveLength(ACTIVITY_DAYS)
+    expect(kept['2026-01-01']).toBeUndefined()
+    expect(kept['2026-12-31']).toEqual({ calls: 1, auto: 0, input: 0, output: 0 })
+    expect(cleanUsage({ '2026-10-03': { calls: 2, auto: 'x', input: -5, output: 3.7 }, nope: { calls: 1 }, '2026-10-04': 7 })).toEqual({
+      '2026-10-03': { calls: 2, auto: 0, input: 0, output: 3 },
+    })
+    expect(cleanUsage(undefined)).toEqual({})
+    expect(cleanUsage([1])).toEqual({})
+  })
+
+  test('the usage line names today\'s calls, the week\'s and its tokens, never a price', () => {
+    const now = new Date(2026, 9, 9, 12).getTime()
+    const day = (back: number) => {
+      const d = new Date(2026, 9, 9 - back, 12)
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    }
+    const record = {
+      [day(0)]: { calls: 12, auto: 9, input: 40_000, output: 6_000 },
+      [day(3)]: { calls: 49, auto: 30, input: 140_000, output: 24_000 },
+      [day(9)]: { calls: 100, auto: 100, input: 9_000_000, output: 9_000_000 },
+    }
+    expect(usageLine(record, now)).toBe('학습 노트의 모델 호출: 오늘 12번 (자동 노트 9) · 최근 7일 61번 · 입력 약 18만 · 출력 약 3만 토큰')
+    expect(usageLine({ [day(1)]: { calls: 2, auto: 0, input: 900, output: 50 } }, now)).toBe('학습 노트의 모델 호출: 오늘 0번 · 최근 7일 2번 · 입력 900 · 출력 50 토큰')
+    expect(usageLine({}, now)).toBe('학습 노트의 모델 호출: 최근 7일 동안 없습니다')
+    expect([0, 999, 1000, 2600, 9600, 12_345, 99_960, 180_000, 123_456_789].map(tokenText)).toEqual([
+      '0', '999', '약 1천', '약 3천', '약 1만', '약 1.2만', '약 10만', '약 18만', '약 1.2억',
+    ])
+  })
+
+  test('a note a turn\'s end passed over says why in the journal', () => {
+    const change = edit('/proj/src/a.ts', ['-  return a', '+    return a'])
+    const note = {
+      id: 'n', turnId: 't', at: Date.UTC(2026, 9, 3, 1), prompt: '정리', answer: '', changes: [change], moreFiles: 0,
+      status: 'off' as const, text: '', savedAs: null, isPast: false, root: '/proj', updatedAt: 0, concepts: [],
+    }
+    expect(journalSection({ ...note, skip: 'format' })).toContain('_띄어쓰기·줄바꿈만 바뀌어 노트 없이 전후 코드만 남겼다._')
+    expect(journalSection({ ...note, skip: 'limit' })).toContain('_하루 자동 노트 한도에 닿아 노트 없이 전후 코드만 남겼다._')
+    expect(journalSection(note)).toContain('_노트 없이 전후 코드만 남겼다._')
+  })
+})
+
+describe('1.6.0: the team file', () => {
+  const FILE = [
+    '# 우리 팀의 학습 노트 파일',
+    '이 줄은 어느 절에도 없어 읽지 않습니다.',
+    '',
+    '## 규칙',
+    '- API 호출은 fetcher로 감쌉니다',
+    '* 상태는 zustand로 둡니다',
+    '1. 바뀌지 않는 값은 const로 선언한다',
+    '<!-- 이 주석은 읽지 않습니다 -->',
+    '```ts',
+    'const example = 1',
+    '```',
+    '',
+    '## 용어',
+    '- **정산**: 하루 매출을 마감하는 일',
+    '- **불변 바인딩 (const)**: const로 묶은 이름',
+    '- **출고: 창고에서 물건이 나가는 일',
+    '- 굵게 없는 줄은 용어가 아닙니다',
+    '',
+    '## 노트에서 빼기',
+    '- `legacy/**`',
+    '- *.gen.ts, fixtures/',
+    '- old-build/ (옛 빌드라 배울 것이 없음)',
+    '- `my docs/**` 띄어쓰기가 든 경로',
+    '```',
+    '# 이 줄은 주석',
+    'vendor/',
+    '```',
+    '## 그 밖',
+    '- 여기는 아무것도 아닙니다',
+  ].join('\n')
+
+  test('rules, terms and patterns are read from under their headings', () => {
+    const team = parseTeamFile(FILE)
+    expect(team.rules).toEqual(['API 호출은 fetcher로 감쌉니다', '상태는 zustand로 둡니다', '바뀌지 않는 값은 const로 선언한다'])
+    expect(team.terms).toEqual([
+      { name: '정산', blurb: '하루 매출을 마감하는 일' },
+      { name: '불변 바인딩 (const)', blurb: 'const로 묶은 이름' },
+      // Its bold never closed: read as a note's concept line is, to its colon.
+      { name: '출고', blurb: '창고에서 물건이 나가는 일' },
+    ])
+    expect(team.exclude).toEqual(['legacy/**', '*.gen.ts', 'fixtures/', 'old-build/', 'my docs/**', 'vendor/'])
+    expect(team.isCut).toBe(false)
+    expect(parseTeamFile(FILE.replace(/\n/g, '\r\n'))).toEqual(team)
+  })
+
+  test('a file with no such heading reads as empty, and the pane says what to write', () => {
+    const team = parseTeamFile('- API 호출은 fetcher로 감쌉니다\n- **정산**: 하루 매출 마감\n')
+    expect(team).toEqual({ rules: [], terms: [], exclude: [], isCut: false })
+    expect(teamSection(team)).toEqual([])
+    expect(teamText(team)).toContain('읽은 것이 없습니다 · 제목을 ## 규칙 · ## 용어 · ## 빼기로 씁니다')
+    expect(teamText(parseTeamFile(FILE))).toBe('이 저장소의 팀 규칙 파일을 읽었습니다 (규칙 3 · 용어 3 · 빼기 6)')
+  })
+
+  test('rules and terms are kept to 3,000 characters together, the rules first', () => {
+    const long = ['## 규칙', ...Array.from({ length: 20 }, (_, i) => `- 규칙 ${i} ${'가'.repeat(200)}`), '## 용어', '- **정산**: 하루 매출 마감'].join('\n')
+    const team = parseTeamFile(long)
+    const size = team.rules.join('').length + team.terms.reduce((sum, one) => sum + one.name.length + one.blurb.length, 0)
+    expect(size).toBeLessThanOrEqual(TEAM_BUDGET)
+    expect(team.rules.length).toBeLessThan(20)
+    expect(team.terms).toEqual([])
+    expect(team.isCut).toBe(true)
+    expect(teamText(team)).toContain('· 규칙과 용어는 앞 3,000자만')
+    // A short file is whole.
+    const short = parseTeamFile('## 용어\n- **정산**: 하루 매출 마감\n')
+    expect(short.terms).toEqual([{ name: '정산', blurb: '하루 매출 마감' }])
+    expect(short.isCut).toBe(false)
+  })
+
+  test('a path pattern from the team file cannot make matching run for ever, and globs read as before', () => {
+    const crafted = `a/${'**x'.repeat(12)}y`
+    const started = Date.now()
+    expect(matchesPattern(`a/${'x'.repeat(60)}.ts`, [crafted])).toBe(false)
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(matchesPattern(`a/${'x'.repeat(12)}y`, [crafted])).toBe(true)
+    expect(matchesPattern(`a/${'x'.repeat(11)}y`, [crafted])).toBe(false)
+    expect(matchesPattern('fixtures/a.json', ['**/fixtures/*.json'])).toBe(true)
+    expect(matchesPattern('src/fixtures/a.json', ['**/fixtures/*.json'])).toBe(true)
+    expect(matchesPattern('src/fixtures/b/a.json', ['**/fixtures/*.json'])).toBe(false)
+    expect(matchesPattern('src/a/b.ts', ['src/*.ts'])).toBe(false)
+    expect(matchesPattern('src/a/b.ts', ['src/**'])).toBe(true)
+    expect(matchesPattern('src/a/b.ts', ['src/a?b.ts'])).toBe(false)
+    expect(matchesPattern('SRC/Gen/A.TS', ['src/gen/*.ts'])).toBe(true)
+    expect(matchesPattern('src/a+b(1).ts', ['src/a+b(1).ts'])).toBe(true)
+  })
+
+  test('the note prompt carries the rules and terms before the concepts already learned', () => {
+    const team = parseTeamFile(FILE)
+    const change = changeOf({ path: '/proj/a.ts', root: '/proj', tool: 'Edit', kind: 'update', hunks: [HUNK] })
+    const prompt = notePrompt({ prompt: 'b를 상수로', answer: '', changes: [change], moreFiles: 0 }, 'beginner', ['정산', '클로저'], false, team)
+    expect(prompt).toContain('## 이 저장소의 팀 규칙과 용어 (팀이 정한 참고 자료다.')
+    expect(prompt).toContain('"팀 규칙:" 또는 "팀 규칙과 다를 수 있음:" 한 줄로 짚는다')
+    expect(prompt).toContain('- 바뀌지 않는 값은 const로 선언한다')
+    expect(prompt).toContain('- **불변 바인딩 (const)**: const로 묶은 이름')
+    expect(prompt.indexOf('## 이 저장소의 팀 규칙과 용어')).toBeLessThan(prompt.indexOf('## 이미 배운 개념'))
+    expect(prompt).toContain('## 이미 배운 개념 (지난 노트들에서)\n정산, 클로저\n')
+    expect(prompt).toContain('(팀 규칙과 직접 닿으면 이 절 끝에')
+    const plain = notePrompt({ prompt: 'b를 상수로', answer: '', changes: [change], moreFiles: 0 }, 'beginner', ['정산'])
+    expect(plain).not.toContain('팀 규칙')
+    expect(plain).toContain('## 이미 배운 개념 (지난 노트들에서)\n정산\n')
+    const note = { prompt: 'b를 상수로', text: '노트', status: 'ready' as const, changes: [change], moreFiles: 0 }
+    const asked = askPrompt(note, '왜 fetcher를 써요?', 'beginner', team)
+    expect(asked).toContain('질문이 이 규칙이나 용어와 닿으면 근거로 삼아 답한다')
+    expect(asked).toContain('- API 호출은 fetcher로 감쌉니다')
+    expect(askPrompt(note, '왜?', 'beginner')).not.toContain('팀 규칙')
   })
 })

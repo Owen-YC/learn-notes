@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, EngineInterface, Register } from 'claude-code'
+import type { ElementTable, EngineInterface, ModelUsage, Register } from 'claude-code'
 
 import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnLive, LearnNote, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSubmit, LearnView, LearnWithheld } from '../types'
 import {
@@ -22,6 +22,14 @@ import {
   parseCheck,
   activityFromNotes,
   addActivity,
+  addUsage,
+  cleanUsage,
+  usageLine,
+  isFormatOnly,
+  parseTeamFile,
+  teamText,
+  TEAM_FILE,
+  type TeamFile,
   addToBank,
   ankiText,
   cleanBank,
@@ -144,6 +152,8 @@ const ACTIVITY_KEY = 'activity'
 const BANK_KEY = 'quizBank'
 /** The Anki import file /learn anki writes, in the journal folder. */
 const ANKI_FILE = 'learn-notes-anki.txt'
+/** Each day's model calls and tokens (see LearnDayUsage), for the daily limit and /learn stats. */
+const USAGE_KEY = 'usage'
 
 type MergeRecord = { concept: LearnConcept; into: string; both: number }
 
@@ -210,6 +220,8 @@ type Config = {
   saveDir: string
   /** Path patterns (excludePaths) whose files stay out of every note. */
   excludePaths: string[]
+  /** Notes a day written by themselves at a turn's end (dailyAutoNotes); 0 for no limit. */
+  dailyAutoNotes: number
 }
 
 function configOf(options: Readonly<Record<string, unknown>>): Config {
@@ -222,7 +234,14 @@ function configOf(options: Readonly<Record<string, unknown>>): Config {
     level: options.level === 'intermediate' || options.level === 'advanced' ? options.level : 'beginner',
     saveDir: typeof options.saveDir === 'string' ? options.saveDir.trim() : '',
     excludePaths: patternsOf(options.excludePaths),
+    dailyAutoNotes: wholeOf(options.dailyAutoNotes),
   }
+}
+
+/** A number setting as a whole number of at least 0 (a typed one may come as text); anything else is 0. */
+function wholeOf(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : Number.NaN
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
 }
 
 /** The excludePaths setting as patterns: comma- or line-separated words (a list, as managed settings may give it). */
@@ -257,6 +276,12 @@ let shownReminder: string | undefined | null = null
 const grading = new Set<string>()
 /** Whether the permission rules forbid reading a path, asked once a turn (see isReadDenied); cleared when the turn ends. */
 const readDenied = new Map<string, boolean>()
+/** Notes a turn's end set to write by themselves whose model call is not in the usage record yet: they count toward the day's limit meanwhile. */
+const autoPending = new Set<string>()
+/** The day the daily limit's toast last showed, so it shows once a day. */
+let limitToastDay: string | undefined
+/** The project's team file as last read (TEAM_FILE), with its stamp: read again only once that changes. */
+let team: { path: string; mtimeMs: number; size: number; parsed: TeamFile } | null = null
 /**
  * Work that must not interleave runs one after another in its lane: journal
  * saves (each reads a journal and writes it whole) and store writes (each
@@ -309,6 +334,7 @@ function fromHistory(raw: unknown, root: string): LearnNote | undefined {
       : [],
     // Anything but a list of them is dropped, not kept from the spread above: such a note left nothing out.
     withheld: Array.isArray(raw.withheld) ? raw.withheld.filter(isWithheld) : undefined,
+    skip: raw.skip === 'format' || raw.skip === 'limit' ? raw.skip : undefined,
   }
 }
 
@@ -742,6 +768,41 @@ function recordActivity($: EngineInterface, day: string, delta: Partial<LearnDay
 }
 
 /**
+ * Counts one model call on today's usage record, with the tokens it read
+ * (cached ones too) and wrote; never fails the caller.
+ */
+function recordUsage($: EngineInterface, usage: ModelUsage | undefined, kind: 'auto' | 'manual'): Promise<void> {
+  return enqueue('storing', async () => {
+    try {
+      const tokens = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? n : 0)
+      const input = tokens(usage?.input_tokens) + tokens(usage?.cache_read_input_tokens) + tokens(usage?.cache_creation_input_tokens)
+      const delta = { calls: 1, auto: kind === 'auto' ? 1 : 0, input, output: tokens(usage?.output_tokens) }
+      await $.store.set(USAGE_KEY, addUsage(cleanUsage(await $.store.get(USAGE_KEY)), stamp(await $.clock.now()).day, delta))
+    } catch (error) {
+      $.ui.log(`learn-notes: 모델 호출 수를 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+    }
+  })
+}
+
+/**
+ * True once `day`'s notes written by themselves reach dailyAutoNotes: the ones
+ * the usage record counts and the ones still being written. Read after any
+ * store write still running; one that cannot be read limits nothing.
+ */
+function isOverLimit($: EngineInterface, cfg: Config, day: string): Promise<boolean> {
+  if (cfg.dailyAutoNotes <= 0) return Promise.resolve(false)
+  return enqueue('storing', async () => {
+    try {
+      const record = cleanUsage(await $.store.get(USAGE_KEY))
+      const done = Object.prototype.hasOwnProperty.call(record, day) ? record[day]!.auto : 0
+      return done + autoPending.size >= cfg.dailyAutoNotes
+    } catch {
+      return false
+    }
+  })
+}
+
+/**
  * Pins "복습할 개념 n개" under the prompt while any concept is due for review,
  * and takes it down when none is (or the reminder is off in /config).
  */
@@ -904,11 +965,14 @@ function noModelText(cfg: Config): string {
  * One model call for the learner: its text, or why there is none in words they
  * can act on. The prompt's secrets are masked once more on the way out: a note
  * stored or a journal written before 1.6.0, or a typed quiz answer, was never masked.
+ * Every call that reached the model is counted in the usage record, answered or
+ * not; `kind` says whether a turn's end made it by itself (an automatic note).
  */
 async function askModel(
   $: EngineInterface,
   cfg: Config,
   call: { system: string; prompt: string; maxTokens: number; timeoutMs?: number },
+  kind: 'auto' | 'manual' = 'manual',
 ): Promise<{ text: string } | { error: string }> {
   let reply
   try {
@@ -916,6 +980,7 @@ async function askModel(
   } catch {
     return { error: noModelText(cfg) }
   }
+  await recordUsage($, reply.usage, kind)
   return reply.isAnswered ? { text: reply.text } : { error: failureText(reply) }
 }
 
@@ -1173,7 +1238,8 @@ async function askNote(
   // A key pasted into a question is masked before the model, the store or the journal sees it.
   const masked = redactText(question).text
   const kept = label === question ? masked : redactText(label).text
-  const asked = await askModel($, cfg, { system: ASK_SYSTEM, prompt: askPrompt(note, masked, cfg.level), maxTokens: 900 })
+  const rules = await teamOf($, note.root)
+  const asked = await askModel($, cfg, { system: ASK_SYSTEM, prompt: askPrompt(note, masked, cfg.level, rules), maxTokens: 900 })
   if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
   const answer = cut(asked.text, 4000)
   const now = await $.clock.now()
@@ -1275,10 +1341,18 @@ async function journalDays($: EngineInterface, cfg: Config): Promise<{ day: stri
 
 /**
  * Writes the note for `id` with the model; the pane redraws as its status
- * moves. `isEasier`: in the plainest words (e). A rewrite that fails leaves the
- * note as it was and says why in a toast. Never rejects.
+ * moves. `isRewrite`: the journal has it already; `isEasier`: in the plainest
+ * words (e); `isAuto`: a turn's end asked for it, not the learner (it counts
+ * toward dailyAutoNotes). A rewrite that fails leaves the note as it was and
+ * says why in a toast. Never rejects.
  */
-async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite: boolean, isEasier = false): Promise<void> {
+async function writeNote(
+  $: EngineInterface,
+  cfg: Config,
+  id: string,
+  how: { isRewrite?: boolean; isEasier?: boolean; isAuto?: boolean } = {},
+): Promise<void> {
+  const { isRewrite = false, isEasier = false, isAuto = false } = how
   if (inFlight.has(id)) return
   inFlight.add(id)
   try {
@@ -1287,13 +1361,22 @@ async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite:
     // A note counts toward the day's learning the first time it is written, never on a rewrite.
     const isCounted = prior.isCounted === true || prior.status === 'ready'
     const good = prior.status === 'ready' ? { status: prior.status, text: prior.text } : undefined
-    const note = await setNote($, id, { status: 'writing', text: '' })
+    // Written now, it is no longer one a turn's end passed over.
+    const note = await setNote($, id, { status: 'writing', text: '', skip: undefined })
     if (!note) return
-    const asked = await askModel($, cfg, {
-      system: SYSTEM,
-      prompt: notePrompt(note, isEasier ? 'beginner' : cfg.level, knownNames(await read($, concepts)), isEasier),
-      maxTokens: 1500,
-    })
+    const rules = await teamOf($, note.root)
+    const asked = await askModel(
+      $,
+      cfg,
+      {
+        system: SYSTEM,
+        prompt: notePrompt(note, isEasier ? 'beginner' : cfg.level, knownNames(await read($, concepts)), isEasier, rules),
+        maxTokens: 1500,
+      },
+      isAuto ? 'auto' : 'manual',
+    )
+    // Counted in the usage record now (or never made): no longer one being written.
+    autoPending.delete(id)
     if ('error' in asked && good) {
       // Only the new version failed: the note it was to replace stays, in the pane, the store and the journal.
       const kept = (await setNote($, id, good)) ?? { ...note, ...good }
@@ -1328,6 +1411,7 @@ async function writeNote($: EngineInterface, cfg: Config, id: string, isRewrite:
     $.ui.log(`learn-notes: 노트를 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
   } finally {
     inFlight.delete(id)
+    autoPending.delete(id)
   }
 }
 
@@ -1448,14 +1532,65 @@ async function isReadDenied($: EngineInterface, path: string): Promise<boolean> 
   return isDenied
 }
 
+/** Bytes past which a team file is not read: rules and terms are cut to TEAM_BUDGET anyway. */
+const TEAM_READ_MAX = 200_000
+
+/** Where `root`'s team file is. */
+function teamPath(root: string): string {
+  return `${root.replace(/[\\/]+$/, '')}/${TEAM_FILE}`
+}
+
+/**
+ * This project's team file (TEAM_FILE), read again only when its stamp
+ * (modified time, size) changed since the last read; undefined while there is
+ * none, it is too big, or the permission rules forbid reading it. Never rejects.
+ */
+async function loadTeam($: EngineInterface): Promise<TeamFile | undefined> {
+  try {
+    const root = await $.session.root()
+    const path = root ? teamPath(root) : ''
+    if (path === '' || !(await $.fs.exists(path)) || (await isReadDenied($, path))) {
+      team = null
+      return undefined
+    }
+    const stat = await $.fs.stat(path)
+    if (stat.kind !== 'file' || stat.size > TEAM_READ_MAX) {
+      team = null
+      return undefined
+    }
+    if (team?.path === path && team.mtimeMs === stat.mtimeMs && team.size === stat.size) return team.parsed
+    const parsed = parseTeamFile(String(await $.fs.read(path)))
+    team = { path, mtimeMs: stat.mtimeMs, size: stat.size, parsed }
+    return parsed
+  } catch (error) {
+    $.ui.log(`learn-notes: 팀 규칙 파일을 읽지 못했습니다 (${String(error)})`, { to: 'debug' })
+    team = null
+    return undefined
+  }
+}
+
+/** The team file for a note of `root`: this project's (read again if it changed), none for a note of another project. */
+async function teamOf($: EngineInterface, root: string): Promise<TeamFile | undefined> {
+  const here = await $.session.root()
+  return root === '' || root === here ? loadTeam($) : undefined
+}
+
+/** The team file read for this project last, without reading it again (the pane, the patterns `collect` leaves out). */
+async function teamHere($: EngineInterface): Promise<TeamFile | undefined> {
+  const root = await $.session.root()
+  return root && team?.path === teamPath(root) ? team.parsed : undefined
+}
+
 /**
  * Folds one tool's change into the running turn; a file that may hold secrets,
- * a lock or generated file, one excludePaths names or one the permission rules
- * forbid reading is only named, its content left out.
+ * a lock or generated file, one excludePaths or the team file's `## 빼기`
+ * names, or one the permission rules forbid reading is only named, its
+ * content left out.
  */
 async function collect($: EngineInterface, cfg: Config, change: LearnChange): Promise<void> {
+  const patterns = [...cfg.excludePaths, ...((await teamHere($))?.exclude ?? [])]
   const why: LearnWithheld['why'] | undefined =
-    withheldOf(change.file, change.path, cfg.excludePaths) ?? ((await isReadDenied($, change.path)) ? 'policy' : undefined)
+    withheldOf(change.file, change.path, patterns) ?? ((await isReadDenied($, change.path)) ? 'policy' : undefined)
   if (why !== undefined) {
     await update($, live, prior => {
       const base = prior ?? emptyLive('', '')
@@ -1634,6 +1769,7 @@ export const register: Register = (on, options) => {
     })
     isInteractive = e.isInteractive
     await loadHistory($)
+    await loadTeam($)
     await seedActivity($)
     await remind($, cfg)
     // A quiz request a reload cut off is not coming back; the last quiz is there for the pane to draw.
@@ -1673,6 +1809,8 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     const seen = { list: recentSubmits, lastRequest: lastRequestText }
     await followRoot($)
+    // The team file (TEAM_FILE) of the project the turn works in, so its `## 빼기` holds for every edit; read again only if it changed.
+    await loadTeam($)
     const kept = await read($, submitted)
     const list = [...kept.list, ...seen.list]
     const request = turnRequest(e.text, list, seen.lastRequest ?? kept.lastRequest ?? undefined)
@@ -1746,7 +1884,11 @@ export const register: Register = (on, options) => {
     // A turn that changed only files left out (a .env, a lock file) makes no note.
     if (turn && turn.changes.length > 0) {
       const at = await $.clock.now()
+      const day = stamp(at).day
       const withheld = turn.withheld ?? []
+      // No model call by itself for spaces and line breaks alone, nor past the day's limit: w writes the note all the same.
+      const skip = turn.changes.every(isFormatOnly) ? 'format' : cfg.isAutoNote && (await isOverLimit($, cfg, day)) ? 'limit' : undefined
+      const isAuto = cfg.isAutoNote && skip === undefined
       const note: LearnNote = {
         id: `${e.turnId}-${at}`,
         turnId: e.turnId,
@@ -1756,7 +1898,8 @@ export const register: Register = (on, options) => {
         changes: turn.changes,
         moreFiles: turn.dropped.length + turn.unlisted,
         ...(withheld.length > 0 ? { withheld } : {}),
-        status: cfg.isAutoNote ? 'writing' : 'off',
+        status: isAuto ? 'writing' : 'off',
+        ...(skip ? { skip } : {}),
         text: '',
         savedAs: null,
         isPast: false,
@@ -1765,14 +1908,20 @@ export const register: Register = (on, options) => {
         updatedAt: at,
       }
       await update($, notes, list => [...list, note].slice(-NOTES_KEPT))
-      if (cfg.isAutoNote && isInteractive) {
-        $.clock.after(1, () => void writeNote($, cfg, note.id, false))
-      } else if (cfg.isAutoNote) {
+      // Counted toward the day's limit from now, before its call is made.
+      if (isAuto) autoPending.add(note.id)
+      if (isAuto && isInteractive) {
+        $.clock.after(1, () => void writeNote($, cfg, note.id, { isAuto: true }))
+      } else if (isAuto) {
         // A -p run's process ends with its turn: the note is written before the turn is handed on,
         // or it never lands. The model call does not count against this hook's time.
-        await writeNote($, cfg, note.id, false)
+        await writeNote($, cfg, note.id, { isAuto: true })
       } else if (cfg.isAutoSave) {
         await save($, cfg, note, false)
+      }
+      if (skip === 'limit' && limitToastDay !== day) {
+        limitToastDay = day
+        $.ui.toast(`학습 노트: 오늘 자동 노트 한도(${cfg.dailyAutoNotes}개)에 닿았습니다 · 패널에서 w를 누르면 씁니다`, { timeoutMs: 8000 })
       }
       // Stored at once, so a session that ends mid-note still leaves it for the next one.
       if (isInteractive || note.status !== 'writing') await persist($)
@@ -1869,6 +2018,8 @@ export const register: Register = (on, options) => {
           '',
           '최근 7일',
           ...days,
+          '',
+          usageLine(cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)), now),
         ].join('\n'),
       }
     }
@@ -2037,7 +2188,9 @@ export const register: Register = (on, options) => {
     // Before the first note, a note's own view (전/후) shows the note view's welcome.
     const shown: LearnView = note || isWhole(mode) ? mode : 'note'
 
-    const liveBlock = running && running.changes.length > 0 ? liveView(running, isDock, cfg.isAutoNote, el) : null
+    // Past today's limit (dailyAutoNotes) the turn's end writes no note: the live line promises none.
+    const willWrite = cfg.isAutoNote && limitToastDay !== stamp(now).day
+    const liveBlock = running && running.changes.length > 0 ? liveView(running, isDock, willWrite, el) : null
     const root = await $.session.root()
     const systemHint = isSystemFolder(root) ? (
       <Text color="yellow" wrap="wrap">
@@ -2053,6 +2206,8 @@ export const register: Register = (on, options) => {
     const strip = viewStrip($, shown, note !== undefined, el)
 
     if (!note) {
+      // The team file read for this project, if any: its notes will follow its rules and terms.
+      const rules = await teamHere($)
       // No note in this project yet: concepts learned elsewhere, and a quiz on them, are still one key away.
       const welcome = (
         <Box flexDirection="column" marginTop={hasConcepts ? 1 : 0}>
@@ -2067,6 +2222,11 @@ export const register: Register = (on, options) => {
           {hasConcepts && (
             <Text dimColor wrap="wrap">
               지금까지 배운 개념 {Object.keys(index).length}개가 있습니다 · v로 보기 · q로 퀴즈
+            </Text>
+          )}
+          {rules && (
+            <Text dimColor wrap="wrap">
+              {teamText(rules)}
             </Text>
           )}
         </Box>
@@ -2105,7 +2265,7 @@ export const register: Register = (on, options) => {
         conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)
       ) : shown === 'note' ? (
         <Box flexDirection="column">
-          {noteBody(note, isBusy, el)}
+          {noteBody(note, isBusy, offText(note, cfg, now), el)}
           {note.status === 'ready' && note.concepts.length > 0 && conceptLine(note, index, map, el)}
           {note.status === 'ready' && noteTools($, cfg, note, isBusy, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el)}
         </Box>
@@ -2174,7 +2334,7 @@ export const register: Register = (on, options) => {
               plain
               dimColor={isBusy}
               label={writeLabel}
-              onPress={() => void writeNote($, cfg, note.id, note.savedAs !== null)}
+              onPress={() => void writeNote($, cfg, note.id, { isRewrite: note.savedAs !== null })}
             />
           </Box>
         )}
@@ -2258,7 +2418,7 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boo
             }}
           />
         )}
-        <Button key="easier" hotkey="e" plain dimColor={isBusy} label="더 쉽게" onPress={() => void writeNote($, cfg, note.id, note.savedAs !== null, true)} />
+        <Button key="easier" hotkey="e" plain dimColor={isBusy} label="더 쉽게" onPress={() => void writeNote($, cfg, note.id, { isRewrite: note.savedAs !== null, isEasier: true })} />
         <Button key="trace" hotkey="r" plain dimColor={ask.isAsking} label={TRACE_LABEL} onPress={() => void askInPane($, cfg, note.id, TRACE_QUESTION, TRACE_LABEL)} />
         {Input && (
           <Button key="ask-type" hotkey="i" plain label="질문하기" onPress={() => void $.ui.focus({ requestId: PANE, key: fieldKey }).catch(() => undefined)} />
@@ -2328,7 +2488,7 @@ function liveView(running: LearnLive, isDock: boolean, isAutoNote: boolean, el: 
  * A note as written, its "무엇이 바뀌었나" drawn as 전 / 후 / 예 lines in the
  * before/after view's colours when the note has them in that shape.
  */
-function noteBody(note: LearnNote, isBusy: boolean, el: ElementTable) {
+function noteBody(note: LearnNote, isBusy: boolean, off: string, el: ElementTable) {
   const { Box, Text, Markdown } = el
   if (note.status === 'ready') {
     const section = changeSection(note.text)
@@ -2351,7 +2511,26 @@ function noteBody(note: LearnNote, isBusy: boolean, el: ElementTable) {
   if (note.status === 'writing' && isBusy) return <Text color="cyan">노트를 쓰는 중입니다…</Text>
   if (note.status === 'writing') return <Text color="yellow">노트를 쓰다 멈췄습니다 · w로 다시 쓰기</Text>
   if (note.status === 'failed') return <Text color="red">노트를 쓰지 못했습니다: {note.text}</Text>
-  return <Text dimColor>자동 노트가 꺼져 있습니다. w로 노트를 쓰거나 v로 전후 코드를 보세요.</Text>
+  if (note.skip === 'limit') return <Text color="yellow" wrap="wrap">{off}</Text>
+  return (
+    <Text dimColor wrap="wrap">
+      {off}
+    </Text>
+  )
+}
+
+/**
+ * Why a note was not written by itself, as the pane says it: only spaces and
+ * line breaks changed, the day's limit was reached (today's limit named), or
+ * automatic notes are off.
+ */
+function offText(note: LearnNote, cfg: Config, now: number): string {
+  if (note.skip === 'format') return '띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다 · w로 쓰기'
+  if (note.skip === 'limit') {
+    if (stamp(note.at).day !== stamp(now).day) return '그날 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · w로 쓰면 씁니다'
+    return `오늘 자동 노트 한도${cfg.dailyAutoNotes > 0 ? `(${cfg.dailyAutoNotes}개)` : ''}에 닿았습니다 · w로 쓰면 씁니다`
+  }
+  return '자동 노트가 꺼져 있습니다. w로 노트를 쓰거나 v로 전후 코드를 보세요.'
 }
 
 const ITEM_MARK: Record<ChangeItem['kind'], { mark: string; color?: string }> = {
@@ -2856,7 +3035,11 @@ function noteAsText(note: LearnNote): string {
         ? '(노트를 쓰는 중입니다)'
         : note.status === 'failed'
           ? `(노트를 쓰지 못했습니다: ${note.text})`
-          : '(자동 노트가 꺼져 있습니다)'
+          : note.skip === 'format'
+            ? '(띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기)'
+            : note.skip === 'limit'
+              ? '(하루 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기)'
+              : '(자동 노트가 꺼져 있습니다)'
   const withheld = (note.withheld ?? []).length > 0 ? `\n\n노트에서 뺀 파일: ${withheldText(note.withheld ?? [])}` : ''
   return `**${stamp(note.at).time} · ${files}${more}**${withheld}\n\n${body}`
 }

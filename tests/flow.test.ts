@@ -46,6 +46,8 @@ type World = {
   models: string[]
   opened: string[]
   files: Map<string, string>
+  /** Each file's modified time as fs.stat gives it (0 when not set). */
+  mtimes: Map<string, number>
   release: () => void
   clock: ReturnType<typeof mock.clock>
 }
@@ -78,6 +80,7 @@ function world(
     models: [],
     opened: [],
     files: new Map(),
+    mtimes: new Map(),
     release: () => release(),
     clock: mock.clock(on, { now: Date.UTC(2026, 9, 3, 1) }),
   }
@@ -103,7 +106,7 @@ function world(
   on('ui.render', { component: 'Spinner' }, ($, e) => $.ui.resolve(e).Text({ children: e.props.word }))
   on('fs.exists', (_$, e) => ({ value: w.files.has(e.path) }))
   on('fs.stat', (_$, e) => ({
-    value: { kind: 'file' as const, size: (w.files.get(e.path) ?? '').length, mtimeMs: 0, isLink: false },
+    value: { kind: 'file' as const, size: (w.files.get(e.path) ?? '').length, mtimeMs: w.mtimes.get(e.path) ?? 0, isLink: false },
   }))
   on('fs.read', (_$, e) => ({ value: w.files.get(e.path) ?? '' }))
   on('fs.list', (_$, e) => ({
@@ -142,6 +145,20 @@ function world(
   })
   on('tool.call', { tool: 'Edit' }, (_$, e) => {
     if (e.file_path.endsWith('broken.ts')) return { isError: true, result: 'boom', text: 'boom' }
+    // An edit that only indents a line further.
+    if (e.file_path.endsWith('fmt.ts')) {
+      return {
+        result: {
+          filePath: e.file_path,
+          oldString: e.old_string,
+          newString: e.new_string,
+          originalFile: 'function f(a) {\n  return a\n}\n',
+          structuredPatch: [{ oldStart: 2, oldLines: 1, newStart: 2, newLines: 1, lines: ['-  return a', '+    return a'] }],
+          userModified: false,
+          replaceAll: false,
+        },
+      }
+    }
     // A file whose one new line is what the edit wrote: a line holding a secret, say.
     if (e.file_path.endsWith('db.ts')) {
       return {
@@ -2789,6 +2806,187 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
     const ui = await pane($)
     expect(await ui.find({ type: 'Text', text: /노트 1\/1/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /뺀 파일/ })).toBeUndefined()
+    await ui.unmount()
+  })
+})
+
+describe('1.6.0: cost guardrails', () => {
+  const FMT = { ...EDIT_A, tool_use_id: 'f1', file_path: '/proj/src/fmt.ts' } as const
+
+  test('a turn that only re-indents code calls no model and says why; w still writes the note', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(FMT))
+    await finish(w)
+    expect(w.models).toHaveLength(0)
+    expect(w.journal()[0]!.text).toContain('_띄어쓰기·줄바꿈만 바뀌어 노트 없이 전후 코드만 남겼다._')
+    expect((await learn($, 'last')).text).toContain('(띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기)')
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: /띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다 · w로 쓰기/ })).toBeDefined()
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(1)
+    expect(await ui.find({ type: 'Markdown', text: /let을 const로/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /띄어쓰기·줄바꿈만/ })).toBeUndefined()
+    await ui.unmount()
+    // The learner's own w is not an automatic note.
+    expect((await learn($, '기록')).text).toContain('학습 노트의 모델 호출: 오늘 1번 · 최근 7일 1번')
+    // Re-indenting beside a real change is a note as ever.
+    await turn($, async () => {
+      await $.tool.call(FMT)
+      await $.tool.call(EDIT_A)
+    }, 't2')
+    await finish(w)
+    expect(w.models).toHaveLength(2)
+  })
+
+  test('past dailyAutoNotes a turn\'s end writes no note and says so once a day; w still writes it', { options: { dailyAutoNotes: 1 } }, async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    for (const id of ['t1', 't2', 't3']) {
+      await turn($, () => $.tool.call(EDIT_A), id)
+      await finish(w)
+    }
+    expect(w.models).toHaveLength(1)
+    expect(w.toasts.filter(text => text.includes('한도'))).toEqual(['학습 노트: 오늘 자동 노트 한도(1개)에 닿았습니다 · 패널에서 w를 누르면 씁니다'])
+    const stored = (store.get('history') as Record<string, { notes: { status: string; skip?: string }[] }>)['/proj']!.notes
+    expect(stored.map(note => [note.status, note.skip])).toEqual([['ready', undefined], ['off', 'limit'], ['off', 'limit']])
+    expect(w.journal().at(-1)!.text).toContain('_하루 자동 노트 한도에 닿아 노트 없이 전후 코드만 남겼다._')
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: /오늘 자동 노트 한도\(1개\)에 닿았습니다 · w로 쓰면 씁니다/ })).toBeDefined()
+    await ui.press({ key: 'prev' })
+    expect(await ui.find({ type: 'Text', text: /한도/ })).toBeDefined()
+    // What the learner presses is never held back.
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(2)
+    expect(await ui.find({ type: 'Markdown', text: /let을 const로/ })).toBeDefined()
+    await ui.unmount()
+    expect((await learn($, '기록')).text).toContain('모델 호출: 오늘 2번 (자동 노트 1)')
+    // The next turn's live line promises no note.
+    await $.turn.start({ text: '또 고쳐줘', turnId: 't4' })
+    await $.tool.call(EDIT_A)
+    const live = await pane($)
+    expect(await live.find({ type: 'Text', text: /● 작업 중: 파일 1개/ })).toBeDefined()
+    expect(await live.find({ type: 'Text', text: /턴이 끝나면 노트를 씁니다/ })).toBeUndefined()
+    await live.unmount()
+  })
+
+  test('a note still being written counts toward the day\'s limit', { options: { dailyAutoNotes: 1 } }, async ($, on) => {
+    const w = world(on, 'hold')
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A), 't1')
+    await w.clock.advance(5)
+    expect(w.models).toHaveLength(1)
+    await turn($, () => $.tool.call(EDIT_A), 't2')
+    await w.clock.advance(5)
+    w.release()
+    await w.clock.settle()
+    expect(w.models).toHaveLength(1)
+    expect((await learn($, 'last')).text).toContain('(하루 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기)')
+    expect((await learn($, '기록')).text).toContain('모델 호출: 오늘 1번 (자동 노트 1)')
+  })
+
+  test('/learn 기록 counts every model call that reached the model, with its tokens', async ($, on) => {
+    const w = world(on)
+    await start($)
+    expect((await learn($, '기록')).text).toContain('학습 노트의 모델 호출: 최근 7일 동안 없습니다')
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect((await learn($, '기록')).text).toContain('학습 노트의 모델 호출: 오늘 1번 (자동 노트 1) · 최근 7일 1번 · 입력 1 · 출력 1 토큰')
+    await learn($, 'ask 왜 const예요?')
+    // Answered or not, a call that reached the model counts.
+    w.model = 'error'
+    await learn($, 'ask 그럼 let은요?')
+    expect((await learn($, '기록')).text).toContain('모델 호출: 오늘 3번 (자동 노트 1) · 최근 7일 3번 · 입력 3 · 출력 3 토큰')
+    // One the engine refused never reached it.
+    w.model = 'reject'
+    await learn($, 'ask 또요?')
+    expect((await learn($, '기록')).text).toContain('모델 호출: 오늘 3번 (자동 노트 1)')
+    expect(Object.values(w.store.get('usage') as object)).toEqual([{ calls: 3, auto: 1, input: 3, output: 3 }])
+  })
+
+  test('a stored note passed over keeps why; anything else there reads as none', async ($, on) => {
+    const stored = (id: string, at: number, skip: unknown) => ({
+      id, turnId: id, at, prompt: '요청', answer: '', changes: [], moreFiles: 0, status: 'off', text: '',
+      savedAs: 'off', isPast: false, root: '/proj', updatedAt: at, concepts: [], skip,
+    })
+    const history = { '/proj': { at: NOW, notes: [stored('n1', NOW - 2000, 'format'), stored('n2', NOW - 1000, 'nope')] } }
+    world(on, 'ok', null, true, new Map<string, unknown>([['history', history]]))
+    await start($)
+    expect((await learn($, 'last')).text).toContain('(자동 노트가 꺼져 있습니다)')
+    const ui = await pane($)
+    await ui.press({ key: 'prev' })
+    expect(await ui.find({ type: 'Text', text: /띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다/ })).toBeDefined()
+    await ui.unmount()
+  })
+})
+
+describe('1.6.0: the team file', () => {
+  const TEAM_PATH = '/proj/.claude/learn-notes.md'
+  const TEAM = '## 규칙\n- 바뀌지 않는 값은 const로 선언한다\n## 용어\n- **불변 바인딩**: const로 묶은 이름\n## 빼기\n- legacy/**\n'
+
+  test('its rules and terms go to the note and to a question about it; its patterns leave files out', async ($, on) => {
+    const w = world(on)
+    w.files.set(TEAM_PATH, TEAM)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.models).toHaveLength(1)
+    expect(w.models[0]).toContain('## 이 저장소의 팀 규칙과 용어')
+    expect(w.models[0]).toContain('- 바뀌지 않는 값은 const로 선언한다')
+    expect(w.models[0]).toContain('- **불변 바인딩**: const로 묶은 이름')
+    await turn($, () => $.tool.call({ ...EDIT_A, file_path: '/proj/legacy/x.ts' }), 't2')
+    await finish(w)
+    expect(w.models).toHaveLength(1)
+    await learn($, 'ask 왜 const예요?')
+    expect(w.models.at(-1)).toContain('질문이 이 규칙이나 용어와 닿으면 근거로 삼아 답한다')
+    expect(w.models.at(-1)).toContain('- 바뀌지 않는 값은 const로 선언한다')
+  })
+
+  test('without a team file nothing is said of team rules, and legacy/ is a folder like any other', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call({ ...EDIT_A, file_path: '/proj/legacy/x.ts' }))
+    await finish(w)
+    expect(w.models).toHaveLength(1)
+    expect(w.models[0]).not.toContain('팀 규칙')
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: /팀 규칙 파일/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('the file is read again only once its stamp moves', async ($, on) => {
+    const w = world(on)
+    w.files.set(TEAM_PATH, TEAM)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.models[0]).toContain('const로 선언한다')
+    // The same time and size: the copy read before stands.
+    w.files.set(TEAM_PATH, TEAM.replace('선언한다', '정의한다'))
+    await turn($, () => $.tool.call(EDIT_A), 't2')
+    await finish(w)
+    expect(w.models[1]).toContain('const로 선언한다')
+    w.mtimes.set(TEAM_PATH, 1000)
+    await turn($, () => $.tool.call(EDIT_A), 't3')
+    await finish(w)
+    expect(w.models[2]).toContain('const로 정의한다')
+    expect(w.models[2]).not.toContain('선언한다')
+    // Gone: no rules from then on.
+    w.files.delete(TEAM_PATH)
+    await turn($, () => $.tool.call(EDIT_A), 't4')
+    await finish(w)
+    expect(w.models[3]).not.toContain('팀 규칙')
+  })
+
+  test('the pane\'s first screen says the team file was read', async ($, on) => {
+    const w = world(on)
+    w.files.set(TEAM_PATH, TEAM)
+    await start($)
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: '이 저장소의 팀 규칙 파일을 읽었습니다 (규칙 1 · 용어 1 · 빼기 1)' })).toBeDefined()
     await ui.unmount()
   })
 })

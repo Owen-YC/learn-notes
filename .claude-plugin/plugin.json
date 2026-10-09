@@ -76,6 +76,12 @@
       "title": "노트에서 뺄 파일",
       "description": "쉼표로 구분한 경로 패턴입니다. 예: legacy/**, *.generated.ts",
       "default": ""
+    },
+    "dailyAutoNotes": {
+      "type": "number",
+      "title": "하루 자동 노트 최대 개수",
+      "description": "0이면 제한이 없습니다. 한도에 닿으면 그날은 턴이 끝나도 노트를 쓰지 않고, 패널에서 w를 누를 때만 씁니다",
+      "default": 0
     }
   }
 }

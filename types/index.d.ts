@@ -74,6 +74,11 @@ export type LearnNote = {
   asks?: LearnAsk[]
   /** Changed files whose content the note left out; absent when none (and on notes before 1.6.0). */
   withheld?: LearnWithheld[]
+  /**
+   * Why a turn's note was not written by itself (status `off`): `format` its files changed only in spaces and
+   * line breaks, `limit` the day's automatic notes (dailyAutoNotes) were used up. w writes it all the same.
+   */
+  skip?: 'format' | 'limit'
 }
 
 /** One question about a note and the model's answer. */
@@ -145,6 +150,12 @@ export type LearnQuizItem = {
 
 /** One day's learning: notes written, and quiz answers the learner graded right and wrong. */
 export type LearnDayActivity = { notes: number; right: number; wrong: number }
+
+/**
+ * One day's model calls this plugin made (notes, quizzes, grades, questions, recaps): how many, how many of
+ * them were notes written by themselves at a turn's end, and the tokens read (cached ones too) and written.
+ */
+export type LearnDayUsage = { calls: number; auto: number; input: number; output: number }
 
 /** A quiz the pane is asking the model for, and why the last try failed. */
 export type LearnQuizRun = {
