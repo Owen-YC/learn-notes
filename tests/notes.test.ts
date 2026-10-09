@@ -1481,6 +1481,37 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
   test('code that mentions a key header is not a key: the lines after it stay', () => {
     const lines = ["+if (pem.startsWith('-----BEGIN PRIVATE KEY-----')) {", '+  return parse(pem)', '+}']
     expect(redactLines(lines)).toEqual({ lines, hits: 0 })
+    const named = ["+const begin = '-----BEGIN PRIVATE KEY-----'; const n = begin.length", "+const end = pem.indexOf('-----END PRIVATE KEY-----')"]
+    expect(redactLines(named)).toEqual({ lines: named, hits: 0 })
+  })
+
+  test('key material on the BEGIN or END line itself is masked too, as one key', () => {
+    const body = 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7abcdefghijk'
+    // A dotenv-style value whose quote closes lines later: the key's first lines ride on the BEGIN line.
+    const env = redactLines([`+PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\\n${body}\\n${body}`, `+${body}\\nlastBit==\\n-----END RSA PRIVATE KEY-----"`])
+    expect(env).toEqual({
+      lines: [`+PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\\n${REDACTED}\\n${REDACTED}`, `+${REDACTED}\\n${REDACTED}\\n-----END RSA PRIVATE KEY-----"`],
+      hits: 1,
+    })
+    // Strings joined with +, the first piece beside BEGIN and the last beside END.
+    const joined = redactLines([`+k = "-----BEGIN PRIVATE KEY-----\\n${body}\\n" +`, `+  "${body}\\n" +`, '+  "tail==\\n-----END PRIVATE KEY-----\\n"'])
+    expect(joined).toEqual({
+      lines: [`+k = "-----BEGIN PRIVATE KEY-----\\n${REDACTED}\\n" +`, `+${REDACTED}`, `+  "${REDACTED}\\n-----END PRIVATE KEY-----\\n"`],
+      hits: 1,
+    })
+    // On one line with spaces for line breaks, as some hosts flatten it.
+    expect(redactLines([`+-----BEGIN PRIVATE KEY----- ${body} ${body}`])).toEqual({ lines: [`+-----BEGIN PRIVATE KEY----- ${REDACTED} ${REDACTED}`], hits: 1 })
+    for (const once of [env, joined]) expect(redactLines(once.lines)).toEqual({ lines: once.lines, hits: 0 })
+    for (const line of [...env.lines, ...joined.lines]) expect(line).not.toContain('MIIE')
+  })
+
+  test('a connection string with no user still has its password masked', () => {
+    expect(redactLines(['+REDIS_URL=redis://:p4ssw0rd@localhost:6379', '+const r = "rediss://:p4ssw0rd@cache:6380/0"'])).toEqual({
+      lines: [`+REDIS_URL=redis://:${REDACTED}@localhost:6379`, `+const r = "rediss://:${REDACTED}@cache:6380/0"`],
+      hits: 2,
+    })
+    const plain = ['+fetch("http://[::1]:8080/a")', '+const u = `redis://:${process.env.REDIS_PASSWORD}@h`']
+    expect(redactLines(plain)).toEqual({ lines: plain, hits: 0 })
   })
 
   test('a very long line (minified code) is looked over once, not word against word', () => {
@@ -1507,8 +1538,10 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
     const clean = changeOf({ path: '/proj/a.ts', root: '/proj', tool: 'Edit', kind: 'update', hunks: [HUNK] })
     expect('redacted' in clean).toBe(false)
     expect(merge([clean], clean).changes[0]!.redacted).toBeUndefined()
-    // A file made this turn and edited again keeps its count through the re-made creation hunk.
+    // A file made this turn and edited again counts what its re-made creation hunk holds:
+    // the key the edit's context line repeats is still one key.
     const made = changeOf({ path: '/proj/n.ts', root: '/proj', tool: 'Write', kind: 'create', hunks: [creationHunk('const t = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"\nlet n = 1\n')] })
+    expect(made.redacted).toBe(1)
     const edit = changeOf({
       path: '/proj/n.ts',
       root: '/proj',
@@ -1516,9 +1549,45 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
       kind: 'update',
       hunks: [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, lines: [' const t = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"', '-let n = 1', '+const n = 1'] }],
     })
+    expect(edit.redacted).toBe(1)
     const [joined] = merge([made], edit).changes
-    expect(joined).toMatchObject({ kind: 'create', added: 2, removed: 0, redacted: 2 })
+    expect(joined).toMatchObject({ kind: 'create', added: 2, removed: 0, redacted: 1 })
     expect(joined!.diff).not.toContain('sk-ant')
+    // The edit replaced the key line itself (− and + both masked): still one key in the file.
+    const swap = changeOf({
+      path: '/proj/n.ts',
+      root: '/proj',
+      tool: 'Edit',
+      kind: 'update',
+      hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-const t = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"', '+const t = "sk-ant-api03-BBBBBBBBBBBBBBBBBBB1"'] }],
+    })
+    expect(merge([made], swap).changes[0]).toMatchObject({ kind: 'create', redacted: 1 })
+    // An edit that took the key out leaves nothing counted.
+    const out = changeOf({
+      path: '/proj/n.ts',
+      root: '/proj',
+      tool: 'Edit',
+      kind: 'update',
+      hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-const t = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"', '+const t = process.env.T'] }],
+    })
+    expect('redacted' in merge([made], out).changes[0]!).toBe(false)
+    // A key block in a new file is one, its BEGIN and END lines and an encrypted key's blank line aside.
+    const pem = changeOf({
+      path: '/proj/k.ts',
+      root: '/proj',
+      tool: 'Write',
+      kind: 'create',
+      hunks: [creationHunk(`const k = \`-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n\n${'Q'.repeat(30)}1\nabc==\n-----END RSA PRIVATE KEY-----\`\nconst p = "postgres://u:pw1@h/db"\nlet n = 1\n`)],
+    })
+    expect(pem.redacted).toBe(2)
+    const tweak = changeOf({
+      path: '/proj/k.ts',
+      root: '/proj',
+      tool: 'Edit',
+      kind: 'update',
+      hunks: [{ oldStart: 7, oldLines: 2, newStart: 7, newLines: 2, lines: [' const p = "postgres://u:pw1@h/db"', '-let n = 1', '+let n = 2'] }],
+    })
+    expect(merge([pem], tweak).changes[0]).toMatchObject({ kind: 'create', redacted: 2 })
   })
 
   test('files that may hold secrets', () => {

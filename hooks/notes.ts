@@ -864,8 +864,8 @@ const SECRET_RULES: readonly { re: RegExp; keep?: (secret: string, before: strin
   { re: /()(\bglpat-[0-9A-Za-z_-]{20,})()/g },
   { re: /()(\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})()/g },
   { re: /(\bBearer\s+)([A-Za-z0-9._~+/-]{20,}=*)()/g },
-  // The password in a connection string: postgres://user:password@host.
-  { re: /(\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:/@'"`]+:)([^\s@/'"`]+)(@)/gi, keep: secret => PLACEHOLDER.test(secret) },
+  // The password in a connection string: postgres://user:password@host, or redis://:password@host with no user.
+  { re: /(\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:/@'"`]*:)([^\s@/'"`]+)(@)/gi, keep: secret => PLACEHOLDER.test(secret) },
   // A quoted literal given to a name that says password, secret, token or key: `password: "…"`, `api_key = '…'`.
   // The names are matched whole and judged after, so a long line costs no more than one look at each word.
   {
@@ -899,6 +899,20 @@ const KEY_END = /-----END [A-Z0-9 ]*PRIVATE KEY-----/
 const KEY_BODY = /^\s*["'`]?(?:[A-Za-z0-9+/=]+|(?:Proc-Type|DEK-Info|Comment): .*)(?:\\n)?["'`]?[\s,+;]*$/
 /** A line of base64 too long to be code: a key's body whose BEGIN line fell outside the hunk (letters and digits both, so a `=====` rule is none). */
 const LONG_BASE64 = /^\s*(?=[A-Za-z0-9+/=]*[A-Za-z])(?=[A-Za-z0-9+/=]*\d)[A-Za-z0-9+/=]{60,}\s*$/
+/** What stands before a key's END on its line when it is the key's last piece (`"abc==\n`), `\n` escapes taken out. */
+const KEY_HEAD = /^\s*["'`]?[A-Za-z0-9+/=]+$/
+
+/**
+ * Key material on the line of its BEGIN (after it) or END (before it), as a
+ * key written in one string has it (`"-----BEGIN PRIVATE KEY-----\nMIIE…\n" +`):
+ * each run of base64 at least `min` long masked, the `\n` escapes and quotes kept.
+ */
+function maskKeyPart(text: string, min: number): string {
+  return text
+    .split('\\n')
+    .map(part => part.replace(/[A-Za-z0-9+/=]+/g, run => (run.length >= min ? REDACTED : run)))
+    .join('\\n')
+}
 
 /**
  * Diff lines (or plain text lines) with common secret formats masked as
@@ -916,7 +930,7 @@ export function redactLines(lines: readonly string[]): { lines: string[]; hits: 
     const end = raw.endsWith('\r') ? '\r' : ''
     const line = end === '' ? raw : raw.slice(0, -1)
     const mark = /^[+\- ]/.test(line) ? line[0]! : ''
-    const body = line.slice(mark.length)
+    let body = line.slice(mark.length)
     if (isInKey) {
       // A blank line, or one masked already, stays as it is; END or a line of code ends the key.
       if (body.trim() === '' || body.trim() === REDACTED) return raw
@@ -926,6 +940,14 @@ export function redactLines(lines: readonly string[]): { lines: string[]; hits: 
         return `${mark}${REDACTED}${end}`
       }
       isInKey = false
+      // The key's last piece on its END line: `abc==\n-----END PRIVATE KEY-----"`.
+      const at = body.search(KEY_END)
+      const head = body.slice(0, Math.max(at, 0))
+      if (at > 0 && KEY_HEAD.test(head.split('\\n').join(''))) {
+        if (!isKeyCounted) hits += 1
+        isKeyCounted = true
+        body = `${maskKeyPart(head, 1)}${body.slice(at)}`
+      }
     }
     if (LONG_BASE64.test(body)) {
       if (!wasLong) hits += 1
@@ -933,17 +955,43 @@ export function redactLines(lines: readonly string[]): { lines: string[]; hits: 
       return `${mark}${REDACTED}${end}`
     }
     wasLong = false
-    const masked = redactLine(line)
+    const masked = redactLine(`${mark}${body}`)
     hits += masked.hits
-    // A key that begins here and ends on a later line: its body lines are masked as they come.
-    const begin = masked.line.search(KEY_BEGIN)
-    if (begin !== -1 && !KEY_END.test(masked.line.slice(begin))) {
+    let text = masked.line
+    // A key that begins here and ends on a later line: its body lines are masked as they come, and any of it on this line now.
+    const begin = KEY_BEGIN.exec(text)
+    if (begin && !KEY_END.test(text.slice(begin.index))) {
+      const from = begin.index + begin[0].length
+      const tail = maskKeyPart(text.slice(from), 16)
       isInKey = true
-      isKeyCounted = false
+      isKeyCounted = tail !== text.slice(from)
+      if (isKeyCounted) {
+        hits += 1
+        text = `${text.slice(0, from)}${tail}`
+      }
     }
-    return `${masked.line}${end}`
+    return `${text}${end}`
   })
   return { lines: out, hits }
+}
+
+/**
+ * How many secrets lines masked earlier hold, counted as redactLines counted
+ * them: each «가림» once, a run of lines masked whole (a key's body) once.
+ */
+function maskedSpots(lines: readonly string[]): number {
+  let spots = 0
+  let wasWhole = false
+  for (const line of lines) {
+    const body = line.replace(/^[+\- ]/, '').trim()
+    // A blank line inside a key's body (after an encrypted key's headers) does not split it.
+    if (body === '') continue
+    const isWhole = body === REDACTED
+    if (!isWhole) spots += line.split(REDACTED).length - 1
+    else if (!wasWhole) spots += 1
+    wasWhole = isWhole
+  }
+  return spots
 }
 
 /** `text` with the secrets redactLines masks masked, line by line; how many. */
@@ -996,19 +1044,22 @@ export function merge(
     return { changes: [...changes, next] }
   }
   const prior = changes[at]!
-  // Secrets masked in either edit stay counted.
-  const redacted = (prior.redacted ?? 0) + (next.redacted ?? 0)
-  const masked = redacted > 0 ? { redacted } : {}
   // A file made this turn and changed again is still a new file: one hunk of what it holds now.
   if (prior.kind === 'create' && next.kind !== 'delete' && !prior.isCut && !next.isCut) {
     const content = parseDiff(prior.diff).flatMap(h => h.lines.filter(line => line.startsWith('+')).map(line => line.slice(1)))
     const now = applyHunks(content, parseDiff(next.diff))
     if (now) {
       const { diff, isCut } = hunksToDiff([creationHunk(now.join('\n'))])
-      const made: LearnChange = { ...prior, tool: next.tool, kind: 'create', added: now.length, removed: 0, diff, isCut, ...masked }
+      // Counted again in what the file holds now: the edit's context and removed lines held the same secrets once more.
+      const spots = maskedSpots(now)
+      const { redacted: _, ...rest } = prior
+      const made: LearnChange = { ...rest, tool: next.tool, kind: 'create', added: now.length, removed: 0, diff, isCut, ...(spots > 0 ? { redacted: spots } : {}) }
       return { changes: changes.map((one, i) => (i === at ? made : one)) }
     }
   }
+  // Both edits' hunks are shown: the secrets masked in either stay counted.
+  const redacted = (prior.redacted ?? 0) + (next.redacted ?? 0)
+  const masked = redacted > 0 ? { redacted } : {}
   const hunks = [...parseDiff(prior.diff), ...parseDiff(next.diff)]
   const { diff, isCut } = hunksToDiff(hunks)
   const kind = prior.kind === 'create' && next.kind !== 'delete' ? 'create' : next.kind

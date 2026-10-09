@@ -900,7 +900,11 @@ function noModelText(cfg: Config): string {
   return `'${cfg.model}' 모델을 부를 수 없습니다 · /config에서 다른 모델을 골라 보세요`
 }
 
-/** One model call for the learner: its text, or why there is none in words they can act on. */
+/**
+ * One model call for the learner: its text, or why there is none in words they
+ * can act on. The prompt's secrets are masked once more on the way out: a note
+ * stored or a journal written before 1.6.0, or a typed quiz answer, was never masked.
+ */
 async function askModel(
   $: EngineInterface,
   cfg: Config,
@@ -908,7 +912,7 @@ async function askModel(
 ): Promise<{ text: string } | { error: string }> {
   let reply
   try {
-    reply = await $.model.complete({ model: cfg.model, effort: 'low', timeoutMs: 90_000, ...call })
+    reply = await $.model.complete({ model: cfg.model, effort: 'low', timeoutMs: 90_000, ...call, prompt: redactText(call.prompt).text })
   } catch {
     return { error: noModelText(cfg) }
   }

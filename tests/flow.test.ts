@@ -2744,6 +2744,25 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
     await ui.unmount()
   })
 
+  test('a note stored before 1.6.0 goes to the model with its secrets masked, though the store keeps it as it was', async ($, on) => {
+    const old = {
+      id: 'n1', turnId: 't', at: NOW - 1000, prompt: `이 키로 연결해 줘 ${KEY}`, answer: '연결했습니다', moreFiles: 0, status: 'ready', text: NOTE_TEXT,
+      savedAs: null, isPast: false, root: '/proj', updatedAt: NOW - 1000, concepts: [],
+      changes: [
+        { file: 'src/db.ts', path: '/proj/src/db.ts', tool: 'Edit', kind: 'update', added: 1, removed: 0, diff: `@@ -1,0 +1,1 @@\n+const key = "${KEY}"`, isCut: false },
+        { file: '.env', path: '/proj/.env', tool: 'Write', kind: 'create', added: 1, removed: 0, diff: '@@ -0,0 +1,1 @@\n+DB_PASSWORD=hunter2', isCut: false },
+      ],
+    }
+    const w = world(on, 'ok', null, true, new Map<string, unknown>([['history', { '/proj': { at: NOW, notes: [old] } }]]))
+    await start($)
+    await learn($, 'ask 이 코드는 무엇을 하나요?')
+    expect(w.models).toHaveLength(1)
+    expect(w.models[0]).toContain('이 키로 연결해 줘 «가림»')
+    expect(w.models[0]).toContain('+DB_PASSWORD=«가림»')
+    expect(w.models[0]).not.toContain(KEY)
+    expect(w.models[0]).not.toContain('hunter2')
+  })
+
   test('a stored note\'s withheld files load back; anything else there is dropped', async ($, on) => {
     const stored = (withheld: unknown) => ({
       id: 'n1', turnId: 't', at: NOW - 1000, prompt: '요청', answer: '', changes: [], moreFiles: 0, status: 'off', text: '',
