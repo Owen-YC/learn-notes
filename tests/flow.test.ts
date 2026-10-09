@@ -1,4 +1,4 @@
-import { expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
@@ -142,6 +142,20 @@ function world(
   })
   on('tool.call', { tool: 'Edit' }, (_$, e) => {
     if (e.file_path.endsWith('broken.ts')) return { isError: true, result: 'boom', text: 'boom' }
+    // A file whose one new line is what the edit wrote: a line holding a secret, say.
+    if (e.file_path.endsWith('db.ts')) {
+      return {
+        result: {
+          filePath: e.file_path,
+          oldString: e.old_string,
+          newString: e.new_string,
+          originalFile: 'export {}\n',
+          structuredPatch: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, lines: [' export {}', `+${e.new_string}`] }],
+          userModified: false,
+          replaceAll: false,
+        },
+      }
+    }
     return {
       result: {
         filePath: e.file_path,
@@ -188,6 +202,15 @@ function world(
             filePath: '/proj/src/style.css',
             hunks: [{ oldStart: 4, oldLines: 1, newStart: 4, newLines: 1, lines: ['-  color: red;', '+  color: blue;'] }],
           },
+          // An install rewrites the lock file too.
+          ...(e.command.includes('npm install')
+            ? [
+                {
+                  filePath: '/proj/package-lock.json',
+                  hunks: [{ oldStart: 9, oldLines: 1, newStart: 9, newLines: 1, lines: ['-      "version": "1.0.0",', '+      "version": "1.0.1",'] }],
+                },
+              ]
+            : []),
         ],
         moreFiles: e.command.includes('many') ? 3 : 0,
       },
@@ -2582,4 +2605,171 @@ test('r leaves the question field as it was, and does nothing while another answ
   w.release()
   await w.clock.settle()
   await ui.unmount()
+})
+
+describe('1.6.0: secrets masked, secret and generated files left out', () => {
+  const ENV = { tool: 'Write', tool_use_id: 'e1', file_path: '/proj/.env', content: 'API_KEY=abc123secret\n' } as const
+  const KEY = 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAA'
+
+  test('a turn that changed only a .env makes no note and calls no model', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(ENV))
+    await finish(w)
+    expect(w.models).toHaveLength(0)
+    expect(w.journal()).toEqual([])
+    expect((await learn($, 'last')).text).toContain('아직 학습 노트가 없습니다')
+  })
+
+  test('a .env changed beside code is named, its content kept out of the model, the journal and the pane', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, async () => {
+      await $.tool.call(EDIT_A)
+      await $.tool.call(ENV)
+    })
+    await finish(w)
+    expect(w.models).toHaveLength(1)
+    expect(w.models[0]).toContain('.env')
+    expect(w.models[0]).toContain('내용을 싣지 않음')
+    expect(w.models[0]).not.toContain('abc123secret')
+    expect(w.journal()[0]!.text).not.toContain('abc123secret')
+    expect(w.journal()[0]!.text).toContain('**뺀 파일**: .env (비밀값이 들 수 있는 파일)')
+    expect(JSON.stringify(w.store.get('history'))).not.toContain('abc123secret')
+    expect((await learn($, 'last')).text).toContain('노트에서 뺀 파일: .env (비밀값이 들 수 있는 파일)')
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: /파일 1개 · \+1 −1 · 노트에서 뺀 파일 1개/ })).toBeDefined()
+    await ui.press({ key: 'view' })
+    expect(await ui.find({ type: 'Text', text: /노트에서 뺀 파일: \.env \(비밀값이 들 수 있는 파일\)/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /abc123secret/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a password in a connection string is masked everywhere, and the pane says so', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () =>
+      $.tool.call({ tool: 'Edit', tool_use_id: 'd1', file_path: '/proj/src/db.ts', old_string: 'export {}', new_string: 'const url = "postgres://u:hunter2@h/db"' }),
+    )
+    await finish(w)
+    expect(w.models[0]).toContain('postgres://u:«가림»@h/db')
+    expect(w.models[0]).not.toContain('hunter2')
+    expect(JSON.stringify(w.store.get('history'))).not.toContain('hunter2')
+    for (const write of w.writes) expect(write.text).not.toContain('hunter2')
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: /비밀값 1곳 가림/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a key pasted into the request, Claude\'s answer or a question about the note is masked', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await $.turn.start({ text: `이 키로 연결해 줘 ${KEY}`, turnId: 't1' })
+    await $.tool.call(EDIT_A)
+    await $.turn.complete({ answer: `${KEY} 키로 연결했습니다`, durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
+    await finish(w)
+    expect(w.models[0]).toContain('이 키로 연결해 줘 «가림»')
+    expect(w.models[0]).toContain('«가림» 키로 연결했습니다')
+    expect(w.models[0]).not.toContain(KEY)
+    expect(w.journal()[0]!.text).toContain('**요청**: 이 키로 연결해 줘 «가림»')
+    expect(w.journal()[0]!.text).not.toContain(KEY)
+    await learn($, `ask 이 키 ${KEY}는 어디에 둬야 해?`)
+    expect(w.models.at(-1)).toContain('## 학습자의 질문\n이 키 «가림»는 어디에 둬야 해?')
+    expect(w.models.at(-1)).not.toContain(KEY)
+    expect(w.files.get(JOURNAL)).not.toContain(KEY)
+    expect(JSON.stringify(w.store.get('history'))).not.toContain(KEY)
+  })
+
+  test('a lock file a shell command rewrote is named, not kept', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call({ tool: 'Bash', tool_use_id: 'b1', command: 'npm install && sed -i s/red/blue/ src/style.css' }))
+    await finish(w)
+    const history = w.store.get('history') as Record<string, { notes: { changes: { file: string }[]; withheld?: unknown }[] }>
+    const [note] = history['/proj']!.notes
+    expect(note!.changes.map(change => change.file)).toEqual(['src/style.css'])
+    expect(note!.withheld).toEqual([{ file: 'package-lock.json', why: 'generated' }])
+    expect(w.models[0]).toContain('package-lock.json — 잠금·생성 파일')
+    expect(w.models[0]).not.toContain('"version"')
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: /노트에서 뺀 파일/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('excludePaths keeps the files it names out', { options: { excludePaths: 'legacy/**, *.generated.ts' } }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call({ ...EDIT_A, file_path: '/proj/legacy/x.ts' }))
+    await finish(w)
+    expect(w.models).toHaveLength(0)
+    await turn($, async () => {
+      await $.tool.call(EDIT_A)
+      await $.tool.call({ ...EDIT_A, tool_use_id: 'u2', file_path: '/proj/src/api.generated.ts' })
+    }, 't2')
+    await finish(w)
+    expect(w.models).toHaveLength(1)
+    expect(w.models[0]).toContain('src/api.generated.ts — 설정으로 빼서 내용을 싣지 않음')
+    const ui = await pane($)
+    await ui.press({ key: 'view' })
+    expect(await ui.find({ type: 'Text', text: /src\/api\.generated\.ts \(설정으로 뺀 파일\)/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a file the permission rules forbid reading stays out (permissions.deny Read)', async ($, on) => {
+    const w = world(on)
+    const asked: string[] = []
+    on('tool.check', { tool: 'Read' }, (_$, e) => {
+      const path = String((e.input as { file_path?: string }).file_path)
+      asked.push(path)
+      return { decision: path.endsWith('a.ts') ? 'deny' : 'allow' }
+    })
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.models).toHaveLength(0)
+    await turn($, async () => {
+      await $.tool.call(EDIT_A)
+      await $.tool.call({ ...EDIT_A, tool_use_id: 'u2' })
+      await $.tool.call({ tool: 'Write', tool_use_id: 'u3', file_path: '/proj/src/new.ts', content: 'export const n = 1\n' })
+    }, 't2')
+    await finish(w)
+    expect(w.models).toHaveLength(1)
+    expect(w.models[0]).not.toContain('+const b = 2')
+    expect(w.models[0]).toContain('src/a.ts — 조직 설정으로 읽기가 막혀 내용을 싣지 않음')
+    // Asked once a turn per file.
+    expect(asked).toEqual(['/proj/src/a.ts', '/proj/src/a.ts', '/proj/src/new.ts'])
+    const ui = await pane($)
+    await ui.press({ key: 'view' })
+    expect(await ui.find({ type: 'Text', text: /조직 설정으로/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a stored note\'s withheld files load back; anything else there is dropped', async ($, on) => {
+    const stored = (withheld: unknown) => ({
+      id: 'n1', turnId: 't', at: NOW - 1000, prompt: '요청', answer: '', changes: [], moreFiles: 0, status: 'off', text: '',
+      savedAs: 'off', isPast: false, root: '/proj', updatedAt: NOW - 1000, concepts: [], withheld,
+    })
+    const good = new Map<string, unknown>([['history', { '/proj': { at: NOW, notes: [stored([{ file: '.env', why: 'secret' }, { file: 'x', why: 'nope' }])] } }]])
+    const w = world(on, 'ok', null, true, good)
+    await start($)
+    expect((await learn($, 'last')).text).toContain('노트에서 뺀 파일: .env (비밀값이 들 수 있는 파일)')
+    expect((await learn($, 'last')).text).not.toContain('nope')
+    void w
+  })
+
+  test('a stored note whose withheld files are not a list reads as having none', async ($, on) => {
+    const bad = new Map<string, unknown>([['history', { '/proj': { at: NOW, notes: [{
+      id: 'n1', turnId: 't', at: NOW - 1000, prompt: '요청', answer: '', changes: [], moreFiles: 0, status: 'off', text: '',
+      savedAs: 'off', isPast: false, root: '/proj', updatedAt: NOW - 1000, concepts: [], withheld: '.env',
+    }] } }]])
+    world(on, 'ok', null, true, bad)
+    await start($)
+    const last = (await learn($, 'last')).text
+    expect(last).toContain('(자동 노트가 꺼져 있습니다)')
+    expect(last).not.toContain('뺀 파일')
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: /노트 1\/1/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /뺀 파일/ })).toBeUndefined()
+    await ui.unmount()
+  })
 })

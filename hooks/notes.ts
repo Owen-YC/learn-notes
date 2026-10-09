@@ -1,7 +1,7 @@
 // Pure helpers: hunks to diff text and back, the prompt for a note, the
 // journal's markdown. No `$` here, so tests reach every branch directly.
 
-import type { LearnAsk, LearnChange, LearnConcept, LearnDayActivity, LearnNote, LearnQuizItem, LearnQuizMarks, LearnSubmit } from '../types'
+import type { LearnAsk, LearnChange, LearnConcept, LearnDayActivity, LearnNote, LearnQuizItem, LearnQuizMarks, LearnSubmit, LearnWithheld } from '../types'
 
 export type Hunk = {
   oldStart: number
@@ -692,7 +692,267 @@ export function isUnder(path: string, dir: string): boolean {
   return d !== '' && slashed(path).startsWith(`${d}/`)
 }
 
-/** A change from one tool's hunks; no hunks means the tool could not diff it. */
+/** The last part of a path, either separator. */
+function baseName(path: string): string {
+  return path.split(/[\\/]/).at(-1) ?? path
+}
+
+/** Names of files that hold credentials whatever folder they are in. */
+const SECRET_NAMES = new Set(['.npmrc', '.pypirc', '.netrc', '.git-credentials'])
+
+/**
+ * True for a file that commonly holds secrets: `.env` and its variants (an
+ * example, sample, template or dist copy aside), keys and certificates, SSH
+ * keys, package-registry and git credentials, cloud credential files, `secrets.*`.
+ */
+export function isSecretFile(path: string): boolean {
+  const name = baseName(path)
+  if (/^\.env(?:\..+)?$/i.test(name)) return !/\.(?:example|sample|template|dist)$/i.test(name)
+  return (
+    SECRET_NAMES.has(name.toLowerCase()) ||
+    /\.(?:pem|key|p12|pfx|tfvars|tfstate)$/i.test(name) ||
+    /\.tfvars\.json$/i.test(name) ||
+    /^id_(?:rsa|ed25519|ecdsa|dsa)/i.test(name) ||
+    /credentials[^/\\]*\.json$/i.test(name) ||
+    /service[^/\\]*account[^/\\]*\.json$/i.test(name) ||
+    /^secrets\./i.test(name)
+  )
+}
+
+/** Lock files: written by a package manager, never by hand. */
+const LOCK_NAMES = new Set([
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'bun.lock',
+  'bun.lockb',
+  'cargo.lock',
+  'poetry.lock',
+  'pipfile.lock',
+  'composer.lock',
+  'gemfile.lock',
+  'go.sum',
+])
+/** Folders of installed or recorded output at any depth, and build output at the project's top. */
+const GENERATED_ANYWHERE = new Set(['node_modules', '__snapshots__'])
+const GENERATED_TOP = new Set(['dist', 'build', 'out', '.next', 'coverage', '.turbo', '.vercel'])
+
+/**
+ * True for a lock file or generated output: a lock file, minified code or a
+ * source map anywhere; a file under `node_modules/` or `__snapshots__/` at any
+ * depth or under a build folder at the project's top. `file` is relative to
+ * the project; one outside it (an absolute path) is judged by its name alone.
+ */
+export function isGeneratedFile(file: string): boolean {
+  const name = baseName(file)
+  if (LOCK_NAMES.has(name.toLowerCase()) || /\.(?:min\.js|min\.css|map)$/i.test(name)) return true
+  if (isAbsolutePath(file)) return false
+  const dirs = slashed(file)
+    .split('/')
+    .filter(part => part !== '' && part !== '.')
+    .slice(0, -1)
+  return dirs.some(part => GENERATED_ANYWHERE.has(part)) || (dirs[0] !== undefined && GENERATED_TOP.has(dirs[0]))
+}
+
+/** A glob as a whole-string pattern: `**` any folders, `*` within one name, `?` one character; either case. */
+function globPattern(glob: string): RegExp {
+  let source = ''
+  for (let i = 0; i < glob.length; i += 1) {
+    const char = glob[i]!
+    if (char === '*' && glob[i + 1] === '*') {
+      // `**/` stands for no folder too; a `**` elsewhere for anything.
+      if (glob[i + 2] === '/') {
+        source += '(?:.*/)?'
+        i += 2
+      } else {
+        source += '.*'
+        i += 1
+      }
+    } else if (char === '*') source += '[^/]*'
+    else if (char === '?') source += '[^/]'
+    else source += char.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+  }
+  return new RegExp(`^${source}$`, 'i')
+}
+
+/**
+ * True when `file` (relative to the project) matches one of `patterns`, as in
+ * .gitignore: a pattern with a `/` goes from the project's top (`legacy/**`,
+ * `src/gen` and all under it), one without matches a file or folder name at
+ * any depth (`*.generated.ts`, `fixtures`); a trailing `/` names a folder.
+ */
+export function matchesPattern(file: string, patterns: readonly string[]): boolean {
+  const path = slashed(file).replace(/^\.\//, '')
+  const names = path.split('/').filter(part => part !== '')
+  const isOutside = isAbsolutePath(path)
+  return patterns.some(raw => {
+    const written = slashed(raw.trim()).replace(/^\.\//, '')
+    const pattern = written.replace(/\/+$/, '')
+    if (pattern === '') return false
+    if (!pattern.includes('/')) {
+      const re = globPattern(pattern)
+      return (written.endsWith('/') ? names.slice(0, -1) : names).some(name => re.test(name))
+    }
+    // A leading `/` is the project's top, as in .gitignore; a file outside the project matches only a whole path.
+    const from = isOutside ? pattern : pattern.replace(/^\/+/, '')
+    return globPattern(from).test(path) || globPattern(`${from}/**`).test(path)
+  })
+}
+
+/** Why a changed file's content stays out of the note (see LearnWithheld), in that order; undefined when it goes in. */
+export function withheldOf(file: string, path: string, patterns: readonly string[]): 'excluded' | 'secret' | 'generated' | undefined {
+  if (patterns.length > 0 && matchesPattern(file, patterns)) return 'excluded'
+  if (isSecretFile(path)) return 'secret'
+  if (isGeneratedFile(file)) return 'generated'
+  return undefined
+}
+
+/** Why a file was left out, as the learner reads it. */
+const WITHHELD_LABEL: Record<LearnWithheld['why'], string> = {
+  secret: '비밀값이 들 수 있는 파일',
+  generated: '잠금·생성 파일',
+  excluded: '설정으로 뺀 파일',
+  policy: '조직 설정으로 읽기가 막힌 파일',
+}
+
+/** Why a file was left out, as the model reads it beside the diffs. */
+const WITHHELD_FOR_MODEL: Record<LearnWithheld['why'], string> = {
+  secret: '비밀값이 들 수 있어 내용을 싣지 않음',
+  generated: '잠금·생성 파일',
+  excluded: '설정으로 빼서 내용을 싣지 않음',
+  policy: '조직 설정으로 읽기가 막혀 내용을 싣지 않음',
+}
+
+/** The files a note left out, each with why: `.env (비밀값이 들 수 있는 파일) · package-lock.json (잠금·생성 파일)`. */
+export function withheldText(list: readonly LearnWithheld[]): string {
+  return list.map(one => `${one.file} (${WITHHELD_LABEL[one.why]})`).join(' · ')
+}
+
+/** What stands where a secret was. No rule below matches it again, so masking twice changes nothing. */
+export const REDACTED = '«가림»'
+
+/** A value that stands for one kept elsewhere: `${DB_PASS}`, `$TOKEN`, `<your-key>`, `%(password)s`. */
+const PLACEHOLDER = /^["']?[$<{%]/
+
+/** A name that says it holds a secret: `password`, `clientSecret`, `x-api-key`. */
+const SECRET_NAME = /password|passwd|secret|token(?!iz)|api[_-]?key|access[_-]?key|private[_-]?key/i
+/**
+ * An upper-case dotenv name with a part that says secret, token, password or key
+ * (`OPENAI_API_KEY=`, `DB_PASSWORD=`, `APIKEY=`), not `KEYBOARD_LAYOUT=` or `MONKEY=`.
+ */
+const ENV_SECRET_NAME = /(?:^|[\s_])(?:[A-Z0-9]*(?:SECRET|TOKEN|PASSWORD|PASSWD)|(?:API|ACCESS|PRIVATE|SECRET|AUTH|MASTER|SIGNING|ENCRYPTION)?KEY)(?:_[A-Z0-9_]*)?=$/
+/** A quoted value's name that says what it is about rather than holding it: `tokenUrl`, `passwordLabel`. */
+const ABOUT_A_SECRET = /(?:url|uri|endpoint|path|file|dir|name|type|label|field|header|length|len|count|min|max|placeholder|hint|message|msg|text|title|error|id)["']?\s*[:=]\s*["'`]$/i
+
+/**
+ * Masking rules for secrets inside a line, each a pattern of three groups:
+ * what stays before, the secret, what stays after; `keep` passes over a match
+ * that is no secret. The well-known key formats come first, so a key in
+ * `API_KEY=…` is masked once.
+ */
+const SECRET_RULES: readonly { re: RegExp; keep?: (secret: string, before: string) => boolean }[] = [
+  // A whole private key on one line (a JSON or escaped string).
+  { re: /(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)(.+?)(-----END [A-Z0-9 ]*PRIVATE KEY-----)/g },
+  // Anthropic and OpenAI keys; a digit in it tells one from a long kebab-case name.
+  { re: /()(\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,})()/g, keep: secret => !/\d/.test(secret) },
+  { re: /()(\b(?:AKIA|ASIA)[A-Z0-9]{16})()(?![A-Za-z0-9])/g },
+  { re: /()(\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}))()/g },
+  { re: /()(\bxox[abposr]-[A-Za-z0-9-]{10,})()/g },
+  { re: /()(\bAIza[0-9A-Za-z_-]{30,})()/g },
+  { re: /()(\b[sr]k_live_[0-9A-Za-z]{10,})()/g },
+  { re: /()(\bglpat-[0-9A-Za-z_-]{20,})()/g },
+  { re: /()(\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})()/g },
+  { re: /(\bBearer\s+)([A-Za-z0-9._~+/-]{20,}=*)()/g },
+  // The password in a connection string: postgres://user:password@host.
+  { re: /(\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:/@'"`]+:)([^\s@/'"`]+)(@)/gi, keep: secret => PLACEHOLDER.test(secret) },
+  // A quoted literal given to a name that says password, secret, token or key: `password: "…"`, `api_key = '…'`.
+  // The names are matched whole and judged after, so a long line costs no more than one look at each word.
+  {
+    re: /((?<![\w.$-])["']?[\w.-]+["']?\s*[:=]\s*["'`])([^"'`\s]{3,})(["'`])/g,
+    keep: (secret, before) => !SECRET_NAME.test(before) || ABOUT_A_SECRET.test(before) || PLACEHOLDER.test(secret),
+  },
+  // An upper-case dotenv line whose name says it holds a secret (`OPENAI_API_KEY=…`), not one naming another variable.
+  {
+    re: /((?<![\w$.])(?:export\s+)?[A-Z][A-Z0-9_]*=(?!=))("[^"\n]*"|'[^'\n]*'|[^\s'"]+)()/g,
+    keep: (secret, before) => !ENV_SECRET_NAME.test(before) || PLACEHOLDER.test(secret) || /^(["'])\1$/.test(secret),
+  },
+]
+
+/** A line's secrets masked by the rules above, and how many. */
+function redactLine(line: string): { line: string; hits: number } {
+  let hits = 0
+  let out = line
+  for (const rule of SECRET_RULES) {
+    out = out.replace(rule.re, (whole: string, before: string, secret: string, after: string) => {
+      if (secret.includes(REDACTED) || rule.keep?.(secret, before)) return whole
+      hits += 1
+      return `${before}${REDACTED}${after}`
+    })
+  }
+  return { line: out, hits }
+}
+
+const KEY_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/
+const KEY_END = /-----END [A-Z0-9 ]*PRIVATE KEY-----/
+/** A line of a private key's body: base64 (in quotes, or joined with `+`, too), or an encrypted key's `Proc-Type:` header. */
+const KEY_BODY = /^\s*["'`]?(?:[A-Za-z0-9+/=]+|(?:Proc-Type|DEK-Info|Comment): .*)(?:\\n)?["'`]?[\s,+;]*$/
+/** A line of base64 too long to be code: a key's body whose BEGIN line fell outside the hunk (letters and digits both, so a `=====` rule is none). */
+const LONG_BASE64 = /^\s*(?=[A-Za-z0-9+/=]*[A-Za-z])(?=[A-Za-z0-9+/=]*\d)[A-Za-z0-9+/=]{60,}\s*$/
+
+/**
+ * Diff lines (or plain text lines) with common secret formats masked as
+ * «가림», the line count and each line's +/−/space marker kept: key formats,
+ * a private key's lines between BEGIN and END, a connection string's
+ * password, quoted values of password-like names, upper-case dotenv values.
+ * The same lines given twice come back the same, with no hits the second time.
+ */
+export function redactLines(lines: readonly string[]): { lines: string[]; hits: number } {
+  let hits = 0
+  let isInKey = false
+  let isKeyCounted = false
+  let wasLong = false
+  const out = lines.map(raw => {
+    const end = raw.endsWith('\r') ? '\r' : ''
+    const line = end === '' ? raw : raw.slice(0, -1)
+    const mark = /^[+\- ]/.test(line) ? line[0]! : ''
+    const body = line.slice(mark.length)
+    if (isInKey) {
+      // A blank line, or one masked already, stays as it is; END or a line of code ends the key.
+      if (body.trim() === '' || body.trim() === REDACTED) return raw
+      if (!KEY_END.test(body) && KEY_BODY.test(body)) {
+        if (!isKeyCounted) hits += 1
+        isKeyCounted = true
+        return `${mark}${REDACTED}${end}`
+      }
+      isInKey = false
+    }
+    if (LONG_BASE64.test(body)) {
+      if (!wasLong) hits += 1
+      wasLong = true
+      return `${mark}${REDACTED}${end}`
+    }
+    wasLong = false
+    const masked = redactLine(line)
+    hits += masked.hits
+    // A key that begins here and ends on a later line: its body lines are masked as they come.
+    const begin = masked.line.search(KEY_BEGIN)
+    if (begin !== -1 && !KEY_END.test(masked.line.slice(begin))) {
+      isInKey = true
+      isKeyCounted = false
+    }
+    return `${masked.line}${end}`
+  })
+  return { lines: out, hits }
+}
+
+/** `text` with the secrets redactLines masks masked, line by line; how many. */
+export function redactText(text: string): { text: string; hits: number } {
+  const { lines, hits } = redactLines(text.split('\n'))
+  return { text: lines.join('\n'), hits }
+}
+
+/** A change from one tool's hunks, its secrets masked first; no hunks means the tool could not diff it. */
 export function changeOf(args: {
   path: string
   root: string | undefined
@@ -700,8 +960,14 @@ export function changeOf(args: {
   kind: LearnChange['kind']
   hunks: readonly Hunk[]
 }): LearnChange {
-  const { diff, isCut } = hunksToDiff(args.hunks)
-  const { added, removed } = tally(args.hunks)
+  let redacted = 0
+  const hunks = args.hunks.map(h => {
+    const masked = redactLines(h.lines)
+    redacted += masked.hits
+    return { ...h, lines: masked.lines }
+  })
+  const { diff, isCut } = hunksToDiff(hunks)
+  const { added, removed } = tally(hunks)
   return {
     file: relative(args.path, args.root),
     path: args.path,
@@ -710,7 +976,8 @@ export function changeOf(args: {
     added,
     removed,
     diff,
-    isCut: isCut || args.hunks.length === 0,
+    isCut: isCut || hunks.length === 0,
+    ...(redacted > 0 ? { redacted } : {}),
   }
 }
 
@@ -729,13 +996,16 @@ export function merge(
     return { changes: [...changes, next] }
   }
   const prior = changes[at]!
+  // Secrets masked in either edit stay counted.
+  const redacted = (prior.redacted ?? 0) + (next.redacted ?? 0)
+  const masked = redacted > 0 ? { redacted } : {}
   // A file made this turn and changed again is still a new file: one hunk of what it holds now.
   if (prior.kind === 'create' && next.kind !== 'delete' && !prior.isCut && !next.isCut) {
     const content = parseDiff(prior.diff).flatMap(h => h.lines.filter(line => line.startsWith('+')).map(line => line.slice(1)))
     const now = applyHunks(content, parseDiff(next.diff))
     if (now) {
       const { diff, isCut } = hunksToDiff([creationHunk(now.join('\n'))])
-      const made: LearnChange = { ...prior, tool: next.tool, kind: 'create', added: now.length, removed: 0, diff, isCut }
+      const made: LearnChange = { ...prior, tool: next.tool, kind: 'create', added: now.length, removed: 0, diff, isCut, ...masked }
       return { changes: changes.map((one, i) => (i === at ? made : one)) }
     }
   }
@@ -750,6 +1020,7 @@ export function merge(
     removed: prior.removed + next.removed,
     diff,
     isCut: prior.isCut || next.isCut || isCut,
+    ...masked,
   }
   return { changes: changes.map((one, i) => (i === at ? joined : one)) }
 }
@@ -808,11 +1079,15 @@ const TONE = '문장은 합니다체(~합니다, ~입니다)로 맞춰 쓴다.'
  */
 export const BOLD = '굵게(**…**)가 괄호·따옴표·백틱으로 끝나면 닫는 ** 바로 뒤에 조사 같은 글자를 붙이지 않는다(띄어쓰기나 쌍점·쉼표·마침표는 괜찮다). 붙이면 굵게가 풀려 별표가 그대로 보인다. 예: "**누적(쌓아올리기)**하는"이 아니라 "**누적**(쌓아올리기)하는", "**`const`**는"이 아니라 "`const`는".'
 
+/** For a prompt that carries diffs: files left out and masked secrets are not to be guessed at. */
+const WITHHELD_RULE = `내용을 싣지 않은 파일은 값을 짐작하지 말고 이름으로만 말한다. ${REDACTED}은 비밀값을 가린 자리다.`
+
 export const SYSTEM = [
   '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 코딩 튜터다.',
   '방금 AI 도우미가 한 턴 동안 바꾼 코드의 전후(unified diff)를 보고 학습 노트를 한국어 마크다운으로 쓴다.',
   '근거는 diff, 사용자의 요청, 도우미의 설명 셋뿐이다. 셋 어디에도 없는 의도만 "아마 ~일 것이다"처럼 추측임을 밝힌다.',
   '도우미의 설명이 diff와 맞지 않으면 diff를 믿는다. 일부만 실린 파일은 보이는 부분만 말한다.',
+  WITHHELD_RULE,
   '코드 줄을 인용할 때는 짧게, 백틱으로 감싼다. 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
   TONE,
   BOLD,
@@ -830,7 +1105,8 @@ function changeLabel(change: LearnChange): string {
 }
 
 /** Each changed file as a heading and its diff, as many as fit in `budget`, then what was left out. */
-function diffBlocks(note: Pick<LearnNote, 'changes' | 'moreFiles'>, budget: number): string[] {
+function diffBlocks(note: Pick<LearnNote, 'changes' | 'moreFiles' | 'withheld'>, budget: number): string[] {
+  const withheld = note.withheld ?? []
   const files: string[] = []
   const skipped: string[] = []
   let used = 0
@@ -849,6 +1125,7 @@ function diffBlocks(note: Pick<LearnNote, 'changes' | 'moreFiles'>, budget: numb
     ...files,
     ...(skipped.length > 0 ? [`(diff를 싣지 못한 파일: ${skipped.join(', ')})`] : []),
     ...(note.moreFiles > 0 ? [`(그 밖에 파일 ${note.moreFiles}개가 더 바뀌었지만 여기엔 싣지 않았다)`] : []),
+    ...(withheld.length > 0 ? [`(노트에서 뺀 파일: ${withheld.map(one => `${one.file} — ${WITHHELD_FOR_MODEL[one.why]}`).join(' · ')})`] : []),
   ]
 }
 
@@ -858,7 +1135,7 @@ const EASIER_TEXT =
 
 /** The one user message the model reads for a note; `isEasier` asks for the plainest words and an everyday comparison per concept. */
 export function notePrompt(
-  note: Pick<LearnNote, 'prompt' | 'answer' | 'changes' | 'moreFiles'>,
+  note: Pick<LearnNote, 'prompt' | 'answer' | 'changes' | 'moreFiles' | 'withheld'>,
   level: Level,
   known: readonly string[] = [],
   isEasier = false,
@@ -903,6 +1180,7 @@ export const ASK_SYSTEM = [
   '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 코딩 튜터다.',
   '학습자가 학습 노트를 읽다가 질문했다. 노트와 그 노트의 코드 전후(diff)를 근거로 한국어로 답한다.',
   '질문에 바로 답하고, 필요하면 짧은 예시 코드를 하나 보인다. 노트와 diff에 없는 것은 일반론이라고 밝힌다. 200단어를 넘기지 않는다.',
+  WITHHELD_RULE,
   '코드는 백틱으로 감싸고, 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
   TONE,
   BOLD,
@@ -926,7 +1204,7 @@ export const ASKS_KEPT = 3
  * context), then the note and its code.
  */
 export function askPrompt(
-  note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles' | 'asks'>,
+  note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles' | 'asks' | 'withheld'>,
   question: string,
   level: Level,
 ): string {
@@ -1073,6 +1351,7 @@ export function journalSection(note: LearnNote, isRewrite = false): string {
     '',
     `**바뀐 파일**: ${[...files, ...more].join(' · ')}`,
     '',
+    ...((note.withheld ?? []).length > 0 ? [`**뺀 파일**: ${withheldText(note.withheld ?? [])}`, ''] : []),
     body,
     '',
     ...diffs,

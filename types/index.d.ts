@@ -13,7 +13,16 @@ export type LearnChange = {
   diff: string
   /** True when hunks or lines were dropped to fit, or there was no diff to keep. */
   isCut: boolean
+  /** How many secrets (a key, a password) the diff had masked as «가림»; absent when none. */
+  redacted?: number
 }
+
+/**
+ * A changed file whose content stays out of the note, the journal and every model call:
+ * `secret` a file that may hold secrets (.env, a private key), `generated` a lock or build output,
+ * `excluded` one the excludePaths setting names, `policy` one the permission rules forbid reading.
+ */
+export type LearnWithheld = { file: string; why: 'secret' | 'generated' | 'excluded' | 'policy' }
 
 /** Changes collected while a turn runs, before its note exists. */
 export type LearnLive = {
@@ -24,6 +33,8 @@ export type LearnLive = {
   dropped: string[]
   /** Files a shell command changed beyond the ones it listed. */
   unlisted: number
+  /** Changed files left out of the note for what they may hold, each once (see LearnWithheld). */
+  withheld: LearnWithheld[]
 }
 
 export type LearnNoteStatus = 'writing' | 'ready' | 'failed' | 'off'
@@ -61,6 +72,8 @@ export type LearnNote = {
   isUnsaved?: boolean
   /** The latest questions asked about this note (the pane's question field, /learn ask) with their answers. */
   asks?: LearnAsk[]
+  /** Changed files whose content the note left out; absent when none (and on notes before 1.6.0). */
+  withheld?: LearnWithheld[]
 }
 
 /** One question about a note and the model's answer. */

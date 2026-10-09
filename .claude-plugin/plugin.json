@@ -70,6 +70,12 @@
       "title": "저장 폴더",
       "description": "비워 두면 ~/.claude/learning-notes (~로 시작하면 홈 폴더 기준)",
       "default": ""
+    },
+    "excludePaths": {
+      "type": "string",
+      "title": "노트에서 뺄 파일",
+      "description": "쉼표로 구분한 경로 패턴입니다. 예: legacy/**, *.generated.ts",
+      "default": ""
     }
   }
 }

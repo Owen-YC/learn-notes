@@ -93,6 +93,14 @@ import {
   RECAP_SYSTEM,
   QUIZ_SYSTEM,
   CHECK_SYSTEM,
+  REDACTED,
+  isGeneratedFile,
+  isSecretFile,
+  matchesPattern,
+  redactLines,
+  redactText,
+  withheldOf,
+  withheldText,
   type Hunk,
 } from '../hooks/notes'
 
@@ -1371,5 +1379,207 @@ describe('1.5.1: bold the pane can close', () => {
     // The case CommonMark cannot close, written out, and what still closes: a concept line's `- **이름 (X)**: 설명`.
     expect(BOLD).toContain('"**누적(쌓아올리기)**하는"이 아니라 "**누적**(쌓아올리기)하는"')
     expect(BOLD).toContain('쌍점')
+  })
+})
+
+describe('1.6.0: secrets masked, secret and generated files left out', () => {
+  const A = 'A'.repeat(36)
+  /** One line per key format, each in a diff line, and the part of it that must go. */
+  const CASES: [string, string][] = [
+    ['+const key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"', 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAA'],
+    ["+openai = 'sk-proj-abc123def456ghi789jkl0'", 'sk-proj-abc123def456ghi789jkl0'],
+    ['-aws_access_key_id = AKIAIOSFODNN7EXAMPLE', 'AKIAIOSFODNN7EXAMPLE'],
+    [`+  auth: ghp_${A}`, `ghp_${A}`],
+    [`+GH=github_pat_11${A}`, `github_pat_11${A}`],
+    ['+slack: xoxb-1234567890-abcdefghij', 'xoxb-1234567890-abcdefghij'],
+    [`+const maps = 'AIza${'B'.repeat(35)}'`, `AIza${'B'.repeat(35)}`],
+    ['+stripe(sk_live_51Habcdefghijklmn)', 'sk_live_51Habcdefghijklmn'],
+    ['+gitlab glpat-abcdefghij0123456789', 'glpat-abcdefghij0123456789'],
+    ['+headers.auth = eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U', 'eyJhbGciOiJIUzI1NiJ9'],
+    ['+const url = "postgres://u:hunter2@h/db"', 'hunter2'],
+    ['+  password: "correct-horse"', 'correct-horse'],
+    ["+db.secret = 's3cr3t-value'", 's3cr3t-value'],
+    ['+  "api_key": "abcd1234"', 'abcd1234'],
+    ['+OPENAI_API_KEY=plainvalue123', 'plainvalue123'],
+    ['+export STRIPE_SECRET="quoted value"', 'quoted value'],
+    ['+DB_PASSWORD=hunter3', 'hunter3'],
+  ]
+
+  test('each common key format is masked, the line and its +/− marker kept', () => {
+    for (const [line, secret] of CASES) {
+      const { lines, hits } = redactLines([line])
+      expect([line, lines[0]!.includes(secret)]).toEqual([line, false])
+      expect([line, lines[0]!.includes(REDACTED)]).toEqual([line, true])
+      expect([line, lines[0]![0]]).toEqual([line, line[0]])
+      expect([line, hits]).toEqual([line, 1])
+    }
+    const all = redactLines(CASES.map(([line]) => line))
+    expect(all.lines).toHaveLength(CASES.length)
+    expect(all.hits).toBe(CASES.length)
+  })
+
+  test('only the secret goes: the name, the user and the host stay', () => {
+    expect(redactLines(['+const url = "postgres://u:hunter2@h/db"']).lines).toEqual([`+const url = "postgres://u:${REDACTED}@h/db"`])
+    expect(redactLines(['+OPENAI_API_KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA']).lines).toEqual([`+OPENAI_API_KEY=${REDACTED}`])
+    expect(redactLines([' password: "x1y2z3"']).lines).toEqual([` password: "${REDACTED}"`])
+  })
+
+  test('masking twice changes nothing more', () => {
+    const lines = [...CASES.map(([line]) => line), '+-----BEGIN RSA PRIVATE KEY-----', `+${'M'.repeat(64)}`, '+abc==', '+-----END RSA PRIVATE KEY-----']
+    const once = redactLines(lines)
+    const twice = redactLines(once.lines)
+    expect(twice.lines).toEqual(once.lines)
+    expect(twice.hits).toBe(0)
+  })
+
+  test('code that only names a secret, and values that are no secret, stay as written', () => {
+    const plain = [
+      '+const apiKey = process.env.API_KEY',
+      '+SUPABASE_URL=https://x.supabase.co',
+      '+NODE_ENV=production',
+      '+KEYBOARD_LAYOUT=us',
+      '+MONKEY=banana',
+      '+  tokenizer: "cl100k"',
+      '+API_KEY=${API_KEY}',
+      '+  password: "Password must be 8 characters"',
+      '+  passwordLabel: "secret123"',
+      '+if (token === "abc") return',
+      '+const className = "sk-loading-spinner-container"',
+      '+fetch("https://example.com:8080/a@b")',
+      '+const url = `postgres://${user}:${password}@db/app`',
+      '+  password: "${DB_PASSWORD}"',
+      '+API_TOKEN=<your-token>',
+      `+${'='.repeat(72)}`,
+      `+${'/'.repeat(72)}`,
+      ' const a = 1',
+    ]
+    expect(redactLines(plain)).toEqual({ lines: plain, hits: 0 })
+  })
+
+  test('a private key is masked whole, its BEGIN and END lines kept', () => {
+    const lines = [
+      ' const pem = `',
+      '+-----BEGIN PRIVATE KEY-----',
+      '+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7',
+      '+abcDEF==',
+      '+-----END PRIVATE KEY-----',
+      ' `',
+    ]
+    const { lines: out, hits } = redactLines(lines)
+    expect(out).toEqual([' const pem = `', '+-----BEGIN PRIVATE KEY-----', `+${REDACTED}`, `+${REDACTED}`, '+-----END PRIVATE KEY-----', ' `'])
+    expect(hits).toBe(1)
+    // One on a single line (an escaped string), and a body whose BEGIN fell outside the hunk.
+    expect(redactLines(['+"key": "-----BEGIN PRIVATE KEY-----\\nMIIEvQ\\n-----END PRIVATE KEY-----\\n"']).lines[0]).toBe(
+      `+"key": "-----BEGIN PRIVATE KEY-----${REDACTED}-----END PRIVATE KEY-----\\n"`,
+    )
+    expect(redactLines([` ${'Qk9'.repeat(22)}`, `+${'R2x'.repeat(22)}`, ' -----END PRIVATE KEY-----'])).toEqual({
+      lines: [` ${REDACTED}`, `+${REDACTED}`, ' -----END PRIVATE KEY-----'],
+      hits: 1,
+    })
+  })
+
+  test('code that mentions a key header is not a key: the lines after it stay', () => {
+    const lines = ["+if (pem.startsWith('-----BEGIN PRIVATE KEY-----')) {", '+  return parse(pem)', '+}']
+    expect(redactLines(lines)).toEqual({ lines, hits: 0 })
+  })
+
+  test('a very long line (minified code) is looked over once, not word against word', () => {
+    const lines = ['a.'.repeat(150_000), '"a":"b",'.repeat(40_000), 'x://a:'.repeat(50_000), 'ABC_'.repeat(75_000)].map(line => `+${line}`)
+    const started = Date.now()
+    expect(redactLines(lines)).toEqual({ lines, hits: 0 })
+    expect(Date.now() - started).toBeLessThan(5000)
+  })
+
+  test('plain text is masked line by line', () => {
+    const { text, hits } = redactText('이 키로 해 줘\nsk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n고마워')
+    expect(text).toBe(`이 키로 해 줘\n${REDACTED}\n고마워`)
+    expect(hits).toBe(1)
+  })
+
+  test('a change counts what was masked, and merging two edits adds them up', () => {
+    const hunk = (line: string): Hunk => ({ oldStart: 1, oldLines: 0, newStart: 1, newLines: 1, lines: [line] })
+    const one = changeOf({ path: '/proj/db.ts', root: '/proj', tool: 'Edit', kind: 'update', hunks: [hunk('+const url = "postgres://u:hunter2@h/db"')] })
+    expect(one.redacted).toBe(1)
+    expect(one.diff).not.toContain('hunter2')
+    expect(one).toMatchObject({ added: 1, removed: 0 })
+    const two = changeOf({ path: '/proj/db.ts', root: '/proj', tool: 'Edit', kind: 'update', hunks: [hunk('+DB_PASSWORD=abc123'), hunk('+const n = 1')] })
+    expect(merge([one], two).changes[0]!.redacted).toBe(2)
+    const clean = changeOf({ path: '/proj/a.ts', root: '/proj', tool: 'Edit', kind: 'update', hunks: [HUNK] })
+    expect('redacted' in clean).toBe(false)
+    expect(merge([clean], clean).changes[0]!.redacted).toBeUndefined()
+    // A file made this turn and edited again keeps its count through the re-made creation hunk.
+    const made = changeOf({ path: '/proj/n.ts', root: '/proj', tool: 'Write', kind: 'create', hunks: [creationHunk('const t = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"\nlet n = 1\n')] })
+    const edit = changeOf({
+      path: '/proj/n.ts',
+      root: '/proj',
+      tool: 'Edit',
+      kind: 'update',
+      hunks: [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, lines: [' const t = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"', '-let n = 1', '+const n = 1'] }],
+    })
+    const [joined] = merge([made], edit).changes
+    expect(joined).toMatchObject({ kind: 'create', added: 2, removed: 0, redacted: 2 })
+    expect(joined!.diff).not.toContain('sk-ant')
+  })
+
+  test('files that may hold secrets', () => {
+    for (const path of ['C:\\proj\\.env', '/proj/.env.local', '/proj/.env.production', 'certs/server.pem', 'tls.key', 'a.p12', 'b.pfx', 'prod.tfvars', '/home/u/.ssh/id_rsa', 'id_ed25519.pub', '.npmrc', '.pypirc', '.netrc', '.git-credentials', 'gcp-credentials.json', 'my-service-account.json', 'config/secrets.yml']) {
+      expect([path, isSecretFile(path)]).toEqual([path, true])
+    }
+    for (const path of ['.env.example', '/proj/.env.sample', '.env.template', '.env.dist', 'src/key.ts', 'src/env.ts', 'keys.json', 'secret-santa.ts']) {
+      expect([path, isSecretFile(path)]).toEqual([path, false])
+    }
+  })
+
+  test('lock files and generated output', () => {
+    for (const file of ['frontend/package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'Cargo.lock', 'go.sum', 'dist/app.js', 'build/index.html', '.next/server/page.js', 'coverage/lcov.info', 'packages/a/node_modules/x/index.js', 'src/__snapshots__/a.test.ts.snap', 'public/app.min.js', 'app.css.map', '/elsewhere/yarn.lock']) {
+      expect([file, isGeneratedFile(file)]).toEqual([file, true])
+    }
+    // A build folder counts at the project's top only; a file outside the project by its name only.
+    for (const file of ['src/build/index.ts', 'src/out.ts', 'docs/dist.md', '/home/u/dist/app.js', 'src/app.js']) {
+      expect([file, isGeneratedFile(file)]).toEqual([file, false])
+    }
+  })
+
+  test('excludePaths patterns, as in .gitignore', () => {
+    expect(matchesPattern('legacy/a/b.ts', ['legacy/**'])).toBe(true)
+    expect(matchesPattern('src/x.generated.ts', ['*.generated.ts'])).toBe(true)
+    expect(matchesPattern('src/legacy/a.ts', ['legacy/**'])).toBe(false)
+    expect(matchesPattern('src/legacy/a.ts', ['legacy'])).toBe(true)
+    expect(matchesPattern('src/legacy/a.ts', ['legacy/'])).toBe(true)
+    expect(matchesPattern('src/legacy', ['legacy/'])).toBe(false)
+    expect(matchesPattern('src/gen/a.ts', ['/src/gen'])).toBe(true)
+    expect(matchesPattern('src/gen/a/b.ts', ['src/**/b.ts'])).toBe(true)
+    expect(matchesPattern('src/b.ts', ['src/**/b.ts'])).toBe(true)
+    expect(matchesPattern('src/a.ts', ['src/?.ts'])).toBe(true)
+    expect(matchesPattern('src\\Legacy\\a.ts', ['legacy/**', ' '])).toBe(false)
+    expect(matchesPattern('Legacy\\a.ts', ['legacy/**'])).toBe(true)
+    expect(matchesPattern('src/a.ts', [])).toBe(false)
+    expect(matchesPattern('src/a.ts', ['', '  '])).toBe(false)
+  })
+
+  test('why a file is left out: the setting first, then secrets, then generated files', () => {
+    expect(withheldOf('.env', '/proj/.env', ['.env'])).toBe('excluded')
+    expect(withheldOf('.env', '/proj/.env', [])).toBe('secret')
+    expect(withheldOf('dist/a.js', '/proj/dist/a.js', [])).toBe('generated')
+    expect(withheldOf('src/a.ts', '/proj/src/a.ts', ['legacy/**'])).toBeUndefined()
+    expect(withheldText([{ file: '.env', why: 'secret' }, { file: 'package-lock.json', why: 'generated' }])).toBe('.env (비밀값이 들 수 있는 파일) · package-lock.json (잠금·생성 파일)')
+  })
+
+  test('the note prompt names the files left out, the journal too, and the model is told not to guess', () => {
+    const change = changeOf({ path: '/proj/a.ts', root: '/proj', tool: 'Edit', kind: 'update', hunks: [HUNK] })
+    const withheld = [{ file: '.env', why: 'secret' as const }, { file: 'package-lock.json', why: 'generated' as const }]
+    const prompt = notePrompt({ prompt: '키 설정', answer: '', changes: [change], moreFiles: 0, withheld }, 'beginner')
+    expect(prompt).toContain('(노트에서 뺀 파일: .env — 비밀값이 들 수 있어 내용을 싣지 않음 · package-lock.json — 잠금·생성 파일)')
+    expect(notePrompt({ prompt: '', answer: '', changes: [change], moreFiles: 0 }, 'beginner')).not.toContain('노트에서 뺀 파일')
+    for (const system of [SYSTEM, ASK_SYSTEM]) {
+      expect(system).toContain('값을 짐작하지 말고 이름으로만 말한다')
+      expect(system).toContain(`${REDACTED}은 비밀값을 가린 자리다`)
+    }
+    const note = {
+      id: 'n', turnId: 't', at: Date.UTC(2026, 9, 3, 1), prompt: '키 설정', answer: '', changes: [change], moreFiles: 0,
+      status: 'off' as const, text: '', savedAs: null, isPast: false, root: '/proj', updatedAt: 0, concepts: [], withheld,
+    }
+    expect(journalSection(note)).toContain('**뺀 파일**: .env (비밀값이 들 수 있는 파일) · package-lock.json (잠금·생성 파일)')
+    expect(journalSection({ ...note, withheld: undefined })).not.toContain('뺀 파일')
   })
 })

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementTable, EngineInterface, Register } from 'claude-code'
 
-import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnLive, LearnNote, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSubmit, LearnView } from '../types'
+import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnLive, LearnNote, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSubmit, LearnView, LearnWithheld } from '../types'
 import {
   HISTORY_PER_PROJECT,
   HISTORY_PROJECTS,
@@ -39,7 +39,10 @@ import {
   conceptsMarkdown,
   closeConceptBold,
   conceptsOf,
+  redactText,
   revealNext,
+  withheldOf,
+  withheldText,
   countConcepts,
   creationHunk,
   deletionHunk,
@@ -205,6 +208,8 @@ type Config = {
   model: string
   level: Level
   saveDir: string
+  /** Path patterns (excludePaths) whose files stay out of every note. */
+  excludePaths: string[]
 }
 
 function configOf(options: Readonly<Record<string, unknown>>): Config {
@@ -216,12 +221,22 @@ function configOf(options: Readonly<Record<string, unknown>>): Config {
     model: typeof options.model === 'string' && options.model !== '' ? options.model : 'haiku',
     level: options.level === 'intermediate' || options.level === 'advanced' ? options.level : 'beginner',
     saveDir: typeof options.saveDir === 'string' ? options.saveDir.trim() : '',
+    excludePaths: patternsOf(options.excludePaths),
   }
 }
 
-function emptyLive(turnId: string, prompt: string): LearnLive {
-  return { turnId, prompt, changes: [], dropped: [], unlisted: 0 }
+/** The excludePaths setting as patterns: comma- or line-separated words (a list, as managed settings may give it). */
+function patternsOf(raw: unknown): string[] {
+  const all = typeof raw === 'string' ? raw.split(/[,\n]/) : Array.isArray(raw) ? raw.filter((one): one is string => typeof one === 'string') : []
+  return all.map(one => one.trim()).filter(one => one !== '')
 }
+
+function emptyLive(turnId: string, prompt: string): LearnLive {
+  return { turnId, prompt, changes: [], dropped: [], unlisted: 0, withheld: [] }
+}
+
+/** Files left out that a note lists by name; past it they go unnamed. */
+const WITHHELD_KEPT = 12
 
 // The module's own memory; a reload starts it over.
 /** Whether an unasked pane would sit beside the transcript, read off the spinner's surface. */
@@ -240,6 +255,8 @@ let personScrolls = 0
 let shownReminder: string | undefined | null = null
 /** Quiz questions being graded now (quiz time and number), so a second press while the first is written does nothing. */
 const grading = new Set<string>()
+/** Whether the permission rules forbid reading a path, asked once a turn (see isReadDenied); cleared when the turn ends. */
+const readDenied = new Map<string, boolean>()
 /**
  * Work that must not interleave runs one after another in its lane: journal
  * saves (each reads a journal and writes it whole) and store writes (each
@@ -290,7 +307,15 @@ function fromHistory(raw: unknown, root: string): LearnNote | undefined {
           (one): one is LearnAsk => isRecord(one) && typeof one.question === 'string' && typeof one.answer === 'string' && typeof one.at === 'number',
         )
       : [],
+    // Anything but a list of them is dropped, not kept from the spread above: such a note left nothing out.
+    withheld: Array.isArray(raw.withheld) ? raw.withheld.filter(isWithheld) : undefined,
   }
+}
+
+const WITHHELD_WHY: readonly string[] = ['secret', 'generated', 'excluded', 'policy']
+
+function isWithheld(one: unknown): one is LearnWithheld {
+  return isRecord(one) && typeof one.file === 'string' && typeof one.why === 'string' && WITHHELD_WHY.includes(one.why)
 }
 
 async function homeDir($: EngineInterface): Promise<string | undefined> {
@@ -1141,14 +1166,17 @@ async function askNote(
 ): Promise<{ answer: string; note: LearnNote; path: string | undefined; at: number } | { error: string }> {
   const note = (await read($, notes)).find(one => one.id === id)
   if (!note) return { error: '그 노트가 패널에 없습니다.' }
-  const asked = await askModel($, cfg, { system: ASK_SYSTEM, prompt: askPrompt(note, question, cfg.level), maxTokens: 900 })
+  // A key pasted into a question is masked before the model, the store or the journal sees it.
+  const masked = redactText(question).text
+  const kept = label === question ? masked : redactText(label).text
+  const asked = await askModel($, cfg, { system: ASK_SYSTEM, prompt: askPrompt(note, masked, cfg.level), maxTokens: 900 })
   if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
   const answer = cut(asked.text, 4000)
   const now = await $.clock.now()
   const latest = (await read($, notes)).find(one => one.id === id) ?? note
-  await setNote($, id, { asks: [...(latest.asks ?? []), { question: cut(label, 1000), answer, at: now }].slice(-ASKS_KEPT) })
+  await setNote($, id, { asks: [...(latest.asks ?? []), { question: cut(kept, 1000), answer, at: now }].slice(-ASKS_KEPT) })
   await persist($)
-  const path = cfg.isAutoSave ? await saveAsk($, cfg, note, label, answer, now) : undefined
+  const path = cfg.isAutoSave ? await saveAsk($, cfg, note, kept, answer, now) : undefined
   return { answer, note, path, at: now }
 }
 
@@ -1315,12 +1343,12 @@ function shellEdits(raw: unknown): ShellEdits | undefined {
 }
 
 /** Folds a shell command's engine-made diff into the running turn. */
-async function collectEdits($: EngineInterface, tool: 'Bash' | 'PowerShell', edits: ShellEdits): Promise<void> {
+async function collectEdits($: EngineInterface, cfg: Config, tool: 'Bash' | 'PowerShell', edits: ShellEdits): Promise<void> {
   const root = await $.session.root()
   for (const file of edits.files) {
     if (file.hunks.length === 0 || (await isBookkeeping($, file.filePath))) continue
     const kind = file.created ? 'create' : file.deleted ? 'delete' : 'update'
-    await collect($, changeOf({ path: file.filePath, root, tool, kind, hunks: file.hunks }))
+    await collect($, cfg, changeOf({ path: file.filePath, root, tool, kind, hunks: file.hunks }))
   }
   if (edits.moreFiles > 0) await countUnlisted($, edits.moreFiles)
 }
@@ -1355,7 +1383,7 @@ async function readTargets($: EngineInterface, command: string): Promise<Map<str
 }
 
 /** What a shell command changed among the files it named, read off the files themselves after it ran. */
-async function collectShellChanges($: EngineInterface, tool: 'Bash' | 'PowerShell', before: Map<string, string | null | undefined>): Promise<void> {
+async function collectShellChanges($: EngineInterface, cfg: Config, tool: 'Bash' | 'PowerShell', before: Map<string, string | null | undefined>): Promise<void> {
   const root = await $.session.root()
   for (const [path, old] of before) {
     if (old === undefined) continue
@@ -1365,7 +1393,7 @@ async function collectShellChanges($: EngineInterface, tool: 'Bash' | 'PowerShel
     const hunks = old === null ? [creationHunk(now ?? '')] : now === null ? [deletionHunk(old)] : diffHunks(old, now)
     // Only line ends changed (CRLF ↔ LF): nothing a learner would read as an edit.
     if (kind === 'update' && hunks.length === 0) continue
-    await collect($, changeOf({ path, root, tool, kind, hunks }))
+    await collect($, cfg, changeOf({ path, root, tool, kind, hunks }))
   }
 }
 
@@ -1376,6 +1404,7 @@ async function collectShellChanges($: EngineInterface, tool: 'Bash' | 'PowerShel
  */
 async function collectShell(
   $: EngineInterface,
+  cfg: Config,
   tool: 'Bash' | 'PowerShell',
   command: string,
   ran: { deny?: unknown; isError?: boolean; result?: unknown },
@@ -1387,17 +1416,51 @@ async function collectShell(
     const result = ran.result
     const edits = isRecord(result) ? shellEdits(result.bashEditDiff) : undefined
     if (edits) {
-      if (!ran.isError) await collectEdits($, tool, edits)
+      if (!ran.isError) await collectEdits($, cfg, tool, edits)
     } else if (before) {
-      await collectShellChanges($, tool, before)
+      await collectShellChanges($, cfg, tool, before)
     }
   } catch (error) {
     $.ui.log(`learn-notes: ${tool} 명령의 변경을 잡지 못했습니다 (${String(error)})`, { to: 'debug' })
   }
 }
 
-/** Folds one tool's change into the running turn. */
-async function collect($: EngineInterface, change: LearnChange): Promise<void> {
+/**
+ * True when the permission rules (permissions.deny's Read rules, the
+ * organization's managed ones too) forbid reading `path`: the engine's verdict
+ * for a Read of it, which runs nothing and opens no dialog. Asked once a turn
+ * per path; a failure to ask counts as allowed.
+ */
+async function isReadDenied($: EngineInterface, path: string): Promise<boolean> {
+  const known = readDenied.get(path)
+  if (known !== undefined) return known
+  let isDenied = false
+  try {
+    isDenied = (await $.tool.check({ tool: 'Read', input: { file_path: path } })).decision === 'deny'
+  } catch {
+    // A host that cannot answer has no rule to keep: the file goes in as before.
+  }
+  readDenied.set(path, isDenied)
+  return isDenied
+}
+
+/**
+ * Folds one tool's change into the running turn; a file that may hold secrets,
+ * a lock or generated file, one excludePaths names or one the permission rules
+ * forbid reading is only named, its content left out.
+ */
+async function collect($: EngineInterface, cfg: Config, change: LearnChange): Promise<void> {
+  const why: LearnWithheld['why'] | undefined =
+    withheldOf(change.file, change.path, cfg.excludePaths) ?? ((await isReadDenied($, change.path)) ? 'policy' : undefined)
+  if (why !== undefined) {
+    await update($, live, prior => {
+      const base = prior ?? emptyLive('', '')
+      const withheld = base.withheld ?? []
+      if (withheld.some(one => one.file === change.file) || withheld.length >= WITHHELD_KEPT) return { ...base, withheld }
+      return { ...base, withheld: [...withheld, { file: change.file, why }] }
+    })
+    return
+  }
   await update($, live, prior => {
     const base = prior ?? emptyLive('', '')
     const { changes, dropped } = merge(base.changes, change)
@@ -1610,10 +1673,11 @@ export const register: Register = (on, options) => {
     const list = [...kept.list, ...seen.list]
     const request = turnRequest(e.text, list, seen.lastRequest ?? kept.lastRequest ?? undefined)
     // Changes left by a turn whose end never arrived ride into this one rather than vanish.
+    // A key pasted into the request is masked before it reaches a note (the remembered prompts stay as they entered, to match turns by).
     await update($, live, prior => ({
       ...(prior ?? emptyLive('', '')),
       turnId: e.turnId,
-      prompt: e.text !== '' ? request : (prior?.prompt ?? ''),
+      prompt: e.text !== '' ? redactText(request).text : (prior?.prompt ?? ''),
     }))
     return next(e)
   })
@@ -1626,7 +1690,7 @@ export const register: Register = (on, options) => {
       if (e.tool === 'Edit' && 'oldString' in ran.result) {
         const r = ran.result
         if (r.staged || (await isBookkeeping($, r.filePath))) return ran
-        await collect($, changeOf({ path: r.filePath, root, tool: 'Edit', kind: 'update', hunks: r.structuredPatch }))
+        await collect($, cfg, changeOf({ path: r.filePath, root, tool: 'Edit', kind: 'update', hunks: r.structuredPatch }))
       } else if (e.tool === 'Write' && 'content' in ran.result) {
         const r = ran.result
         if (r.staged || (await isBookkeeping($, r.filePath))) return ran
@@ -1635,7 +1699,7 @@ export const register: Register = (on, options) => {
         // An update with no patch (too large, or the diff timed out) still shows, marked as having no diff.
         const hunks: Hunk[] =
           r.structuredPatch.length > 0 ? r.structuredPatch : kind === 'create' ? [creationHunk(r.content)] : []
-        await collect($, changeOf({ path: r.filePath, root, tool: 'Write', kind, hunks }))
+        await collect($, cfg, changeOf({ path: r.filePath, root, tool: 'Write', kind, hunks }))
       }
     } catch (error) {
       $.ui.log(`learn-notes: 바뀐 코드를 잡지 못했습니다 (${String(error)})`, { to: 'debug' })
@@ -1647,7 +1711,7 @@ export const register: Register = (on, options) => {
     // A command that may write gets the files it names read first, for when the engine gives no diff of its own.
     const before = WRITES.test(e.command) && !isGitMove(e.command) ? await readTargets($, e.command) : undefined
     const ran = await next(e)
-    await collectShell($, 'Bash', e.command, ran, before)
+    await collectShell($, cfg, 'Bash', e.command, ran, before)
     return ran
   })
 
@@ -1660,7 +1724,7 @@ export const register: Register = (on, options) => {
     const command = isRecord(input) && typeof input.command === 'string' ? input.command : ''
     const before = command !== '' && !isGitMove(command) ? await readTargets($, command) : undefined
     const ran = await next(e)
-    await collectShell($, 'PowerShell', command, ran, before)
+    await collectShell($, cfg, 'PowerShell', command, ran, before)
     return ran
   })
 
@@ -1673,16 +1737,21 @@ export const register: Register = (on, options) => {
       return null
     })
     const turn = box.turn
+    // A file's read permission is asked again next turn: the rules may change in between.
+    readDenied.clear()
+    // A turn that changed only files left out (a .env, a lock file) makes no note.
     if (turn && turn.changes.length > 0) {
       const at = await $.clock.now()
+      const withheld = turn.withheld ?? []
       const note: LearnNote = {
         id: `${e.turnId}-${at}`,
         turnId: e.turnId,
         at,
         prompt: turn.prompt,
-        answer: cut(e.answer, 2000),
+        answer: cut(redactText(e.answer).text, 2000),
         changes: turn.changes,
         moreFiles: turn.dropped.length + turn.unlisted,
+        ...(withheld.length > 0 ? { withheld } : {}),
         status: cfg.isAutoNote ? 'writing' : 'off',
         text: '',
         savedAs: null,
@@ -2019,6 +2088,8 @@ export const register: Register = (on, options) => {
     const totalAdded = note.changes.reduce((sum, c) => sum + c.added, 0)
     const totalRemoved = note.changes.reduce((sum, c) => sum + c.removed, 0)
     const fileCount = note.changes.length + note.moreFiles
+    const withheld = note.withheld ?? []
+    const redacted = note.changes.reduce((sum, c) => sum + (c.redacted ?? 0), 0)
     const writeLabel = isBusy ? '쓰는 중…' : note.status === 'off' ? '노트 쓰기' : '다시 쓰기'
     // Above the code, the note's own words on what the change does differently.
     const summary = note.status === 'ready' ? changeSection(note.text) : undefined
@@ -2061,6 +2132,13 @@ export const register: Register = (on, options) => {
               <Text dimColor>그 밖에 파일 {note.moreFiles}개 (너무 많아 생략)</Text>
             </Box>
           )}
+          {withheld.length > 0 && (
+            <Box marginTop={1}>
+              <Text dimColor wrap="wrap">
+                노트에서 뺀 파일: {withheldText(withheld)}
+              </Text>
+            </Box>
+          )}
         </Box>
       )
 
@@ -2077,6 +2155,8 @@ export const register: Register = (on, options) => {
               {' '}
               · {note.isPast ? '지난 세션 · ' : ''}
               {when(note.at, now)} · 파일 {fileCount}개 · +{totalAdded} −{totalRemoved}
+              {withheld.length > 0 ? ` · 노트에서 뺀 파일 ${withheld.length}개` : ''}
+              {redacted > 0 ? ` · 비밀값 ${redacted}곳 가림` : ''}
             </Text>
           </Text>
         )}
@@ -2773,5 +2853,6 @@ function noteAsText(note: LearnNote): string {
         : note.status === 'failed'
           ? `(노트를 쓰지 못했습니다: ${note.text})`
           : '(자동 노트가 꺼져 있습니다)'
-  return `**${stamp(note.at).time} · ${files}${more}**\n\n${body}`
+  const withheld = (note.withheld ?? []).length > 0 ? `\n\n노트에서 뺀 파일: ${withheldText(note.withheld ?? [])}` : ''
+  return `**${stamp(note.at).time} · ${files}${more}**${withheld}\n\n${body}`
 }
