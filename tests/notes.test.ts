@@ -1679,6 +1679,11 @@ describe('1.6.0: cost guardrails', () => {
     expect(isFormatOnly(edit('/proj/src/a.scss', ['-&:hover {}', '+& :hover {}']))).toBe(false)
     expect(isFormatOnly(edit('/proj/src/a.ts', ['-a .b', '+a.b']))).toBe(true)
     expect(isFormatOnly(edit('/proj/src/a.ts', ['-var x = 1', '+let x = 1']))).toBe(false)
+    // A line moved past an unchanged one changes what runs first, though its '-' and '+' lines read alike.
+    expect(isFormatOnly(edit('/proj/src/a.ts', ['-  init()', '   run()', '+  init()']))).toBe(false)
+    expect(isFormatOnly(edit('/proj/src/a.ts', [' function f() {', '-  cleanup()', '   return x', '+  cleanup()', ' }']))).toBe(false)
+    // Unchanged lines around a re-indented one change nothing.
+    expect(isFormatOnly(edit('/proj/src/a.ts', [' function f(a) {', '-  return a', '+    return a', ' }']))).toBe(true)
     expect(isFormatOnly(edit('/proj/src/a.ts', ['-foo(a,b)', '+foo(a,b,)']))).toBe(false)
     // A space taken out between two words (in a string, too) is a change.
     expect(isFormatOnly(edit('/proj/src/a.ts', ["-say('Hello world')", "+say('Helloworld')"]))).toBe(false)

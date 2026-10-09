@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { journalPath } from '../hooks/notes'
+import { journalPath, stamp } from '../hooks/notes'
 
 const NOW = Date.UTC(2026, 9, 3, 1)
 const NOTES_DIR = '/home/u/.claude/learning-notes'
@@ -48,6 +48,8 @@ type World = {
   files: Map<string, string>
   /** Each file's modified time as fs.stat gives it (0 when not set). */
   mtimes: Map<string, number>
+  /** Paths that are links, with where each leads (fs.stat's isLink and realPath). */
+  links: Map<string, string>
   release: () => void
   clock: ReturnType<typeof mock.clock>
 }
@@ -81,6 +83,7 @@ function world(
     opened: [],
     files: new Map(),
     mtimes: new Map(),
+    links: new Map(),
     release: () => release(),
     clock: mock.clock(on, { now: Date.UTC(2026, 9, 3, 1) }),
   }
@@ -106,7 +109,13 @@ function world(
   on('ui.render', { component: 'Spinner' }, ($, e) => $.ui.resolve(e).Text({ children: e.props.word }))
   on('fs.exists', (_$, e) => ({ value: w.files.has(e.path) }))
   on('fs.stat', (_$, e) => ({
-    value: { kind: 'file' as const, size: (w.files.get(e.path) ?? '').length, mtimeMs: w.mtimes.get(e.path) ?? 0, isLink: false },
+    value: {
+      kind: 'file' as const,
+      size: (w.files.get(e.path) ?? '').length,
+      mtimeMs: w.mtimes.get(e.path) ?? 0,
+      isLink: w.links.has(e.path),
+      ...(e.resolve ? { realPath: w.links.get(e.path) ?? e.path } : {}),
+    },
   }))
   on('fs.read', (_$, e) => ({ value: w.files.get(e.path) ?? '' }))
   on('fs.list', (_$, e) => ({
@@ -154,6 +163,20 @@ function world(
           newString: e.new_string,
           originalFile: 'function f(a) {\n  return a\n}\n',
           structuredPatch: [{ oldStart: 2, oldLines: 1, newStart: 2, newLines: 1, lines: ['-  return a', '+    return a'] }],
+          userModified: false,
+          replaceAll: false,
+        },
+      }
+    }
+    // An edit that moves a call after the next one, each line as it was.
+    if (e.file_path.endsWith('moved.ts')) {
+      return {
+        result: {
+          filePath: e.file_path,
+          oldString: e.old_string,
+          newString: e.new_string,
+          originalFile: 'init()\nrun()\n',
+          structuredPatch: [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, lines: ['-init()', ' run()', '+init()'] }],
           userModified: false,
           replaceAll: false,
         },
@@ -2850,6 +2873,8 @@ describe('1.6.0: cost guardrails', () => {
     }
     expect(w.models).toHaveLength(1)
     expect(w.toasts.filter(text => text.includes('한도'))).toEqual(['학습 노트: 오늘 자동 노트 한도(1개)에 닿았습니다 · 패널에서 w를 누르면 씁니다'])
+    // Kept for the day's other sessions.
+    expect(store.get('limitToast')).toBe(stamp(NOW).day)
     const stored = (store.get('history') as Record<string, { notes: { status: string; skip?: string }[] }>)['/proj']!.notes
     expect(stored.map(note => [note.status, note.skip])).toEqual([['ready', undefined], ['off', 'limit'], ['off', 'limit']])
     expect(w.journal().at(-1)!.text).toContain('_하루 자동 노트 한도에 닿아 노트 없이 전후 코드만 남겼다._')
@@ -2871,6 +2896,46 @@ describe('1.6.0: cost guardrails', () => {
     expect(await live.find({ type: 'Text', text: /● 작업 중: 파일 1개/ })).toBeDefined()
     expect(await live.find({ type: 'Text', text: /턴이 끝나면 노트를 씁니다/ })).toBeUndefined()
     await live.unmount()
+  })
+
+  test('a session started past the day\'s limit promises no note and shows no second toast', { options: { dailyAutoNotes: 1 } }, async ($, on) => {
+    const today = stamp(NOW).day
+    const usage = { [today]: { calls: 1, auto: 1, input: 1, output: 1 } }
+    const w = world(on, 'ok', null, true, new Map<string, unknown>([['usage', usage], ['limitToast', today]]))
+    await start($)
+    await $.turn.start({ text: '고쳐줘', turnId: 't1' })
+    await $.tool.call(EDIT_A)
+    const live = await pane($)
+    expect(await live.find({ type: 'Text', text: /● 작업 중: 파일 1개/ })).toBeDefined()
+    expect(await live.find({ type: 'Text', text: /턴이 끝나면 노트를 씁니다/ })).toBeUndefined()
+    await live.unmount()
+    await $.turn.complete({ answer: '바꿨습니다', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
+    await finish(w)
+    expect(w.models).toHaveLength(0)
+    // An earlier session showed it today.
+    expect(w.toasts.filter(text => text.includes('한도'))).toEqual([])
+    expect((await learn($, 'last')).text).toContain('(하루 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기)')
+  })
+
+  test('a session whose day has room promises the note', { options: { dailyAutoNotes: 2 } }, async ($, on) => {
+    const yesterday = stamp(NOW - 86_400_000).day
+    const usage = { [yesterday]: { calls: 5, auto: 5, input: 1, output: 1 }, [stamp(NOW).day]: { calls: 3, auto: 1, input: 1, output: 1 } }
+    world(on, 'ok', null, true, new Map<string, unknown>([['usage', usage]]))
+    await start($)
+    await $.turn.start({ text: '고쳐줘', turnId: 't1' })
+    await $.tool.call(EDIT_A)
+    const live = await pane($)
+    expect(await live.find({ type: 'Text', text: /● 작업 중: 파일 1개 · 턴이 끝나면 노트를 씁니다/ })).toBeDefined()
+    await live.unmount()
+  })
+
+  test('a turn that moves a line past another is no spacing change: its note is written', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'm1', file_path: '/proj/src/moved.ts' }))
+    await finish(w)
+    expect(w.models).toHaveLength(1)
+    expect(w.models[0]).toContain('src/moved.ts')
   })
 
   test('a note still being written counts toward the day\'s limit', { options: { dailyAutoNotes: 1 } }, async ($, on) => {
@@ -2979,6 +3044,34 @@ describe('1.6.0: the team file', () => {
     await turn($, () => $.tool.call(EDIT_A), 't4')
     await finish(w)
     expect(w.models[3]).not.toContain('팀 규칙')
+  })
+
+  test('a team file committed as a link is read only where what it leads to may be read', async ($, on) => {
+    const w = world(on)
+    w.files.set(TEAM_PATH, TEAM)
+    w.links.set(TEAM_PATH, '/home/u/private/rules.md')
+    on('tool.check', { tool: 'Read' }, (_$, e) => {
+      const path = String((e.input as { file_path?: string }).file_path)
+      return { decision: path.startsWith('/home/u/private/') ? 'deny' : 'allow' }
+    })
+    await start($)
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: '아직 학습 노트가 없습니다' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /팀 규칙 파일/ })).toBeUndefined()
+    await ui.unmount()
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.models).toHaveLength(1)
+    expect(w.models[0]).not.toContain('팀 규칙')
+    // Its patterns are not kept either: legacy/ is a folder like any other.
+    await turn($, () => $.tool.call({ ...EDIT_A, file_path: '/proj/legacy/x.ts' }), 't2')
+    await finish(w)
+    expect(w.models).toHaveLength(2)
+    // A link to a file that may be read is read as the file itself.
+    w.links.set(TEAM_PATH, '/proj/docs/team-rules.md')
+    await turn($, () => $.tool.call(EDIT_A), 't3')
+    await finish(w)
+    expect(w.models[2]).toContain('- 바뀌지 않는 값은 const로 선언한다')
   })
 
   test('the pane\'s first screen says the team file was read', async ($, on) => {

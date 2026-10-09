@@ -1170,6 +1170,8 @@ function codeOnly(lines: readonly string[], isStyle: boolean): string {
  * True when a change only moved spaces and line breaks in a file where that
  * changes nothing the code does (FORMAT_FREE): an update whose every hunk
  * reads the same before and after, spaces and line breaks aside (codeOnly).
+ * Each side is read with the hunk's unchanged lines in place, so a line moved
+ * past another (`init()` now after `run()`) is a change, not a line break.
  * A diff cut short, missing or with a secret masked in it is never taken for one.
  */
 export function isFormatOnly(change: Pick<LearnChange, 'kind' | 'path' | 'diff' | 'isCut' | 'redacted'>): boolean {
@@ -1180,7 +1182,8 @@ export function isFormatOnly(change: Pick<LearnChange, 'kind' | 'path' | 'diff' 
   return (
     hunks.length > 0 &&
     hunks.every(h => {
-      const side = (mark: string) => h.lines.filter(line => line.startsWith(mark)).map(line => line.slice(1))
+      // A side is its own lines and the unchanged ones between them, in order.
+      const side = (mark: string) => h.lines.filter(line => line.startsWith(mark) || line.startsWith(' ')).map(line => line.slice(1))
       return codeOnly(side('-'), isStyle) === codeOnly(side('+'), isStyle)
     })
   )

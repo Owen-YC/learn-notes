@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementTable, EngineInterface, ModelUsage, Register } from 'claude-code'
 
-import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnLive, LearnNote, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSubmit, LearnView, LearnWithheld } from '../types'
+import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnDayUsage, LearnLive, LearnNote, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSubmit, LearnView, LearnWithheld } from '../types'
 import {
   HISTORY_PER_PROJECT,
   HISTORY_PROJECTS,
@@ -154,6 +154,8 @@ const BANK_KEY = 'quizBank'
 const ANKI_FILE = 'learn-notes-anki.txt'
 /** Each day's model calls and tokens (see LearnDayUsage), for the daily limit and /learn stats. */
 const USAGE_KEY = 'usage'
+/** The last day the daily limit's toast showed, in any session: it shows once a day. */
+const LIMIT_TOAST_KEY = 'limitToast'
 
 type MergeRecord = { concept: LearnConcept; into: string; both: number }
 
@@ -278,7 +280,13 @@ const grading = new Set<string>()
 const readDenied = new Map<string, boolean>()
 /** Notes a turn's end set to write by themselves whose model call is not in the usage record yet: they count toward the day's limit meanwhile. */
 const autoPending = new Set<string>()
-/** The day the daily limit's toast last showed, so it shows once a day. */
+/**
+ * A day's notes written by themselves, as the usage record last read or
+ * written here (session start, a turn's end, each model call): what the live
+ * line goes by to say whether the turn's end will write one.
+ */
+let autoDone: { day: string; auto: number } | undefined
+/** The day the daily limit's toast last showed here (the store keeps it for every session, LIMIT_TOAST_KEY). */
 let limitToastDay: string | undefined
 /** The project's team file as last read (TEAM_FILE), with its stamp: read again only once that changes. */
 let team: { path: string; mtimeMs: number; size: number; parsed: TeamFile } | null = null
@@ -777,28 +785,75 @@ function recordUsage($: EngineInterface, usage: ModelUsage | undefined, kind: 'a
       const tokens = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? n : 0)
       const input = tokens(usage?.input_tokens) + tokens(usage?.cache_read_input_tokens) + tokens(usage?.cache_creation_input_tokens)
       const delta = { calls: 1, auto: kind === 'auto' ? 1 : 0, input, output: tokens(usage?.output_tokens) }
-      await $.store.set(USAGE_KEY, addUsage(cleanUsage(await $.store.get(USAGE_KEY)), stamp(await $.clock.now()).day, delta))
+      const day = stamp(await $.clock.now()).day
+      const next = addUsage(cleanUsage(await $.store.get(USAGE_KEY)), day, delta)
+      await $.store.set(USAGE_KEY, next)
+      autoDone = { day, auto: autoOn(next, day) }
     } catch (error) {
       $.ui.log(`learn-notes: 모델 호출 수를 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
     }
   })
 }
 
+/** `day`'s notes written by themselves in a usage record. */
+function autoOn(record: Readonly<Record<string, LearnDayUsage>>, day: string): number {
+  return Object.prototype.hasOwnProperty.call(record, day) ? record[day]!.auto : 0
+}
+
 /**
- * True once `day`'s notes written by themselves reach dailyAutoNotes: the ones
- * the usage record counts and the ones still being written. Read after any
- * store write still running; one that cannot be read limits nothing.
+ * True once `day`'s notes written by themselves reach dailyAutoNotes, as last
+ * read (autoDone) with the ones still being written (autoPending).
+ */
+function isLimitReached(cfg: Config, day: string): boolean {
+  if (cfg.dailyAutoNotes <= 0) return false
+  const done = autoDone?.day === day ? autoDone.auto : 0
+  return done + autoPending.size >= cfg.dailyAutoNotes
+}
+
+/**
+ * isLimitReached on the usage record as it stands, read after any store
+ * write still running; one that cannot be read limits nothing.
  */
 function isOverLimit($: EngineInterface, cfg: Config, day: string): Promise<boolean> {
   if (cfg.dailyAutoNotes <= 0) return Promise.resolve(false)
   return enqueue('storing', async () => {
     try {
-      const record = cleanUsage(await $.store.get(USAGE_KEY))
-      const done = Object.prototype.hasOwnProperty.call(record, day) ? record[day]!.auto : 0
-      return done + autoPending.size >= cfg.dailyAutoNotes
+      autoDone = { day, auto: autoOn(cleanUsage(await $.store.get(USAGE_KEY)), day) }
+      return isLimitReached(cfg, day)
     } catch {
       return false
     }
+  })
+}
+
+/** Today's notes written by themselves, read once a session: a session started past the limit says so before its first turn ends. */
+function seedUsage($: EngineInterface): Promise<void> {
+  return enqueue('storing', async () => {
+    try {
+      const day = stamp(await $.clock.now()).day
+      autoDone = { day, auto: autoOn(cleanUsage(await $.store.get(USAGE_KEY)), day) }
+    } catch (error) {
+      $.ui.log(`learn-notes: 모델 호출 수를 읽지 못했습니다 (${String(error)})`, { to: 'debug' })
+    }
+  })
+}
+
+/**
+ * True the first time on `day` the daily limit's toast is to show, in this
+ * session or any other: the store keeps the day it last showed. A store that
+ * cannot keep it only lets it show again.
+ */
+function isFirstLimitToast($: EngineInterface, day: string): Promise<boolean> {
+  if (limitToastDay === day) return Promise.resolve(false)
+  limitToastDay = day
+  return enqueue('storing', async () => {
+    try {
+      if ((await $.store.get(LIMIT_TOAST_KEY)) === day) return false
+      await $.store.set(LIMIT_TOAST_KEY, day)
+    } catch (error) {
+      $.ui.log(`learn-notes: 한도 알림을 띄운 날을 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+    }
+    return true
   })
 }
 
@@ -1543,7 +1598,8 @@ function teamPath(root: string): string {
 /**
  * This project's team file (TEAM_FILE), read again only when its stamp
  * (modified time, size) changed since the last read; undefined while there is
- * none, it is too big, or the permission rules forbid reading it. Never rejects.
+ * none, it is too big, or the permission rules forbid reading it (or, for a
+ * link in its place, what it leads to). Never rejects.
  */
 async function loadTeam($: EngineInterface): Promise<TeamFile | undefined> {
   try {
@@ -1554,7 +1610,9 @@ async function loadTeam($: EngineInterface): Promise<TeamFile | undefined> {
       return undefined
     }
     const stat = await $.fs.stat(path)
-    if (stat.kind !== 'file' || stat.size > TEAM_READ_MAX) {
+    // A repository may commit a link there: the file it leads to must be one the rules let be read, too.
+    const real = stat.isLink ? (await $.fs.stat(path, { resolve: true })).realPath : path
+    if (stat.kind !== 'file' || stat.size > TEAM_READ_MAX || real === undefined || (real !== path && (await isReadDenied($, real)))) {
       team = null
       return undefined
     }
@@ -1771,6 +1829,7 @@ export const register: Register = (on, options) => {
     await loadHistory($)
     await loadTeam($)
     await seedActivity($)
+    await seedUsage($)
     await remind($, cfg)
     // A quiz request a reload cut off is not coming back; the last quiz is there for the pane to draw.
     if (!isQuizMaking && !isQuizChecking) await update($, quizRun, () => ({ isMaking: false, error: null, checking: null }))
@@ -1919,8 +1978,7 @@ export const register: Register = (on, options) => {
       } else if (cfg.isAutoSave) {
         await save($, cfg, note, false)
       }
-      if (skip === 'limit' && limitToastDay !== day) {
-        limitToastDay = day
+      if (skip === 'limit' && (await isFirstLimitToast($, day))) {
         $.ui.toast(`학습 노트: 오늘 자동 노트 한도(${cfg.dailyAutoNotes}개)에 닿았습니다 · 패널에서 w를 누르면 씁니다`, { timeoutMs: 8000 })
       }
       // Stored at once, so a session that ends mid-note still leaves it for the next one.
@@ -2189,7 +2247,7 @@ export const register: Register = (on, options) => {
     const shown: LearnView = note || isWhole(mode) ? mode : 'note'
 
     // Past today's limit (dailyAutoNotes) the turn's end writes no note: the live line promises none.
-    const willWrite = cfg.isAutoNote && limitToastDay !== stamp(now).day
+    const willWrite = cfg.isAutoNote && !isLimitReached(cfg, stamp(now).day)
     const liveBlock = running && running.changes.length > 0 ? liveView(running, isDock, willWrite, el) : null
     const root = await $.session.root()
     const systemHint = isSystemFolder(root) ? (
