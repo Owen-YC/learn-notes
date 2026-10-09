@@ -119,7 +119,10 @@ import {
   stamp,
   todayReview,
   CONCEPTS_KEPT,
+  KIND_LABEL,
+  spreadPicks,
   type Hunk,
+  type QuizPick,
 } from '../hooks/notes'
 
 const HUNK: Hunk = {
@@ -2042,5 +2045,97 @@ describe('1.6.0: reviews go by recall, and a concept known leaves them', () => {
     expect(plain).not.toContain('이미 아는 개념')
     expect(plain).not.toContain('퀴즈로 익힌 개념')
     expect(plain).toContain('## 이미 배운 개념 (지난 노트들에서)\nmap\n')
+  })
+})
+
+describe('1.6.0: quiz kinds, spread across notes', () => {
+  const at = Date.UTC(2026, 9, 3)
+  const concept = (name: string, extra: Partial<QuizPick> = {}): QuizPick => ({ key: `c:${name}`, name, count: 1, firstAt: 0, lastAt: 0, blurb: '', files: [], ...extra })
+  const picks = [concept('A'), concept('B'), concept('C')]
+
+  test('a T line names each question\'s kind; a reply without one still reads every question', () => {
+    const text = ['T1: 예측', 'Q1: 무엇이 찍힐까요?', 'A1: 3', 'T2: **바꿔 보기**', 'Q2: 대문자로 하려면?', 'A2: toUpperCase()', 'T3: why', 'Q3: 지우면?', 'A3: 손님이 빠진다'].join('\n')
+    expect(parseQuiz(text, picks).map(one => one.kind)).toEqual(['predict', 'modify', 'why'])
+    expect(parseQuiz(text, picks)[0]).toEqual({ key: 'c:A', name: 'A', question: '무엇이 찍힐까요?', answer: '3', kind: 'predict' })
+    expect(parseQuiz(['T1: 바꾸기', 'Q1: 하나', 'A1: 하나'].join('\n'), picks)[0]!.kind).toBe('modify')
+    const plain = parseQuiz(['Q1: 하나', 'A1: 하나', 'Q2: 둘', 'A2: 둘', 'Q3: 셋', 'A3: 셋'].join('\n'), picks)
+    expect(plain).toHaveLength(3)
+    expect(plain.every(one => one.kind === undefined && !('kind' in one))).toBe(true)
+    // A kind the pane does not know is left off.
+    expect(parseQuiz('T1: 퍼즐\nQ1: 하나\nA1: 하나', picks)[0]!.kind).toBeUndefined()
+    expect(KIND_LABEL).toEqual({ predict: '예측', why: '왜', modify: '바꿔 보기' })
+  })
+
+  test('a T1. line inside the question\'s code is code, not a kind (as h1.textContent is)', () => {
+    const text = ['T1: 예측', 'Q1: 아래 코드의 결과는?', '```', "T1.textContent = '안녕'", 'T2: 가짜', '```', 'A1: 안녕', 'T2: 왜', 'Q2: 둘', 'A2: 둘'].join('\n')
+    const [first, second] = parseQuiz(text, picks)
+    expect(first!.question).toContain("T1.textContent = '안녕'")
+    expect(first!.question).toContain('T2: 가짜')
+    expect(first!.kind).toBe('predict')
+    expect(second!.kind).toBe('why')
+  })
+
+  test('each question keeps the note its concept was picked from', () => {
+    const fromNotes = [concept('A', { noteId: 'n1' }), concept('B')]
+    expect(parseQuiz('Q1: 하나\nA1: 하나\nQ2: 둘\nA2: 둘', fromNotes).map(one => one.noteId)).toEqual(['n1', undefined])
+  })
+
+  test('the quiz prompt asks for a kind with each question: all three in a review, predict and modify in a note\'s own', () => {
+    const review = quizPrompt(picks, 'beginner')
+    expect(review).toContain('T1: (예측 · 왜 · 바꿔 보기 중 하나)\nQ1: (문제 한두 문장)')
+    expect(review).toContain('한 퀴즈 안에서는 되도록 서로 다른 유형으로 낸다')
+    expect(review).not.toContain('예측과 바꿔 보기만')
+    const note = quizPrompt(picks, 'beginner', 'note')
+    expect(note).toContain('예측과 바꿔 보기만')
+    expect(note).toContain('T1: (예측 · 바꿔 보기 중 하나)')
+    expect(note).toContain('노트의 정의를 그대로 되묻지 않는다')
+  })
+
+  test('a typed answer is graded by what its kind asks; a question with no kind as before', () => {
+    const item = { name: '클로저', question: '무엇이 찍힐까요?', answer: '3' }
+    expect(checkPrompt({ ...item, kind: 'predict' }, '3', 'beginner')).toContain('출력이나 값이 같으면 설명이 없어도 맞음이다')
+    expect(checkPrompt({ ...item, kind: 'modify' }, 'x', 'beginner')).toContain('바라는 대로 동작하면 맞음이다')
+    expect(checkPrompt({ ...item, kind: 'why' }, 'x', 'beginner')).toContain('왜 문제다')
+    const plain = checkPrompt(item, '3', 'beginner')
+    expect(plain).not.toContain('예측 문제다')
+    expect(plain).not.toContain('바꿔 보기 문제다')
+  })
+
+  test('a review quiz spreads over notes: one from each first, a second from one note only to fill up, a wrong one always', () => {
+    const a1 = concept('a1', { noteId: 'A' })
+    const a2 = concept('a2', { noteId: 'A' })
+    const a3 = concept('a3', { noteId: 'A' })
+    const b1 = concept('b1', { noteId: 'B' })
+    const c1 = concept('c1', { noteId: 'C' })
+    const loose = concept('loose')
+    expect(spreadPicks([a1, a2, a3, b1, c1]).map(one => one.name)).toEqual(['a1', 'b1', 'c1'])
+    // Not enough notes: the next of note A fills it, in the order given.
+    expect(spreadPicks([a1, a2, a3, b1]).map(one => one.name)).toEqual(['a1', 'a2', 'b1'])
+    expect(spreadPicks([a1, a2, a3]).map(one => one.name)).toEqual(['a1', 'a2', 'a3'])
+    // A concept no note holds anymore never waits.
+    expect(spreadPicks([a1, loose, a2, b1]).map(one => one.name)).toEqual(['a1', 'loose', 'b1'])
+    // Answered wrong: taken even beside another of its note.
+    const missed = concept('a2', { noteId: 'A', missedAt: at, reviewedAt: at })
+    expect(spreadPicks([a1, missed, a3, b1, c1]).map(one => one.name)).toEqual(['a1', 'a2', 'b1'])
+    expect(spreadPicks([], 3)).toEqual([])
+    expect(spreadPicks([a1, b1, c1], 2).map(one => one.name)).toEqual(['a1', 'b1'])
+  })
+
+  test('a concept due waits for no concept that is not: other notes fill only what the due ones leave', () => {
+    const a1 = concept('a1', { noteId: 'A' })
+    const a2 = concept('a2', { noteId: 'A' })
+    const a3 = concept('a3', { noteId: 'A' })
+    const b1 = concept('b1', { noteId: 'B' })
+    const c1 = concept('c1', { noteId: 'C' })
+    const due = new Set(['a1', 'a2', 'a3'])
+    const isDue = (one: QuizPick) => due.has(one.name)
+    // Three due, all from note A: the quiz is note A's, none asked early from another note.
+    expect(spreadPicks([a1, a2, a3, b1, c1], 3, isDue).map(one => one.name)).toEqual(['a1', 'a2', 'a3'])
+    // Two due: the third from another note.
+    due.delete('a3')
+    expect(spreadPicks([a1, a2, a3, b1, c1], 3, isDue).map(one => one.name)).toEqual(['a1', 'a2', 'b1'])
+    // One due: then one from each other note first.
+    due.delete('a2')
+    expect(spreadPicks([a1, a2, a3, b1, c1], 3, isDue).map(one => one.name)).toEqual(['a1', 'b1', 'c1'])
   })
 })

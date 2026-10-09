@@ -126,7 +126,7 @@ export type LearnConcept = {
   knownAt?: number
 }
 
-/** One quiz question about a concept; the answer stays hidden until /learn quiz 정답, or a in the pane's quiz. */
+/** One quiz question about a concept; its answer stays hidden until /learn quiz 정답 (one question at a time), or a in the pane's quiz. */
 export type LearnQuizItem = {
   key: string
   name: string
@@ -136,7 +136,7 @@ export type LearnQuizItem = {
   hint?: string
   /** True once the learner looked at the hint (h in the pane, /learn quiz 힌트). */
   isHinted?: boolean
-  /** True once the pane showed its answer (a). */
+  /** True once its answer was shown: a in the pane, /learn quiz 정답 (this question), or a grade. */
   isShown?: boolean
   /** How the learner graded their own answer: o and x in the pane, or /learn quiz 정답 · 틀림. */
   result?: 'right' | 'wrong'
@@ -152,6 +152,14 @@ export type LearnQuizItem = {
   before?: LearnQuizMarks
   /** True once the learner set the grade themselves over Claude's (f, /learn quiz 맞음 · 틀림): fully right or fully wrong. */
   isLearnerGraded?: boolean
+  /**
+   * What the question asks (T1 in the model's reply): the output or value of some code (예측), why a line is
+   * there or what changes without it (왜), or how to change the code to do something else (바꿔 보기);
+   * absent on quizzes made before 1.6.0, or when the model named none.
+   */
+  kind?: 'predict' | 'why' | 'modify'
+  /** The note that taught its concept, whose code the question was made from (the latest one that did); absent when no note held it. */
+  noteId?: string
 }
 
 /** One day's learning: notes written, and quiz answers the learner graded right and wrong. */
@@ -195,8 +203,11 @@ declare module 'claude-code' {
       root: string | null
       /** Concept keys merged into others (/learn merge): old key → the key it counts under now. */
       aliases: Record<string, string>
-      /** The last /learn quiz: its questions, and whether the answers were shown. */
-      quiz: { at: number; items: LearnQuizItem[]; isRevealed: boolean } | null
+      /**
+       * The last quiz: its questions, whether every answer was shown (/learn quiz 정답 before 1.6.0; now written
+       * false), and `from: 'note'` for a note's own quiz (t under a note).
+       */
+      quiz: { at: number; items: LearnQuizItem[]; isRevealed: boolean; from?: 'note' } | null
       /** The pane's quiz request: whether one is out, and the last failure to show. */
       quizRun: LearnQuizRun
       /** The pane's questions about notes, by note id: whose answer is being written, and the last failure to show. */

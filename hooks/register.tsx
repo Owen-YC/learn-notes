@@ -81,6 +81,7 @@ import {
   knownNames,
   listItem,
   isMissed,
+  isDue,
   isKnown,
   DAILY_REVIEW,
   todayReview,
@@ -94,6 +95,8 @@ import {
   QUIZ_SYSTEM,
   quizPick,
   quizPrompt,
+  KIND_LABEL,
+  spreadPicks,
   noteEntry,
   noteLine,
   notePrompt,
@@ -987,7 +990,8 @@ async function journalEntriesFor($: EngineInterface, cfg: Config, days: readonly
   return found
 }
 
-type Quiz = { at: number; items: LearnQuizItem[]; isRevealed: boolean }
+/** A quiz as kept: `isRevealed` (every answer shown) is read from quizzes kept before 1.6.0 and written false; `from` marks a note's own quiz. */
+type Quiz = { at: number; items: LearnQuizItem[]; isRevealed: boolean; from?: 'note' }
 
 /** A concept's marks read back off a stored quiz question. */
 function marksFrom(raw: unknown): LearnQuizMarks | undefined {
@@ -1003,7 +1007,7 @@ function marksFrom(raw: unknown): LearnQuizMarks | undefined {
 /** One quiz question read back from the store; undefined when it is not one. */
 function quizItemOf(one: unknown): LearnQuizItem | undefined {
   if (!isRecord(one)) return undefined
-  const { key, name, question, answer, hint, isHinted, isShown, result, gradedAt, mine, verdict, feedback } = one
+  const { key, name, question, answer, hint, isHinted, isShown, result, gradedAt, mine, verdict, feedback, kind, noteId } = one
   if (typeof key !== 'string' || typeof name !== 'string' || typeof question !== 'string' || typeof answer !== 'string') return undefined
   const before = marksFrom(one.before)
   return {
@@ -1020,6 +1024,8 @@ function quizItemOf(one: unknown): LearnQuizItem | undefined {
     ...(verdict === 'right' || verdict === 'partial' || verdict === 'wrong' ? { verdict } : {}),
     ...(typeof feedback === 'string' ? { feedback } : {}),
     ...(before ? { before } : {}),
+    ...(kind === 'predict' || kind === 'why' || kind === 'modify' ? { kind } : {}),
+    ...(typeof noteId === 'string' && noteId !== '' ? { noteId } : {}),
   }
 }
 
@@ -1030,10 +1036,10 @@ async function lastQuiz($: EngineInterface): Promise<Quiz | null> {
   const raw = await $.store.get(QUIZ_KEY).catch(() => undefined)
   if (!isRecord(raw) || typeof raw.at !== 'number' || !Array.isArray(raw.items)) return null
   const items = raw.items.map(quizItemOf).filter(one => one !== undefined)
-  return items.length > 0 ? { at: raw.at, items, isRevealed: raw.isRevealed === true } : null
+  return items.length > 0 ? { at: raw.at, items, isRevealed: raw.isRevealed === true, ...(raw.from === 'note' ? { from: 'note' as const } : {}) } : null
 }
 
-/** Whether the learner has seen a question's answer: shown in the pane, or all of them by /learn quiz 정답. */
+/** Whether the learner has seen a question's answer: shown in the pane or by /learn quiz 정답, or all of them in a quiz kept before 1.6.0. */
 function isAnswerShown(current: Quiz, item: LearnQuizItem): boolean {
   return current.isRevealed || item.isShown === true
 }
@@ -1162,7 +1168,7 @@ async function askModel(
   return reply.isAnswered ? { text: reply.text } : { error: failureText(reply) }
 }
 
-/** Each concept with the learner's code from the latest note that taught it, while a note still holds it. */
+/** Each concept with the latest note that taught it, while a note still holds it: that note's id, and the learner's code from it. */
 async function withCode($: EngineInterface, picks: readonly RankedConcept[], map: Readonly<Record<string, string>>): Promise<QuizPick[]> {
   const written = (await allNotes($)).filter(note => note.status === 'ready').sort((a, b) => b.at - a.at)
   return picks.map(one => {
@@ -1172,17 +1178,21 @@ async function withCode($: EngineInterface, picks: readonly RankedConcept[], map
     const changes = [...note.changes].sort((a, b) => Number(one.files.includes(b.file)) - Number(one.files.includes(a.file)))
     for (const change of changes) {
       const text = codeFor(change, one.blurb)
-      if (text) return { ...one, code: { file: change.file.split(/[\\/]/).at(-1) ?? change.file, text } }
+      if (text) return { ...one, noteId: note.id, code: { file: change.file.split(/[\\/]/).at(-1) ?? change.file, text } }
     }
-    return one
+    return { ...one, noteId: note.id }
   })
 }
 
+/** Concepts a review quiz looks through: twice the questions it asks, so it can take them from different notes. */
+const QUIZ_CANDIDATES = 6
+
 /**
  * Asks the model for a new quiz and keeps it; or says why there is none. The
- * concepts due first, or `only` these (a note's, for t in the pane), never one
- * marked known, each asked about the code the learner made with it where a
- * note still holds it.
+ * concepts due first, taken from different notes where it can (a wrong one
+ * always), or `only` these (a note's, for t in the pane: a note quiz that asks
+ * to predict and to modify), never one marked known, each asked about the code
+ * the learner made with it where a note still holds it.
  */
 async function makeQuiz(
   $: EngineInterface,
@@ -1200,17 +1210,20 @@ async function makeQuiz(
       return one ? [{ ...one, key }] : []
     })
   // A concept the learner knows is asked about in no quiz, a note's own neither.
-  const chosen = only ? taught.filter(one => !isKnown(one)).slice(0, 3) : quizPick(index, now)
+  const chosen = only ? taught.filter(one => !isKnown(one)).slice(0, 3) : quizPick(index, now, QUIZ_CANDIDATES)
   if (chosen.length === 0) {
     if (only) return { error: taught.length > 0 ? '이 노트의 개념은 모두 아는 개념이라 퀴즈를 낼 수 없습니다. 되돌리려면 /learn 모른다 개념 이름.' : '이 노트에는 배울 개념이 없어 퀴즈를 낼 수 없습니다.' }
     return { error: Object.keys(index).length > 0 ? ALL_KNOWN_TEXT : NO_CONCEPTS_FOR_QUIZ }
   }
-  const picks = await withCode($, chosen, map)
-  const asked = await askModel($, cfg, { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: 1400 })
+  // A review quiz goes over more than one note where it can (three concepts from one note make one lesson
+  // again), the concepts due before any other.
+  const found = await withCode($, chosen, map)
+  const picks = only ? found : spreadPicks(found, 3, one => isDue(one, now))
+  const asked = await askModel($, cfg, { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level, only ? 'note' : 'review'), maxTokens: 1400 })
   if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
   const items = parseQuiz(asked.text, picks)
   if (items.length === 0) return { error: '퀴즈를 내지 못했습니다: 모델의 답을 문제로 읽지 못했습니다. 다시 해 보세요.' }
-  await keepQuiz($, { at: now, items, isRevealed: false })
+  await keepQuiz($, { at: now, items, isRevealed: false, ...(only ? { from: 'note' as const } : {}) })
   await update($, quizRun, run => ({ ...run, error: null }))
   await bankQuestions($, items, now)
   return { items }
@@ -1815,57 +1828,168 @@ async function stepNote($: EngineInterface, delta: number): Promise<void> {
   })
 }
 
+/** What a question in a /learn quiz list says before itself: its grade (and help), Claude grading it now, or its answer seen. */
+function quizItemState(current: Quiz, item: LearnQuizItem, isChecking: boolean): string {
+  if (item.result !== undefined) return `${resultMark(item)}${helpText(item)} · `
+  if (isChecking) return '채점 중 · '
+  return isAnswerShown(current, item) ? '정답 봄 · ' : ''
+}
+
+/** The first question still to answer, past the one Claude is grading now: its index, or -1. */
+function firstOpen(current: Quiz, checking?: number | null): number {
+  return current.items.findIndex((item, i) => i !== checking && isOpen(current, item))
+}
+
 /**
- * /learn quiz and what may follow it: a new quiz; `1 내 답`, a typed answer
- * Claude grades; `힌트`; `정답`, the answers; `맞음 1` · `틀림 2`, the
- * learner's own grade once the answer is seen (or turning a grade around).
+ * The quiz there is, as /learn quiz shows it again (no model call): each
+ * question with its grade, then how to go on, `tail` after it.
+ */
+function quizListText(current: Quiz, now: number, tail: string, checking?: number | null): string {
+  const graded = current.items.filter(item => item.result !== undefined).length
+  const lines = current.items.map((item, i) => listItem(i + 1, `${quizItemState(current, item, i === checking)}${item.question}`))
+  const open = firstOpen(current, checking)
+  const seen = current.items.flatMap((item, i) => (item.result === undefined && i !== checking && isAnswerShown(current, item) ? [i + 1] : []))
+  const next = open === -1 ? '모두 채점했거나 정답을 봤습니다' : `답을 적어 채점받기: /learn 퀴즈 ${open + 1} 내 답`
+  return [
+    `풀던 퀴즈 · ${current.items.length}문제 중 ${graded}개 채점 (${when(current.at, now)})`,
+    '',
+    lines.join('\n\n'),
+    '',
+    ...(seen.length > 0 ? [`정답을 본 문제는 스스로 채점: /learn 퀴즈 맞음 ${seen[0]} · /learn 퀴즈 틀림 ${seen[0]}`] : []),
+    `${next} ${tail}`,
+  ].join('\n')
+}
+
+/**
+ * Claude grades a typed answer to question `n` in the conversation: the grade,
+ * the answer and what comes next (`lead` before them), or why it was not graded.
+ */
+async function typedAnswer($: EngineInterface, cfg: Config, current: Quiz, n: number, mine: string, lead = ''): Promise<string> {
+  const item = current.items[n - 1]
+  if (!item) return `문제 번호를 1~${current.items.length} 사이로 적어 주세요. 예: /learn 퀴즈 1 내 답`
+  if (item.result !== undefined) return `${n}번은 이미 채점했습니다 (${resultMark(item)}). 새 문제: /learn 퀴즈 새로`
+  if (isAnswerShown(current, item)) return `${n}번은 정답을 이미 봤습니다. 스스로 채점해 알려 주세요: /learn 퀴즈 맞음 ${n} · /learn 퀴즈 틀림 ${n}`
+  if (isQuizChecking) return '다른 답을 채점하고 있습니다. 잠시 뒤 다시 보내 주세요.'
+  if (isQuizMaking) return '새 문제를 만들고 있습니다. 문제가 나온 뒤 /learn 퀴즈로 보고 답하세요.'
+  isQuizChecking = true
+  try {
+    await update($, quizRun, run => ({ ...run, checking: n - 1, error: null }))
+    const graded = await gradeTyped($, cfg, current, n - 1, mine)
+    if ('error' in graded) return graded.error
+    const after = (await lastQuiz($)) ?? current
+    const next = after.items.findIndex(one => isOpen(after, one))
+    const right = after.items.filter(one => one.result === 'right').length
+    const index = await read($, concepts)
+    const finished = reviewDoneText(todayReview(index, await read($, activity), await $.clock.now()))
+    const tail =
+      next !== -1
+        ? `다음 문제: /learn 퀴즈 ${next + 1} 내 답${after.items[next]!.hint && !after.items[next]!.isHinted ? ' · 막히면 /learn 퀴즈 힌트' : ''}`
+        : after.items.every(one => one.result !== undefined)
+          ? `다 풀었습니다: ${after.items.length}문제 중 ${right}개 맞힘.${missesText(after.items) ? ` ${missesText(after.items, '. ')}.` : ''}${finished ? ` ${finished}.` : ''}`
+          : ''
+    const done = graded.item
+    const graduated = graduatedIn([done], index, await read($, aliases))
+    return [
+      ...(lead ? [lead, ''] : []),
+      `${n}번 ${resultMark(done)}${helpText(done)} · ${VERDICT_TEXT[done.verdict ?? 'wrong']} ${done.feedback ?? ''}`.trim(),
+      '',
+      '정답',
+      done.answer,
+      '',
+      `채점이 이상하면 바꾸세요: /learn 퀴즈 ${done.result === 'right' ? '틀림' : '맞음'} ${n}`,
+      ...(graduated.length > 0 ? ['', graduatedText(graduated)] : []),
+      ...(tail ? ['', tail] : []),
+    ].join('\n')
+  } finally {
+    isQuizChecking = false
+    await update($, quizRun, run => ({ ...run, checking: null }))
+  }
+}
+
+/**
+ * /learn quiz 정답: the answer of the question being answered (the first one
+ * open, or number `said`), seen now so a grade the learner gives it keeps its
+ * step; every answer once no question is left open.
+ */
+async function answerText($: EngineInterface, current: Quiz, said: number | undefined): Promise<string> {
+  const checking = (await read($, quizRun)).checking
+  const n = said ?? firstOpen(current, checking) + 1
+  if (said === undefined && n === 0) {
+    // Nothing left to recall: every answer at once, and how to grade the ones seen and not graded.
+    const lines = current.items.map((item, i) => listItem(i + 1, `${item.answer}\n(개념: ${item.name}${item.result !== undefined ? ` · ${resultMark(item)}` : ''})`))
+    const seen = current.items.flatMap((item, i) => (item.result === undefined && i !== checking ? [i + 1] : []))
+    // Seeing the answers grades nothing: only what the learner says counts toward the record and the review steps.
+    const how =
+      seen.length > 0
+        ? `\n\n스스로 채점해 번호로 알려 주세요: 맞힌 문제는 /learn 퀴즈 맞음 ${seen.join(' ')} · 틀린 문제는 /learn 퀴즈 틀림 ${seen[0]}\n채점한 문제만 학습 기록과 복습 간격에 들어갑니다.`
+        : ''
+    return `정답\n\n${lines.join('\n\n')}${how}`
+  }
+  const item = current.items[n - 1]
+  if (!item) return `문제 번호를 1~${current.items.length} 사이로 알려 주세요. 예: /learn 퀴즈 정답 ${current.items.length}`
+  if (checking === n - 1) return `${n}번은 지금 Claude가 채점하고 있습니다. 채점이 끝나면 정답도 함께 보입니다.`
+  if (item.result === undefined) await showAnswer($, n - 1)
+  const after = (await lastQuiz($)) ?? current
+  const next = firstOpen(after, checking)
+  const steps = [
+    ...(item.result === undefined ? [`스스로 채점: /learn 퀴즈 맞음 ${n} · /learn 퀴즈 틀림 ${n}`] : []),
+    ...(next !== -1 ? [`다음 문제: /learn 퀴즈 ${next + 1} 내 답`] : []),
+  ]
+  const mark = item.result !== undefined ? ` · ${resultMark(item)}` : ''
+  return `${n}번 정답\n\n${item.answer}\n(개념: ${item.name}${mark})${steps.length > 0 ? `\n\n${steps.join(' · ')}` : ''}`
+}
+
+/** Words that start a /learn quiz command, not an answer: one misspelled is not graded as the learner's answer. */
+const QUIZ_WORD = /^(힌트|정답|문제|새로|맞|틀|오답|(?:hints?|answers?|questions?|right|correct|wrong|missed?)\b)/i
+
+/**
+ * /learn quiz and what may follow it: the quiz being answered (a new one when
+ * none is), `새로` for a new one; `1 내 답`, or an answer with no number for
+ * the first open question, a typed answer Claude grades; `힌트`; `정답`, the
+ * answer of the question being answered (`정답 2`, that one's); `맞음 1` ·
+ * `틀림 2`, the learner's own grade once the answer is seen (or turning a
+ * grade around).
  */
 async function quizCommand($: EngineInterface, cfg: Config, rest: string): Promise<string> {
   const now = await $.clock.now()
   const current = await lastQuiz($)
-  if (/^(정답|답|answer|answers)$/i.test(rest)) {
+  const isNew = /^(새로|새|new)$/i.test(rest)
+  const answer = /^(정답|답|answer|answers)\s*(?:(\d+)\s*번?)?$/i.exec(rest)
+  if (answer) {
     if (!current) return NO_QUIZ
-    await keepQuiz($, { ...current, isRevealed: true })
-    const lines = current.items.map((item, i) => listItem(i + 1, `${item.answer}\n(개념: ${item.name}${item.result !== undefined ? ` · ${resultMark(item)}` : ''})`))
-    const open = current.items.flatMap((item, i) => (item.result === undefined ? [i + 1] : []))
-    // Seeing the answers grades nothing: only what the learner says counts toward the record and the review steps.
-    const how =
-      open.length > 0
-        ? `\n\n스스로 채점해 번호로 알려 주세요: 맞힌 문제는 /learn quiz 맞음 ${open.join(' ')} · 틀린 문제는 /learn quiz 틀림 ${open[0]}\n채점한 문제만 학습 기록과 복습 간격에 들어갑니다.`
-        : ''
-    return `정답\n\n${lines.join('\n\n')}${how}`
+    return answerText($, current, answer[2] === undefined ? undefined : Number(answer[2]))
   }
   if (/^(문제|questions?)$/i.test(rest)) {
     if (!current) return NO_QUIZ
-    const lines = current.items.map((item, i) => listItem(i + 1, `${item.result !== undefined ? `${resultMark(item)} · ` : ''}${item.question}`))
-    const open = current.items.findIndex(item => isOpen(current, item))
-    const next = open === -1 ? '모두 채점했거나 정답을 봤습니다. 새 문제는 /learn quiz.' : `답을 적어 채점받기: /learn quiz ${open + 1} 내 답`
-    return `복습 퀴즈 · ${current.items.length}문제 (${when(current.at, now)})\n\n${lines.join('\n\n')}\n\n${next}`
+    return quizListText(current, now, '· 새 문제: /learn 퀴즈 새로', (await read($, quizRun)).checking)
   }
   if (/^(힌트|hint|hints)$/i.test(rest)) {
     if (!current) return NO_QUIZ
     const open = current.items.flatMap((item, i) => (isOpen(current, item) ? [{ item, n: i + 1 }] : []))
-    if (open.length === 0) return '힌트를 볼 문제가 없습니다 (모두 채점했거나 정답을 봤습니다). 새 문제는 /learn quiz.'
+    if (open.length === 0) return '힌트를 볼 문제가 없습니다 (모두 채점했거나 정답을 봤습니다). 새 문제: /learn 퀴즈 새로'
     const hinted = open.filter(one => one.item.hint !== undefined)
-    if (hinted.length === 0) return '남은 문제에는 힌트가 없습니다. 정답을 보려면 /learn quiz 정답.'
+    if (hinted.length === 0) return '남은 문제에는 힌트가 없습니다. 정답을 보려면 /learn 퀴즈 정답.'
     await keepQuiz($, { ...current, items: current.items.map((item, i) => (hinted.some(one => one.n === i + 1) ? { ...item, isHinted: true } : item)) })
-    return `힌트\n\n${hinted.map(one => listItem(one.n, one.item.hint!)).join('\n\n')}\n\n답을 적어 채점받기: /learn quiz ${hinted[0]!.n} 내 답`
+    return `힌트\n\n${hinted.map(one => listItem(one.n, one.item.hint!)).join('\n\n')}\n\n답을 적어 채점받기: /learn 퀴즈 ${hinted[0]!.n} 내 답`
   }
-  const grade = /^(맞음|맞았어|맞혔어|맞힘|right|correct|틀림|틀렸어|틀렸음|틀린|오답|miss|missed|wrong)\s*(.*)$/i.exec(rest)
+  // Only numbers may follow the word: "틀린 것 같은데…" is no grade.
+  const grade = /^(맞음|맞았어|맞혔어|맞힘|right|correct|틀림|틀렸어|틀렸음|틀린|오답|miss|missed|wrong)\s*([\d\s,번]*)$/i.exec(rest)
   if (grade) {
     if (!current) return NO_QUIZ
     const result = /^(맞|right|correct)/i.test(grade[1]!) ? 'right' : 'wrong'
     const word = result === 'right' ? '맞음' : '틀림'
     const said = [...new Set((grade[2]!.match(/\d+/g) ?? []).map(Number))]
-    const numbers = said.length === 0 && current.items.length === 1 ? [1] : said
+    // No number: the one question there is, or the one whose answer was just seen and not graded.
+    const seen = current.items.flatMap((item, i) => (item.result === undefined && isAnswerShown(current, item) ? [i + 1] : []))
+    const numbers = said.length > 0 ? said : current.items.length === 1 ? [1] : seen.length === 1 ? seen : []
     if (numbers.length === 0 || numbers.some(n => current.items[n - 1] === undefined)) {
-      return `문제 번호를 1~${current.items.length} 사이로 알려 주세요. 예: /learn quiz ${word} ${current.items.length}`
+      return `문제 번호를 1~${current.items.length} 사이로 알려 주세요. 예: /learn 퀴즈 ${word} ${current.items.length}`
     }
     const checking = (await read($, quizRun)).checking
     if (typeof checking === 'number' && numbers.includes(checking + 1)) return `${checking + 1}번은 지금 Claude가 채점하고 있습니다. 채점이 끝난 뒤 다시 알려 주세요.`
     const unseen = numbers.filter(n => isOpen(current, current.items[n - 1]!))
     if (unseen.length > 0) {
-      return `${unseen.join(', ')}번은 아직 정답을 보지 않았습니다. 답을 적어 채점받기: /learn quiz ${unseen[0]} 내 답 · 정답 보기: /learn quiz 정답`
+      return `${unseen.join(', ')}번은 아직 정답을 보지 않았습니다. 답을 적어 채점받기: /learn 퀴즈 ${unseen[0]} 내 답 · 정답 보기: /learn 퀴즈 정답 ${unseen[0]}`
     }
     const changed: string[] = []
     const changedAt: number[] = []
@@ -1900,48 +2024,22 @@ async function quizCommand($: EngineInterface, cfg: Config, rest: string): Promi
   const typed = /^(\d+)\s*번?\s*[.):]?\s+([\s\S]+)$/.exec(rest)
   if (typed) {
     if (!current) return NO_QUIZ
-    const n = Number(typed[1])
-    const item = current.items[n - 1]
-    if (!item) return `문제 번호를 1~${current.items.length} 사이로 적어 주세요. 예: /learn quiz 1 내 답`
-    if (item.result !== undefined) return `${n}번은 이미 채점했습니다 (${resultMark(item)}). 새 문제는 /learn quiz.`
-    if (isAnswerShown(current, item)) return `${n}번은 정답을 이미 봤습니다. 스스로 채점해 알려 주세요: /learn quiz 맞음 ${n} · /learn quiz 틀림 ${n}`
-    if (isQuizChecking) return '다른 답을 채점하고 있습니다. 잠시 뒤 다시 보내 주세요.'
-    if (isQuizMaking) return '새 문제를 만들고 있습니다. 문제가 나온 뒤 /learn quiz 문제로 보고 답하세요.'
-    isQuizChecking = true
-    try {
-      await update($, quizRun, run => ({ ...run, checking: n - 1, error: null }))
-      const graded = await gradeTyped($, cfg, current, n - 1, typed[2]!.trim())
-      if ('error' in graded) return graded.error
-      const after = (await lastQuiz($)) ?? current
-      const next = after.items.findIndex(one => isOpen(after, one))
-      const right = after.items.filter(one => one.result === 'right').length
-      const index = await read($, concepts)
-      const finished = reviewDoneText(todayReview(index, await read($, activity), await $.clock.now()))
-      const tail =
-        next !== -1
-          ? `다음 문제: /learn quiz ${next + 1} 내 답${after.items[next]!.hint && !after.items[next]!.isHinted ? ' · 막히면 /learn quiz 힌트' : ''}`
-          : after.items.every(one => one.result !== undefined)
-            ? `다 풀었습니다: ${after.items.length}문제 중 ${right}개 맞힘.${missesText(after.items) ? ` ${missesText(after.items, '. ')}.` : ''}${finished ? ` ${finished}.` : ''}`
-            : ''
-      const done = graded.item
-      const graduated = graduatedIn([done], index, await read($, aliases))
-      return [
-        `${n}번 ${resultMark(done)}${helpText(done)} · ${VERDICT_TEXT[done.verdict ?? 'wrong']} ${done.feedback ?? ''}`.trim(),
-        '',
-        '정답',
-        done.answer,
-        '',
-        `채점이 이상하면 바꾸세요: /learn quiz ${done.result === 'right' ? '틀림' : '맞음'} ${n}`,
-        ...(graduated.length > 0 ? ['', graduatedText(graduated)] : []),
-        ...(tail ? ['', tail] : []),
-      ].join('\n')
-    } finally {
-      isQuizChecking = false
-      await update($, quizRun, run => ({ ...run, checking: null }))
-    }
+    return typedAnswer($, cfg, current, Number(typed[1]), typed[2]!.trim())
   }
-  if (rest !== '') return QUIZ_USAGE
-  if (isQuizMaking) return '패널에서 문제를 만들고 있습니다. 잠시 뒤 /learn quiz 문제로 보세요.'
+  if (rest !== '' && !isNew) {
+    // An answer with no number: the first question still open.
+    const open = current ? firstOpen(current) : -1
+    if (!current || open === -1) return QUIZ_USAGE
+    if (/^\d+\s*번?$/.test(rest)) return `숫자만 적으면 문제 번호인지 답인지 알 수 없습니다. ${open + 1}번의 답이 ${rest}이면: /learn 퀴즈 ${open + 1} ${rest}`
+    if (QUIZ_WORD.test(rest) || [...rest.trim()].length < 2) return QUIZ_USAGE
+    // Said only once it is graded: an answer turned away (another being graded, the model failing) was not.
+    return typedAnswer($, cfg, current, open + 1, rest.trim(), `${open + 1}번 답으로 채점했습니다`)
+  }
+  if (isQuizMaking) return '패널에서 문제를 만들고 있습니다. 잠시 뒤 /learn 퀴즈로 보세요.'
+  // The quiz being answered first: a new one only once none is left open, or when asked for (새로).
+  if (!isNew && current && current.items.some(item => isOpen(current, item))) {
+    return quizListText(current, now, '· 새 문제: /learn 퀴즈 새로', (await read($, quizRun)).checking)
+  }
   if (isQuizChecking) return '답을 채점하고 있습니다. 채점이 끝난 뒤 새 문제를 받으세요.'
   isQuizMaking = true
   let made
@@ -1957,9 +2055,9 @@ async function quizCommand($: EngineInterface, cfg: Config, rest: string): Promi
     made.items.map((item, i) => listItem(i + 1, item.question)).join('\n\n'),
     '',
     '먼저 스스로 답해 보세요.',
-    '- 답을 적어 채점받기: /learn quiz 1 내 답',
-    ...(made.items.some(item => item.hint !== undefined) ? ['- 막히면 힌트: /learn quiz 힌트'] : []),
-    '- 정답만 보기: /learn quiz 정답 (그 뒤 맞음·틀림을 번호로 알려 주세요)',
+    '- 답을 적어 채점받기: /learn 퀴즈 1 내 답 (번호 없이 적으면 1번부터)',
+    ...(made.items.some(item => item.hint !== undefined) ? ['- 막히면 힌트: /learn 퀴즈 힌트'] : []),
+    '- 정답 보기: /learn 퀴즈 정답 (지금 문제 하나 · 그 뒤 맞음·틀림을 번호로 알려 주세요)',
     '',
     '패널(/learn)의 퀴즈 보기(q)에서도 같은 문제를 이어서 풉니다.',
   ].join('\n')
@@ -2464,7 +2562,7 @@ export const register: Register = (on, options) => {
           {hasConcepts && keysHint}
           {hasConcepts && shown !== 'note' ? (
             <Box marginTop={1} flexDirection="column">
-              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, review, el) : conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)}
+              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, review, list, el) : conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)}
             </Box>
           ) : (
             welcome
@@ -2485,7 +2583,7 @@ export const register: Register = (on, options) => {
 
     const body =
       shown === 'quiz' ? (
-        quizView($, cfg, current, run, hasConcepts, now, review, el)
+        quizView($, cfg, current, run, hasConcepts, now, review, list, el)
       ) : shown === 'concepts' ? (
         conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)
       ) : shown === 'note' ? (
@@ -2636,7 +2734,7 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boo
             key="note-quiz"
             hotkey="t"
             plain
-            label="퀴즈"
+            label="이 노트 퀴즈"
             onPress={async () => {
               await update($, view, () => 'quiz')
               void startQuiz($, cfg, note.concepts)
@@ -2928,6 +3026,12 @@ async function openNote($: EngineInterface, id: string): Promise<void> {
   await update($, view, () => 'note')
 }
 
+/** The quiz's n under a question answered wrong: the note that taught its concept, while the pane holds it. */
+async function openTaughtNote($: EngineInterface, id: string): Promise<void> {
+  if ((await read($, notes)).some(note => note.id === id)) await openNote($, id)
+  else $.ui.log(`learn-notes: 이 개념을 배운 노트(${id})가 패널에 없어 열지 않았습니다`, { to: 'debug' })
+}
+
 /** Where the concepts beyond the list are: concepts.md when it is kept, else how to make it. */
 function moreConceptsText(count: number, isAutoSave: boolean): string {
   return isAutoSave ? `그 밖에 ${count}개는 일지 폴더의 concepts.md에 있습니다` : `그 밖에 ${count}개 · /learn save로 concepts.md에 모두 저장`
@@ -3053,10 +3157,12 @@ function conceptsView(
 }
 
 /**
- * The quiz, one question at a time: the learner types an answer for Claude to
- * grade (i, Enter), or looks at a hint (h) or the answer (a) and grades it
- * themselves (o, x); a wrong one comes first next time. The questions already
- * graded stay above as one line each, the last one Claude graded opened up.
+ * The quiz, one question at a time, each titled with its kind (예측 · 왜 ·
+ * 바꿔 보기): the learner types an answer for Claude to grade (i, Enter), or
+ * looks at a hint (h) or the answer (a) and grades it themselves (o, x); a
+ * wrong one comes first next time. The questions already graded stay above as
+ * one line each, the last one Claude graded opened up, with the note that
+ * taught its concept (n) when it was wrong and the pane holds that note.
  */
 function quizView(
   $: EngineInterface,
@@ -3066,6 +3172,7 @@ function quizView(
   hasConcepts: boolean,
   now: number,
   review: { due: number; left: number; graduated: readonly string[] },
+  list: readonly LearnNote[],
   el: ElementTable,
 ) {
   const { Box, Text, Markdown, Button } = el
@@ -3082,7 +3189,7 @@ function quizView(
   return (
     <Box flexDirection="column">
       <Text bold wrap="truncate-end">
-        복습 퀴즈
+        {current?.from === 'note' ? '이 노트 퀴즈' : '복습 퀴즈'}
         {current && items.length > 0 && (
           <Text dimColor>
             {' '}
@@ -3123,6 +3230,10 @@ function quizView(
               </Text>
             )
           }
+          // Answered wrong (or partly right): back to the note that taught it, where r walks its code through.
+          const wrongFrom = item.result === 'wrong' ? item.noteId : undefined
+          const taught = wrongFrom !== undefined && list.some(note => note.id === wrongFrom) ? wrongFrom : undefined
+          const isElsewhere = wrongFrom !== undefined && taught === undefined
           return (
             <Box key={`quiz-${i}`} flexDirection="column" marginTop={1}>
               <Text wrap="truncate-end">
@@ -3142,6 +3253,7 @@ function quizView(
               <Text color="green">정답</Text>
               <Markdown text={item.answer} />
               <Box flexWrap="wrap" columnGap={2}>
+                {taught && <Button key="quiz-note" hotkey="n" plain label="이 개념을 배운 노트" onPress={() => openTaughtNote($, taught)} />}
                 <Button
                   key="quiz-flip"
                   hotkey="f"
@@ -3151,6 +3263,11 @@ function quizView(
                   onPress={() => flipGrade($, cfg, i)}
                 />
               </Box>
+              {isElsewhere && (
+                <Text dimColor wrap="wrap">
+                  이 개념을 배운 노트는 이 패널에 없습니다 · /learn 찾기 {item.name}
+                </Text>
+              )}
             </Box>
           )
         }
@@ -3159,6 +3276,7 @@ function quizView(
           <Box key={`quiz-${i}`} flexDirection="column" marginTop={1}>
             <Text bold>
               문제 {i + 1}/{items.length}
+              {item.kind !== undefined ? ` · ${KIND_LABEL[item.kind]}` : ''}
             </Text>
             <Markdown text={item.question} />
             {item.hint !== undefined && item.isHinted === true && (
@@ -3234,7 +3352,7 @@ const HELP = [
   '',
   '**자주 쓰는 것**',
   `- \`/learn\`: 학습 노트 패널 열기 (${KEYS_HINT})`,
-  '- `/learn quiz`: 복습할 개념으로 퀴즈 받기 (내가 만든 코드로 묻습니다) · `/learn quiz 1 내 답`: Claude에게 채점받기',
+  '- `/learn quiz`: 풀던 퀴즈 보기, 없으면 복습할 개념으로 새 퀴즈 (내 코드의 결과를 맞히거나 바꿔 봅니다) · `/learn quiz 내 답`: Claude에게 채점받기',
   '- `/learn ask 질문`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기',
   '- `/learn recap`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
   '',
@@ -3245,7 +3363,7 @@ const HELP = [
   '- 퀴즈(`q`): `s` 문제 받기 · `i` 답 적기(Enter로 채점) · `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기',
   '',
   '**더 있는 것**',
-  '- 퀴즈: `/learn quiz 문제` 지금 문제 · `힌트` · `정답` · `맞음 1` · `틀림 2` 스스로 채점',
+  '- 퀴즈: `/learn quiz 새로` 새 문제 · `2 내 답` 그 문제에 답하기 · `힌트` · `정답` 지금 문제의 정답 (`정답 2`도 됩니다) · `맞음 1` · `틀림 2` 스스로 채점',
   '- 기록: `/learn concepts` 배운 개념과 복습 날짜 · `/learn stats` 연속 학습일과 정답률 · `/learn find 말` 노트 찾기',
   '- 아는 개념: `/learn 안다 이름` 복습·퀴즈에서 빼기 (쉼표로 여럿) · `/learn 모른다 이름` 되돌리기',
   '- 일지: `/learn day` 오늘 노트 목차 (`어제` · `2026-10-03`도 됩니다) · `/learn days` 일지가 있는 날짜',
@@ -3282,10 +3400,9 @@ const COMMAND_WORDS: Record<string, string> = {
 }
 /** Lines /learn day prints at most: the reply goes into the conversation the model reads. */
 const DAY_LINES = 40
-const QUIZ_USAGE =
-  '쓰는 법: /learn quiz (새 문제 받기) · /learn quiz 문제 (지금 문제 다시 보기) · /learn quiz 1 내 답 (Claude가 채점) · /learn quiz 힌트 · /learn quiz 정답 · /learn quiz 맞음 1 · /learn quiz 틀림 2 (스스로 채점)'
+const QUIZ_USAGE = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 · 정답 · 새로 · 맞음 1 · 틀림 2'
 const ASK_USAGE = '쓰는 법: /learn ask 질문 (예: /learn ask 왜 let 대신 const를 썼어?) · 패널에서 고른 노트(없으면 마지막 노트)에 대해 답합니다'
-const NO_QUIZ = '아직 낸 퀴즈가 없습니다. /learn quiz로 먼저 문제를 받으세요.'
+const NO_QUIZ = '아직 낸 퀴즈가 없습니다. /learn 퀴즈로 먼저 문제를 받으세요.'
 const KNOW_USAGE =
   '쓰는 법: /learn 안다 개념 이름 (쉼표로 여럿, 예: /learn 안다 const 선언, 화살표 함수) · 되돌리기: /learn 모른다 개념 이름 · 아는 개념은 복습과 퀴즈에서 빠집니다'
 const MERGE_USAGE =

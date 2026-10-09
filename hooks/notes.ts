@@ -2424,8 +2424,17 @@ export function recapSection(range: RecapRange, text: string, at: number, day: s
   return [`## ${day} 정리 · ${range.label} (${stamp(at).time})`, '', text, '', '---', ''].join('\n')
 }
 
-/** A concept picked for a quiz, with the code a note met it in when there is one: the quiz asks about the learner's own code. */
-export type QuizPick = RankedConcept & { code?: { file: string; text: string } }
+/**
+ * A concept picked for a quiz, with the code a note met it in when there is one (the quiz asks about the
+ * learner's own code), and that note's id when a note still holds the concept.
+ */
+export type QuizPick = RankedConcept & { code?: { file: string; text: string }; noteId?: string }
+
+/** What a quiz question asks: the output or value of some code, why a line is there, or how to change it. */
+export type QuizKind = NonNullable<LearnQuizItem['kind']>
+
+/** Each kind of question as the pane names it after the question's number. */
+export const KIND_LABEL: Readonly<Record<QuizKind, string>> = { predict: '예측', why: '왜', modify: '바꿔 보기' }
 
 /** Characters of the learner's code a quiz question is shown for one concept. */
 const QUIZ_CODE_BUDGET = 700
@@ -2466,6 +2475,30 @@ export function quizPick(index: Readonly<Record<string, LearnConcept>>, now: num
   return [...due, ...rest].slice(0, size)
 }
 
+/**
+ * Up to `size` of `candidates`, in their order, from as many notes as there are: a concept that shares its
+ * note with one already taken waits, and fills the quiz only when the other notes run out. A concept answered
+ * wrong is always taken. The ones `isFirst` (due for review) are spread and taken before any other: a concept
+ * due waits for no concept that is not, since answering one early moves its review on not at all.
+ */
+export function spreadPicks<T extends QuizPick>(candidates: readonly T[], size = 3, isFirst: (one: T) => boolean = () => true): T[] {
+  const taken: T[] = []
+  const spread = (group: readonly T[]) => {
+    const waiting: T[] = []
+    for (const one of group) {
+      if (taken.length >= size) break
+      const isSameNote = one.noteId !== undefined && taken.some(other => other.noteId === one.noteId)
+      if (isSameNote && !isMissed(one)) waiting.push(one)
+      else taken.push(one)
+    }
+    taken.push(...waiting.slice(0, Math.max(0, size - taken.length)))
+  }
+  spread(candidates.filter(one => isFirst(one)))
+  spread(candidates.filter(one => !isFirst(one)))
+  const chosen = new Set(taken)
+  return candidates.filter(one => chosen.has(one))
+}
+
 export const QUIZ_SYSTEM = [
   '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 코딩 튜터다.',
   '그 사람이 전에 배운 개념을 스스로 떠올려 보게 하는 짧은 문제를 한국어로 낸다.',
@@ -2474,9 +2507,15 @@ export const QUIZ_SYSTEM = [
   BOLD,
 ].join(' ')
 
-/** The one user message the model reads for a quiz: each concept with what the notes said about it, and the learner's code it was met in. */
-export function quizPrompt(picks: readonly (LearnConcept & { code?: QuizPick['code'] })[], level: Level): string {
+/**
+ * The one user message the model reads for a quiz: each concept with what the notes said about it, and the
+ * learner's code it was met in. A review quiz mixes the kinds of question (predict, why, modify); a note's own
+ * quiz (`mode` 'note', right after reading the note) asks only to predict and to modify, never the definition
+ * the note just gave.
+ */
+export function quizPrompt(picks: readonly (LearnConcept & { code?: QuizPick['code'] })[], level: Level, mode: 'review' | 'note' = 'review'): string {
   const hasCode = picks.some(one => one.code !== undefined)
+  const kinds = mode === 'note' ? '예측 · 바꿔 보기' : '예측 · 왜 · 바꿔 보기'
   return [
     LEVEL_TEXT[level],
     '',
@@ -2490,11 +2529,18 @@ export function quizPrompt(picks: readonly (LearnConcept & { code?: QuizPick['co
     '',
     `개념마다 문제 하나씩, 위 순서대로 ${picks.length}개를 낸다. 문제에 개념 이름을 그대로 쓰지 말고, 코드나 상황을 보여 주고 묻는다.`,
     ...(hasCode ? ['학습자가 만든 코드가 붙은 개념은 그 코드를 그대로, 또는 조금 바꿔 보여 주고 묻는다. 자기 코드로 다시 떠올리게 하는 것이 목적이다.'] : []),
+    '문제 유형: 예측은 코드를 보여 주고 출력이나 값을 맞히게 한다. 바꿔 보기는 바라는 동작을 말하고 어느 줄을 어떻게 바꿀지 묻는다. 왜는 어떤 줄을 빼거나 바꾸면 어떻게 되는지, 왜 그렇게 썼는지 묻는다.',
+    ...(mode === 'note'
+      ? ['이 노트를 방금 읽은 학습자에게 내는 문제다. 예측과 바꿔 보기만 낸다. 노트의 정의를 그대로 되묻지 않는다. 코드가 없는 개념은 짧은 예시 코드를 보여 주고 묻는다. 예측은 코드만으로 출력이나 값이 하나로 정해질 때만 낸다.']
+      : ['학습자 코드가 붙은 개념은 예측(코드만으로 출력이나 값이 하나로 정해질 때만) 또는 바꿔 보기로, 코드가 없는 개념은 왜로 낸다. 한 퀴즈 안에서는 되도록 서로 다른 유형으로 낸다.']),
+    '답은 예측이면 출력이나 값을, 바꿔 보기면 바꾼 코드와 그 까닭을, 왜면 무엇이 달라지는지를 쓴다.',
     '힌트는 막힌 학습자가 답을 떠올리게 돕는 실마리 한 문장이다. 답이나 개념 이름을 그대로 말하지 않는다.',
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
+    `T1: (${kinds} 중 하나)`,
     'Q1: (문제 한두 문장)',
     'H1: (힌트 한 문장)',
     'A1: (답 한두 문장)',
+    'T2: …',
     'Q2: …',
     'H2: …',
     'A2: …',
@@ -2509,8 +2555,15 @@ export const CHECK_SYSTEM = [
   BOLD,
 ].join(' ')
 
-/** The one user message the model reads to grade a typed answer. */
-export function checkPrompt(item: Pick<LearnQuizItem, 'name' | 'question' | 'answer'>, mine: string, level: Level): string {
+/** How each kind of question is graded, said to the model that grades a typed answer. */
+const KIND_CHECK: Readonly<Record<QuizKind, string>> = {
+  predict: '예측 문제다. 학습자가 말한 출력이나 값이 같으면 설명이 없어도 맞음이다. 출력이나 값이 다르면 설명이 그럴듯해도 틀림이다.',
+  modify: '바꿔 보기 문제다. 학습자가 고친 코드가 모범 답과 달라도 바라는 대로 동작하면 맞음이다.',
+  why: '왜 문제다. 무엇이 달라지는지, 또는 왜 그렇게 썼는지의 핵심을 짚으면 낱말이 달라도 맞음이다.',
+}
+
+/** The one user message the model reads to grade a typed answer; a question's kind adds how that kind is graded. */
+export function checkPrompt(item: Pick<LearnQuizItem, 'name' | 'question' | 'answer' | 'kind'>, mine: string, level: Level): string {
   return [
     LEVEL_TEXT[level],
     '',
@@ -2524,6 +2577,7 @@ export function checkPrompt(item: Pick<LearnQuizItem, 'name' | 'question' | 'ans
     cut(mine, 1500),
     '',
     '판정은 셋 중 하나다. 맞음: 핵심을 맞게 이해했다. 거의: 방향은 맞지만 중요한 부분이 빠졌거나 일부가 틀렸다. 틀림: 틀렸거나 관계없는 답이다("모르겠다"도 틀림).',
+    ...(item.kind ? [KIND_CHECK[item.kind]] : []),
     '피드백은 한두 문장으로, 학습자의 답에서 맞은 점과 빠진 점을 구체적으로 짚는다. 모범 답을 그대로 옮기지 않는다.',
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
     '판정: (맞음 · 거의 · 틀림 중 하나)',
@@ -2579,11 +2633,12 @@ export function listItem(n: number, text: string): string {
 }
 
 /**
- * Questions, hints and answers read back from the model's reply, paired by
- * number with the concepts asked about. Each runs on over the lines after its
- * marker (a code block in it included) until the next marker; a hint may be missing.
+ * Questions, hints, answers and kinds read back from the model's reply, paired
+ * by number with the concepts asked about (each keeps its pick's note). Each runs
+ * on over the lines after its marker (a code block in it included) until the
+ * next marker; a hint or a kind may be missing.
  */
-export function parseQuiz(text: string, picks: readonly RankedConcept[]): LearnQuizItem[] {
+export function parseQuiz(text: string, picks: readonly QuizPick[]): LearnQuizItem[] {
   const aware = quizItems(quizParts(text, true), picks)
   // A fence the model left open would hide every marker after it: then read it as if there were no code.
   return aware.length >= picks.length ? aware : [aware, quizItems(quizParts(text, false), picks)].reduce((a, b) => (b.length > a.length ? b : a))
@@ -2593,16 +2648,16 @@ export function parseQuiz(text: string, picks: readonly RankedConcept[]): LearnQ
 const BARE_FENCE = /^\s*(`{3,}|~{3,})[\w+.-]*\s*$/
 
 /**
- * Each marker's text (Q1, H1, A1, …), the lines after it included. With
+ * Each marker's text (T1, Q1, H1, A1, …), the lines after it included. With
  * `isFenceAware`, a capital marker inside a code block is the code's own line
- * (`h1.textContent`, `a1.`); a marker seen twice keeps its first text.
+ * (`h1.textContent`, `T1.textContent`, `a1.`); a marker seen twice keeps its first text.
  */
 function quizParts(text: string, isFenceAware: boolean): Map<string, string[]> {
   const parts = new Map<string, string[]>()
   let current: string[] | undefined
   let fence: string | null = null
   for (const raw of text.split('\n')) {
-    const m = fence !== null ? null : /^\s*(?:\*\*)?([QHA])\s*(\d+)\s*(?:\*\*)?\s*[:.)：]\s*(?:\*\*)?\s*(.*)$/.exec(raw)
+    const m = fence !== null ? null : /^\s*(?:\*\*)?([QHAT])\s*(\d+)\s*(?:\*\*)?\s*[:.)：]\s*(?:\*\*)?\s*(.*)$/.exec(raw)
     const key = m ? `${m[1]}${Number(m[2])}` : undefined
     if (m && key && !parts.has(key)) {
       current = [m[3]!.replace(/\*\*$/, '')]
@@ -2617,8 +2672,17 @@ function quizParts(text: string, isFenceAware: boolean): Map<string, string[]> {
   return parts
 }
 
+/** A question's kind from its T line (예측 · 왜 · 바꿔 보기, or the English words); undefined for anything else. */
+function kindOf(lines: readonly string[] | undefined): QuizKind | undefined {
+  const word = (lines?.[0] ?? '').replace(/[*_`()[\]]/g, '').trim().toLowerCase()
+  if (/^(예측|predict)/.test(word)) return 'predict'
+  if (/^(왜|why)/.test(word)) return 'why'
+  if (/^(바꿔\s*보기|바꾸기|바꿔|modify)/.test(word)) return 'modify'
+  return undefined
+}
+
 /** The questions read out of `parts`, paired by number with the concepts asked about. */
-function quizItems(parts: Map<string, string[]>, picks: readonly RankedConcept[]): LearnQuizItem[] {
+function quizItems(parts: Map<string, string[]>, picks: readonly QuizPick[]): LearnQuizItem[] {
   const read = (key: string) => {
     const lines = parts.get(key)
     return lines ? closeFence(cut(lines.join('\n').replace(/\n{3,}/g, '\n\n'), 1200)) : ''
@@ -2630,7 +2694,10 @@ function quizItems(parts: Map<string, string[]>, picks: readonly RankedConcept[]
     const hint = parts.has(`H${i + 1}`) ? closeFence(cut(parts.get(`H${i + 1}`)!.join('\n').replace(/\n{2,}/g, '\n'), 300)) : ''
     // A hint that is the answer itself helps no one.
     const isHelpful = hint !== '' && squash(hint) !== squash(answer)
-    if (question && answer) items.push({ key: one.key, name: one.name, question, ...(isHelpful ? { hint } : {}), answer })
+    const kind = kindOf(parts.get(`T${i + 1}`))
+    if (question && answer) {
+      items.push({ key: one.key, name: one.name, question, ...(isHelpful ? { hint } : {}), answer, ...(kind ? { kind } : {}), ...(one.noteId ? { noteId: one.noteId } : {}) })
+    }
   })
   return items
 }
