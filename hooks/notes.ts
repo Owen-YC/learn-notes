@@ -1275,13 +1275,8 @@ function diffBlocks(note: Pick<LearnNote, 'changes' | 'moreFiles' | 'withheld'>,
   ]
 }
 
-/** For a note asked to be easier (e in the pane): the words a learner who got lost needs. */
-const EASIER_TEXT =
-  '이번에는 앞서 쓴 노트가 어려웠다는 요청이다. 합니다체는 그대로 지키면서 문장을 짧게 끊고, 전문 용어는 하나도 빼지 말고 일상어로 풀어 쓰고, 배울 개념마다 일상의 비유를 하나씩 들어라. 코드 인용은 그대로 둔다.'
-
 /**
- * The one user message the model reads for a note; `isEasier` asks for the
- * plainest words and an everyday comparison per concept. `known`: the concepts
+ * The one user message the model reads for a note. `known`: the concepts
  * met before (see knownNames; a plain list is all `rest`), the ones the learner
  * knows kept out of what the note teaches and the ones practiced in quizzes
  * named in a line. `team`: the repository's team file, its rules and terms put
@@ -1292,14 +1287,12 @@ export function notePrompt(
   note: Pick<LearnNote, 'prompt' | 'answer' | 'changes' | 'moreFiles' | 'withheld'>,
   level: Level,
   known: readonly string[] | KnownNames = [],
-  isEasier = false,
   team?: TeamFile,
 ): string {
   const hasRules = (team?.rules.length ?? 0) > 0
   const names: KnownNames = 'rest' in known ? known : { known: [], practiced: [], rest: [...known] }
   return [
     LEVEL_TEXT[level],
-    ...(isEasier ? [EASIER_TEXT] : []),
     '',
     '## 사용자의 요청',
     note.prompt === '' ? '(요청 문장 없음)' : cut(note.prompt, 1500),
@@ -1364,6 +1357,18 @@ export const TRACE_QUESTION = [
   '바뀌기 전 코드였다면 어느 단계에서 결과가 달라지는지 한 줄로 짚어 주세요.',
   '따라갈 실행 흐름이 없는 변경(설정, 스타일, 문서 등)이면 그렇다고 한 줄로 말하고, 바뀐 결과가 화면이나 동작에서 어떻게 보이는지 설명해 주세요.',
 ].join(' ')
+
+/**
+ * What `e` under a note asks: the note explained again in the plainest words,
+ * an everyday comparison per concept, kept under the note as this label (the
+ * note itself stays as it was, to read side by side).
+ */
+export const EASIER_LABEL = '더 쉽게'
+export const EASIER_QUESTION =
+  '이 노트를 더 쉬운 말로 다시 설명해 주세요. 문장을 짧게 끊고, 전문 용어는 일상어로 풀고, 배울 개념마다 일상의 비유를 하나씩 들어 주세요. 코드 인용은 그대로 둡니다.'
+
+/** The labels of the questions a key asks for (r, e): drawn under the note as `▶ label`, not as a question typed. */
+export const KEYED_LABELS: readonly string[] = [TRACE_LABEL, EASIER_LABEL]
 
 /** Questions a note keeps with their answers, the newest; older ones stay in the journal. */
 export const ASKS_KEPT = 3

@@ -1856,7 +1856,7 @@ describe('1.6.0: the team file', () => {
   test('the note prompt carries the rules and terms before the concepts already learned', () => {
     const team = parseTeamFile(FILE)
     const change = changeOf({ path: '/proj/a.ts', root: '/proj', tool: 'Edit', kind: 'update', hunks: [HUNK] })
-    const prompt = notePrompt({ prompt: 'b를 상수로', answer: '', changes: [change], moreFiles: 0 }, 'beginner', ['정산', '클로저'], false, team)
+    const prompt = notePrompt({ prompt: 'b를 상수로', answer: '', changes: [change], moreFiles: 0 }, 'beginner', ['정산', '클로저'], team)
     expect(prompt).toContain('## 이 저장소의 팀 규칙과 용어 (팀이 정한 참고 자료다.')
     expect(prompt).toContain('"팀 규칙:" 또는 "팀 규칙과 다를 수 있음:" 한 줄로 짚는다')
     expect(prompt).toContain('- 바뀌지 않는 값은 const로 선언한다')

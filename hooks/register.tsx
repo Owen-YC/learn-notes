@@ -88,6 +88,7 @@ import {
   isKnown,
   DAILY_REVIEW,
   todayReview,
+  dueAt,
   dueConcepts,
   dueText,
   markMissed,
@@ -121,6 +122,9 @@ import {
   type ShownLine,
   TRACE_LABEL,
   TRACE_QUESTION,
+  EASIER_LABEL,
+  EASIER_QUESTION,
+  KEYED_LABELS,
   type RankedConcept,
   shortPath,
   stamp,
@@ -171,6 +175,9 @@ const ANKI_FILE = 'learn-notes-anki.txt'
 const USAGE_KEY = 'usage'
 /** The last day the daily limit's toast showed, in any session: it shows once a day. */
 const LIMIT_TOAST_KEY = 'limitToast'
+/** Set once a new install's first session said hello (welcome), or one found notes or concepts there already. */
+const WELCOMED_KEY = 'welcomed'
+const WELCOME = 'learn-notes가 켜졌습니다 · 파일을 고치는 요청을 하면 노트가 생깁니다 · /learn으로 패널'
 
 type MergeRecord = { concept: LearnConcept; into: string; both: number }
 
@@ -483,6 +490,31 @@ async function isPaneVisible($: EngineInterface): Promise<boolean> {
   return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced && pane.isShown)
 }
 
+/**
+ * True where the pane cannot show: a cloud session (its screen is drawn for
+ * no one), or no pane placed on a screen that seats none (the terminal not
+ * fullscreen, as the spinner last said; unknown counts as none). A toast there
+ * is gone in seconds with nothing to open, so a written note says so in the
+ * transcript instead.
+ */
+async function isPaneless($: EngineInterface): Promise<boolean> {
+  if (await isCloudSession($)) return true
+  if ((await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)) return false
+  return canDock !== true
+}
+
+/**
+ * Says a note is ready where the pane is not in sight: a dim transcript line
+ * (never sent to the model) where no pane can show, a toast where it is hidden
+ * or closed.
+ */
+async function announceNote($: EngineInterface, note: LearnNote): Promise<void> {
+  const line = summaryOf(note.text)
+  const about = line === '' ? '준비됐습니다' : line
+  if (await isPaneless($)) $.ui.log(`학습 노트 · ${about} · /learn으로 보기`)
+  else if (!(await isPaneVisible($))) $.ui.toast(`학습 노트: ${about} · /learn으로 보기`, { timeoutMs: 6000 })
+}
+
 /** Appends a /learn ask question and answer to the journal the note is in, after any save still running. */
 function saveAsk($: EngineInterface, cfg: Config, note: LearnNote, question: string, answer: string, at: number): Promise<string | undefined> {
   return enqueue('saving', async () => {
@@ -600,6 +632,26 @@ async function currentAliases($: EngineInterface): Promise<Record<string, string
   const map = cleanAliases(await $.store.get(ALIASES_KEY))
   if (JSON.stringify(map) !== JSON.stringify(await read($, aliases))) await update($, aliases, () => map)
   return map
+}
+
+/**
+ * One toast for a brand-new install: the first interactive session with no
+ * notes and no concepts kept says what makes a note. Marked first, so a store
+ * that takes no writes never shows it again and again; one with notes already
+ * is marked too, and never looked at again. None in a cloud session: its screen
+ * is drawn for no one, and its store goes with the machine. Never fails the start.
+ */
+async function welcome($: EngineInterface): Promise<void> {
+  if (!isInteractive || (await isCloudSession($))) return
+  try {
+    if ((await $.store.get(WELCOMED_KEY)) !== undefined) return
+    const hasAny = (raw: unknown) => isRecord(raw) && Object.keys(raw).length > 0
+    const isNew = !hasAny(await $.store.get(HISTORY_KEY)) && !hasAny(await $.store.get(CONCEPTS_KEY))
+    await $.store.set(WELCOMED_KEY, true)
+    if (isNew) $.ui.toast(WELCOME, { timeoutMs: 8000 })
+  } catch (error) {
+    $.ui.log(`learn-notes: 첫 세션 안내를 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+  }
 }
 
 /** Fills an empty pane with the notes earlier sessions left for this project, and the concept index. */
@@ -1496,7 +1548,8 @@ async function keepQuiz($: EngineInterface, next: Quiz): Promise<void> {
 /**
  * Asks the model about a note and keeps the question and answer on it (and in
  * the journal): the answer, or why there is none. `label` is the words kept and
- * shown for a question the model is asked in other words (r's walk-through).
+ * shown for a question the model is asked in other words (r's walk-through, e's
+ * plainer words); `level` the reader it answers for, the setting's unless given.
  */
 async function askNote(
   $: EngineInterface,
@@ -1504,6 +1557,7 @@ async function askNote(
   id: string,
   question: string,
   label = question,
+  level: Level = cfg.level,
 ): Promise<{ answer: string; note: LearnNote; path: string | undefined; at: number } | { error: string }> {
   const note = (await read($, notes)).find(one => one.id === id)
   if (!note) return { error: '그 노트가 패널에 없습니다.' }
@@ -1511,7 +1565,7 @@ async function askNote(
   const masked = redactText(question).text
   const kept = label === question ? masked : redactText(label).text
   const rules = await teamOf($, note.root)
-  const asked = await askModel($, cfg, { system: ASK_SYSTEM, prompt: askPrompt(note, masked, cfg.level, rules), maxTokens: 900 })
+  const asked = await askModel($, cfg, { system: ASK_SYSTEM, prompt: askPrompt(note, masked, level, rules), maxTokens: 900 })
   if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
   const answer = cut(asked.text, 4000)
   const now = await $.clock.now()
@@ -1569,10 +1623,11 @@ function focusInPane($: EngineInterface, key: string): void {
 }
 
 /**
- * Enter in a note's question field, or r (its walk-through, `label` the words
- * kept for it): the answer shows under the note, the pane saying so meanwhile.
+ * Enter in a note's question field, or r and e (its walk-through, its plainer
+ * words: `label` the words kept for it, `level` the reader answered for): the
+ * answer shows under the note, the pane saying so meanwhile.
  */
-async function askInPane($: EngineInterface, cfg: Config, id: string, text: string, label?: string): Promise<void> {
+async function askInPane($: EngineInterface, cfg: Config, id: string, text: string, label?: string, level?: Level): Promise<void> {
   const question = text.trim()
   const set = (state: LearnAskRun) => update($, askRun, all => ({ ...all, [id]: state }))
   // r leaves the field as it was: a question typed there, or one put back after a failure, stays.
@@ -1592,7 +1647,7 @@ async function askInPane($: EngineInterface, cfg: Config, id: string, text: stri
   let answeredAt: number | undefined
   try {
     await set({ isAsking: true, error: null, draft: kept })
-    const asked = await askNote($, cfg, id, question, label)
+    const asked = await askNote($, cfg, id, question, label, level)
     if ('error' in asked) error = asked.error
     else answeredAt = asked.at
   } catch (thrown) {
@@ -1629,18 +1684,17 @@ async function journalDays($: EngineInterface, cfg: Config): Promise<{ day: stri
 
 /**
  * Writes the note for `id` with the model; the pane redraws as its status
- * moves. `isRewrite`: the journal has it already; `isEasier`: in the plainest
- * words (e); `isAuto`: a turn's end asked for it, not the learner (it counts
- * toward dailyAutoNotes). A rewrite that fails leaves the note as it was and
- * says why in a toast. Never rejects.
+ * moves. `isRewrite`: the journal has it already; `isAuto`: a turn's end asked
+ * for it, not the learner (it counts toward dailyAutoNotes). A rewrite that
+ * fails leaves the note as it was and says why in a toast. Never rejects.
  */
 async function writeNote(
   $: EngineInterface,
   cfg: Config,
   id: string,
-  how: { isRewrite?: boolean; isEasier?: boolean; isAuto?: boolean } = {},
+  how: { isRewrite?: boolean; isAuto?: boolean } = {},
 ): Promise<void> {
-  const { isRewrite = false, isEasier = false, isAuto = false } = how
+  const { isRewrite = false, isAuto = false } = how
   if (inFlight.has(id)) return
   inFlight.add(id)
   try {
@@ -1658,7 +1712,7 @@ async function writeNote(
       cfg,
       {
         system: SYSTEM,
-        prompt: notePrompt(note, isEasier ? 'beginner' : cfg.level, knownNames(await read($, concepts)), isEasier, rules),
+        prompt: notePrompt(note, cfg.level, knownNames(await read($, concepts)), rules),
         maxTokens: 1500,
       },
       isAuto ? 'auto' : 'manual',
@@ -1690,10 +1744,7 @@ async function writeNote(
     // autoSave off means no journal, nothing more: the note stays in the pane and the store.
     if (cfg.isAutoSave) await save($, cfg, done, isRewrite)
     await persist($, false, [done])
-    if (done.status === 'ready' && !(await isPaneVisible($))) {
-      const line = summaryOf(done.text)
-      $.ui.toast(`학습 노트: ${line === '' ? '준비됐습니다' : line} · /learn으로 보기`, { timeoutMs: 6000 })
-    }
+    if (done.status === 'ready') await announceNote($, done)
   } catch (error) {
     $.ui.log(`learn-notes: 노트를 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
   } finally {
@@ -2183,12 +2234,21 @@ export const register: Register = (on, options) => {
       argumentHint: '[퀴즈|정리|질문|기록|보고서|찾기|일지|도움말]',
       immediate: true,
     })
+    // An engine without tools for plugins, or one that refuses this one, leaves /learn as it was.
+    try {
+      await $.tool.register(TOOL_SPEC)
+      hasTool = true
+    } catch (error) {
+      hasTool = false
+      $.ui.log(`learn-notes: 학습 기록 도구를 등록하지 못했습니다 (${String(error)})`, { to: 'debug' })
+    }
     isInteractive = e.isInteractive
     await loadHistory($)
     await loadTeam($)
     await seedActivity($)
     await seedUsage($)
     await remind($, cfg)
+    await welcome($)
     // A quiz request a reload cut off is not coming back; the last quiz is there for the pane to draw.
     if (!isQuizMaking && !isQuizChecking) await update($, quizRun, () => ({ isMaking: false, error: null, checking: null }))
     // A question a reload cut off is not coming back: its field is there again.
@@ -2198,6 +2258,25 @@ export const register: Register = (on, options) => {
       if (last) await update($, quiz, () => last)
     }
     return next(e)
+  })
+
+  // The learning record tool (TOOL_SPEC): read-only, answered here with no model call.
+  on('tool.call', { tool: TOOL_NAME }, async ($, e) => {
+    const action = typeof e.action === 'string' ? e.action.trim() : ''
+    const query = typeof e.query === 'string' ? e.query.trim() : ''
+    try {
+      return { result: await toolText($, cfg, action, query) }
+    } catch (error) {
+      $.ui.log(`learn-notes: 학습 기록 도구가 답하지 못했습니다 (${String(error)})`, { to: 'debug' })
+      return { result: '학습 기록을 읽지 못했습니다. 잠시 뒤 다시 해 보세요.' }
+    }
+  })
+
+  // It only reads the learner's own record: no permission dialog. A deny rule written against it still holds.
+  on('tool.check', { tool: TOOL_NAME }, async ($, e, next) => {
+    const verdict = await next(e).catch(() => undefined)
+    if (verdict?.decision === 'deny') return verdict
+    return { decision: 'allow' as const, reason: 'learn-notes의 읽기 전용 학습 기록' }
   })
 
   // Only reads where the spinner is drawn, to know whether a pane would dock.
@@ -2358,7 +2437,7 @@ export const register: Register = (on, options) => {
     const arg = COMMAND_WORDS[said] ?? said
     const rest = words.slice(said.length).trim()
     const list = await read($, notes)
-    if (arg === 'help') return { text: HELP }
+    if (arg === 'help') return { text: commandHelp() }
     if (arg === 'find') {
       if (rest === '') return { text: '쓰는 법: /learn 찾기 찾을 말 (요청 · 노트 내용 · 파일 이름 · 개념 이름에서 찾습니다)' }
       const now = await $.clock.now()
@@ -2674,7 +2753,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           {noteBody(note, isBusy, offText(note, cfg, now), el)}
           {note.status === 'ready' && note.concepts.length > 0 && conceptLine(note, index, map, el)}
-          {note.status === 'ready' && noteTools($, cfg, note, isBusy, writeLabel, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el)}
+          {note.status === 'ready' && noteTools($, cfg, note, writeLabel, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el)}
         </Box>
       ) : (
         <Box flexDirection="column">
@@ -2843,11 +2922,12 @@ function focusShown($: EngineInterface, current: Quiz): void {
 
 /**
  * Under a written note, what to do with it: a quiz on its concepts (t), the
- * note again in plainer words (e), its code followed step by step on one
- * example (r), a question about it (i, the field below), and last and dim the
- * note written again (w), with the latest questions and their answers.
+ * note explained again in plainer words under it, the note kept (e), its code
+ * followed step by step on one example (r), a question about it (i, the field
+ * below), and last and dim the note written again (w), with the latest
+ * questions and their answers.
  */
-function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boolean, writeLabel: string, ask: LearnAskRun, el: ElementTable) {
+function noteTools($: EngineInterface, cfg: Config, note: LearnNote, writeLabel: string, ask: LearnAskRun, el: ElementTable) {
   const { Box, Text, Button, Markdown } = el
   // The mobile app draws no text field yet: there a question goes through /learn ask.
   const Input = 'Input' in el ? el.Input : undefined
@@ -2868,7 +2948,14 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boo
             }}
           />
         )}
-        <Button key="easier" hotkey="e" plain dimColor={isBusy} label="더 쉽게" onPress={() => void writeNote($, cfg, note.id, { isRewrite: note.savedAs !== null, isEasier: true })} />
+        <Button
+          key="easier"
+          hotkey="e"
+          plain
+          dimColor={ask.isAsking}
+          label={EASIER_LABEL}
+          onPress={() => void askInPane($, cfg, note.id, EASIER_QUESTION, EASIER_LABEL, 'beginner')}
+        />
         <Button key="trace" hotkey="r" plain dimColor={ask.isAsking} label={TRACE_LABEL} onPress={() => void askInPane($, cfg, note.id, TRACE_QUESTION, TRACE_LABEL)} />
         {Input && (
           <Button key="ask-type" hotkey="i" plain label="질문하기" onPress={() => void $.ui.focus({ requestId: PANE, key: fieldKey }).catch(() => undefined)} />
@@ -2878,7 +2965,7 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boo
       {(note.asks ?? []).map((one, i, all) => ({ one, key: askedKey(note.id, all, i) })).slice(-2).map(({ one, key }) => (
         <Box key={key} flexDirection="column" marginTop={1}>
           <Text color="cyan" wrap="wrap">
-            {one.question === TRACE_LABEL ? `▶ ${TRACE_LABEL}` : `질문 · ${one.question}`}
+            {KEYED_LABELS.includes(one.question) ? `▶ ${one.question}` : `질문 · ${one.question}`}
           </Text>
           <Markdown text={one.answer} />
         </Box>
@@ -3215,6 +3302,129 @@ async function recordText($: EngineInterface, cfg: Config): Promise<string> {
     '',
     usageLine(cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)), now),
   ].join('\n')
+}
+
+/**
+ * The read-only tool the main Claude calls when the learner asks what they
+ * learned (registered at session.start, so a chat question needs no command):
+ * this project's notes, every project's concepts, no model call of this
+ * plugin's. Its full name is `mcp__<plugin>__<name>`.
+ */
+const TOOL = 'notes'
+const TOOL_NAME = 'mcp__learn-notes__notes'
+/** Characters one answer of the tool holds at most: it goes into the conversation. */
+const TOOL_BUDGET = 4000
+const TOOL_ACTIONS = ['search', 'concepts', 'due', 'recent', 'note'] as const
+const TOOL_SPEC = {
+  name: TOOL,
+  description:
+    '이 학습자의 learn-notes 학습 기록(노트·배운 개념·복습할 개념·퀴즈 결과)을 읽는다. 학습자가 자기가 배운 것을 물을 때만 쓴다. Read-only.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: {
+        enum: [...TOOL_ACTIONS],
+        description:
+          'search: query가 든 이 프로젝트의 노트와 모든 프로젝트의 개념 · concepts: 학습 기록(연속 학습일·퀴즈 정답률·복습할 개념·배운 개념) · due: 지금 복습할 개념 · recent: 한 기간의 이 프로젝트 노트와 그 개념 · note: 노트 하나의 전문과 그 아래 질문과 답',
+      },
+      query: {
+        type: 'string',
+        description: 'search: 찾을 말 · recent: 오늘, 어제, 이번주, 최근 7일(기본), YYYY-MM-DD · note: 찾을 말(없으면 패널에서 고른 노트, 그것도 없으면 마지막 노트)',
+      },
+    },
+    required: ['action'],
+  },
+}
+const TOOL_USAGE = `action은 ${TOOL_ACTIONS.join(' · ')} 중 하나입니다.`
+/** Notes the tool gives in full at most in one answer; the rest go as one line each. */
+const TOOL_FULL_NOTES = 2
+/** True once this load registered the tool: the help says a question in the chat works only then. */
+let hasTool = false
+
+/** A concept as the tool lists it: its name, how often met, where its review stands, and what it is. */
+function conceptForTool(one: LearnConcept, now: number): string {
+  const state = isKnown(one) ? '아는 개념' : reviewText(one, now)
+  return `- **${one.name}** ×${one.count} · ${state}${one.blurb === '' ? '' : `: ${one.blurb}`}`
+}
+
+/** A note as the tool gives it in full: when, the request, the note, then the questions asked under it. */
+function noteForTool(note: LearnNote, now: number): string {
+  const request = note.prompt === '' ? '(없음)' : cut(note.prompt.replace(/\s+/g, ' '), 300)
+  const asks = (note.asks ?? []).map(one => `- ${KEYED_LABELS.includes(one.question) ? one.question : `질문 · ${one.question}`}\n  답: ${cut(one.answer.replace(/\s+/g, ' '), 600)}`)
+  return [`## ${when(note.at, now)} 노트`, `요청: ${request}`, '', noteAsText(note), ...(asks.length > 0 ? ['', '노트 아래에서 나눈 질문과 답', ...asks] : [])].join('\n')
+}
+
+/**
+ * The tool's answer to one call (see TOOL_SPEC): plain text, TOOL_BUDGET
+ * characters at most, whole lists first and notes in full last, so a cut
+ * takes the end of a note and never a line of the lists.
+ */
+async function toolText($: EngineInterface, cfg: Config, action: string, query: string): Promise<string> {
+  const now = await $.clock.now()
+  const root = (await read($, paneRoot)) ?? (await $.session.root())
+  // Notes of the project in use only (a note in the pane may carry no root); concepts cross projects.
+  const mine = (await allNotes($)).filter(note => (note.root || root) === root).sort((a, b) => b.at - a.at)
+  const index = await read($, concepts)
+  const aliases = await currentAliases($)
+  const full = (list: readonly LearnNote[]) => (list.length > 0 ? ['', ...list.slice(0, TOOL_FULL_NOTES).map(note => noteForTool(note, now))] : [])
+  const noteLines = (list: readonly LearnNote[], most: number) => [
+    ...list.slice(0, most).map(note => `- ${noteLine(note, now)}`),
+    ...(list.length > most ? [`- 그 밖에 ${list.length - most}개`] : []),
+  ]
+  let lines: string[]
+  if (action === 'search') {
+    if (query === '') return '찾을 말을 query에 주세요. 요청 · 노트 내용 · 파일 이름 · 개념 이름에서 찾습니다.'
+    const found = searchNotes(mine, query, aliases)
+    const needle = query.toLowerCase()
+    const key = resolveKey(aliases, conceptKey(query))
+    const matched = rankConcepts(index).filter(one => one.key === key || one.name.toLowerCase().includes(needle) || one.blurb.toLowerCase().includes(needle))
+    lines = [
+      found.length > 0 ? `'${query}' · 이 프로젝트의 노트 ${found.length}개 (최근 것부터)` : `'${query}'에 맞는 노트가 이 프로젝트에 없습니다.`,
+      ...noteLines(found, 10),
+      ...(matched.length > 0 ? ['', `'${query}'에 맞는 개념 ${matched.length}개 (모든 프로젝트)`, ...matched.slice(0, 10).map(one => conceptForTool(one, now))] : []),
+      ...full(found),
+    ]
+  } else if (action === 'concepts') {
+    lines = [await recordText($, cfg)]
+  } else if (action === 'due') {
+    const due = dueConcepts(index, now)
+    const today = todayReview(index, await storedActivity($), now)
+    if (due.length === 0) {
+      const next = rankConcepts(index)
+        .filter(one => !isKnown(one))
+        .sort((a, b) => dueAt(a) - dueAt(b))[0]
+      lines = [`지금 복습할 개념이 없습니다.${next ? ` 다음 복습: ${next.name} (${dueText(next, now)})` : ''}`]
+    } else {
+      lines = [
+        `복습할 개념 ${due.length}개 (퀴즈에서 틀린 것부터) · ${todayText(today)} · 복습하는 곳: ${reviewWay(today.left)}`,
+        ...due.slice(0, RECORD_CONCEPTS).map(one => conceptForTool(one, now)),
+        ...(due.length > RECORD_CONCEPTS ? [`- 그 밖에 ${due.length - RECORD_CONCEPTS}개`] : []),
+      ]
+    }
+  } else if (action === 'recent') {
+    const asked = recapRange(query === '' ? '최근 7일' : query, now)
+    const range = asked ?? recapRange('최근 7일', now)!
+    const within = mine.filter(note => note.at >= range.from && note.at < range.to)
+    const keys = new Set(within.flatMap(note => note.concepts.map(one => resolveKey(aliases, one))))
+    const taught = rankConcepts(index).filter(one => keys.has(one.key))
+    lines = [
+      ...(asked ? [] : [`'${query}'는 기간으로 읽지 못해 최근 7일로 봅니다.`]),
+      `${range.label} · 이 프로젝트의 노트 ${within.length}개 (최근 것부터)`,
+      ...noteLines(within, 15),
+      ...(taught.length > 0
+        ? ['', `이 노트들의 개념 ${taught.length}개`, ...taught.slice(0, 15).map(one => `${conceptForTool(one, now)}${one.firstAt >= range.from ? ' (이 기간에 처음 배움)' : ''}`)]
+        : []),
+      ...full(within),
+    ]
+  } else if (action === 'note') {
+    const picked = (await read($, selectedId)) ?? undefined
+    const note = query === '' ? (mine.find(one => one.id === picked) ?? mine[0]) : searchNotes(mine, query, aliases)[0]
+    if (!note) return query === '' ? '이 프로젝트에는 아직 노트가 없습니다.' : `'${query}'에 맞는 노트가 이 프로젝트에 없습니다.`
+    lines = [noteForTool(note, now)]
+  } else {
+    return TOOL_USAGE
+  }
+  return cut(lines.join('\n'), TOOL_BUDGET)
 }
 
 const REPORT_USAGE = '쓰는 법: /learn 보고서 (최근 7일 · 이번주 · 어제 · 오늘 · 2026-10-03)'
@@ -3585,6 +3795,15 @@ const HELP = [
   '- `/learn 찾기 말`: 지난 노트 찾기 · `/learn 일지`: 오늘 노트 목차 (`어제` · `2026-10-03` · `목록`도 됩니다)',
   '- 가끔: `/learn 마지막` 마지막 노트 · `/learn 합치기 A = B` 개념 합치기 · `/learn 안다 이름` 복습에서 빼기 · `/learn 모른다 이름` 되돌리기 · `/learn 안키` Anki 카드 · `/learn 비우기` 패널 비우기',
 ].join('\n')
+/** Said at the top of the help while the learning record tool is there (hasTool): the record answers a plain question. */
+const CHAT_HINT = '대화창에 그냥 물어봐도 됩니다: "오늘 배운 거 알려 줘"'
+
+/** /learn 도움말: HELP, with CHAT_HINT under its title while the tool is registered. */
+function commandHelp(): string {
+  if (!hasTool) return HELP
+  const [title, ...rest] = HELP.split('\n')
+  return [title, CHAT_HINT, ...rest].join('\n')
+}
 /** What an unknown subcommand gets: the few most used, and where the rest are. */
 const SHORT_HELP = '자주 쓰는 것: `/learn` 패널 · `/learn 퀴즈` · `/learn 정리` · `/learn 질문 …` · `/learn 기록` · 전체는 `/learn 도움말`'
 /**

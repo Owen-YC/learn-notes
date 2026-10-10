@@ -70,7 +70,7 @@ export type LearnNote = {
   isCounted?: boolean
   /** True while the journal refused its latest writing (or, before 1.6.0, autoSave was off): the next save that works writes it too. */
   isUnsaved?: boolean
-  /** The latest questions asked about this note (the pane's question field, /learn ask) with their answers. */
+  /** The latest questions asked about this note (the pane's question field, r, e since 1.6.0, /learn ask) with their answers. */
   asks?: LearnAsk[]
   /** Changed files whose content the note left out; absent when none (and on notes before 1.6.0). */
   withheld?: LearnWithheld[]
@@ -81,7 +81,7 @@ export type LearnNote = {
   skip?: 'format' | 'limit'
 }
 
-/** One question about a note and the model's answer. */
+/** One question about a note and the model's answer; a key's (r, e) is kept as its label (`예시로 따라가기`, `더 쉽게`). */
 export type LearnAsk = { question: string; answer: string; at: number }
 
 /** A note's question in the pane: whether its answer is being written, and why the last one failed. */

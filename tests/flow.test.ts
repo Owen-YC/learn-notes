@@ -56,6 +56,10 @@ type World = {
   copied: string[]
   /** True while the surface has no clipboard to copy on (a remote one). */
   copyFails: boolean
+  /** The tools the plugin registered for the model, by short name. */
+  tools: string[]
+  /** True while no tool can be registered (an engine with no tools for plugins). */
+  toolFails: boolean
   release: () => void
   clock: ReturnType<typeof mock.clock>
 }
@@ -93,6 +97,8 @@ function world(
     links: new Map(),
     copied: [],
     copyFails: false,
+    tools: [],
+    toolFails: false,
     release: () => release(),
     clock: mock.clock(on, { now: Date.UTC(2026, 9, 3, 1) }),
   }
@@ -100,6 +106,11 @@ function world(
   on('session.root', () => ({ value: w.root }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('tool.register', (_$, e) => {
+    if (w.toolFails) throw new Error('no tools for plugins here')
+    w.tools.push(e.name)
+    return { value: { tool: `mcp__learn-notes__${e.name}` } }
+  })
   // The store as JSON, as the host keeps it: what goes in comes back a copy.
   on('store.get', (_$, e) => ({ value: w.store.has(e.key) ? JSON.parse(JSON.stringify(w.store.get(e.key))) : undefined }))
   on('store.set', (_$, e) => {
@@ -356,8 +367,9 @@ test('a turn that edits files becomes a written, saved note', async ($, on) => {
   expect(w.writes[0]!.text).toContain('# 학습 노트')
   expect(w.writes[0]!.text).toContain('let을 const로')
   expect(w.writes[0]!.text).toContain('`src/a.ts` (수정, +1 −1)')
-  expect(w.toasts[0]).toBe('학습 노트: let을 const로 바꿔 값이 다시 바뀌지 않게 했다 · /learn으로 보기')
-  expect(w.logs).toEqual([])
+  // No pane can show here (none placed, the terminal not fullscreen): a dim line in the transcript, not a toast.
+  expect(w.logs).toEqual(['학습 노트 · let을 const로 바꿔 값이 다시 바뀌지 않게 했다 · /learn으로 보기'])
+  expect(w.toasts).toEqual([])
 
   const last = await learn($, 'last')
   expect(last.text).toContain('src/a.ts (+1 −1), src/new.ts (+1 −0)')
@@ -845,7 +857,7 @@ test('a new session loads the stored notes into the pane', async ($, on) => {
   const history = store.get('history') as Record<string, { notes: { id: string; isPast: boolean }[] }>
   expect(history['/proj']!.notes.map(n => n.id).slice(0, 2)).toEqual(['old', 'cut'])
   expect(history['/proj']!.notes).toHaveLength(3)
-  expect(w.logs).toEqual([])
+  expect(w.logs).toEqual(['학습 노트 · let을 const로 바꿔 값이 다시 바뀌지 않게 했다 · /learn으로 보기'])
 })
 
 test('/learn clear forgets this project in the store too', async ($, on) => {
@@ -1944,20 +1956,37 @@ test('t in the note view quizzes on that note\'s concepts only: 이 노트 퀴�
   await ui.unmount()
 })
 
-test('e rewrites the note in plainer words with an everyday comparison', async ($, on) => {
-  const w = world(on)
+test('e explains the note again in plainer words under it, the note kept as it was', { options: { level: 'advanced' } }, async ($, on) => {
+  const store = new Map<string, unknown>()
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  w.answer = CONCEPT_NOTE(['for...of 반복문'])
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
+  const countOf = () => Object.values(store.get('concepts') as Record<string, { name: string; count: number }>).find(one => one.name === 'for...of 반복문')!.count
+  const counted = countOf()
+  const activity = JSON.stringify(store.get('activity'))
   const ui = await pane($)
   expect(w.models[0]).not.toContain('일상의 비유')
-  w.answer = NOTE_TEXT.replace('let을 const로 바꿔', '값을 한 번 정하면 못 바꾸게(상자에 자물쇠) 해서')
+  w.answer = '값을 한 번 정하면 못 바꾸게(상자에 자물쇠) 합니다.'
   await ui.press({ key: 'easier' })
   await w.clock.settle()
+  // One call, asked as a question about the note, for a beginner whatever the setting.
   expect(w.models).toHaveLength(2)
   expect(w.models[1]).toContain('일상의 비유')
   expect(w.models[1]).toContain('입문자')
+  expect(await ui.find({ type: 'Text', text: /^▶ 더 쉽게$/ })).toBeDefined()
   expect(await ui.find({ type: 'Markdown', text: /상자에 자물쇠/ })).toBeDefined()
-  expect(w.journal().at(-1)!.text).toContain('(다시 쓴 노트)')
+  // The note stays, to read beside the plainer words; nothing counted again.
+  const history = store.get('history') as Record<string, { notes: { text: string; asks?: { question: string }[] }[] }>
+  const note = history['/proj']!.notes.at(-1)!
+  expect(note.text).toBe(CONCEPT_NOTE(['for...of 반복문']))
+  expect(note.asks!.at(-1)!.question).toBe('더 쉽게')
+  expect(countOf()).toBe(counted)
+  expect(JSON.stringify(store.get('activity'))).toBe(activity)
+  // The journal keeps it as a question under the note, not as the note rewritten.
+  expect(w.journal().at(-1)!.text).toContain('**물음**: 더 쉽게')
+  expect(w.journal().at(-1)!.text).not.toContain('(다시 쓴 노트)')
   await ui.unmount()
 })
 
@@ -3469,10 +3498,10 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
     await turn($, () => $.tool.call(EDIT_A))
     await finish(w)
     await learn($, '안다 기본 매개변수')
-    // e: the prompt says the learner knows it, so the plainer note leaves it out.
+    // w: the prompt says the learner knows it, so the note written again leaves it out.
     const ui = await pane($)
     w.answer = CONCEPT_NOTE(['for...of 반복문'])
-    await ui.press({ key: 'easier' })
+    await ui.press({ key: 'write' })
     await w.clock.settle()
     expect(w.models.at(-1)).toContain('## 학습자가 이미 아는 개념 (배울 개념에 넣지 마라. 꼭 필요하면 왜 칸에서 한 마디만)\n기본 매개변수\n')
     const kept = stepOfName(store, '기본 매개변수')
@@ -4230,5 +4259,191 @@ describe('1.6.0: fewer commands, one record, a report with no code', () => {
     expect(w.models).toHaveLength(calls + 2)
     expect(w.models.at(-1)).toContain('요청: 어제 요청')
     expect(w.models.at(-1)).not.toContain('퀴즈에서 틀린 개념')
+  })
+})
+
+describe('1.6.0: e under the note, a line where no pane shows, the record Claude reads', () => {
+  const DAY = 86_400_000
+  const TOOL = 'mcp__learn-notes__notes'
+  const READY_LINE = '학습 노트 · let을 const로 바꿔 값이 다시 바뀌지 않게 했다 · /learn으로 보기'
+  const WELCOME = 'learn-notes가 켜졌습니다 · 파일을 고치는 요청을 하면 노트가 생깁니다 · /learn으로 패널'
+  /** What the tool answers the model for one call. */
+  const record = async ($: Engine, action: string, query?: string) =>
+    String((await $.tool.call({ tool: TOOL, action, ...(query === undefined ? {} : { query }) })).result)
+  const noteLines = (w: World) => w.logs.filter(line => line.startsWith('학습 노트 · '))
+
+  test('where no pane can show, a written note is a dim line in the transcript and no toast', async ($, on) => {
+    const w = world(on)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(noteLines(w)).toEqual([READY_LINE])
+    expect(w.toasts).toEqual([])
+  })
+
+  test('a cloud session says it in the transcript though a pane is placed: its screen is drawn for no one', async ($, on) => {
+    const w = world(on, 'ok', { isShown: false }, true, new Map(), { CLAUDE_CODE_REMOTE: 'true' })
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(noteLines(w)).toEqual([READY_LINE])
+    expect(w.toasts).toEqual([])
+  })
+
+  test('a pane hidden behind another, or closed on a screen that seats one, still gets the toast', { options: { autoOpen: false } }, async ($, on) => {
+    const w = world(on, 'ok', { isShown: false })
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.toasts).toEqual(['학습 노트: let을 const로 바꿔 값이 다시 바뀌지 않게 했다 · /learn으로 보기'])
+    expect(noteLines(w)).toEqual([])
+  })
+
+  test('a fullscreen terminal with the pane never opened gets the toast too', { options: { autoOpen: false } }, async ($, on) => {
+    const w = world(on)
+    await fullscreen($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.toasts).toHaveLength(1)
+    expect(noteLines(w)).toEqual([])
+  })
+
+  test('a new install says hello once: the first interactive session with nothing learned', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(w.toasts).toEqual([WELCOME])
+    expect(store.get('welcomed')).toBe(true)
+    await start($)
+    expect(w.toasts).toEqual([WELCOME])
+  })
+
+  test('no hello where notes or concepts are kept already: it is marked and not looked at again', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', { 'c:클로저': { name: '클로저', count: 1, firstAt: NOW - DAY, lastAt: NOW - DAY, blurb: '', files: [] } }]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(w.toasts).toEqual([])
+    expect(store.get('welcomed')).toBe(true)
+  })
+
+  test('no hello in a -p run, nor in a cloud session, and none marked there', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store, { CLAUDE_CODE_REMOTE: 'true' })
+    await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: false })
+    await start($)
+    expect(w.toasts).toEqual([])
+    expect(store.has('welcomed')).toBe(false)
+  })
+
+  test('e that brings no answer says why under the note, the note kept as it was', async ($, on) => {
+    const w = world(on)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const ui = await pane($)
+    w.model = 'error'
+    await ui.press({ key: 'easier' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: /답하지 못했습니다/ })).toBeDefined()
+    // The note is as it was, still ready, its w still 다시 쓰기.
+    expect(await ui.find({ type: 'Markdown', text: /let을 const로/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'write', text: '다시 쓰기' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('Claude gets a read-only tool at start: it finds this project\'s notes and every project\'s concepts, with no model call', async ($, on) => {
+    const other = {
+      id: 'far',
+      turnId: 'far',
+      at: NOW - DAY,
+      prompt: '다른 프로젝트의 const 요청',
+      answer: '',
+      changes: [{ file: 'b.ts', path: '/other/b.ts', tool: 'Edit', kind: 'update', added: 1, removed: 1, diff: '@@ -1,1 +1,1 @@\n-a\n+b', isCut: false }],
+      moreFiles: 0,
+      status: 'ready',
+      text: '### 한 줄 요약\n다른 곳의 const 노트',
+      savedAs: 'ready',
+    }
+    const store = new Map<string, unknown>([
+      ['history', { '/other': { at: NOW - DAY, notes: [other] } }],
+      ['concepts', { 'c:const 선언': { name: 'const 선언', count: 2, firstAt: NOW - 2 * DAY, lastAt: NOW - DAY, blurb: '다시 대입할 수 없는 변수', files: ['/other/b.ts'] } }],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(w.tools).toEqual(['notes'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const calls = w.models.length
+    const found = await record($, 'search', 'const')
+    expect(found).toContain('이 프로젝트의 노트 1개')
+    expect(found).toContain('let을 const로')
+    expect(found).not.toContain('다른 곳의 const 노트')
+    expect(found).not.toContain('다른 프로젝트의 const 요청')
+    expect(found).toContain('**const 선언** ×2')
+    expect(found).toContain('다시 대입할 수 없는 변수')
+    expect(await record($, 'search', '')).toContain('찾을 말을 query에 주세요')
+    expect(await record($, 'search', '없는말')).toContain("'없는말'에 맞는 노트가 이 프로젝트에 없습니다.")
+    expect(w.models).toHaveLength(calls)
+  })
+
+  test('due, recent, note and concepts read the record; an unknown action says which there are', async ($, on) => {
+    const store = new Map<string, unknown>([
+      ['concepts', { 'c:클로저': { name: '클로저', count: 1, firstAt: NOW - 5 * DAY, lastAt: NOW - 5 * DAY, blurb: '함수가 바깥 변수를 기억함', files: [] } }],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const due = await record($, 'due')
+    expect(due).toContain('복습할 개념 1개')
+    expect(due).toContain('**클로저** ×1 · 아직 떠올려 본 적 없음: 함수가 바깥 변수를 기억함')
+    expect(await record($, 'note')).toBe('이 프로젝트에는 아직 노트가 없습니다.')
+
+    await turn($, () => $.tool.call(EDIT_A), 't1', 'b를 상수로 바꿔줘')
+    await finish(w)
+    w.answer = '`const`는 다시 대입할 수 없습니다.'
+    await learn($, '질문 왜 const야?')
+    const recent = await record($, 'recent')
+    expect(recent).toContain('최근 7일 · 이 프로젝트의 노트 1개')
+    expect(recent).toContain('요청: b를 상수로 바꿔줘')
+    expect(await record($, 'recent', '어제')).toContain('어제 · 이 프로젝트의 노트 0개')
+    expect(await record($, 'recent', '언젠가')).toContain("'언젠가'는 기간으로 읽지 못해 최근 7일로 봅니다.")
+    const note = await record($, 'note')
+    expect(note).toContain('let을 const로 바꿔 값이 다시 바뀌지 않게 했다')
+    expect(note).toContain('- 질문 · 왜 const야?\n  답: `const`는 다시 대입할 수 없습니다.')
+    expect(await record($, 'note', '상수로')).toContain('요청: b를 상수로 바꿔줘')
+    expect(await record($, 'concepts')).toContain('학습 기록 · ')
+    expect(await record($, 'quiz')).toBe('action은 search · concepts · due · recent · note 중 하나입니다.')
+  })
+
+  test('an answer stays within 4,000 characters, the lists first', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.answer = `${NOTE_TEXT}\n\n${'긴 설명입니다. '.repeat(1200)}`
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const found = await record($, 'search', 'const')
+    expect(found.length).toBeLessThanOrEqual(4000)
+    expect(found.split('\n')[1]).toContain('let을 const로')
+  })
+
+  test('it runs without a permission dialog: the check allows it', async ($, on) => {
+    world(on)
+    await start($)
+    const verdict = await $.tool.check({ tool: TOOL, input: { action: 'due' } })
+    expect(verdict.decision).toBe('allow')
+  })
+
+  test('an engine with no tools for plugins still starts, and the help leaves the chat line out', async ($, on) => {
+    const w = world(on)
+    w.toolFails = true
+    await start($)
+    expect(w.tools).toEqual([])
+    const help = (await learn($, '도움말')).text ?? ''
+    expect(help).toContain('learn-notes 명령')
+    expect(help).not.toContain('대화창에 그냥 물어봐도 됩니다')
+    expect(w.logs.some(line => line.startsWith('learn-notes: 학습 기록 도구를 등록하지 못했습니다'))).toBe(true)
+  })
+
+  test('with the tool there, the help says a plain question in the chat works, still 15 lines at most', async ($, on) => {
+    world(on)
+    await start($)
+    const help = (await learn($, '도움말')).text ?? ''
+    expect(help.split('\n').slice(0, 2)).toEqual(['learn-notes 명령', '대화창에 그냥 물어봐도 됩니다: "오늘 배운 거 알려 줘"'])
+    expect(help.split('\n').length).toBeLessThanOrEqual(15)
   })
 })
