@@ -98,6 +98,7 @@ import {
   QUIZ_SYSTEM,
   CHECK_SYSTEM,
   REDACTED,
+  isConfigFile,
   isGeneratedFile,
   isSecretFile,
   matchesPattern,
@@ -1438,6 +1439,28 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
     ['+OPENAI_API_KEY=plainvalue123', 'plainvalue123'],
     ['+export STRIPE_SECRET="quoted value"', 'quoted value'],
     ['+DB_PASSWORD=hunter3', 'hunter3'],
+    // Formats masked past the first list: Bearer tokens, every kind of GitHub token, Stripe test and restricted keys, mongodb+srv.
+    ["+  headers: { Authorization: 'Bearer 9f8a7c6e5d4b3a2f1e0d9c8b7a6f5e4d' },", '9f8a7c6e5d4b3a2f1e0d9c8b7a6f5e4d'],
+    [`+GITHUB_TOKEN_CI: gho_${A}`, `gho_${A}`],
+    [`+  installation: 'ghs_${A}',`, `ghs_${A}`],
+    [`+refresh ghr_${A}`, `ghr_${A}`],
+    [`+user ghu_${A}`, `ghu_${A}`],
+    ['+stripe(rk_live_51Habcdefghijklmn)', 'rk_live_51Habcdefghijklmn'],
+    ['+stripe.setKey(sk_test_51H8a2bC3dE4fG5hI6jK7lM8nO9pQ)', 'sk_test_51H8a2bC3dE4fG5hI6jK7lM8nO9pQ'],
+    ['+const uri = "mongodb+srv://admin:Pa55word@cluster0.abcd.mongodb.net/test"', 'Pa55word'],
+    // npm, Hugging Face, Supabase, Telegram and Discord bot tokens, Slack and Discord webhooks.
+    [`+//registry.npmjs.org/:_authToken=npm_${'a1B2'.repeat(9)}`, `npm_${'a1B2'.repeat(9)}`],
+    ["+const hf = 'hf_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345'", 'hf_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345'],
+    ['+createClient(url, sb_' + 'secret_N7UND0UgjKTVK-Uodkm0Hg_xSvEMPvz)', 'sb_' + 'secret_N7UND0UgjKTVK-Uodkm0Hg_xSvEMPvz'],
+    ["+bot = TeleBot('7123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw')", '7123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw'],
+    ["+client.login('MTEyMzQ1Njc4OTAxMjM0NTY3OA." + "GhIjKl.aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789ab')", 'MTEyMzQ1Njc4OTAxMjM0NTY3OA'],
+    ['+const url = "https://hooks.slack.com/' + 'services/T0123ABCD/B0123ABCD/abcdefGHIJKLmnopQRSTuvwx"', 'abcdefGHIJKLmnopQRSTuvwx'],
+    ['+const hook = "https://discord.com/api/webhooks/123456789012345678/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_ab"', 'AbCdEfGhIjKlMnOpQrStUvWxYz'],
+    // A name ending in key with a value that looks generated, and a name ending in pass.
+    ['+const KAKAO_REST_KEY = "0123456789abcdef0123456789abcdef"', '0123456789abcdef0123456789abcdef'],
+    ['+  serviceKey: "abc%2Bdef1234567890ghijklmnopqrstuvwxyz%3D%3D",', 'abc%2Bdef1234567890'],
+    ['+DB_PASS=hunter2hunter2', 'hunter2hunter2'],
+    ["+const dbPass = 'hunter2'", 'hunter2'],
   ]
 
   test('each common key format is masked, the line and its +/− marker kept', () => {
@@ -1487,8 +1510,77 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
       `+${'='.repeat(72)}`,
       `+${'/'.repeat(72)}`,
       ' const a = 1',
+      // A package's version, a ternary's branches, the name a token is kept under, a label in Korean.
+      '+    "jsonwebtoken": "^9.0.2",',
+      '+    "@types/jsonwebtoken": "~9.0.6",',
+      '+    "js-tokens": "^4.0.0",',
+      '+  <input type={show ? "password" : "text"} />',
+      "+  autoComplete={isNew ? 'new-password' : 'current-password'}",
+      '+const TOKEN_KEY = "accessToken"',
+      "+var tokenKey = ':_authToken'",
+      '+  "password": "비밀번호",',
+      // Names ending in key or pass whose values are no generated key or password.
+      '+const storageKey = "theme"',
+      '+  queryKey: "todos",',
+      '+  i18nKey="dashboard.welcome.title"',
+      '+const CACHE_KEY = "user-profile-cache-v2"',
+      '+const STORAGE_KEY = "learnNotesStateV2"',
+      '+  Key: "uploads/2024/10/photo.jpg",',
+      '+const apiKeyName = "x-api-key"',
+      '+const monkey = "a1b2c3d4e5f6g7h8i9j0"',
+      '+const PASS = "PASS"',
+      "+  renderPass: 'shadow',",
+      "+  PWD: '/Users/me/app',",
+      '+PWD=/home/user/app',
+      '+BYPASS_CACHE=1',
+      // Code that only types or fetches a secret; a dotted name with no digit (no Discord token); a test's hex digest.
+      '+  token: string;',
+      '+const token = await getToken()',
+      '+  password: z.string().min(8),',
+      '+NotificationServiceProvid.render.someVeryLongMethodNameHereX',
+      "+    '5f78c33274e43fa9de5659265c1d917e25c03722dcb0b8d27db8d5feaa813953',",
     ]
     expect(redactLines(plain)).toEqual({ lines: plain, hits: 0 })
+  })
+
+  test('in a config file an unquoted value of a password-like name is masked too; in code it is not', () => {
+    const lines = [
+      '+spring.datasource.password=myS3cretPw!',
+      '+jwt.secret=9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d',
+      '+    password: myS3cretPw # local only',
+      '+  - POSTGRES_PASSWORD: example',
+      '+aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    ]
+    expect(redactLines(lines, true)).toEqual({
+      lines: [
+        `+spring.datasource.password=${REDACTED}`,
+        `+jwt.secret=${REDACTED}`,
+        `+    password: ${REDACTED} # local only`,
+        `+  - POSTGRES_PASSWORD: ${REDACTED}`,
+        `+aws_secret_access_key = ${REDACTED}`,
+      ],
+      hits: 5,
+    })
+    const plain = [
+      '+    id-token: write',
+      '+  password: ${DB_PASSWORD}',
+      '+use_token: true',
+      '+error.password=Wrong password',
+      '+login.password=비밀번호',
+      '+    jsonwebtoken: ^9.0.2',
+      '+  primary_key: id',
+      '+  max_tokens: 1000',
+      '+  secretName: my-secret',
+      '+  password:',
+    ]
+    expect(redactLines(plain, true)).toEqual({ lines: plain, hits: 0 })
+    // Code assigns rather than configures: the same shapes in a source file stay.
+    const code = ['+user.password = hash', '+jwt.secret = loadSecret()']
+    expect(redactLines(code)).toEqual({ lines: code, hits: 0 })
+    expect(['src/main/resources/application.properties', 'docker-compose.yml', 'config.toml', 'setup.cfg', 'src/app.ts', 'README.md'].map(isConfigFile)).toEqual([true, true, true, true, false, false])
+    const yml = changeOf({ path: '/proj/src/main/resources/application.yml', root: '/proj', tool: 'Edit', kind: 'update', hunks: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: 1, lines: ['+    password: myS3cretPw'] }] })
+    expect(yml.redacted).toBe(1)
+    expect(yml.diff).not.toContain('myS3cretPw')
   })
 
   test('a private key is masked whole, its BEGIN and END lines kept', () => {
@@ -1511,6 +1603,43 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
       lines: [` ${REDACTED}`, `+${REDACTED}`, ' -----END PRIVATE KEY-----'],
       hits: 1,
     })
+  })
+
+  test("a key's END whose BEGIN fell outside the hunk masks the body lines above it, quoted ones too", () => {
+    const body = 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7abcdefghijk'
+    const lines = [` "${body}\\n" +`, ` "${body}\\n" +`, ' "tail==\\n" +', ' "-----END PRIVATE KEY-----\\n"', '-x', '+y']
+    const once = redactLines(lines)
+    expect(once).toEqual({ lines: [` ${REDACTED}`, ` ${REDACTED}`, ` ${REDACTED}`, ' "-----END PRIVATE KEY-----\\n"', '-x', '+y'], hits: 1 })
+    expect(redactLines(once.lines)).toEqual({ lines: once.lines, hits: 0 })
+    // The middle of a key, neither BEGIN nor END in the hunk: its long quoted lines tell it alone.
+    expect(redactLines([` "${body}\\n" +`, `-  "${body}\\n" +`, `+  "A${body.slice(1)}\\n" +`, ` "${body}\\n" +`])).toEqual({
+      lines: [` ${REDACTED}`, `-${REDACTED}`, `+${REDACTED}`, ` ${REDACTED}`],
+      hits: 1,
+    })
+    // Only the short last pieces are left in the hunk: the one above END and the one on it.
+    expect(redactLines([' "abc==\\n" +', ' "def==\\n-----END PRIVATE KEY-----\\n"'])).toEqual({
+      lines: [` ${REDACTED}`, ` "${REDACTED}\\n-----END PRIVATE KEY-----\\n"`],
+      hits: 1,
+    })
+    // Code that names the END marker is no key: the lines above it stay.
+    const code = ['+  return pem', '+}', "+const end = '-----END PRIVATE KEY-----'"]
+    expect(redactLines(code)).toEqual({ lines: code, hits: 0 })
+    // Written whole, then edited below its END in the same turn: still one new file, its key masked.
+    const file = ['const key =', '  "-----BEGIN PRIVATE KEY-----\\n" +', `  "${body}\\n" +`, `  "${body}\\n" +`, '  "tail==\\n" +', '  "-----END PRIVATE KEY-----\\n"', '', 'module.exports = sign']
+    const made = changeOf({ path: '/proj/jwt.js', root: '/proj', tool: 'Write', kind: 'create', hunks: [creationHunk(file.join('\n'))] })
+    const edit = changeOf({
+      path: '/proj/jwt.js',
+      root: '/proj',
+      tool: 'Edit',
+      kind: 'update',
+      hunks: [{ oldStart: 5, oldLines: 4, newStart: 5, newLines: 4, lines: [' ' + file[4]!, ' ' + file[5]!, ' ', '-module.exports = sign', '+module.exports = { sign }'] }],
+    })
+    expect(edit.redacted).toBe(1)
+    const [joined] = merge([made], edit).changes
+    expect(joined).toMatchObject({ kind: 'create', redacted: 1 })
+    expect(parseDiff(joined!.diff)).toHaveLength(1)
+    expect(joined!.diff).not.toContain('tail==')
+    expect(joined!.diff).not.toContain('MIIE')
   })
 
   test('code that mentions a key header is not a key: the lines after it stay', () => {
@@ -1554,6 +1683,21 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
     const started = Date.now()
     expect(redactLines(lines)).toEqual({ lines, hits: 0 })
     expect(Date.now() - started).toBeLessThan(5000)
+  })
+
+  test('a long line of near misses is not read again from each, and a huge one only as far as a note keeps', () => {
+    // A JWT's start over and over with no dot, BEGIN after BEGIN with no END, a key's body line spoilt at its very end.
+    const lines = [`+${('eyJ' + 'a'.repeat(5) + '-').repeat(30_000)}`, `+${'-----BEGIN PRIVATE KEY-----x'.repeat(10_000)}`, `+a1${'+'.repeat(100_000)}!`]
+    let started = Date.now()
+    expect(redactLines(lines)).toEqual({ lines, hits: 0 })
+    expect(Date.now() - started).toBeLessThan(1000)
+    // A one-line file of megabytes: the key near its start is masked, the rest is not read through.
+    const huge = `+const k = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; ${'a.b(c,"d");'.repeat(1_800_000)}`
+    started = Date.now()
+    const change = changeOf({ path: '/proj/bundle.js', root: '/proj', tool: 'Write', kind: 'create', hunks: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 1, lines: [huge] }] })
+    expect(Date.now() - started).toBeLessThan(300)
+    expect(change).toMatchObject({ redacted: 1, isCut: true })
+    expect(change.diff).not.toContain('sk-ant')
   })
 
   test('plain text is masked line by line', () => {
@@ -1629,13 +1773,17 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
     for (const path of ['C:\\proj\\.env', '/proj/.env.local', '/proj/.env.production', 'certs/server.pem', 'tls.key', 'a.p12', 'b.pfx', 'prod.tfvars', '/home/u/.ssh/id_rsa', 'id_ed25519.pub', '.npmrc', '.pypirc', '.netrc', '.git-credentials', 'gcp-credentials.json', 'my-service-account.json', 'config/secrets.yml']) {
       expect([path, isSecretFile(path)]).toEqual([path, true])
     }
-    for (const path of ['.env.example', '/proj/.env.sample', '.env.template', '.env.dist', 'src/key.ts', 'src/env.ts', 'keys.json', 'secret-santa.ts']) {
+    // Past the first list: other SSH keys, Terraform state, AWS and database credentials, direnv, other .env names, Java keystores.
+    for (const path of ['id_ecdsa', '/home/u/.ssh/id_dsa', 'prod.tfstate', 'x.tfvars.json', '/home/u/.aws/credentials', 'C:\\Users\\u\\.aws\\credentials', '/home/u/.pgpass', '.envrc', 'app.env', '.env-prod', '.env_local', 'android/key.properties', 'release.jks', 'debug.keystore']) {
+      expect([path, isSecretFile(path)]).toEqual([path, true])
+    }
+    for (const path of ['.env.example', '/proj/.env.sample', '.env.template', '.env.dist', 'src/key.ts', 'src/env.ts', 'keys.json', 'secret-santa.ts', 'example.env', '.env-example', '.env_sample', 'src/credentials.ts', 'gradle.properties']) {
       expect([path, isSecretFile(path)]).toEqual([path, false])
     }
   })
 
   test('lock files and generated output', () => {
-    for (const file of ['frontend/package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'Cargo.lock', 'go.sum', 'dist/app.js', 'build/index.html', '.next/server/page.js', 'coverage/lcov.info', 'packages/a/node_modules/x/index.js', 'src/__snapshots__/a.test.ts.snap', 'public/app.min.js', 'app.css.map', '/elsewhere/yarn.lock']) {
+    for (const file of ['frontend/package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'Cargo.lock', 'go.sum', 'dist/app.js', 'build/index.html', '.next/server/page.js', 'coverage/lcov.info', 'packages/a/node_modules/x/index.js', 'src/__snapshots__/a.test.ts.snap', 'public/app.min.js', 'app.css.map', '/elsewhere/yarn.lock']) {
       expect([file, isGeneratedFile(file)]).toEqual([file, true])
     }
     // A build folder counts at the project's top only; a file outside the project by its name only.

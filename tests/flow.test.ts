@@ -2939,6 +2939,24 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
     await ui.unmount()
   })
 
+  test("a key in a constant, a config file's password and a direnv file stay out of the model, the store and the journal", async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, async () => {
+      await $.tool.call({ tool: 'Write', tool_use_id: 'k1', file_path: '/proj/src/weather.js', content: 'const WEATHER_KEY = "0123456789abcdef0123456789abcdef"\n' })
+      await $.tool.call({ tool: 'Write', tool_use_id: 'k2', file_path: '/proj/src/main/resources/application.properties', content: 'spring.datasource.password=myS3cretPw!\n' })
+      await $.tool.call({ tool: 'Write', tool_use_id: 'k3', file_path: '/proj/.envrc', content: 'export SHOP_DB=shop-prod-7731\n' })
+    })
+    await finish(w)
+    expect(w.models).toHaveLength(1)
+    expect(w.models[0]).toContain('.envrc — 비밀값이 들 수 있어 내용을 싣지 않음')
+    for (const secret of ['0123456789abcdef0123456789abcdef', 'myS3cretPw', 'shop-prod-7731']) {
+      expect([secret, w.models[0]!.includes(secret)]).toEqual([secret, false])
+      expect([secret, JSON.stringify(w.store.get('history')).includes(secret)]).toEqual([secret, false])
+      for (const write of w.writes) expect([secret, write.text.includes(secret)]).toEqual([secret, false])
+    }
+  })
+
   test('a key pasted into the request, Claude\'s answer or a question about the note is masked', async ($, on) => {
     const w = world(on)
     await start($)

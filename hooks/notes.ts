@@ -717,20 +717,25 @@ export function shortPath(file: string): string {
   return /^(?:[A-Za-z]:)?[\\/]/.test(file) ? baseName(file) : file
 }
 
-/** Names of files that hold credentials whatever folder they are in. */
-const SECRET_NAMES = new Set(['.npmrc', '.pypirc', '.netrc', '.git-credentials'])
+/**
+ * Names of files that hold credentials whatever folder they are in: package
+ * registry, git and PostgreSQL logins, AWS's `~/.aws/credentials`, direnv's
+ * `.envrc`, an Android app's signing `key.properties`.
+ */
+const SECRET_NAMES = new Set(['.npmrc', '.pypirc', '.netrc', '.git-credentials', '.pgpass', 'credentials', '.envrc', 'key.properties'])
 
 /**
- * True for a file that commonly holds secrets: `.env` and its variants (an
- * example, sample, template or dist copy aside), keys and certificates, SSH
- * keys, package-registry and git credentials, cloud credential files, `secrets.*`.
+ * True for a file that commonly holds secrets: `.env` and its variants
+ * (`.env.local`, `.env-prod`, `app.env`; an example, sample, template or dist
+ * copy aside), keys, keystores and certificates, SSH keys, package-registry,
+ * git and database credentials, cloud credential files, `secrets.*`.
  */
 export function isSecretFile(path: string): boolean {
   const name = baseName(path)
-  if (/^\.env(?:\..+)?$/i.test(name)) return !/\.(?:example|sample|template|dist)$/i.test(name)
+  if (/^\.env(?:[.\-_].+)?$|\.env$/i.test(name)) return !/[.\-_](?:example|sample|template|dist)$|^(?:example|sample|template)\.env$/i.test(name)
   return (
     SECRET_NAMES.has(name.toLowerCase()) ||
-    /\.(?:pem|key|p12|pfx|tfvars|tfstate)$/i.test(name) ||
+    /\.(?:pem|key|p12|pfx|jks|keystore|tfvars|tfstate)$/i.test(name) ||
     /\.tfvars\.json$/i.test(name) ||
     /^id_(?:rsa|ed25519|ecdsa|dsa)/i.test(name) ||
     /credentials[^/\\]*\.json$/i.test(name) ||
@@ -892,39 +897,85 @@ const PLACEHOLDER = /^["']?[$<{%]/
 const SECRET_NAME = /password|passwd|secret|token(?!iz)|api[_-]?key|access[_-]?key|private[_-]?key/i
 /**
  * An upper-case dotenv name with a part that says secret, token, password or key
- * (`OPENAI_API_KEY=`, `DB_PASSWORD=`, `APIKEY=`), not `KEYBOARD_LAYOUT=` or `MONKEY=`.
+ * (`OPENAI_API_KEY=`, `DB_PASSWORD=`, `DB_PASS=`, `APIKEY=`), not `KEYBOARD_LAYOUT=`,
+ * `MONKEY=`, `BYPASS=` or the shell's `PWD=`.
  */
-const ENV_SECRET_NAME = /(?:^|[\s_])(?:[A-Z0-9]*(?:SECRET|TOKEN|PASSWORD|PASSWD)|(?:API|ACCESS|PRIVATE|SECRET|AUTH|MASTER|SIGNING|ENCRYPTION)?KEY)(?:_[A-Z0-9_]*)?=$/
+const ENV_SECRET_NAME = /(?:^|[\s_])(?:[A-Z0-9]*(?:SECRET|TOKEN|PASSWORD|PASSWD)|PASS|(?<=_)PWD|(?:API|ACCESS|PRIVATE|SECRET|AUTH|MASTER|SIGNING|ENCRYPTION)?KEY)(?:_[A-Z0-9_]*)?=$/
 /** A quoted value's name that says what it is about rather than holding it: `tokenUrl`, `passwordLabel`. */
 const ABOUT_A_SECRET = /(?:url|uri|endpoint|path|file|dir|name|type|label|field|header|length|len|count|min|max|placeholder|hint|message|msg|text|title|error|id)["']?\s*[:=]\s*["'`]$/i
+/** A quoted value's name whose last word is key (`WEATHER_KEY`, `serviceKey`, `app_key`, `TOKEN_KEY`), not `monkey`. */
+const KEY_NAME = /(?:(?<![A-Za-z])key|Key|KEY)["']?\s*[:=]\s*["'`]$/
+/** A key's name that says whose secret it is (`API_KEY`, `secretKey`, `signing_key`): its value is masked whatever it looks like. */
+const SECRET_KEY_NAME = /(?:api|access|private|secret|auth|master|signing|encryption)[_-]?key["']?\s*[:=]\s*["'`]$/i
+/** A quoted value's name whose last word is pass or pwd (`DB_PASS`, `dbPwd`), not `bypass`, `compass` or the shell's `PWD`. */
+const PASS_NAME = /(?:(?<![A-Za-z])(?:pass|PASS)|(?<=[_.-])(?:pwd|PWD)|(?<=[a-z0-9])(?:Pass|Pwd))["']?\s*[:=]\s*["'`]$/
+/** A package's version or range, as package.json gives one: `"jsonwebtoken": "^9.0.2"` names a package, not a token. */
+const VERSION = /^(?:[~^]|[<>]=?|=)?v?\d+(?:\.(?:\d+|[xX*])){1,2}(?:[-+][0-9A-Za-z.-]+)?$/
+/** Korean words: `"password": "비밀번호"` in a translation file is a label, not a password. */
+const HANGUL = /\p{Script=Hangul}/u
+
+/**
+ * True for a value that looks generated, as an API key does: a run of 16 or
+ * more letters and digits (base64 and %-escapes too) with both kinds in it,
+ * not a word with a number after it (`learnNotesStateV2`) or words joined by
+ * `-`, `.` or `/` (`user-cache-v2`, `uploads/2024/photo.jpg`).
+ */
+function isKeyShaped(value: string): boolean {
+  return !/^[A-Za-z]+\d+$/.test(value) && (value.match(/[A-Za-z0-9+=%]{16,}/g) ?? []).some(run => /\d/.test(run) && /[A-Za-z]/.test(run))
+}
+
+/**
+ * True when a quoted value is no secret: its name does not say it holds one or
+ * says what it is about, it stands for one kept elsewhere, it is a version or
+ * Korean words. A name ending in key is judged by its value unless it says
+ * whose secret it is (`const WEATHER_KEY = "3f9a…"` is masked, `TOKEN_KEY =
+ * "accessToken"` is not); one ending in pass or pwd unless its value is a plain word.
+ */
+function isNoSecret(secret: string, before: string): boolean {
+  if (ABOUT_A_SECRET.test(before) || PLACEHOLDER.test(secret) || VERSION.test(secret) || HANGUL.test(secret)) return true
+  if (KEY_NAME.test(before)) return !SECRET_KEY_NAME.test(before) && !isKeyShaped(secret)
+  if (PASS_NAME.test(before)) return /^[A-Za-z]+$/.test(secret)
+  return !SECRET_NAME.test(before)
+}
 
 /**
  * Masking rules for secrets inside a line, each a pattern of three groups:
  * what stays before, the secret, what stays after; `keep` passes over a match
  * that is no secret. The well-known key formats come first, so a key in
- * `API_KEY=…` is masked once.
+ * `API_KEY=…` is masked once. No rule reads the rest of a line again from
+ * each near miss on it (`-eyJ…-eyJ…`, BEGIN after BEGIN), so a long line
+ * takes time in proportion to its length.
  */
 const SECRET_RULES: readonly { re: RegExp; keep?: (secret: string, before: string) => boolean }[] = [
-  // A whole private key on one line (a JSON or escaped string).
-  { re: /(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)(.+?)(-----END [A-Z0-9 ]*PRIVATE KEY-----)/g },
+  // A whole private key on one line (a JSON or escaped string); a BEGIN with no END before the next BEGIN is left to redactLines.
+  { re: /(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)((?:(?!-----BEGIN ).)+?)(-----END [A-Z0-9 ]*PRIVATE KEY-----)/g },
   // Anthropic and OpenAI keys; a digit in it tells one from a long kebab-case name.
   { re: /()(\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,})()/g, keep: secret => !/\d/.test(secret) },
   { re: /()(\b(?:AKIA|ASIA)[A-Z0-9]{16})()(?![A-Za-z0-9])/g },
   { re: /()(\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}))()/g },
   { re: /()(\bxox[abposr]-[A-Za-z0-9-]{10,})()/g },
   { re: /()(\bAIza[0-9A-Za-z_-]{30,})()/g },
-  { re: /()(\b[sr]k_live_[0-9A-Za-z]{10,})()/g },
+  { re: /()(\b[sr]k_(?:live|test)_[0-9A-Za-z]{10,})()/g },
   { re: /()(\bglpat-[0-9A-Za-z_-]{20,})()/g },
-  { re: /()(\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})()/g },
+  // npm, Hugging Face and Supabase keys.
+  { re: /()(\bnpm_[A-Za-z0-9]{36})()(?![A-Za-z0-9])/g },
+  { re: /()(\bhf_[A-Za-z0-9]{30,})()/g },
+  { re: /()(\bsb_secret_[A-Za-z0-9_-]{20,})()/g },
+  // A Telegram bot token, and a Discord bot token (a digit in it tells one from a long dotted name).
+  { re: /()(\b\d{8,10}:AA[A-Za-z0-9_-]{30,})()/g },
+  { re: /()(\b[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,})()/g, keep: secret => !/\d/.test(secret) },
+  // Slack and Discord webhook URLs: the host stays, the part that lets anyone post goes.
+  { re: /(hooks\.slack\.com\/services\/)([A-Za-z0-9]+\/[A-Za-z0-9]+\/[A-Za-z0-9]+)()/g },
+  { re: /(discord(?:app)?\.com\/api\/webhooks\/\d+\/)([A-Za-z0-9_-]{30,})()/g },
+  // A JWT's first part ends at a `-eyJ`, where the next one would start, so near misses are not read again from each.
+  { re: /()(\beyJ(?:[A-Za-z0-9_]|-(?!eyJ)){10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})()/g },
   { re: /(\bBearer\s+)([A-Za-z0-9._~+/-]{20,}=*)()/g },
   // The password in a connection string: postgres://user:password@host, or redis://:password@host with no user.
   { re: /(\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:/@'"`]*:)([^\s@/'"`]+)(@)/gi, keep: secret => PLACEHOLDER.test(secret) },
   // A quoted literal given to a name that says password, secret, token or key: `password: "…"`, `api_key = '…'`.
   // The names are matched whole and judged after, so a long line costs no more than one look at each word.
-  {
-    re: /((?<![\w.$-])["']?[\w.-]+["']?\s*[:=]\s*["'`])([^"'`\s]{3,})(["'`])/g,
-    keep: (secret, before) => !SECRET_NAME.test(before) || ABOUT_A_SECRET.test(before) || PLACEHOLDER.test(secret),
-  },
+  // A string after a ternary's `?` (`show ? "password" : "text"`) is a branch, not a name.
+  { re: /((?<![\w.$-]|\?\s{0,8}["']?)["']?[\w.-]+["']?\s*[:=]\s*["'`])([^"'`\s]{3,})(["'`])/g, keep: isNoSecret },
   // An upper-case dotenv line whose name says it holds a secret (`OPENAI_API_KEY=…`), not one naming another variable.
   {
     re: /((?<![\w$.])(?:export\s+)?[A-Z][A-Z0-9_]*=(?!=))("[^"\n]*"|'[^'\n]*'|[^\s'"]+)()/g,
@@ -932,11 +983,42 @@ const SECRET_RULES: readonly { re: RegExp; keep?: (secret: string, before: strin
   },
 ]
 
-/** A line's secrets masked by the rules above, and how many. */
-function redactLine(line: string): { line: string; hits: number } {
+/** A config line's name ending in key (`primary_key: `), and one that says whose secret it is (`api_key = `, `aws_secret_access_key = `). */
+const CONFIG_KEY_NAME = /key\s*[:=][ \t]*$/i
+const CONFIG_SECRET_KEY_NAME = /(?:api|access|private|secret|auth|master|signing|encryption)[_.-]?key\s*[:=][ \t]*$/i
+
+/**
+ * In a config file only: an unquoted value of a name ending in password,
+ * secret, token or key (`spring.datasource.password=…`, `  password: …`,
+ * `aws_secret_access_key = …`), up to a comment. A value followed by more
+ * words is a sentence (`error.password=Wrong password`), and a switch
+ * (`id-token: write`, `use_token: true`), a version (`jsonwebtoken: ^9.0.2`)
+ * or Korean words are no secret; a key is judged by its value as a quoted
+ * one is (`primary_key: id` stays).
+ */
+const CONFIG_RULE = {
+  re: /^([+\- ]?\s*(?:-\s+)?[\w.-]*?(?:password|passwd|pwd|secret|token|[_.-]key)\s*[:=][ \t]*)([^\s"'#;]\S*)()(?=[ \t]*$|[ \t]+[#;])/gi,
+  keep: (secret: string, before: string) =>
+    PLACEHOLDER.test(secret) ||
+    VERSION.test(secret) ||
+    HANGUL.test(secret) ||
+    /^(?:true|false|yes|no|on|off|null|none|~|read|write)$/i.test(secret) ||
+    (CONFIG_KEY_NAME.test(before) && !CONFIG_SECRET_KEY_NAME.test(before) && !isKeyShaped(secret)),
+}
+
+/** The rules for a config file's lines: those for any line, then the one for its unquoted values. */
+const CONFIG_FILE_RULES = [...SECRET_RULES, CONFIG_RULE]
+
+/** True for a config file, whose `name = value` and `name: value` lines hold values unquoted: properties, INI, TOML, YAML. */
+export function isConfigFile(path: string): boolean {
+  return /\.(?:properties|ini|cfg|conf|toml|ya?ml)$/i.test(baseName(path))
+}
+
+/** A line's secrets masked by the rules above (a config file's too), and how many. */
+function redactLine(line: string, isConfig: boolean): { line: string; hits: number } {
   let hits = 0
   let out = line
-  for (const rule of SECRET_RULES) {
+  for (const rule of isConfig ? CONFIG_FILE_RULES : SECRET_RULES) {
     out = out.replace(rule.re, (whole: string, before: string, secret: string, after: string) => {
       if (secret.includes(REDACTED) || rule.keep?.(secret, before)) return whole
       hits += 1
@@ -949,9 +1031,17 @@ function redactLine(line: string): { line: string; hits: number } {
 const KEY_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/
 const KEY_END = /-----END [A-Z0-9 ]*PRIVATE KEY-----/
 /** A line of a private key's body: base64 (in quotes, or joined with `+`, too), or an encrypted key's `Proc-Type:` header. */
-const KEY_BODY = /^\s*["'`]?(?:[A-Za-z0-9+/=]+|(?:Proc-Type|DEK-Info|Comment): .*)(?:\\n)?["'`]?[\s,+;]*$/
-/** A line of base64 too long to be code: a key's body whose BEGIN line fell outside the hunk (letters and digits both, so a `=====` rule is none). */
-const LONG_BASE64 = /^\s*(?=[A-Za-z0-9+/=]*[A-Za-z])(?=[A-Za-z0-9+/=]*\d)[A-Za-z0-9+/=]{60,}\s*$/
+const KEY_BODY = /^\s*["'`]?(?:[A-Za-z0-9+/=]+|(?:Proc-Type|DEK-Info|Comment): .*)(?:\\n)?["'`]?\s*[,+;]?\s*$/
+/**
+ * A line of base64 too long to be code, bare or as a quoted piece of a joined
+ * string (`"MIIE…\n" +`): a key's body whose BEGIN line fell outside the hunk
+ * (letters and digits both, so a `=====` rule is none; in quotes upper and
+ * lower case both, so a test's hex digest is none).
+ */
+const LONG_BASE64 =
+  /^\s*(?:(?=[A-Za-z0-9+/=]*[A-Za-z])(?=[A-Za-z0-9+/=]*\d)[A-Za-z0-9+/=]{60,}|["'`](?=[A-Za-z0-9+/=]*[a-z])(?=[A-Za-z0-9+/=]*[A-Z])(?=[A-Za-z0-9+/=]*\d)[A-Za-z0-9+/=]{60,}(?:\\n)?["'`]\s*[,+;]?)\s*$/
+/** A key's END line with nothing but the key's data on it (`-----END PRIVATE KEY-----`, `"abc==\n-----END PRIVATE KEY-----\n"`), not code that names it. */
+const KEY_END_LINE = /^\s*["'`]?(?:[A-Za-z0-9+/=]+(?:\\n)?)?-----END [A-Z0-9 ]*PRIVATE KEY-----(?:\\n)?["'`]?[\s,+;)]*$/
 /** What stands before a key's END on its line when it is the key's last piece (`"abc==\n`), `\n` escapes taken out. */
 const KEY_HEAD = /^\s*["'`]?[A-Za-z0-9+/=]+$/
 
@@ -971,26 +1061,54 @@ function maskKeyPart(text: string, min: number): string {
  * Diff lines (or plain text lines) with common secret formats masked as
  * «가림», the line count and each line's +/−/space marker kept: key formats,
  * a private key's lines between BEGIN and END, a connection string's
- * password, quoted values of password-like names, upper-case dotenv values.
+ * password, quoted values of password-like names, upper-case dotenv values,
+ * and in a config file (`isConfig`) unquoted values of password-like names.
  * The same lines given twice come back the same, with no hits the second time.
  */
-export function redactLines(lines: readonly string[]): { lines: string[]; hits: number } {
+export function redactLines(lines: readonly string[], isConfig = false): { lines: string[]; hits: number } {
   let hits = 0
   let isInKey = false
   let isKeyCounted = false
   let wasLong = false
-  const out = lines.map(raw => {
+  const out: string[] = []
+  const parts = (raw: string) => {
     const end = raw.endsWith('\r') ? '\r' : ''
     const line = end === '' ? raw : raw.slice(0, -1)
     const mark = /^[+\- ]/.test(line) ? line[0]! : ''
-    let body = line.slice(mark.length)
+    return { end, mark, body: line.slice(mark.length) }
+  }
+  for (const raw of lines) {
+    const { end, mark } = parts(raw)
+    let { body } = parts(raw)
+    if (!isInKey && KEY_END_LINE.test(body)) {
+      // A key's END whose BEGIN fell outside the hunk: the body lines just above it are masked now, as a whole key's are.
+      let isMasked = false
+      let wasMasked = false
+      for (let i = out.length - 1; i >= 0; i -= 1) {
+        const above = parts(out[i]!)
+        if (above.body.trim() === REDACTED) {
+          wasMasked = true
+          continue
+        }
+        if (above.body.trim() === '' || KEY_BEGIN.test(above.body) || KEY_END.test(above.body) || !KEY_BODY.test(above.body)) break
+        out[i] = `${above.mark}${REDACTED}${above.end}`
+        isMasked = true
+      }
+      if (isMasked && !wasMasked) hits += 1
+      isInKey = true
+      isKeyCounted = isMasked || wasMasked
+    }
     if (isInKey) {
       // A blank line, or one masked already, stays as it is; END or a line of code ends the key.
-      if (body.trim() === '' || body.trim() === REDACTED) return raw
+      if (body.trim() === '' || body.trim() === REDACTED) {
+        out.push(raw)
+        continue
+      }
       if (!KEY_END.test(body) && KEY_BODY.test(body)) {
         if (!isKeyCounted) hits += 1
         isKeyCounted = true
-        return `${mark}${REDACTED}${end}`
+        out.push(`${mark}${REDACTED}${end}`)
+        continue
       }
       isInKey = false
       // The key's last piece on its END line: `abc==\n-----END PRIVATE KEY-----"`.
@@ -1005,10 +1123,11 @@ export function redactLines(lines: readonly string[]): { lines: string[]; hits: 
     if (LONG_BASE64.test(body)) {
       if (!wasLong) hits += 1
       wasLong = true
-      return `${mark}${REDACTED}${end}`
+      out.push(`${mark}${REDACTED}${end}`)
+      continue
     }
     wasLong = false
-    const masked = redactLine(`${mark}${body}`)
+    const masked = redactLine(`${mark}${body}`, isConfig)
     hits += masked.hits
     let text = masked.line
     // A key that begins here and ends on a later line: its body lines are masked as they come, and any of it on this line now.
@@ -1023,8 +1142,8 @@ export function redactLines(lines: readonly string[]): { lines: string[]; hits: 
         text = `${text.slice(0, from)}${tail}`
       }
     }
-    return `${text}${end}`
-  })
+    out.push(`${text}${end}`)
+  }
   return { lines: out, hits }
 }
 
@@ -1089,6 +1208,9 @@ export function screenNote<T extends Screened>(note: T, patterns: readonly strin
   }
 }
 
+/** Characters of one diff line that are masked and kept, well past DIFF_BUDGET: a one-line file of megabytes is not read through. */
+const LINE_MASKED = 20_000
+
 /** A change from one tool's hunks, its secrets masked first; no hunks means the tool could not diff it. */
 export function changeOf(args: {
   path: string
@@ -1098,8 +1220,13 @@ export function changeOf(args: {
   hunks: readonly Hunk[]
 }): LearnChange {
   let redacted = 0
+  const isConfig = isConfigFile(args.path)
   const hunks = args.hunks.map(h => {
-    const masked = redactLines(h.lines)
+    // Past DIFF_BUDGET no line is kept, so a longer one is masked only as far as it could show.
+    const masked = redactLines(
+      h.lines.map(line => (line.length > LINE_MASKED ? `${line.slice(0, LINE_MASKED)}…` : line)),
+      isConfig,
+    )
     redacted += masked.hits
     return { ...h, lines: masked.lines }
   })
