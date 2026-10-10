@@ -37,6 +37,7 @@ import {
   searchNotes,
   closeConceptBold,
   conceptKey,
+  conceptName,
   conceptsOf,
   revealNext,
   countConcepts,
@@ -2248,5 +2249,26 @@ describe('1.6.0: the learning report and the recap\'s missed concepts', () => {
       expect(plain).not.toContain('퀴즈에서 틀린 개념')
       expect(plain).toContain('### 헷갈리기 쉬운 것\n(노트로 보아 놓치기 쉬운 점 1~2개)')
     }
+  })
+})
+
+describe('1.6.0: concept names without a plain-words gloss', () => {
+  test('a Korean gloss in brackets leaves the name, a synonym or a symbol stays', () => {
+    expect(conceptName('기본값 매개변수(넘기지 않으면 자동으로 채워지는 값)')).toBe('기본값 매개변수')
+    expect(conceptName('for...of 반복문 (목록을 하나씩 꺼내는 반복)')).toBe('for...of 반복문')
+    expect(conceptName('구조 분해 할당 (Destructuring)')).toBe('구조 분해 할당 (Destructuring)')
+    expect(conceptName('논리곱(&&)')).toBe('논리곱(&&)')
+    expect(conceptName('복합 대입 연산자(+=)')).toBe('복합 대입 연산자(+=)')
+    expect(conceptName('클로저(함수)')).toBe('클로저(함수)')
+    expect(conceptName('(넘기지 않으면 채워지는 값)')).toBe('(넘기지 않으면 채워지는 값)')
+  })
+
+  test('notes and the stored index read the short name, under the same key', () => {
+    const [one] = conceptsOf('### 배울 개념\n- **기본값 매개변수(넘기지 않으면 자동으로 채워지는 값)**: 값을 안 주면 0 — `function f(a = 0)`')
+    expect(one!.name).toBe('기본값 매개변수')
+    expect(one!.key).toBe(conceptKey('기본값 매개변수(넘기지 않으면 자동으로 채워지는 값)'))
+    const index = cleanConcepts({ x: { name: 'for...of 반복문(목록을 하나씩 꺼내는 반복)', count: 2, firstAt: 1, lastAt: 2, blurb: '', files: [] } })
+    expect(Object.values(index).map(c => c.name)).toEqual(['for...of 반복문'])
+    expect(notePrompt({ prompt: '', answer: '', changes: [], moreFiles: 0 }, 'beginner')).toContain('개념 이름은 짧은 용어만 쓰고')
   })
 })

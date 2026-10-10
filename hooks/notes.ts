@@ -1333,7 +1333,7 @@ export function notePrompt(
     '### 왜 이렇게 바꿨을까',
     ...(hasRules ? ['(팀 규칙과 직접 닿으면 이 절 끝에 "팀 규칙: …" 또는 "팀 규칙과 다를 수 있음: …" 한 줄을 더한다)'] : []),
     '### 배울 개념',
-    '(1~3개. "- **개념 이름**: 설명 — 그 개념이 쓰인 코드 한 줄을 백틱으로 인용". 줄 번호는 쓰지 마라)',
+    '(1~3개. "- **개념 이름**: 설명 — 그 개념이 쓰인 코드 한 줄을 백틱으로 인용". 개념 이름은 짧은 용어만 쓰고 쉬운 말 풀이는 이름 뒤 설명에 쓴다. 줄 번호는 쓰지 마라)',
     '### 직접 확인해 볼 것',
     '(실행하거나 바꿔 보며 확인할 수 있는 것 1~2개. 위의 예와 겹치지 않게)',
   ].join('\n')
@@ -1557,6 +1557,19 @@ export function closeTicks(text: string): string {
 }
 
 /** The key a concept is counted under: its name without a trailing gloss in parentheses, case, spaces, quotes, dots or dashes. */
+/**
+ * A concept's name without a plain-words gloss the model tucked on its end
+ * (`기본값 매개변수(넘기지 않으면 자동으로 채워지는 값)` reads as
+ * `기본값 매개변수`): a bracketed part in Korean with a space in it explains
+ * the term, it does not name it. A synonym (`(Destructuring)`), a symbol
+ * (`(&&)`) or a short tag stays. The key is the same either way.
+ */
+export function conceptName(name: string): string {
+  const m = /^(.+?)\s*[(（]([^()（）]*)[)）]$/.exec(name.trim())
+  if (!m || !/[가-힣]/.test(m[2]!) || !/\s/.test(m[2]!.trim())) return name
+  return m[1]!.trim() || name
+}
+
 export function conceptKey(name: string): string {
   const base = name.replace(/\s*[(（][^()（）]*[)）]\s*$/, '').trim() || name
   return `c:${base.toLowerCase().replace(/[\s()（）"'`.…\-–—_·]+/g, '')}`
@@ -1653,11 +1666,13 @@ function conceptOnLine(raw: string, max: number): { key: string; name: string; b
   const m = closed ?? (open && [open[0], open[2]!, open[4]!])
   if (!m) return undefined
   const name = cut(
-    m[1]!
-      .replace(/[`*]/g, '')
-      .replace(REVIEW_MARK, '')
-      .replace(/[\s:：.,·—–-]+$/, '')
-      .trim(),
+    conceptName(
+      m[1]!
+        .replace(/[`*]/g, '')
+        .replace(REVIEW_MARK, '')
+        .replace(/[\s:：.,·—–-]+$/, '')
+        .trim(),
+    ),
     40,
   )
   const key = conceptKey(name)
@@ -1827,7 +1842,7 @@ export function cleanConcepts(raw: unknown, aliases: Readonly<Record<string, str
           ...knownOf(prior.knownAt, knownAt),
         }
       : {
-          name: one.name,
+          name: conceptName(one.name),
           count: Math.floor(one.count),
           firstAt,
           lastAt,
