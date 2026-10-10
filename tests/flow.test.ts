@@ -676,7 +676,8 @@ test('an unfocused terminal pane says how to reach its keys; a focused one how t
   await ui.unmount()
 
   const focused = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
-  const back = await focused.find({ type: 'Text', text: /Esc: 대화로 돌아가기/ })
+  // The letter keys still need the English input mode while the pane holds them.
+  const back = await focused.find({ type: 'Text', text: 'Esc: 대화로 돌아가기 · 글자 키는 영문 상태에서' })
   expect(back?.props.dimColor).toBe(true)
   expect(await focused.find({ type: 'Text', text: /ctrl\+x tab/ })).toBeUndefined()
   await focused.unmount()
@@ -723,10 +724,10 @@ test('/learn opens the pane, prints usage for unknown words and clear empties it
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
 
-  expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다 · 숫자 1~4로 보기를 바꾸고, Esc로 대화로 돌아갑니다.')
+  expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다 · 패널의 키를 쓰려면 ctrl+x tab(또는 패널 클릭)')
   expect(w.opened).toEqual(['learn-notes'])
-  // Asked from the prompt, it asks for the keys at once: no ctrl+x tab.
-  expect(w.focused.at(-1)).toBe(true)
+  // The keys stay in the prompt: what is typed next is a request, not one of the pane's keys.
+  expect(w.focused.at(-1)).toBe(false)
   expect((await learn($, 'what')).text).toContain("모르는 하위 명령입니다: 'what'")
   expect((await learn($, 'what')).text).toContain('전체는 `/learn 도움말`')
   // Korean words work as the subcommands do.
@@ -1144,13 +1145,13 @@ test('a concept met once and not since comes back for review, and the reminder s
   expect((await ui.find({ type: 'Button', key: 'view-note', text: '노트' }))?.props.hotkey).toBe('1')
   expect(await ui.find({ type: 'Text', text: /클로저 · 31일 지남/ })).toBeDefined()
   // Learned just now and never quizzed: due tomorrow, said as never recalled yet.
-  expect(await ui.find({ type: 'Text', text: /for\.\.\.of 반복문 ×1 · 최근 .* · 아직 떠올려 본 적 없음$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /for\.\.\.of 반복문 ×1 · 아직 떠올려 본 적 없음 · 최근 오늘$/ })).toBeDefined()
   await ui.unmount()
   const listed = (await learn($, 'concepts')).text
   expect(listed).toContain('복습할 개념 1개: 클로저')
   expect((await learn($, 'stats')).text).toBe(listed)
   expect(listed).toContain('**for...of 반복문** ×1 · 최근 2026-10-03 · 아직 떠올려 본 적 없음: ')
-  expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
+  expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 복습')
 })
 
 test('/learn find looks through every project, and puts this project\'s newest hit in the pane', async ($, on) => {
@@ -1646,7 +1647,8 @@ test('/learn quiz asks about concepts due for review; 정답 shows the answers a
   expect((await ui.find({ type: 'Button', key: 'view-quiz' }))?.props.hotkey).toBe('4')
   await ui.press({ key: 'view-concepts' })
   expect(await ui.find({ type: 'Text', text: /클로저/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /퀴즈 \d\d:\d\d/ })).toBeDefined()
+  // Dates without times, so a 56-column pane keeps the review: quizzed today.
+  expect(await ui.find({ type: 'Text', text: /클로저 ×1 · 다음 복습 .* · 퀴즈 오늘$/ })).toBeDefined()
   await ui.press({ key: 'view-note' })
   expect(await ui.find({ type: 'Text', text: /아직 학습 노트가 없습니다/ })).toBeDefined()
   await ui.unmount()
@@ -1807,6 +1809,10 @@ test('the pane quiz asks once while the model answers, and says why when it coul
 
   // A reply that is not a quiz: said in red, the last quiz stays, and s is there to try again.
   w.answer = '문제를 못 만들겠어요'
+  // With questions still to grade, the first s only asks; the second asks the model.
+  await ui.press({ key: 'quiz-new' })
+  expect(await ui.find({ type: 'Text', text: '풀던 문제 3개가 남았습니다 · s를 한 번 더 누르면 새 문제를 받습니다' })).toBeDefined()
+  expect(w.models).toHaveLength(1)
   await ui.press({ key: 'quiz-new' })
   await w.clock.settle()
   expect(await ui.find({ type: 'Text', text: /모델의 답을 문제로 읽지 못했습니다/ })).toBeDefined()
@@ -1900,7 +1906,7 @@ test('the review reminder goes away once nothing is due, and stays off when turn
   store.set('concepts', { 'c:클로저': { name: '클로저', count: 1, firstAt: NOW - 3 * 86_400_000, lastAt: NOW - 3 * 86_400_000, blurb: '함수가 바깥 변수를 기억한다', files: [] } })
   const w = world(on, 'ok', null, true, store)
   await start($)
-  expect(w.statuses).toEqual(['학습 노트 · 오늘 복습 1개 · /learn 뒤 q'])
+  expect(w.statuses).toEqual(['학습 노트 · 오늘 복습 1개 · /learn 복습'])
   w.answer = 'Q1: counter()가 왜 커질까?\nA1: 바깥 변수를 기억해서다.'
   const ui = await pane($)
   await ui.press({ key: 'view-quiz' })
@@ -1913,7 +1919,7 @@ test('the review reminder goes away once nothing is due, and stays off when turn
   await w.clock.advance(3 * 86_400_000)
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
-  expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
+  expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 복습')
   await ui.unmount()
 })
 
@@ -1949,8 +1955,9 @@ test('t in the note view quizzes on that note\'s concepts only: 이 노트 퀴�
   expect(await ui.find({ type: 'Text', text: /^이 노트 퀴즈 · \d\d:\d\d · 2문제 중 0개 채점$/ })).toBeDefined()
   expect(await ui.find({ type: 'Markdown', text: '문제 하나' })).toBeDefined()
   expect(store.get('quiz')).toMatchObject({ from: 'note' })
-  // s asks for a review quiz: titled so again, and asked with every kind.
+  // s asks for a review quiz: titled so again, and asked with every kind (twice, with this one's questions left).
   w.answer = THREE_QUESTIONS
+  await ui.press({ key: 'quiz-new' })
   await ui.press({ key: 'quiz-new' })
   await w.clock.settle()
   expect(w.models.at(-1)).toContain('T1: (예측 · 왜 · 바꿔 보기 중 하나)')
@@ -2316,10 +2323,15 @@ test('/learn quiz 1 내 답: Claude grades a typed answer in the conversation, w
   expect(asked.text).not.toContain('바깥을 떠올려')
   expect(w.models.at(-1)).toContain('H1: (힌트 한 문장)')
 
+  // One question's hint, as the pane's h: the one being answered, and only it is marked hinted.
   const hints = await learn($, 'quiz 힌트')
-  expect(hints.text).toContain('1. 바깥을 떠올려 보세요')
-  expect(hints.text).toContain('2. 둘째 힌트')
-  expect(store.get('quiz')).toMatchObject({ items: [{ isHinted: true }, { isHinted: true }] })
+  expect(hints.text).toBe('1번 힌트\n\n바깥을 떠올려 보세요\n\n답을 적어 채점받기: /learn 퀴즈 1 내 답 · 정답 보기: /learn 퀴즈 정답 1')
+  const hinted = () => (store.get('quiz') as { items: { isHinted?: boolean }[] }).items.map(one => one.isHinted === true)
+  expect(hinted()).toEqual([true, false])
+  // 힌트 2, or the number first: that question's.
+  expect((await learn($, 'quiz 2 힌트')).text).toContain('2번 힌트\n\n둘째 힌트')
+  expect(hinted()).toEqual([true, true])
+  expect((await learn($, 'quiz 힌트 9')).text).toContain('1~2 사이로')
 
   w.answer = '판정: 맞음\n피드백: 정확합니다.'
   const graded = await learn($, 'quiz 1 바깥 변수를 기억해서')
@@ -2902,7 +2914,9 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
     expect(JSON.stringify(w.store.get('history'))).not.toContain('abc123secret')
     expect((await learn($, 'last')).text).toContain('노트에서 뺀 파일: .env (비밀값이 들 수 있는 파일)')
     const ui = await pane($)
-    expect(await ui.find({ type: 'Text', text: /파일 1개 · \+1 −1 · 노트에서 뺀 파일 1개/ })).toBeDefined()
+    // On a line of its own under the header, which a narrow pane cuts at its end.
+    expect(await ui.find({ type: 'Text', text: /파일 1개 · \+1 −1$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '노트에서 뺀 파일 1개' })).toBeDefined()
     await ui.press({ key: 'view-split' })
     expect(await ui.find({ type: 'Text', text: /노트에서 뺀 파일: \.env \(비밀값이 들 수 있는 파일\)/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /abc123secret/ })).toBeUndefined()
@@ -3103,7 +3117,7 @@ describe('1.6.0: cost guardrails', () => {
     expect(stored.map(note => [note.status, note.skip])).toEqual([['ready', undefined], ['off', 'limit'], ['off', 'limit']])
     expect(w.journal().at(-1)!.text).toContain('_하루 자동 노트 한도에 닿아 노트 없이 전후 코드만 남겼다._')
     const ui = await pane($)
-    expect(await ui.find({ type: 'Text', text: /오늘 자동 노트 한도\(1개\)에 닿았습니다 · w로 쓰면 씁니다/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /오늘 자동 노트 한도\(1개\)에 닿았습니다 · w를 누르면 씁니다/ })).toBeDefined()
     await ui.press({ key: 'prev' })
     expect(await ui.find({ type: 'Text', text: /한도/ })).toBeDefined()
     // What the learner presses is never held back.
@@ -3366,10 +3380,10 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
     const store = new Map<string, unknown>([['concepts', many(25)]])
     const w = world(on, 'ok', null, true, store)
     await start($)
-    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 10개 · /learn 뒤 q')
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 10개 · /learn 복습')
     // Every concept due is still counted where they are all listed.
     expect((await learn($, 'concepts')).text).toContain('복습할 개념 25개: 개념0, 개념1, 개념2, 개념3, 개념4 …')
-    expect((await learn($, 'stats')).text).toContain('- 복습할 개념 25개: 개념0, 개념1, 개념2, 개념3, 개념4 … · 오늘 10개 (하루 10개까지) · 패널에서 q, 또는 /learn quiz')
+    expect((await learn($, 'stats')).text).toContain('- 복습할 개념 25개: 개념0, 개념1, 개념2, 개념3, 개념4 … · 오늘 10개 (하루 10개까지) · /learn 복습 (패널에서는 q)')
   })
 
   test('ten answers graded today take the reminder down', async ($, on) => {
@@ -3378,7 +3392,7 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
     const w = world(on, 'ok', null, true, store)
     await start($)
     expect(w.statuses.at(-1)).toBeUndefined()
-    expect((await learn($, 'stats')).text).toContain(' … · 오늘 몫은 마쳤습니다 · 패널의 퀴즈(4), 또는 /learn quiz')
+    expect((await learn($, 'stats')).text).toContain(' … · 오늘 몫은 마쳤습니다 · /learn 퀴즈 (패널에서는 4)')
   })
 
   test('the answer that makes ten today takes the reminder down, and the quiz says the day\'s review is done', async ($, on) => {
@@ -3386,7 +3400,7 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
     store.set('activity', { [stamp(NOW).day]: { notes: 0, right: 8, wrong: 0 } })
     const w = world(on, 'ok', null, true, store)
     await start($)
-    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 2개 · /learn 뒤 q')
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 2개 · /learn 복습')
     w.answer = THREE_QUESTIONS
     const ui = await pane($)
     await ui.press({ key: 'view-quiz' })
@@ -3396,7 +3410,7 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
     expect(w.models.at(-1)).toContain('1. 개념0 —')
     await ui.press({ key: 'quiz-answer' })
     await ui.press({ key: 'quiz-right' })
-    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 복습')
     await ui.press({ key: 'quiz-answer' })
     await ui.press({ key: 'quiz-wrong' })
     expect(w.statuses.at(-1)).toBeUndefined()
@@ -3408,7 +3422,7 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
     expect(await ui.find({ type: 'Button', key: 'review' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /복습할 개념 \d+개 · 틀린 것 먼저, 잊을 때쯤 다시 나옵니다 · 오늘 몫은 마쳤습니다 · 4로 퀴즈$/ })).toBeDefined()
     await ui.unmount()
-    expect((await learn($, 'stats')).text).toContain('· 오늘 몫은 마쳤습니다 · 패널의 퀴즈(4), 또는 /learn quiz')
+    expect((await learn($, 'stats')).text).toContain('· 오늘 몫은 마쳤습니다 · /learn 퀴즈 (패널에서는 4)')
     expect((await learn($, 'concepts')).text).toBe((await learn($, 'stats')).text)
   })
 
@@ -3420,7 +3434,7 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
     })
     const w = world(on, 'ok', null, true, store)
     await start($)
-    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 복습')
     expect((await learn($, '안다')).text).toContain('쓰는 법: /learn 안다 개념 이름')
     const known = await learn($, '안다 const 선언, 없는 개념')
     expect(known.text).toContain('아는 개념으로 표시했습니다: const 선언. 복습과 퀴즈에서 빠지고, 다음 노트부터 배울 개념에 넣지 않습니다.')
@@ -3450,7 +3464,7 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
 
     expect((await learn($, '모른다 const 선언')).text).toBe('아는 개념 표시를 지웠습니다: const 선언. 다시 복습과 퀴즈에 나옵니다.')
     expect(stepOfName(store, 'const 선언').knownAt).toBeUndefined()
-    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 복습')
     expect(await ui.find({ type: 'Text', text: /^아는 개념/ })).toBeUndefined()
     expect((await learn($, 'unknow const 선언')).text).toBe('아는 개념으로 표시하지 않은 개념입니다: const 선언')
     await ui.unmount()
@@ -3827,16 +3841,17 @@ describe('1.6.0: quiz kinds, the note that taught a missed concept, and /learn q
     await start($)
     w.answer = THREE_QUESTIONS
     await learn($, 'quiz')
-    const QUIZ_USAGE_TEXT = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 · 정답 · 새로 · 맞음 1 · 틀림 2'
+    const QUIZ_USAGE_TEXT = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 (힌트 2) · 정답 · 새로 · 맞음 1 · 틀림 2'
     // Graded, any of these would be wrong: a model call, a miss and a day's count for words never meant as an answer.
     w.answer = '판정: 틀림\n피드백: 아닙니다.'
-    for (const words of ['다음', '다음 문제', 'next', '목록']) {
+    // 시작 · 계속 · 보기 · 풀기 ask for the quiz as /learn 퀴즈 alone does: the one being answered.
+    for (const words of ['다음', '다음 문제', 'next', '목록', '시작', '계속', '보기', '풀기', 'start']) {
       const listed = (await learn($, `quiz ${words}`)).text
       expect(listed).toContain('풀던 퀴즈 · 3문제 중 0개 채점')
       expect(listed).toContain('답을 적어 채점받기: /learn 퀴즈 1 내 답')
     }
     for (const words of ['help', '도움말', '내 답', '쓰는 법']) expect((await learn($, `quiz ${words}`)).text).toBe(QUIZ_USAGE_TEXT)
-    for (const words of ['새 문제 주세요', '다음 문제 보여 줘', 'help me']) {
+    for (const words of ['새 문제 주세요', '다음 문제 보여 줘', 'help me', '답 적기', '채점해 줘']) {
       const said = (await learn($, `quiz ${words}`)).text
       expect(said).toContain('답으로 채점하지 않았습니다')
       expect(said).not.toContain('채점했습니다\n')
@@ -3847,7 +3862,8 @@ describe('1.6.0: quiz kinds, the note that taught a missed concept, and /learn q
     // An answer that starts with a command word: said not graded, with how to send it as the answer.
     const answerLike = (await learn($, 'quiz 정답은 3이에요')).text
     expect(answerLike).toContain('답으로 채점하지 않았습니다')
-    expect(answerLike).toContain('1번의 답이면 번호를 붙여 보내 주세요: /learn 퀴즈 1 정답은 3이에요')
+    // Not offered back with a number: a command word sent so would be graded as the answer.
+    expect(answerLike).toContain('1번의 답이면 번호 뒤에 적어 주세요: /learn 퀴즈 1 내 답')
     expect(answerLike).toContain(QUIZ_USAGE_TEXT)
     // A question's number alone: how to answer it, not "the answer of 1 is 1번".
     expect((await learn($, 'quiz 2번')).text).toBe('2번에 답하려면 번호 뒤에 답을 적어 주세요: /learn 퀴즈 2 내 답 · 정답 보기: /learn 퀴즈 정답 2')
@@ -3865,7 +3881,7 @@ describe('1.6.0: quiz kinds, the note that taught a missed concept, and /learn q
     // The pane's own words for a and h: 정답 보기 · 정답 2 보기 · 힌트 보기.
     expect((await learn($, 'quiz 정답 보기')).text).toContain('1번 정답\n\n답 하나')
     expect((await learn($, 'quiz 정답 3 보기')).text).toContain('3번 정답\n\n답 셋')
-    expect((await learn($, 'quiz 힌트 보기')).text).toBe('남은 문제에는 힌트가 없습니다. 정답을 보려면 /learn 퀴즈 정답.')
+    expect((await learn($, 'quiz 힌트 보기')).text).toBe('2번에는 힌트가 없습니다. 정답 보기: /learn 퀴즈 정답 2')
     expect(w.models).toHaveLength(5)
   })
 
@@ -3891,8 +3907,9 @@ describe('1.6.0: quiz kinds, the note that taught a missed concept, and /learn q
     expect(asked).not.toContain('drive(car)')
     const notesNow = (store.get('history') as Record<string, { notes: { id: string }[] }>)['/proj']!.notes
     expect(store.get('quiz')).toMatchObject({ from: 'note', items: [{ noteId: notesNow[0]!.id }] })
-    // A review quiz still asks about the latest code that met it.
+    // A review quiz still asks about the latest code that met it (s twice: this quiz's question is still to answer).
     w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    await ui.press({ key: 'quiz-new' })
     await ui.press({ key: 'quiz-new' })
     await w.clock.settle()
     expect(w.models.at(-1)).toContain('학습자가 만든 코드 (second.ts)')
@@ -4009,7 +4026,7 @@ describe('1.6.0: views on 1 to 4, q for today\'s review, the keys where they are
     await ui.unmount()
   })
 
-  test('/learn takes the keys only for a pane with something to press: an empty one leaves them in the prompt', async ($, on) => {
+  test('/learn leaves the keys in the prompt, with how to reach the pane; an empty one says how a note comes', async ($, on) => {
     const w = world(on)
     await start($)
     // No note, no concept: no view and no button, and the welcome asks for a request typed in the prompt.
@@ -4021,15 +4038,71 @@ describe('1.6.0: views on 1 to 4, q for today\'s review, the keys where they are
 
     await turn($, () => $.tool.call(EDIT_A))
     await finish(w)
-    expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다 · 숫자 1~4로 보기를 바꾸고, Esc로 대화로 돌아갑니다.')
-    expect(w.focused.at(-1)).toBe(true)
+    expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다 · 패널의 키를 쓰려면 ctrl+x tab(또는 패널 클릭)')
+    expect(w.focused.at(-1)).toBe(false)
   })
 
-  test('/learn takes the keys for concepts alone, learned in another project', async ($, on) => {
+  test('/learn names today\'s review when there is one; /learn 복습 opens the pane on it holding the keys', async ($, on) => {
     const w = world(on, 'ok', null, true, new Map<string, unknown>([['concepts', DUE]]))
     await start($)
-    expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다 · 숫자 1~4로 보기를 바꾸고, Esc로 대화로 돌아갑니다.')
-    expect(w.focused).toEqual([true])
+    expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다 · 패널의 키를 쓰려면 ctrl+x tab(또는 패널 클릭) · 오늘 복습 1개: /learn 복습')
+    expect(w.focused).toEqual([false])
+    w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    expect((await learn($, '복습')).text).toBe('학습 노트 패널에서 오늘 복습을 엽니다 · 답을 적고 Enter로 채점받고, Esc로 대화로 돌아갑니다.')
+    expect(w.focused).toEqual([false, true])
+    await w.clock.settle()
+    expect(w.models).toHaveLength(1)
+    // The quiz on show, its first answer field holding the keys; again, the same quiz and no new one.
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/1/ })).toBeDefined()
+    expect(focusesOf(w).at(-1)).toMatch(/^quiz-mine-\d+-0$/)
+    await learn($, 'review')
+    await w.clock.settle()
+    expect(w.models).toHaveLength(1)
+    await ui.unmount()
+  })
+
+  test('the answer field takes the keys whenever the pane does, and says how to reach the buttons; a hint skips the answer being graded', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = HINTED_QUESTIONS
+    await learn($, 'quiz')
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-quiz' })
+    expect((await ui.find({ type: 'Input', key: mineKey(store, 0) }))?.props.autoFocus).toBe(true)
+    expect(await ui.find({ type: 'Text', text: 'Enter: 채점 · Tab: 버튼으로 (h 힌트 · a 정답 · 1~4 보기)' })).toBeDefined()
+    await ui.press({ key: 'quiz-hint' })
+    expect(await ui.find({ type: 'Text', text: 'Enter: 채점 · Tab: 버튼으로 (a 정답 · 1~4 보기)' })).toBeDefined()
+    await ui.unmount()
+    // Not holding the keys, the pane says how to reach them instead.
+    const idle = await pane($, 'terminal', { ...PANE_PROPS, isFocused: false })
+    expect(await idle.find({ type: 'Text', text: /Tab: 버튼으로/ })).toBeUndefined()
+    await idle.unmount()
+  })
+
+  test('/learn 퀴즈 힌트 while Claude grades the first answer shows the next question\'s, the one graded keeping its step', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = HINTED_QUESTIONS
+    await learn($, 'quiz')
+    const ui = await pane($)
+    await ui.press({ key: 'view-quiz' })
+    // The grade held back: the first answer is being graded.
+    w.model = 'hold'
+    w.answer = '판정: 맞음\n피드백: 정확합니다.'
+    await ui.input({ key: mineKey(store, 0), text: '바깥 변수' })
+    expect(await ui.find({ type: 'Text', text: '채점하는 중입니다…' })).toBeDefined()
+    expect((await learn($, 'quiz 힌트')).text).toContain('2번 힌트\n\n둘째 힌트')
+    expect((await learn($, 'quiz 힌트 1')).text).toBe('1번은 지금 Claude가 채점하고 있습니다. 채점이 끝난 뒤 다시 보세요.')
+    w.release()
+    await w.clock.settle()
+    const items = (store.get('quiz') as { items: { result?: string; isHinted?: boolean }[] }).items
+    expect(items[0]).toMatchObject({ result: 'right' })
+    expect(items[0]!.isHinted).toBeUndefined()
+    expect(items[1]!.isHinted).toBe(true)
+    await ui.unmount()
   })
 
   test('the quiz view offers q once its quiz is all graded, as the status line says; not while one is answered or made', async ($, on) => {
@@ -4038,7 +4111,7 @@ describe('1.6.0: views on 1 to 4, q for today\'s review, the keys where they are
     store.set('quiz', { at: NOW - 2 * DAY, isRevealed: false, items: [{ key: 'c:클로저', name: '클로저', question: '왜 커질까?', answer: '바깥 변수를 기억해서다.', result: 'right' }] })
     const w = world(on, 'hold', null, true, store)
     await start($)
-    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 복습')
     const ui = await pane($)
     await ui.press({ key: 'view-quiz' })
     expect(await ui.find({ type: 'Text', text: /1문제 중 1개 맞혔습니다/ })).toBeDefined()

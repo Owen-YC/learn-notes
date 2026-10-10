@@ -142,6 +142,8 @@ const TITLE = '학습 노트'
  * letter hotkey matches, so the English one is named; a digit is the same in both.
  */
 const KEYS_HINT = 'ctrl+x tab: 패널 고르기 · 숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서'
+/** The same line while the pane holds the keys: how to give them back, and the input mode the letter keys need. */
+const FOCUSED_HINT = 'Esc: 대화로 돌아가기 · 글자 키는 영문 상태에서'
 
 const notes = atom({ plugin: 'learn-notes', key: 'notes' } as const, [])
 const live = atom({ plugin: 'learn-notes', key: 'live' } as const, null)
@@ -1029,7 +1031,7 @@ function isFirstLimitToast($: EngineInterface, day: string): Promise<boolean> {
  */
 async function remind($: EngineInterface, cfg: Config): Promise<void> {
   const left = cfg.isReviewReminder ? todayReview(await read($, concepts), await read($, activity), await $.clock.now()).left : 0
-  const text = left > 0 ? `학습 노트 · 오늘 복습 ${left}개 · /learn 뒤 q` : undefined
+  const text = left > 0 ? `학습 노트 · 오늘 복습 ${left}개 · /learn 복습` : undefined
   if (text === shownReminder) return
   shownReminder = text
   $.ui.status(text)
@@ -1192,9 +1194,9 @@ function todayText(review: { due: number; left: number }): string {
   return review.left > 0 ? `오늘 ${review.left}개 (하루 ${DAILY_REVIEW}개까지)` : '오늘 몫은 마쳤습니다'
 }
 
-/** Where a reply sends the learner for the review: q in the pane while today's has questions left (q is drawn only then), else the quiz view. */
+/** Where a reply sends the learner for the review: /learn 복습 while today's has questions left, else the quiz. */
 function reviewWay(left: number): string {
-  return left > 0 ? '패널에서 q, 또는 /learn quiz' : '패널의 퀴즈(4), 또는 /learn quiz'
+  return left > 0 ? '/learn 복습 (패널에서는 q)' : '/learn 퀴즈 (패널에서는 4)'
 }
 
 /** What a finished quiz says of today's review once it is done: undefined while questions are left for today. */
@@ -2082,7 +2084,9 @@ async function answerText($: EngineInterface, current: Quiz, said: number | unde
  * The replies' own "새 문제" and "다음 문제", and help, are among them: graded, they would be a miss.
  */
 const QUIZ_WORD =
-  /^(힌트|정답|문제|새로|새\s*(?:문제|퀴즈)|다음\s*문제|맞|틀|오답|도움말|(?:hints?|answers?|questions?|right|correct|wrong|missed?|help|new\s+(?:quiz|questions?))\b)/i
+  /^(힌트|정답|문제|새로|새\s*(?:문제|퀴즈)|다음\s*문제|맞|틀|오답|도움말|답\s*적기|적기|채점|(?:hints?|answers?|questions?|right|correct|wrong|missed?|help|new\s+(?:quiz|questions?))\b)/i
+/** The quiz asked for in other words (시작 · 보기 · 계속 …): the quiz being answered, or a new one when none is, as /learn 퀴즈 alone. */
+const QUIZ_SHOW = /^(?:시작|보기|풀기|계속|이어서|다시|열기|start|show|open|continue|resume)(?:\s*(?:하기|해\s*줘|할래))?$/i
 /** A new quiz asked for: 새로 · 새 · new, or 새 문제 (받기) · 새 퀴즈 as the replies and the pane's s say it. */
 const QUIZ_NEW = /^(?:새로|새|new)(?:\s*(?:문제|퀴즈|quiz|questions?))?(?:\s*받기)?$/i
 /** The quiz being answered asked for again: 문제, or 다음 (문제) · 목록 as the replies' "다음 문제: …" may be read. */
@@ -2098,9 +2102,12 @@ const QUIZ_HELP = /^(?:help|도움말|도움|쓰는\s*법|사용법|usage|내\s*
  * `틀림 2`, the learner's own grade once the answer is seen (or turning a
  * grade around).
  */
-async function quizCommand($: EngineInterface, cfg: Config, rest: string): Promise<string> {
+async function quizCommand($: EngineInterface, cfg: Config, said: string): Promise<string> {
   const now = await $.clock.now()
   const current = await lastQuiz($)
+  // The number first (1 힌트 · 2 정답) is the same ask as after: not an answer to grade.
+  const flipped = /^(\d+)\s*번?\s+(힌트|hints?|정답|answers?)(?:\s*보기)?$/i.exec(said)
+  const rest = QUIZ_SHOW.test(said) ? '' : flipped ? `${flipped[2]} ${flipped[1]}` : said
   const isNew = QUIZ_NEW.test(rest)
   if (QUIZ_HELP.test(rest)) return QUIZ_USAGE
   // 보기 after it as the pane's a says it: 정답 보기, 정답 2 보기.
@@ -2113,14 +2120,20 @@ async function quizCommand($: EngineInterface, cfg: Config, rest: string): Promi
     if (!current) return NO_QUIZ
     return quizListText(current, now, '· 새 문제: /learn 퀴즈 새로', (await read($, quizRun)).checking)
   }
-  if (/^(힌트|hint|hints)(?:\s*보기)?$/i.test(rest)) {
+  // One question's hint, as the pane's h: the one being answered (the first open, not the one Claude is grading), or 힌트 2.
+  const hintAsk = /^(?:힌트|hints?)\s*(?:(\d+)\s*번?)?(?:\s*보기)?$/i.exec(rest)
+  if (hintAsk) {
     if (!current) return NO_QUIZ
-    const open = current.items.flatMap((item, i) => (isOpen(current, item) ? [{ item, n: i + 1 }] : []))
-    if (open.length === 0) return '힌트를 볼 문제가 없습니다 (모두 채점했거나 정답을 봤습니다). 새 문제: /learn 퀴즈 새로'
-    const hinted = open.filter(one => one.item.hint !== undefined)
-    if (hinted.length === 0) return '남은 문제에는 힌트가 없습니다. 정답을 보려면 /learn 퀴즈 정답.'
-    await keepQuiz($, { ...current, items: current.items.map((item, i) => (hinted.some(one => one.n === i + 1) ? { ...item, isHinted: true } : item)) })
-    return `힌트\n\n${hinted.map(one => listItem(one.n, one.item.hint!)).join('\n\n')}\n\n답을 적어 채점받기: /learn 퀴즈 ${hinted[0]!.n} 내 답`
+    const checking = (await read($, quizRun)).checking
+    const n = hintAsk[1] !== undefined ? Number(hintAsk[1]) : current.items.findIndex((item, i) => i !== checking && isOpen(current, item)) + 1
+    const item = current.items[n - 1]
+    if (hintAsk[1] === undefined && !item) return '힌트를 볼 문제가 없습니다 (모두 채점했거나 정답을 봤습니다). 새 문제: /learn 퀴즈 새로'
+    if (!item) return `문제 번호를 1~${current.items.length} 사이로 알려 주세요. 예: /learn 퀴즈 힌트 1`
+    if (checking === n - 1) return `${n}번은 지금 Claude가 채점하고 있습니다. 채점이 끝난 뒤 다시 보세요.`
+    if (!isOpen(current, item)) return `${n}번은 이미 채점했거나 정답을 봤습니다. 지금 문제: /learn 퀴즈`
+    if (item.hint === undefined) return `${n}번에는 힌트가 없습니다. 정답 보기: /learn 퀴즈 정답 ${n}`
+    if (item.isHinted !== true) await keepQuiz($, { ...current, items: current.items.map((one, i) => (i === n - 1 ? { ...one, isHinted: true } : one)) })
+    return `${n}번 힌트\n\n${item.hint}\n\n답을 적어 채점받기: /learn 퀴즈 ${n} 내 답 · 정답 보기: /learn 퀴즈 정답 ${n}`
   }
   // Only numbers may follow the word (said plainly or politely: 맞았어요): "틀린 것 같은데…" is no grade.
   const grade = /^(맞음|맞았어요?|맞혔어요?|맞아요|맞힘|right|correct|틀림|틀렸어요?|틀렸음|틀려요|틀린|오답|miss|missed|wrong)\s*([\d\s,번]*)$/i.exec(rest)
@@ -2189,9 +2202,10 @@ async function quizCommand($: EngineInterface, cfg: Config, rest: string): Promi
     if (/^\d+$/.test(rest)) return `숫자만 적으면 문제 번호인지 답인지 알 수 없습니다. ${open + 1}번의 답이 ${rest}이면: /learn 퀴즈 ${open + 1} ${rest}`
     // A command word misspelled, or an answer that starts with one ("정답은 3이에요"): neither read nor graded, and said so.
     const isShort = [...rest.trim()].length < 2
-    if (isShort || QUIZ_WORD.test(rest)) {
-      const why = isShort ? '한 글자뿐이라' : '명령 낱말(힌트 · 정답 · 맞음 · 틀림 · 새 문제 등)로 시작해'
-      return `${why} 답으로 채점하지 않았습니다. ${open + 1}번의 답이면 번호를 붙여 보내 주세요: /learn 퀴즈 ${open + 1} ${rest}\n\n${QUIZ_USAGE}`
+    if (isShort) return `한 글자뿐이라 답으로 채점하지 않았습니다. ${open + 1}번의 답이면 번호를 붙여 보내 주세요: /learn 퀴즈 ${open + 1} ${rest}\n\n${QUIZ_USAGE}`
+    // A command word is not offered back with a number: that would be graded as the answer.
+    if (QUIZ_WORD.test(rest)) {
+      return `명령 낱말(힌트 · 정답 · 맞음 · 틀림 · 새 문제 등)로 시작해 답으로 채점하지 않았습니다. ${open + 1}번의 답이면 번호 뒤에 적어 주세요: /learn 퀴즈 ${open + 1} 내 답\n\n${QUIZ_USAGE}`
     }
     // Said only once it is graded: an answer turned away (another being graded, the model failing) was not.
     return typedAnswer($, cfg, current, open + 1, rest.trim(), `${open + 1}번 답으로 채점했습니다`)
@@ -2231,7 +2245,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'learn',
       description: '학습 노트 패널을 엽니다 · /learn 도움말로 명령 목록',
-      argumentHint: '[퀴즈|정리|질문|기록|보고서|찾기|일지|도움말]',
+      argumentHint: '[복습|퀴즈|정리|질문|기록|보고서|찾기|일지|도움말]',
       immediate: true,
     })
     // An engine without tools for plugins, or one that refuses this one, leaves /learn as it was.
@@ -2472,6 +2486,16 @@ export const register: Register = (on, options) => {
       }
     }
     if (arg === 'quiz') return { text: await quizCommand($, cfg, rest) }
+    // Today's review at once: the pane opens on the quiz holding the keys (its answer field), as the pane's q.
+    if (arg === 'review') {
+      const hasConcepts = Object.keys(await read($, concepts)).length > 0
+      if (rest !== '' || !hasConcepts || (await isCloudSession($))) return { text: await quizCommand($, cfg, rest) }
+      await update($, autoOpened, () => true)
+      const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true })
+      if (!opened.isPlaced) return { text: await quizCommand($, cfg, '') }
+      await reviewNow($, cfg)
+      return { text: '학습 노트 패널에서 오늘 복습을 엽니다 · 답을 적고 Enter로 채점받고, Esc로 대화로 돌아갑니다.' }
+    }
     if (arg === 'know' || arg === 'unknow') {
       const toKnown = arg === 'know'
       // Names may hold spaces: one concept per comma.
@@ -2620,10 +2644,10 @@ export const register: Register = (on, options) => {
     }
     if (arg !== '') return { text: `모르는 하위 명령입니다: '${said}'.\n\n${SHORT_HELP}` }
     await update($, autoOpened, () => true)
-    // Sent from an empty prompt, the pane asks for the keys at once (no ctrl+x tab); Esc hands them back and leaves it open.
-    // A pane with no note and no concept has no key to press: the keys stay in the prompt, for the request that makes the first note.
+    // The keys stay in the prompt: what is typed next is a request, never one of the pane's keys (w · e · r call the model).
+    // ctrl+x tab or a click hands them to the pane; /learn 복습 opens it holding them.
     const hasKeys = list.length > 0 || Object.keys(await read($, concepts)).length > 0
-    const opened = await $.ui.open({ id: PANE, title: TITLE, ...(hasKeys ? { focus: true as const } : {}) })
+    const opened = await $.ui.open({ id: PANE, title: TITLE })
     const last = list.at(-1)
     if (opened.isPlaced && (await isCloudSession($))) {
       // Placed on the cloud computer's own terminal, which nobody sees: say so, and show the note here.
@@ -2634,7 +2658,11 @@ export const register: Register = (on, options) => {
     const root = await $.session.root()
     const hint = isSystemFolder(root) ? `\n\n${systemFolderHint(root)}` : ''
     if (opened.isPlaced && !hasKeys) return { text: `학습 노트 패널을 열었습니다 · Claude에게 파일을 만들거나 고쳐 달라고 하면, 턴이 끝난 뒤 여기에 노트가 생깁니다.${hint}` }
-    if (opened.isPlaced) return { text: `학습 노트 패널을 열었습니다 · 숫자 1~4로 보기를 바꾸고, Esc로 대화로 돌아갑니다.${hint}` }
+    if (opened.isPlaced) {
+      const left = todayReview(await read($, concepts), await read($, activity), await $.clock.now()).left
+      const review = left > 0 ? ` · 오늘 복습 ${left}개: /learn 복습` : ''
+      return { text: `학습 노트 패널을 열었습니다 · 패널의 키를 쓰려면 ctrl+x tab(또는 패널 클릭)${review}${hint}` }
+    }
     $.ui.log(`learn-notes: 패널을 열지 못했습니다 (${opened.reason})`, { to: 'debug' })
     return {
       text: `이 화면에는 패널을 띄울 수 없어 마지막 노트를 여기에 적습니다. 터미널을 전체 화면(/tui fullscreen)으로 쓰면 오른쪽에 패널이 붙습니다.\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
@@ -2681,15 +2709,16 @@ export const register: Register = (on, options) => {
         {systemFolderHint(root)}
       </Text>
     ) : null
-    // The terminal's pane takes the keys from /learn, a click or ctrl+x tab; Esc gives them back to the prompt.
+    // The terminal's pane takes the keys from /learn 복습, a click or ctrl+x tab; Esc gives them back to the prompt.
+    const isTerminalFocus = e.surface === 'terminal' && e.props.isFocused === true
     const keysHint =
       e.surface === 'terminal' ? (
         <Text dimColor wrap="wrap">
-          {e.props.isFocused ? 'Esc: 대화로 돌아가기' : KEYS_HINT}
+          {e.props.isFocused ? FOCUSED_HINT : KEYS_HINT}
         </Text>
       ) : null
     // q is for the review not on show: the quiz view offers it too once its quiz is all graded (as the status line's
-    // '/learn 뒤 q' says, the view kept from before), not while a question waits for its answer or a quiz is made.
+    // view /learn opens on, kept from before), not while a question waits for its answer or a quiz is made.
     const isReviewOn = shown === 'quiz' && (run.isMaking || (current?.items.some(item => item.result === undefined) ?? false))
     const strip = viewStrip($, cfg, shown, note !== undefined, isReviewOn ? 0 : review.left, el)
 
@@ -2727,7 +2756,7 @@ export const register: Register = (on, options) => {
           {hasConcepts && keysHint}
           {hasConcepts && shown !== 'note' ? (
             <Box marginTop={1} flexDirection="column">
-              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, review, list, el) : conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el)}
+              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, review, list, isTerminalFocus, el) : conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el)}
             </Box>
           ) : (
             welcome
@@ -2748,7 +2777,7 @@ export const register: Register = (on, options) => {
 
     const body =
       shown === 'quiz' ? (
-        quizView($, cfg, current, run, hasConcepts, now, review, list, el)
+        quizView($, cfg, current, run, hasConcepts, now, review, list, isTerminalFocus, el)
       ) : shown === 'concepts' ? (
         conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el)
       ) : shown === 'note' ? (
@@ -2807,9 +2836,13 @@ export const register: Register = (on, options) => {
               {' '}
               · {note.isPast ? '지난 세션 · ' : ''}
               {when(note.at, now)} · 파일 {fileCount}개 · +{totalAdded} −{totalRemoved}
-              {withheld.length > 0 ? ` · 노트에서 뺀 파일 ${withheld.length}개` : ''}
-              {redacted > 0 ? ` · 비밀값 ${redacted}곳 가림` : ''}
             </Text>
+          </Text>
+        )}
+        {/* On a line of its own: the header's end is cut in a narrow pane, and this is what keeps code out of the note. */}
+        {!isWhole(shown) && (withheld.length > 0 || redacted > 0) && (
+          <Text dimColor wrap="wrap">
+            {[withheld.length > 0 ? `노트에서 뺀 파일 ${withheld.length}개` : '', redacted > 0 ? `비밀값 ${redacted}곳 가림` : ''].filter(part => part !== '').join(' · ')}
           </Text>
         )}
         {!isWhole(shown) && (
@@ -2914,6 +2947,21 @@ async function showQuiz($: EngineInterface): Promise<void> {
   await update($, view, () => 'quiz')
   const current = await lastQuiz($)
   if (current) focusShown($, current)
+}
+
+/**
+ * The quiz view's s: a new quiz. While questions of the one on show are still
+ * to grade, the first press only asks (the notice under the button), and the
+ * second makes it: one s typed by mistake drops no question.
+ */
+async function pressNew($: EngineInterface, cfg: Config): Promise<void> {
+  const current = await lastQuiz($)
+  const isLeft = current?.items.some(item => item.result === undefined) ?? false
+  if (current && isLeft && (await read($, quizRun)).armedNew !== current.at) {
+    await update($, quizRun, run => ({ ...run, armedNew: current.at }))
+    return
+  }
+  await startQuiz($, cfg)
 }
 
 /** The keys to the answer field of the question the quiz view shows (the first not graded), while it is still to answer. */
@@ -3067,8 +3115,8 @@ function noteBody(note: LearnNote, isBusy: boolean, off: string, el: ElementTabl
 function offText(note: LearnNote, cfg: Config, now: number): string {
   if (note.skip === 'format') return '띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다 · w로 쓰기'
   if (note.skip === 'limit') {
-    if (stamp(note.at).day !== stamp(now).day) return '그날 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · w로 쓰면 씁니다'
-    return `오늘 자동 노트 한도${cfg.dailyAutoNotes > 0 ? `(${cfg.dailyAutoNotes}개)` : ''}에 닿았습니다 · w로 쓰면 씁니다`
+    if (stamp(note.at).day !== stamp(now).day) return '그날 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · w를 누르면 씁니다'
+    return `오늘 자동 노트 한도${cfg.dailyAutoNotes > 0 ? `(${cfg.dailyAutoNotes}개)` : ''}에 닿았습니다 · w를 누르면 씁니다`
   }
   return '자동 노트가 꺼져 있습니다. w로 노트를 쓰거나 2로 전/후 코드를 보세요.'
 }
@@ -3484,6 +3532,14 @@ function reviewText(one: LearnConcept, now: number): string {
   return one.reviewedAt === undefined ? '아직 떠올려 본 적 없음' : `다음 복습 ${dueText(one, now)}`
 }
 
+/** A day as a narrow row says it: 오늘, or the date with no time. */
+function dayWhen(at: number, now: number): string {
+  const a = stamp(at).day
+  const n = stamp(now).day
+  if (a === n) return '오늘'
+  return a.slice(0, 4) === n.slice(0, 4) ? a.slice(5) : a
+}
+
 /** Names the known concepts' line shows at most: /learn 기록's reply goes into the conversation. */
 const KNOWN_SHOWN = 30
 
@@ -3533,8 +3589,8 @@ function conceptsView(
           </Text>
           <Text dimColor>
             {' '}
-            ×{one.count} · 최근 {when(one.lastAt, now)}
-            {one.reviewedAt !== undefined ? ` · 퀴즈 ${when(one.reviewedAt, now)}` : ''} · {reviewText(one, now)}
+            ×{one.count} · {reviewText(one, now)} · 최근 {dayWhen(one.lastAt, now)}
+            {one.reviewedAt !== undefined ? ` · 퀴즈 ${dayWhen(one.reviewedAt, now)}` : ''}
           </Text>
         </Text>
         {one.blurb !== '' && <Markdown text={one.blurb} dimColor />}
@@ -3611,6 +3667,7 @@ function quizView(
   now: number,
   review: { due: number; left: number; graduated: readonly string[] },
   list: readonly LearnNote[],
+  isFocused: boolean,
   el: ElementTable,
 ) {
   const { Box, Text, Markdown, Button } = el
@@ -3637,8 +3694,13 @@ function quizView(
       </Text>
       {hasConcepts && !run.isMaking && (run.checking ?? null) === null && (
         <Box>
-          <Button key="quiz-new" hotkey="s" plain label={current ? '새 문제 받기' : '퀴즈 시작'} onPress={() => void startQuiz($, cfg)} />
+          <Button key="quiz-new" hotkey="s" plain label={current ? '새 문제 받기' : '퀴즈 시작'} onPress={() => void pressNew($, cfg)} />
         </Box>
+      )}
+      {current && run.armedNew === current.at && items.length > graded.length && !run.isMaking && (
+        <Text color="yellow" wrap="wrap">
+          풀던 문제 {items.length - graded.length}개가 남았습니다 · s를 한 번 더 누르면 새 문제를 받습니다
+        </Text>
       )}
       {!hasConcepts && <Text dimColor>{NO_CONCEPTS_FOR_QUIZ}</Text>}
       {hasConcepts && items.length === 0 && !run.isMaking && (
@@ -3739,6 +3801,7 @@ function quizView(
                 {Input && (
                   <Input
                     key={fieldKey(i)}
+                    autoFocus
                     label="내 답"
                     placeholder="답을 적고 Enter"
                     submitLabel="채점받기"
@@ -3754,6 +3817,12 @@ function quizView(
                   <Button key="quiz-answer" hotkey="a" plain label={Input ? '정답만 보기' : '정답 보기'} onPress={() => showAnswer($, i)} />
                   {!Input && <Text dimColor>먼저 스스로 답해 보세요</Text>}
                 </Box>
+                {/* While the field holds the keys every letter is typed into it: how to reach the buttons. */}
+                {Input && isFocused && (
+                  <Text dimColor wrap="wrap">
+                    Enter: 채점 · Tab: 버튼으로 ({[...(item.hint !== undefined && item.isHinted !== true ? ['h 힌트'] : []), 'a 정답', '1~4 보기'].join(' · ')})
+                  </Text>
+                )}
               </Box>
             )}
           </Box>
@@ -3787,11 +3856,12 @@ function taughtBy(list: readonly LearnNote[], map: Readonly<Record<string, strin
 const HELP = [
   'learn-notes 명령',
   '',
-  '- `/learn`: 패널 열기 · 바로 키를 받고, Esc로 대화로 돌아갑니다 (숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다)',
+  '- `/learn`: 패널 열기 · 패널의 키를 쓰려면 `ctrl+x tab`(또는 패널 클릭), Esc로 대화로 돌아갑니다 (숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다)',
+  '- `/learn 복습`: 오늘 복습을 패널 퀴즈로 바로 시작 · 답 칸에 바로 적고 Enter (패널이 없는 화면에서는 대화창에 문제를 냅니다)',
   '- 패널: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작 · `p`·`n` 이전·다음 노트 · `w` 노트 쓰기, 다시 쓰기',
   '- 노트 아래: `t` 이 노트 퀴즈 · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기',
-  '- 퀴즈(`4`): 답을 적고 Enter로 채점 · `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기 · `s` 새 문제 · `n` 틀린 개념을 배운 노트',
-  '- `/learn 퀴즈`: 풀던 퀴즈 보기, 없으면 복습할 개념으로 새 퀴즈 (내 코드의 결과를 맞히거나 바꿔 봅니다) · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트` · `정답`',
+  '- 퀴즈(`4`): 답을 적고 Enter로 채점 · 답 칸에서 Tab으로 버튼에 가서 `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기 · `s` 새 문제(풀던 문제가 남았으면 두 번) · `n` 틀린 개념을 배운 노트',
+  '- `/learn 퀴즈`: 대화창에서 풀기 · 풀던 퀴즈, 없으면 복습할 개념으로 새 퀴즈 (내 코드의 결과를 맞히거나 바꿔 봅니다) · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트`(`힌트 2`) · `정답`',
   '- `/learn 정리`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
   '- `/learn 질문 …`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기',
   '- `/learn 기록`: 연속 학습일 · 정답률 · 복습할 개념 · 배운 개념 · 모델 호출 수',
@@ -3809,7 +3879,7 @@ function commandHelp(): string {
   return [title, CHAT_HINT, ...rest].join('\n')
 }
 /** What an unknown subcommand gets: the few most used, and where the rest are. */
-const SHORT_HELP = '자주 쓰는 것: `/learn` 패널 · `/learn 퀴즈` · `/learn 정리` · `/learn 질문 …` · `/learn 기록` · 전체는 `/learn 도움말`'
+const SHORT_HELP = '자주 쓰는 것: `/learn` 패널 · `/learn 복습` · `/learn 퀴즈` · `/learn 정리` · `/learn 질문 …` · `/learn 기록` · 전체는 `/learn 도움말`'
 /**
  * Korean words for the subcommands, so `/learn 퀴즈` works as `/learn quiz` does. Some are kept
  * out of the help: 날짜 (days), 저장 (save, retired), 개념 and 통계 (the record, as 기록).
@@ -3818,8 +3888,8 @@ const COMMAND_WORDS: Record<string, string> = {
   도움말: 'help',
   도움: 'help',
   퀴즈: 'quiz',
+  복습: 'review',
   문제: 'quiz',
-  복습: 'quiz',
   개념: 'stats',
   정리: 'recap',
   요약: 'recap',
@@ -3845,7 +3915,7 @@ const COMMAND_WORDS: Record<string, string> = {
 const SAVE_OFF = '노트는 저절로 저장됩니다. 파일로 남기려면 /config에서 learn-notes.autoSave(노트를 마크다운 파일로 자동 저장)를 켜세요.'
 /** Lines /learn day prints at most: the reply goes into the conversation the model reads. */
 const DAY_LINES = 40
-const QUIZ_USAGE = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 · 정답 · 새로 · 맞음 1 · 틀림 2'
+const QUIZ_USAGE = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 (힌트 2) · 정답 · 새로 · 맞음 1 · 틀림 2'
 const ASK_USAGE = '쓰는 법: /learn 질문 물을 말 (예: /learn 질문 왜 let 대신 const를 썼어?) · 패널에서 고른 노트(없으면 마지막 노트)에 대해 답합니다'
 const NO_QUIZ = '아직 낸 퀴즈가 없습니다. /learn 퀴즈로 먼저 문제를 받으세요.'
 const KNOW_USAGE =

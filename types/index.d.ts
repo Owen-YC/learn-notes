@@ -179,6 +179,8 @@ export type LearnQuizRun = {
   checking?: number | null
   /** A typed answer whose grading failed, put back in its question's field to send again. */
   draft?: { at: number; i: number; text: string } | null
+  /** The quiz (by when it was asked) whose s was pressed once with questions still to grade: the next s makes a new one. */
+  armedNew?: number | null
 }
 
 /** What the pane shows: the selected note or its code before and after, every concept, or the quiz. */
