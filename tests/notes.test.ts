@@ -124,6 +124,8 @@ import {
   CONCEPTS_KEPT,
   KIND_LABEL,
   spreadPicks,
+  recapMissed,
+  reportMarkdown,
   type Hunk,
   type QuizPick,
 } from '../hooks/notes'
@@ -2163,5 +2165,70 @@ describe('1.6.0: the pane\'s short lines', () => {
     expect(progressParts(statsOf(days, now))).toEqual(['연속 2일째', '퀴즈 4/6'])
     // Quizzed only more than a week ago: a run of none, and no quiz part.
     expect(progressParts(statsOf({ '2026-09-20': { notes: 0, right: 2, wrong: 0 } }, now))).toEqual([])
+  })
+})
+
+describe('1.6.0: the learning report and the recap\'s missed concepts', () => {
+  const now = new Date(2026, 9, 9, 15, 0).getTime()
+  const DAY = 86_400_000
+  const range = recapRange('최근 7일', now)!
+  const index: Record<string, LearnConcept> = {
+    'c:const': { name: 'const 선언', count: 1, firstAt: now - DAY, lastAt: now - DAY, blurb: '다시 넣지 않는 값 — `const b = 2`', files: ['src/a.ts'] },
+    'c:closure': { name: '클로저', count: 3, firstAt: now - 2 * DAY, lastAt: now - DAY, blurb: '바깥 변수를 기억한다', files: ['src/b.ts'], missedAt: now - DAY, reviewedAt: now - DAY, step: 0 },
+    'c:map': { name: 'map | 배열', count: 4, firstAt: now - 40 * DAY, lastAt: now - 2 * DAY, blurb: '새 배열', files: [] },
+  }
+  const activity = {
+    [stamp(now).day]: { notes: 2, right: 3, wrong: 1 },
+    [stamp(now - DAY).day]: { notes: 3, right: 0, wrong: 0 },
+    [stamp(now - 3 * DAY).day]: { notes: 1, right: 0, wrong: 0 },
+    // Before the range: not counted in it, though the run of days reaches back only through yesterday.
+    [stamp(now - 20 * DAY).day]: { notes: 9, right: 9, wrong: 9 },
+  }
+
+  test('the report counts the days, notes, concepts and quiz answers of its range, by name only', () => {
+    const md = reportMarkdown({ range, activity, index, level: 'beginner', now, usage: { [stamp(now).day]: { calls: 4, auto: 2, input: 12_000, output: 900 } } })
+    expect(md.split('\n')[0]).toBe(`# 학습 보고 · ${range.days[0]} ~ ${range.days[6]} (최근 7일)`)
+    expect(md).toContain('모든 프로젝트를 합친 기록입니다. 코드 · 요청 문장 · 파일 이름은 들어 있지 않습니다.')
+    expect(md).toContain('- 학습한 날 3일 · 지금 연속 2일째')
+    expect(md).toContain('- 학습 노트 6개')
+    expect(md).toContain('- 새로 배운 개념 2개: 클로저 · const 선언')
+    // Met before the range and again in it.
+    expect(md).toContain('- 다시 만난 개념 1개')
+    expect(md).toContain('- 퀴즈 4문제 중 3개 맞힘 (75%)')
+    expect(md).toContain('- 다시 볼 개념(퀴즈에서 틀림): 클로저')
+    expect(md).toContain('- 설명 수준 beginner')
+    expect(md).toContain('- 학습 노트의 모델 호출 4번 (자동 노트 2) · 입력 약 1.2만 · 출력 900 토큰')
+    expect(md).toContain('## 이번 기간에 배운 것을 내 말로 한 줄')
+    // No explanation, no file, no code.
+    for (const leak of ['const b', 'src/a.ts', 'src/b.ts', '바깥 변수를', '`']) expect(md).not.toContain(leak)
+  })
+
+  test('a report with no quiz says so, and a name cannot open code or break a line', () => {
+    const quiet = { [stamp(now).day]: { notes: 1, right: 0, wrong: 0 } }
+    const named = { 'c:x': { name: '`useEffect`\n훅', count: 1, firstAt: now, lastAt: now, blurb: '', files: [] } }
+    const md = reportMarkdown({ range: recapRange('오늘', now)!, activity: quiet, index: named, level: 'advanced', now })
+    expect(md.split('\n')[0]).toBe(`# 학습 보고 · ${stamp(now).day} (오늘)`)
+    expect(md).toContain('- 퀴즈: 아직 채점한 문제가 없습니다')
+    expect(md).toContain('- 새로 배운 개념 1개: useEffect 훅')
+    expect(md).toContain('- 학습한 날 1일 · 지금 연속 1일째')
+    expect(md).toContain('- 학습 노트의 모델 호출: 없습니다')
+    expect(md).not.toContain('다시 볼 개념')
+    expect(reportMarkdown({ range: recapRange('2026-10-01', now)!, activity: {}, index: {}, level: 'beginner', now }).split('\n')[0]).toBe('# 학습 보고 · 2026-10-01')
+  })
+
+  test('the recap prompt starts what is easy to confuse from the concepts a quiz in its range found missed', () => {
+    const today = recapRange('오늘', now)!
+    const entry = { day: stamp(now).day, time: '10:00', request: '고쳐줘', summary: '고쳤다', files: [], concepts: [] }
+    const missed = { ...index, 'c:closure': { ...index['c:closure']!, missedAt: now - 60_000 } }
+    expect(recapMissed(missed, today).map(one => one.name)).toEqual(['클로저'])
+    const text = recapPrompt(today, [entry], missed, {}, 'beginner')
+    expect(text).toContain('## 이 기간에 퀴즈에서 틀린 개념 (아직 다시 맞히지 못한 것)\n클로저\n헷갈리기 쉬운 것은 이 목록부터 쓴다.')
+    expect(text).toContain('### 헷갈리기 쉬운 것\n(위의 퀴즈에서 틀린 개념부터')
+    // Missed before the range, or not missed: no such section, and the guess as before.
+    for (const one of [index, { ...index, 'c:closure': { ...index['c:closure']!, missedAt: undefined } }]) {
+      const plain = recapPrompt(today, [entry], one, {}, 'beginner')
+      expect(plain).not.toContain('퀴즈에서 틀린 개념')
+      expect(plain).toContain('### 헷갈리기 쉬운 것\n(노트로 보아 놓치기 쉬운 점 1~2개)')
+    }
   })
 })

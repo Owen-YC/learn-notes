@@ -108,6 +108,7 @@ import {
   rememberSubmit,
   recapRange,
   recapSection,
+  reportMarkdown,
   type RecapEntry,
   type RecapRange,
   parseDiff,
@@ -165,7 +166,7 @@ const ACTIVITY_KEY = 'activity'
 const BANK_KEY = 'quizBank'
 /** The Anki import file /learn anki writes, in the journal folder. */
 const ANKI_FILE = 'learn-notes-anki.txt'
-/** Each day's model calls and tokens (see LearnDayUsage), for the daily limit and /learn stats. */
+/** Each day's model calls and tokens (see LearnDayUsage), for the daily limit, /learn 기록 and /learn 보고서. */
 const USAGE_KEY = 'usage'
 /** The last day the daily limit's toast showed, in any session: it shows once a day. */
 const LIMIT_TOAST_KEY = 'limitToast'
@@ -409,22 +410,57 @@ async function appendJournal($: EngineInterface, cfg: Config, root: string, at: 
   return path
 }
 
-/** A failure is a toast once and a debug line, never a broken turn. */
+/**
+ * A failure is a toast once and a debug line, never a broken turn; the note
+ * stays unsaved, and the next save that works writes it too (flushUnsaved).
+ */
 async function saveNow($: EngineInterface, cfg: Config, note: LearnNote, isRewrite: boolean): Promise<string | undefined> {
   try {
     // Into the journal of the note's own project, even after a /cd.
     const root = note.root || (await $.session.root())
     const path = await appendJournal($, cfg, root, note.at, journalSection(note, isRewrite))
     await setNote($, note.id, { savedAs: note.status, isUnsaved: false })
+    // The folder takes writes again: the notes it refused before go in after this one.
+    void flushUnsaved($, cfg, note.id)
     return path
   } catch (error) {
     await setNote($, note.id, { isUnsaved: true }).catch(() => undefined)
     $.ui.log(`learn-notes: 노트를 파일에 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
     if (!hasWarnedSave) {
       hasWarnedSave = true
-      $.ui.toast('학습 노트를 파일에 저장하지 못했습니다 · /config에서 저장 폴더를 확인하세요', { timeoutMs: 8000 })
+      $.ui.toast('학습 노트를 파일에 쓰지 못했습니다 · /config의 saveDir를 확인하면 다음 노트 때 함께 저장됩니다', { timeoutMs: 8000 })
     }
     return undefined
+  }
+}
+
+/** Notes queued for another try at the journal, so none is queued twice while its try waits. */
+const retrying = new Set<string>()
+
+/**
+ * Queues another try at the journal for each note in the pane a failed save
+ * left unsaved (an autoSave left off before 1.6.0 did too), but the one just
+ * saved and any being written (or rewritten: its own save follows). Called
+ * from inside the saving lane, so it never waits on that lane: the tries run
+ * after the save that called it.
+ */
+async function flushUnsaved($: EngineInterface, cfg: Config, savedId: string): Promise<void> {
+  // A note being written saves itself when done.
+  const isFree = (one: LearnNote) => one.status !== 'writing' && !inFlight.has(one.id)
+  const pending = (await read($, notes)).filter(one => one.isUnsaved === true && isFree(one) && one.id !== savedId && !retrying.has(one.id))
+  for (const { id } of pending) {
+    retrying.add(id)
+    void enqueue('saving', async () => {
+      try {
+        // As the note is when its turn comes: a rewrite meanwhile is what goes in.
+        const note = (await read($, notes)).find(one => one.id === id)
+        if (!note || note.isUnsaved !== true || !isFree(note)) return
+        // Stored as saved, so the next session does not write it again; not awaited: a store write may wait on this lane.
+        if (await saveNow($, cfg, note, note.savedAs !== null)) void persist($)
+      } finally {
+        retrying.delete(id)
+      }
+    })
   }
 }
 
@@ -690,7 +726,7 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
       const isUndo = named !== from && resolveKey(map, named) === from
       const into = isUndo ? named : resolveKey(map, named)
       const gone = conceptAt(index, from)
-      if (!gone) return { isDone: false, text: `없는 개념입니다: '${fromName}'. /learn concepts로 이름을 확인하세요.\n\n${MERGE_USAGE}` }
+      if (!gone) return { isDone: false, text: `없는 개념입니다: '${fromName}'. /learn 기록으로 이름을 확인하세요.\n\n${MERGE_USAGE}` }
       if (from === into) return { isDone: false, text: `'${fromName}' · '${intoName}': 이미 같은 개념으로 셉니다.` }
       const merges = cleanMerges(await $.store.get(MERGES_KEY))
       const record = isUndo ? merges[named] : undefined
@@ -798,7 +834,7 @@ function knownReply(result: KnownResult, toKnown: boolean): string {
     )
   }
   if (result.already.length > 0) lines.push(`${toKnown ? '이미 아는 개념입니다' : '아는 개념으로 표시하지 않은 개념입니다'}: ${result.already.join(' · ')}`)
-  if (result.missing.length > 0) lines.push(`없는 개념입니다: ${result.missing.map(name => `'${name}'`).join(', ')}. /learn concepts로 이름을 확인하세요.`)
+  if (result.missing.length > 0) lines.push(`없는 개념입니다: ${result.missing.map(name => `'${name}'`).join(', ')}. /learn 기록으로 이름을 확인하세요.`)
   return lines.join('\n')
 }
 
@@ -1650,9 +1686,8 @@ async function writeNote(
         $.ui.log(`learn-notes: 노트의 개념을 세지 못했습니다 (${String(error)})`, { to: 'debug' })
       }
     }
+    // autoSave off means no journal, nothing more: the note stays in the pane and the store.
     if (cfg.isAutoSave) await save($, cfg, done, isRewrite)
-    // Not saved: /learn save still finds it, rewritten or not.
-    else done = (await setNote($, id, { isUnsaved: true })) ?? { ...done, isUnsaved: true }
     await persist($, false, [done])
     if (done.status === 'ready' && !(await isPaneVisible($))) {
       const line = summaryOf(done.text)
@@ -2143,8 +2178,8 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'learn',
-      description: '학습 노트 패널을 연다 (/learn help: 하위 명령)',
-      argumentHint: '[quiz|recap|ask|stats|concepts|find|day|anki|last|help]',
+      description: '학습 노트 패널을 엽니다 · /learn 도움말로 명령 목록',
+      argumentHint: '[퀴즈|정리|질문|기록|보고서|찾기|일지|도움말]',
       immediate: true,
     })
     isInteractive = e.isInteractive
@@ -2324,7 +2359,7 @@ export const register: Register = (on, options) => {
     const list = await read($, notes)
     if (arg === 'help') return { text: HELP }
     if (arg === 'find') {
-      if (rest === '') return { text: '쓰는 법: /learn find 찾을 말 (요청 · 노트 내용 · 파일 이름 · 개념 이름에서 찾습니다)' }
+      if (rest === '') return { text: '쓰는 법: /learn 찾기 찾을 말 (요청 · 노트 내용 · 파일 이름 · 개념 이름에서 찾습니다)' }
       const now = await $.clock.now()
       const found = searchNotes(await allNotes($), rest, await currentAliases($))
       if (found.length === 0) return { text: `'${rest}'에 맞는 노트가 없습니다.` }
@@ -2385,40 +2420,14 @@ export const register: Register = (on, options) => {
         ].join('\n'),
       }
     }
-    if (arg === 'stats') {
-      const now = await $.clock.now()
-      const record = await storedActivity($)
-      const stats = statsOf(record, now)
-      const index = await read($, concepts)
-      const { fresh, again } = progressOf(index, now)
-      const due = dueConcepts(index, now)
-      const today = todayReview(index, record, now)
-      const graded = stats.month.right + stats.month.wrong
-      const bar = (n: number) => (n === 0 ? '·' : '■'.repeat(Math.min(n, 10)) + (n > 10 ? '+' : ''))
-      const days = stats.days.map(({ day, weekday, one }) => {
-        const quiz = one.right + one.wrong > 0 ? ` · 퀴즈 ${one.right}/${one.right + one.wrong}` : ''
-        return `- ${day.slice(5)} ${weekday} ${bar(one.notes)} 노트 ${one.notes}${quiz}`
-      })
-      return {
-        text: [
-          `학습 기록 · ${stats.streak > 0 ? `연속 ${stats.streak}일째` : '오늘 시작해 보세요'}${stats.best > stats.streak ? ` (가장 길게 ${stats.best}일)` : ''}${stats.streak > 0 && !stats.isTodayActive ? ' · 오늘도 하면 이어집니다' : ''}`,
-          '',
-          `- 최근 7일: 노트 ${stats.week.notes}개 · 새 개념 ${fresh}개 · 다시 만난 개념 ${again}개${stats.week.right + stats.week.wrong > 0 ? ` · 퀴즈 ${stats.week.right}/${stats.week.right + stats.week.wrong} 맞힘` : ''}`,
-          `- 최근 30일 퀴즈 정답률: ${graded > 0 ? `${Math.round((stats.month.right / graded) * 100)}% (${stats.month.right}/${graded})` : '아직 채점한 문제가 없습니다'}`,
-          `- 복습할 개념: ${due.length > 0 ? `${due.length}개 · ${todayText(today)} · ${reviewWay(today.left)}` : '지금은 없습니다'}`,
-          '',
-          '최근 7일',
-          ...days,
-          '',
-          usageLine(cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)), now),
-        ].join('\n'),
-      }
-    }
+    // One record since 1.6.0: the run of days and the concepts learned together (stats · concepts · 기록 · 개념 · 통계).
+    if (arg === 'stats' || arg === 'concepts') return { text: await recordText($, cfg) }
+    if (arg === 'report') return { text: await reportCommand($, cfg, rest) }
     if (arg === 'ask') {
       if (rest === '') return { text: ASK_USAGE }
       const wanted = await read($, selectedId)
       const note = list.find(one => one.id === wanted) ?? list.at(-1)
-      if (!note) return { text: '물어볼 노트가 없습니다. 코딩을 요청해 노트가 생기면 /learn ask 질문으로 물어보세요.' }
+      if (!note) return { text: '물어볼 노트가 없습니다. 코딩을 요청해 노트가 생기면 /learn 질문 뒤에 물을 말을 적어 물어보세요.' }
       const asked = await askNote($, cfg, note.id, rest)
       if ('error' in asked) return { text: asked.error }
       const now = await $.clock.now()
@@ -2429,7 +2438,7 @@ export const register: Register = (on, options) => {
     if (arg === 'recap') {
       const now = await $.clock.now()
       const range = recapRange(rest, now)
-      if (!range) return { text: '쓰는 법: /learn recap (오늘 · 어제 · 이번주 · 최근 7일 · 2026-10-03)' }
+      if (!range) return { text: '쓰는 법: /learn 정리 (오늘 · 어제 · 이번주 · 최근 7일 · 2026-10-03)' }
       const root = await $.session.root()
       const index = await read($, concepts)
       const map = await currentAliases($)
@@ -2467,74 +2476,65 @@ export const register: Register = (on, options) => {
           : `이 프로젝트의 일지 ${days.length}일 · 최근 순\n\n${days
               .slice(0, 14)
               .map(one => `- ${one.day}${one.parts.length > 1 ? ` (파일 ${one.parts.length}개)` : ''}`)
-              .join('\n')}\n\n/learn day 날짜로 그날의 목차를 봅니다.`
-      if (arg === 'days') return { text: listed() }
+              .join('\n')}\n\n/learn 일지 날짜로 그날의 목차를 봅니다.`
+      if (arg === 'days' || /^(목록|list)$/i.test(rest)) return { text: listed() }
       const now = await $.clock.now()
+      const year = stamp(now).day.slice(0, 4)
       const isToday = rest === '' || rest === '오늘' || rest.toLowerCase() === 'today'
-      const day = isToday ? stamp(now).day : rest === '어제' || rest.toLowerCase() === 'yesterday' ? dayBefore(now) : rest
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { text: '쓰는 법: /learn day 2026-10-03 (또는 오늘 · 어제) · /learn days: 일지가 있는 날짜' }
+      let day = isToday ? stamp(now).day : rest === '어제' || rest.toLowerCase() === 'yesterday' ? dayBefore(now) : rest
+      // A month and day alone (10-02, as the other days' line names them): the latest such day with a journal, else this year's.
+      const md = /^(\d{1,2})-(\d{1,2})$/.exec(day)
+      if (md) {
+        const tail = `${md[1]!.padStart(2, '0')}-${md[2]!.padStart(2, '0')}`
+        day = days.find(one => one.day.slice(5) === tail)?.day ?? `${year}-${tail}`
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { text: '쓰는 법: /learn 일지 2026-10-03 (또는 오늘 · 어제 · 10-03) · /learn 일지 목록: 일지가 있는 날짜' }
       const found = days.find(one => one.day === day)
       // No journal today yet: the days there are, rather than a dead end.
-      if (!found) return { text: rest === '' ? `오늘 일지는 아직 없습니다.\n\n${listed()}` : `${day}의 일지가 없습니다. /learn days로 있는 날짜를 봅니다.` }
+      if (!found) return { text: rest === '' ? `오늘 일지는 아직 없습니다.\n\n${listed()}` : `${day}의 일지가 없습니다. /learn 일지 목록으로 있는 날짜를 봅니다.` }
       const index = []
       for (const path of found.parts) index.push(...journalIndex(await $.fs.read(path).catch(() => '')))
       const lines = index
         .slice(0, DAY_LINES)
         .map(one => `- ${one.time} · ${one.request || '(요청 없음)'}${one.summary ? ` — ${one.summary}` : ''}${one.isRewrite ? ' (다시 씀)' : ''}`)
       const more = index.length > DAY_LINES ? `\n\n그 밖에 ${index.length - DAY_LINES}개는 일지 파일에 있습니다.` : ''
-      return { text: `${day} 노트 ${index.length}개 (${found.parts.join(', ')})\n\n${lines.join('\n')}${more}` }
+      // The latest few other days, this year's by month and day: the way to the next one is in the reply.
+      const short = (one: string) => (one.slice(0, 4) === year ? one.slice(5) : one)
+      const others = days
+        .slice(0, 6)
+        .filter(one => one.day !== day)
+        .slice(0, 5)
+        .map(one => short(one.day))
+      const elsewhere = others.length > 0 ? `\n\n다른 날: ${others.join(' · ')} · /learn 일지 ${others[0]}` : ''
+      const files = found.parts.length > 1 ? ` (일지 파일 ${found.parts.length}개)` : ''
+      return { text: `${day} 노트 ${index.length}개${files}\n\n${lines.join('\n')}${more}${elsewhere}` }
     }
     if (arg === 'last') {
       const last = list.at(-1)
       return { text: last ? noteAsText(last) : EMPTY_TEXT }
     }
-    if (arg === 'concepts') {
-      const index = await read($, concepts)
-      const total = Object.keys(index).length
-      if (total === 0) return { text: '아직 모인 개념이 없습니다. 노트가 쓰이면 "배울 개념"이 여기에 쌓입니다.' }
-      const ranked = rankConcepts(index).filter(one => !isKnown(one))
-      const now = await $.clock.now()
-      const { fresh, again } = progressOf(index, now)
-      const due = dueConcepts(index, now)
-      const queue = due.slice(0, 5)
-      const lines = ranked.slice(0, 30).map(one => `- **${one.name}** ×${one.count} · 최근 ${stamp(one.lastAt).day} · ${reviewText(one, now)}: ${one.blurb}`)
-      const review =
-        queue.length > 0
-          ? `\n\n복습할 개념 ${due.length}개: ${queue.map(one => (isMissed(one) ? `${one.name} (퀴즈 틀림)` : one.name)).join(', ')}${due.length > queue.length ? ' …' : ''} · ${reviewWay(todayReview(index, await read($, activity), now).left)}`
-          : ''
-      const more = ranked.length > 30 ? `\n\n${moreConceptsText(ranked.length - 30, cfg.isAutoSave)}.` : ''
-      const known = knownLine(index)
-      const list = lines.length > 0 ? `\n\n${lines.join('\n')}` : ''
-      return {
-        text: `지금까지 배운 개념 ${total}개 · 최근 7일 새 개념 ${fresh}개 · 다시 만난 개념 ${again}개${review}${list}${more}${known ? `\n\n${known} · 되돌리기: /learn 모른다 이름` : ''}`,
-      }
-    }
     if (arg === 'clear') {
+      // Asked once more first: the pane's notes do not come back.
+      if (!/^(확인|yes|y)$/i.test(rest)) {
+        return {
+          text:
+            list.length === 0
+              ? '패널에 비울 노트가 없습니다.'
+              : `이 프로젝트의 노트 ${list.length}개를 패널에서 비웁니다(일지 파일과 개념 모음은 그대로). 정말 비우려면 /learn 비우기 확인`,
+        }
+      }
       await update($, notes, () => [])
       await update($, selectedId, () => null)
       await persist($, true)
       return { text: '이 프로젝트의 학습 노트를 비웠습니다. 다음 세션에도 다시 나오지 않습니다. 일지 파일과 배운 개념 모음은 그대로입니다.' }
     }
+    // Retired in 1.6.0: a note is saved by itself, and one the journal refused goes in with the next that works.
     if (arg === 'save') {
-      if (list.length === 0) return { text: EMPTY_TEXT }
-      const pending = list.filter(one => one.status !== 'writing' && (one.savedAs !== one.status || one.isUnsaved === true))
-      const writing = list.filter(one => one.status === 'writing').length
-      const later = writing > 0 ? ` 쓰는 중인 노트 ${writing}개는 다 쓰이면 ${cfg.isAutoSave ? '저절로 저장됩니다' : '/learn save로 저장하세요'}.` : ''
-      if (pending.length === 0) {
-        await saveConcepts($, cfg, await read($, concepts))
-        return { text: `저장할 새 노트가 없습니다. 모두 ${await journalDir($, cfg)}에 있습니다.${later}` }
+      return {
+        text: cfg.isAutoSave
+          ? `노트는 저절로 저장됩니다: ${await journalDir($, cfg)}. 파일에 쓰지 못한 노트는 다음 노트를 저장할 때 함께 저장됩니다.`
+          : SAVE_OFF,
       }
-      const paths = new Set<string>()
-      for (const note of pending) {
-        const path = await save($, cfg, note, note.savedAs !== null)
-        if (path) paths.add(path)
-      }
-      await persist($)
-      await saveConcepts($, cfg, await read($, concepts))
-      if (paths.size === 0) {
-        return { text: `노트를 ${await journalDir($, cfg)}에 쓰지 못했습니다. 그 폴더에 쓸 수 있는지 확인하거나 /config에서 저장 폴더(saveDir)를 바꾸세요.` }
-      }
-      return { text: `노트 ${pending.length}개를 저장했습니다: ${[...paths].join(', ')}${later}` }
     }
     if (arg !== '') return { text: `모르는 하위 명령입니다: '${said}'.\n\n${SHORT_HELP}` }
     await update($, autoOpened, () => true)
@@ -2546,7 +2546,7 @@ export const register: Register = (on, options) => {
     if (opened.isPlaced && (await isCloudSession($))) {
       // Placed on the cloud computer's own terminal, which nobody sees: say so, and show the note here.
       return {
-        text: `이 세션은 클라우드 컴퓨터에서 돌아, 패널이 지금 보는 화면에 뜨지 않을 수 있습니다. 마지막 노트를 여기에 적습니다 (/learn last 로 언제든 다시 봅니다).\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
+        text: `이 세션은 클라우드 컴퓨터에서 돌아, 패널이 지금 보는 화면에 뜨지 않을 수 있습니다. 마지막 노트를 여기에 적습니다 (/learn 마지막으로 언제든 다시 봅니다).\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
       }
     }
     const root = await $.session.root()
@@ -3159,9 +3159,106 @@ async function openTaughtNote($: EngineInterface, id: string): Promise<void> {
   else $.ui.log(`learn-notes: 이 개념을 배운 노트(${id})가 패널에 없어 열지 않았습니다`, { to: 'debug' })
 }
 
-/** Where the concepts beyond the list are: concepts.md when it is kept, else how to make it. */
+/** Where the concepts beyond the list are: concepts.md when it is kept, else how to have it kept. */
 function moreConceptsText(count: number, isAutoSave: boolean): string {
-  return isAutoSave ? `그 밖에 ${count}개는 일지 폴더의 concepts.md에 있습니다` : `그 밖에 ${count}개 · /learn save로 concepts.md에 모두 저장`
+  return isAutoSave ? `그 밖에 ${count}개는 일지 폴더의 concepts.md에 있습니다` : `그 밖에 ${count}개 · /config에서 autoSave를 켜면 concepts.md에 모두 저장됩니다`
+}
+
+/** Concepts /learn 기록 lists at most: its reply goes into the conversation the model reads. */
+const RECORD_CONCEPTS = 20
+
+/**
+ * /learn 기록 (stats and concepts in one): the run of days, the last seven
+ * days, the month's quiz answers, the concepts due (the missed ones said so),
+ * the week's notes day by day on one line, then the concepts learned but the
+ * known ones (the most met first), those folded into a line, and what the
+ * plugin's model calls came to.
+ */
+async function recordText($: EngineInterface, cfg: Config): Promise<string> {
+  const now = await $.clock.now()
+  const record = await storedActivity($)
+  const stats = statsOf(record, now)
+  const index = await read($, concepts)
+  const { fresh, again } = progressOf(index, now)
+  const due = dueConcepts(index, now)
+  const today = todayReview(index, record, now)
+  const graded = stats.month.right + stats.month.wrong
+  const queue = due.slice(0, 5)
+  const review =
+    due.length > 0
+      ? `- 복습할 개념 ${due.length}개: ${queue.map(one => (isMissed(one) ? `${one.name} (퀴즈 틀림)` : one.name)).join(', ')}${due.length > queue.length ? ' …' : ''} · ${todayText(today)} · ${reviewWay(today.left)}`
+      : '- 복습할 개념: 지금은 없습니다'
+  // Today first, as the run of days counts back.
+  const week = [...stats.days].reverse().map(({ weekday, one }) => `${weekday} ${one.notes}`)
+  const total = Object.keys(index).length
+  const ranked = rankConcepts(index).filter(one => !isKnown(one))
+  const known = knownLine(index)
+  const learned =
+    total === 0
+      ? ['아직 모인 개념이 없습니다. 노트가 쓰이면 "배울 개념"이 여기에 쌓입니다.']
+      : [
+          `지금까지 배운 개념 ${total}개 · 많이 만난 순`,
+          ...ranked.slice(0, RECORD_CONCEPTS).map(one => `- **${one.name}** ×${one.count} · 최근 ${stamp(one.lastAt).day} · ${reviewText(one, now)}: ${one.blurb}`),
+          ...(ranked.length > RECORD_CONCEPTS ? ['', `${moreConceptsText(ranked.length - RECORD_CONCEPTS, cfg.isAutoSave)}.`] : []),
+          ...(known ? ['', `${known} · 되돌리기: /learn 모른다 이름`] : []),
+        ]
+  return [
+    `학습 기록 · ${stats.streak > 0 ? `연속 ${stats.streak}일째` : '오늘 시작해 보세요'}${stats.best > stats.streak ? ` (가장 길게 ${stats.best}일)` : ''}${stats.streak > 0 && !stats.isTodayActive ? ' · 오늘도 하면 이어집니다' : ''}`,
+    '',
+    `- 최근 7일: 노트 ${stats.week.notes}개 · 새 개념 ${fresh}개 · 다시 만난 개념 ${again}개${stats.week.right + stats.week.wrong > 0 ? ` · 퀴즈 ${stats.week.right}/${stats.week.right + stats.week.wrong} 맞힘` : ''}`,
+    `- 최근 30일 퀴즈 정답률: ${graded > 0 ? `${Math.round((stats.month.right / graded) * 100)}% (${stats.month.right}/${graded})` : '아직 채점한 문제가 없습니다'}`,
+    review,
+    `- 최근 7일 노트: ${week.join(' · ')}`,
+    '',
+    ...learned,
+    '',
+    usageLine(cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)), now),
+  ].join('\n')
+}
+
+const REPORT_USAGE = '쓰는 법: /learn 보고서 (최근 7일 · 이번주 · 어제 · 오늘 · 2026-10-03)'
+
+/**
+ * /learn 보고서: the learning report with no code in it (reportMarkdown) for
+ * the days asked, the last seven by default, with no model call. It goes on
+ * the clipboard and, with autoSave on, into a file beside the journals; the
+ * reply only says so. Where nothing could be copied, or in a cloud session
+ * (whose clipboard is a computer nobody sees), the reply is the report.
+ */
+async function reportCommand($: EngineInterface, cfg: Config, rest: string): Promise<string> {
+  const now = await $.clock.now()
+  const range = recapRange(rest === '' ? '최근 7일' : rest, now)
+  if (!range) return REPORT_USAGE
+  const text = reportMarkdown({
+    range,
+    activity: await storedActivity($),
+    index: cleanConcepts(await $.store.get(CONCEPTS_KEY), await currentAliases($)),
+    level: cfg.level,
+    now,
+    usage: cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)),
+  })
+  let path: string | undefined
+  if (cfg.isAutoSave) {
+    const target = `${(await journalDir($, cfg)).replace(/[\\/]+$/, '')}/report-${range.days[0]}_${range.days.at(-1)}.md`
+    try {
+      await $.fs.write(target, text)
+      path = target
+    } catch (error) {
+      $.ui.log(`learn-notes: 학습 보고서를 파일에 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
+    }
+  }
+  const home = await homeDir($)
+  const file = path === undefined ? undefined : `파일: ${home !== undefined && isUnder(path, home) ? `~${path.slice(home.replace(/[\\/]+$/, '').length)}` : path}`
+  let isCopied = false
+  if (!(await isCloudSession($))) {
+    try {
+      isCopied = (await $.ui.copy({ text })).isCopied
+    } catch (error) {
+      $.ui.log(`learn-notes: 학습 보고서를 클립보드에 복사하지 못했습니다 (${String(error)})`, { to: 'debug' })
+    }
+  }
+  if (isCopied) return ['학습 보고서를 클립보드에 복사했습니다 · PR 설명이나 팀 채널에 붙이기 전에 한 번 읽어 보세요', ...(file ? [file] : [])].join('\n')
+  return [`학습 보고서입니다 · 이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다. 붙이기 전에 한 번 읽어 보세요${file ? ` · ${file}` : ''}`, '', text].join('\n')
 }
 
 /** When a concept comes back, as a concepts list says it: never quizzed, missed, or the next review. */
@@ -3170,7 +3267,7 @@ function reviewText(one: LearnConcept, now: number): string {
   return one.reviewedAt === undefined ? '아직 떠올려 본 적 없음' : `다음 복습 ${dueText(one, now)}`
 }
 
-/** Names the known concepts' line shows at most, as many as the list above it: /learn concepts' reply goes into the conversation. */
+/** Names the known concepts' line shows at most: /learn 기록's reply goes into the conversation. */
 const KNOWN_SHOWN = 30
 
 /** The concepts marked known, folded into one line under a concepts list: how many, the most recently met first. */
@@ -3473,41 +3570,37 @@ function taughtBy(list: readonly LearnNote[], map: Readonly<Record<string, strin
 const HELP = [
   'learn-notes 명령',
   '',
-  '**자주 쓰는 것**',
-  `- \`/learn\`: 학습 노트 패널 열기 (${KEYS_HINT})`,
-  '- `/learn quiz`: 풀던 퀴즈 보기, 없으면 복습할 개념으로 새 퀴즈 (내 코드의 결과를 맞히거나 바꿔 봅니다) · `/learn quiz 내 답`: Claude에게 채점받기',
-  '- `/learn ask 질문`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기',
-  '- `/learn recap`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
-  '',
-  '**패널 키**',
-  '- 보기: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작',
-  '- 노트: `p`·`n` 이전·다음 · `w` 노트 쓰기, 다시 쓰기',
+  '- `/learn`: 패널 열기 · 바로 키를 받고, Esc로 대화로 돌아갑니다 (숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다)',
+  '- 패널: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작 · `p`·`n` 이전·다음 노트 · `w` 노트 쓰기, 다시 쓰기',
   '- 노트 아래: `t` 이 노트 퀴즈 · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기',
-  '- 글자 키가 먹지 않으면 한/영을 영문 상태로 바꾸세요 (한글 상태면 `q`가 `ㅂ`으로 들어갑니다). 숫자 키는 상관없습니다',
-  '- 퀴즈(`4`): `s` 문제 받기 · `i` 답 적기(Enter로 채점) · `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기 · `n` 틀린 개념을 배운 노트',
-  '',
-  '**더 있는 것**',
-  '- 퀴즈: `/learn quiz 새로` 새 문제 · `2 내 답` 그 문제에 답하기 · `힌트` · `정답` 지금 문제의 정답 (`정답 2`도 됩니다) · `맞음 1` · `틀림 2` 스스로 채점',
-  '- 기록: `/learn concepts` 배운 개념과 복습 날짜 · `/learn stats` 연속 학습일과 정답률 · `/learn find 말` 노트 찾기',
-  '- 아는 개념: `/learn 안다 이름` 복습·퀴즈에서 빼기 (쉼표로 여럿) · `/learn 모른다 이름` 되돌리기',
-  '- 일지: `/learn day` 오늘 노트 목차 (`어제` · `2026-10-03`도 됩니다) · `/learn days` 일지가 있는 날짜',
-  '- 관리: `/learn last` 마지막 노트 · `/learn anki` Anki 카드 · `/learn merge 합칠 개념 = 남길 개념` · `/learn save` · `/learn clear`',
-  '',
-  '한글로도 됩니다: `/learn 퀴즈` · `개념` · `정리` · `기록` · `질문` · `찾기` · `일지` · `도움말`',
+  '- 퀴즈(`4`): 답을 적고 Enter로 채점 · `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기 · `s` 새 문제 · `n` 틀린 개념을 배운 노트',
+  '- `/learn 퀴즈`: 풀던 퀴즈 보기, 없으면 복습할 개념으로 새 퀴즈 (내 코드의 결과를 맞히거나 바꿔 봅니다) · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트` · `정답`',
+  '- `/learn 정리`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
+  '- `/learn 질문 …`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기',
+  '- `/learn 기록`: 연속 학습일 · 정답률 · 복습할 개념 · 배운 개념 · 모델 호출 수',
+  '- `/learn 보고서`: 코드 없는 학습 보고서를 클립보드와 파일로 (최근 7일 · `이번주` · `어제`도 됩니다)',
+  '- `/learn 찾기 말`: 지난 노트 찾기 · `/learn 일지`: 오늘 노트 목차 (`어제` · `2026-10-03` · `목록`도 됩니다)',
+  '- 가끔: `/learn 마지막` 마지막 노트 · `/learn 합치기 A = B` 개념 합치기 · `/learn 안다 이름` 복습에서 빼기 · `/learn 모른다 이름` 되돌리기 · `/learn 안키` Anki 카드 · `/learn 비우기` 패널 비우기',
 ].join('\n')
 /** What an unknown subcommand gets: the few most used, and where the rest are. */
-const SHORT_HELP = '자주 쓰는 것: `/learn` (패널) · `/learn quiz` · `/learn recap` · `/learn ask 질문` · `/learn stats` · 전체 목록은 `/learn help`'
-/** Korean words for the subcommands, so `/learn 퀴즈` works as `/learn quiz` does. */
+const SHORT_HELP = '자주 쓰는 것: `/learn` 패널 · `/learn 퀴즈` · `/learn 정리` · `/learn 질문 …` · `/learn 기록` · 전체는 `/learn 도움말`'
+/**
+ * Korean words for the subcommands, so `/learn 퀴즈` works as `/learn quiz` does. Some are kept
+ * out of the help: 날짜 (days), 저장 (save, retired), 개념 and 통계 (the record, as 기록).
+ */
 const COMMAND_WORDS: Record<string, string> = {
   도움말: 'help',
   도움: 'help',
   퀴즈: 'quiz',
   문제: 'quiz',
-  개념: 'concepts',
+  복습: 'quiz',
+  개념: 'stats',
   정리: 'recap',
   요약: 'recap',
   기록: 'stats',
   통계: 'stats',
+  보고서: 'report',
+  보고: 'report',
   질문: 'ask',
   묻기: 'ask',
   찾기: 'find',
@@ -3522,15 +3615,17 @@ const COMMAND_WORDS: Record<string, string> = {
   비우기: 'clear',
   안키: 'anki',
 }
+/** What /learn save answers with autoSave off, now that a note is saved by itself. */
+const SAVE_OFF = '노트는 저절로 저장됩니다. 파일로 남기려면 /config에서 learn-notes.autoSave(노트를 마크다운 파일로 자동 저장)를 켜세요.'
 /** Lines /learn day prints at most: the reply goes into the conversation the model reads. */
 const DAY_LINES = 40
 const QUIZ_USAGE = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 · 정답 · 새로 · 맞음 1 · 틀림 2'
-const ASK_USAGE = '쓰는 법: /learn ask 질문 (예: /learn ask 왜 let 대신 const를 썼어?) · 패널에서 고른 노트(없으면 마지막 노트)에 대해 답합니다'
+const ASK_USAGE = '쓰는 법: /learn 질문 물을 말 (예: /learn 질문 왜 let 대신 const를 썼어?) · 패널에서 고른 노트(없으면 마지막 노트)에 대해 답합니다'
 const NO_QUIZ = '아직 낸 퀴즈가 없습니다. /learn 퀴즈로 먼저 문제를 받으세요.'
 const KNOW_USAGE =
   '쓰는 법: /learn 안다 개념 이름 (쉼표로 여럿, 예: /learn 안다 const 선언, 화살표 함수) · 되돌리기: /learn 모른다 개념 이름 · 아는 개념은 복습과 퀴즈에서 빠집니다'
 const MERGE_USAGE =
-  '쓰는 법: /learn merge 합칠 개념 = 남길 개념  (예: /learn merge Destructuring = 구조 분해 할당 · = 대신 => -> → | 도 됩니다 · 거꾸로 하면 되돌립니다)'
+  '쓰는 법: /learn 합치기 합칠 개념 = 남길 개념  (예: /learn 합치기 Destructuring = 구조 분해 할당 · = 대신 => -> → | 도 됩니다 · 거꾸로 하면 되돌립니다)'
 const EMPTY_TEXT = '아직 학습 노트가 없습니다. Claude가 파일을 고친 턴이 끝나면 생깁니다.'
 
 function noteAsText(note: LearnNote): string {

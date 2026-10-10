@@ -2380,6 +2380,21 @@ export function recapAgain(
   return [...keys].map(key => conceptAt(index, key)).filter((one): one is LearnConcept => one !== undefined && one.firstAt < from)
 }
 
+/** Missed concepts a recap names at most. */
+const RECAP_MISSED = 10
+
+/**
+ * Concepts a quiz in the range was answered wrong on, still missed (a later
+ * right answer clears the miss), the oldest miss first: what a recap's
+ * 헷갈리기 쉬운 것 starts from, instead of the model's guess.
+ */
+export function recapMissed(index: Readonly<Record<string, LearnConcept>>, range: Pick<RecapRange, 'from' | 'to'>): LearnConcept[] {
+  return Object.values(index)
+    .filter(one => typeof one.missedAt === 'number' && one.missedAt >= range.from && one.missedAt < range.to)
+    .sort((a, b) => (a.missedAt ?? 0) - (b.missedAt ?? 0))
+    .slice(0, RECAP_MISSED)
+}
+
 export const RECAP_SYSTEM = [
   '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 코딩 튜터다.',
   '그 사람이 정해진 기간에 받은 학습 노트들의 요약을 보고, 기간 전체를 돌아보는 정리를 한국어 마크다운으로 쓴다.',
@@ -2405,6 +2420,7 @@ export function recapPrompt(
       return `- ${entry.day} ${entry.time} · 요청: ${entry.request || '(없음)'} · 요약: ${entry.summary || '(노트 없음)'} · 파일: ${entry.files.slice(0, 4).join(', ') || '-'}${names.length > 0 ? ` · 개념: ${names.join(', ')}` : ''}`
     })
   const again = recapAgain(entries, index, aliases, range.from)
+  const missed = recapMissed(index, range)
   return [
     LEVEL_TEXT[level],
     '',
@@ -2416,13 +2432,16 @@ export function recapPrompt(
     ...(lines.length > 60 ? [`(앞의 ${lines.length - 60}개는 줄였다)`] : []),
     '',
     ...(again.length > 0 ? ['## 이 기간에 다시 만난 개념 (예전에 배운 것)', again.map(one => `${one.name} ×${one.count}`).join(', '), ''] : []),
+    ...(missed.length > 0
+      ? ['## 이 기간에 퀴즈에서 틀린 개념 (아직 다시 맞히지 못한 것)', missed.map(one => one.name).join(', '), '헷갈리기 쉬운 것은 이 목록부터 쓴다.', '']
+      : []),
     '아래 네 제목을 이 순서 그대로 쓰고, 다 합쳐 300단어를 넘기지 마라.',
     '### 한 일',
     '(무엇을 만들고 고쳤는지 2~4줄)',
     '### 핵심 개념',
     '(이 기간에 가장 중요했던 개념 3개 이내, 각각 한 줄)',
     '### 헷갈리기 쉬운 것',
-    '(노트로 보아 놓치기 쉬운 점 1~2개)',
+    missed.length > 0 ? '(위의 퀴즈에서 틀린 개념부터 1~2개: 무엇을 헷갈리기 쉬운지 한 줄씩)' : '(노트로 보아 놓치기 쉬운 점 1~2개)',
     '### 다음에 해 볼 것',
     '(직접 손으로 해 보면 좋은 것 1~2개)',
   ].join('\n')
@@ -2431,6 +2450,79 @@ export function recapPrompt(
 /** A recap as a journal section, under the day of the last note it covers. */
 export function recapSection(range: RecapRange, text: string, at: number, day: string): string {
   return [`## ${day} 정리 · ${range.label} (${stamp(at).time})`, '', text, '', '---', ''].join('\n')
+}
+
+/** What /learn 보고서 reads: its days, every project's record and concepts, the level setting and the model calls. */
+export type ReportInput = {
+  range: RecapRange
+  activity: Readonly<Record<string, LearnDayActivity>>
+  index: Readonly<Record<string, LearnConcept>>
+  level: Level
+  now: number
+  usage?: Readonly<Record<string, LearnDayUsage>>
+}
+
+/** Names a report lists at most: the new concepts, and the ones a quiz found missed. */
+const REPORT_NEW = 15
+const REPORT_MISSED = 5
+
+/**
+ * A learning report with no code in it, for a PR, a 1:1 or a team channel:
+ * the days learned, the notes, the concepts met first or again, the quiz
+ * answers, what to look at again, and a line left for the learner's own words.
+ * Concepts go by name only (a blurb may quote code), with no request and no
+ * file name; every project's record together, as the store keeps it.
+ */
+export function reportMarkdown({ range, activity, index, level, now, usage = {} }: ReportInput): string {
+  const has = (record: object, day: string) => Object.prototype.hasOwnProperty.call(record, day)
+  const days = range.days.map(day => (has(activity, day) ? activity[day]! : { notes: 0, right: 0, wrong: 0 }))
+  const total = days.reduce((sum, one) => ({ notes: sum.notes + one.notes, right: sum.right + one.right, wrong: sum.wrong + one.wrong }), { notes: 0, right: 0, wrong: 0 })
+  const learned = days.filter(one => one.notes + one.right + one.wrong > 0).length
+  const { streak } = statsOf(activity, now)
+  const isIn = (ms: number) => ms >= range.from && ms < range.to
+  const ranked = rankConcepts(index)
+  const fresh = ranked.filter(one => isIn(one.firstAt))
+  const again = ranked.filter(one => one.count > 1 && isIn(one.lastAt) && one.firstAt < range.from)
+  const missed = ranked.filter(isMissed).sort((a, b) => (a.missedAt ?? 0) - (b.missedAt ?? 0))
+  const graduated = ranked.filter(one => typeof one.knownAt === 'number' && isIn(one.knownAt))
+  // A name as plain text: on one line, no table bar, no backtick to open code with.
+  const names = (list: readonly LearnConcept[], max: number) =>
+    list
+      .slice(0, max)
+      .map(one => cell(one.name.replace(/`/g, '')))
+      .join(' · ') + (list.length > max ? ` 외 ${list.length - max}개` : '')
+  const graded = total.right + total.wrong
+  const calls = range.days.reduce(
+    (sum, day) => {
+      const one = has(usage, day) ? usage[day]! : undefined
+      return one ? { calls: sum.calls + one.calls, auto: sum.auto + one.auto, input: sum.input + one.input, output: sum.output + one.output } : sum
+    },
+    { calls: 0, auto: 0, input: 0, output: 0 },
+  )
+  const span = range.days.length > 1 ? `${range.days[0]} ~ ${range.days.at(-1)}` : (range.days[0] ?? '')
+  return [
+    `# 학습 보고 · ${span}${range.label === span ? '' : ` (${range.label})`}`,
+    '',
+    '모든 프로젝트를 합친 기록입니다. 코드 · 요청 문장 · 파일 이름은 들어 있지 않습니다.',
+    '',
+    `- 학습한 날 ${learned}일${streak > 0 ? ` · 지금 연속 ${streak}일째` : ''}`,
+    `- 학습 노트 ${total.notes}개`,
+    `- 새로 배운 개념 ${fresh.length}개${fresh.length > 0 ? `: ${names(fresh, REPORT_NEW)}` : ''}`,
+    `- 다시 만난 개념 ${again.length}개`,
+    graded > 0 ? `- 퀴즈 ${graded}문제 중 ${total.right}개 맞힘 (${Math.round((total.right / graded) * 100)}%)` : '- 퀴즈: 아직 채점한 문제가 없습니다',
+    ...(missed.length > 0 ? [`- 다시 볼 개념(퀴즈에서 틀림): ${names(missed, REPORT_MISSED)}`] : []),
+    ...(graduated.length > 0 ? [`- 졸업한 개념(아는 개념으로 옮김) ${graduated.length}개`] : []),
+    `- 지금 복습할 개념 ${dueConcepts(index, now).length}개`,
+    `- 설명 수준 ${level}`,
+    calls.calls > 0
+      ? `- 학습 노트의 모델 호출 ${calls.calls}번${calls.auto > 0 ? ` (자동 노트 ${calls.auto})` : ''} · 입력 ${tokenText(calls.input)} · 출력 ${tokenText(calls.output)} 토큰`
+      : '- 학습 노트의 모델 호출: 없습니다',
+    '',
+    '## 이번 기간에 배운 것을 내 말로 한 줄',
+    '',
+    '- ',
+    '',
+  ].join('\n')
 }
 
 /**

@@ -68,7 +68,7 @@ export type LearnNote = {
   concepts: string[]
   /** True once the day's learning record counted it (the first time it was written), so a rewrite does not count it again. */
   isCounted?: boolean
-  /** True while its latest writing is in no journal yet (autoSave off): /learn save writes it. */
+  /** True while the journal refused its latest writing (or, before 1.6.0, autoSave was off): the next save that works writes it too. */
   isUnsaved?: boolean
   /** The latest questions asked about this note (the pane's question field, /learn ask) with their answers. */
   asks?: LearnAsk[]

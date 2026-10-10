@@ -52,6 +52,10 @@ type World = {
   mtimes: Map<string, number>
   /** Paths that are links, with where each leads (fs.stat's isLink and realPath). */
   links: Map<string, string>
+  /** Each text put on the clipboard. */
+  copied: string[]
+  /** True while the surface has no clipboard to copy on (a remote one). */
+  copyFails: boolean
   release: () => void
   clock: ReturnType<typeof mock.clock>
 }
@@ -87,6 +91,8 @@ function world(
     files: new Map(),
     mtimes: new Map(),
     links: new Map(),
+    copied: [],
+    copyFails: false,
     release: () => release(),
     clock: mock.clock(on, { now: Date.UTC(2026, 9, 3, 1) }),
   }
@@ -135,6 +141,11 @@ function world(
   on('ui.toast', (_$, e) => {
     w.toasts.push(e.text)
     return { value: undefined }
+  })
+  on('ui.copy', (_$, e) => {
+    if (w.copyFails) return { value: { isCopied: false as const, reason: 'no-clipboard' as const } }
+    w.copied.push(e.text)
+    return { value: { isCopied: true as const } }
   })
   on('ui.status', (_$, e) => {
     w.statuses.push(e.text)
@@ -442,7 +453,7 @@ test('a note cleared while it is being written still reaches the journal', async
   await turn($, () => $.tool.call(EDIT_A))
   await w.clock.advance(5)
   expect(w.models).toHaveLength(1)
-  await learn($, 'clear')
+  await learn($, 'clear 확인')
   w.release()
   await w.clock.settle()
   expect(w.writes).toHaveLength(1)
@@ -470,25 +481,32 @@ test('with autoNote off no model is called, the diff is saved and w writes the n
   await ui.unmount()
 })
 
-test('with autoSave off nothing is written until /learn save, and only once', { options: { autoSave: false } }, async ($, on) => {
+test('with autoSave off no file is written, and /learn save only says how to keep one (1.6.0)', { options: { autoSave: false } }, async ($, on) => {
   const w = world(on)
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
   expect(w.models).toHaveLength(1)
+  expect(w.journal()).toHaveLength(0)
+  // A rewrite writes none either: autoSave off means no journal, and nothing is left to save later.
+  const ui = await pane($)
+  await ui.press({ key: 'write' })
+  await w.clock.settle()
+  await ui.unmount()
+  expect(w.models).toHaveLength(2)
   expect(w.writes).toHaveLength(0)
 
-  expect((await learn($, 'save')).text).toContain('노트 1개를 저장했습니다: /home/u/.claude/learning-notes/')
-  expect(w.journal()).toHaveLength(1)
-  expect((await learn($, 'save')).text).toContain('저장할 새 노트가 없습니다')
-  expect(w.journal()).toHaveLength(1)
-  expect(w.files.has('/home/u/.claude/learning-notes/concepts.md')).toBe(true)
+  const reply = (await learn($, 'save')).text
+  expect(reply).toContain('노트는 저절로 저장됩니다')
+  expect(reply).toContain('learn-notes.autoSave(노트를 마크다운 파일로 자동 저장)를 켜세요')
+  expect(w.writes).toHaveLength(0)
+  expect((await learn($, '저장')).text).toBe(reply)
 })
 
-test('/learn save with autoSave on has nothing new to write', async ($, on) => {
+test('/learn save with autoSave on says notes are saved by themselves (1.6.0)', async ($, on) => {
   const w = world(on)
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
-  expect((await learn($, 'save')).text).toContain('저장할 새 노트가 없습니다')
+  expect((await learn($, 'save')).text).toBe('노트는 저절로 저장됩니다: /home/u/.claude/learning-notes. 파일에 쓰지 못한 노트는 다음 노트를 저장할 때 함께 저장됩니다.')
   expect(w.journal()).toHaveLength(1)
 })
 
@@ -694,13 +712,18 @@ test('/learn opens the pane, prints usage for unknown words and clear empties it
   // Asked from the prompt, it asks for the keys at once: no ctrl+x tab.
   expect(w.focused.at(-1)).toBe(true)
   expect((await learn($, 'what')).text).toContain("모르는 하위 명령입니다: 'what'")
-  expect((await learn($, 'what')).text).toContain('/learn help')
+  expect((await learn($, 'what')).text).toContain('전체는 `/learn 도움말`')
   // Korean words work as the subcommands do.
   expect((await learn($, '도움말')).text).toContain('learn-notes 명령')
   expect((await learn($, '마지막')).text).toContain('let을 const로')
 
-  await learn($, 'clear')
+  // Asked once more first (1.6.0): the bare word only says what would go.
+  expect((await learn($, 'clear')).text).toBe('이 프로젝트의 노트 1개를 패널에서 비웁니다(일지 파일과 개념 모음은 그대로). 정말 비우려면 /learn 비우기 확인')
+  expect((await learn($, '비우기 아마도')).text).toContain('정말 비우려면')
+  expect((await learn($, 'last')).text).toContain('let을 const로')
+  expect((await learn($, '비우기 확인')).text).toContain('학습 노트를 비웠습니다')
   expect((await learn($, 'last')).text).toContain('아직 학습 노트가 없습니다')
+  expect((await learn($, 'clear')).text).toBe('패널에 비울 노트가 없습니다.')
 })
 
 test('two notes finishing together both reach the journal', async ($, on) => {
@@ -833,7 +856,11 @@ test('/learn clear forgets this project in the store too', async ($, on) => {
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
   expect(Object.keys(store.get('history') as object).sort()).toEqual(['/other', '/proj'])
+  // Without 확인 nothing goes (1.6.0).
+  const kept = JSON.stringify(store.get('history'))
   await learn($, 'clear')
+  expect(JSON.stringify(store.get('history'))).toBe(kept)
+  expect((await learn($, 'clear yes')).text).toContain('학습 노트를 비웠습니다')
   const history = store.get('history') as Record<string, { notes: unknown[]; clearedAt?: number }>
   expect(history['/proj']!.notes).toEqual([])
   expect(history['/proj']!.clearedAt).toBeGreaterThan(0)
@@ -848,7 +875,7 @@ test('a note another session stored before a clear does not come back', async ($
   await finish(w)
   const before = (store.get('history') as Record<string, { notes: { id: string }[] }>)['/proj']!.notes[0]!
   await w.clock.advance(1000)
-  await learn($, 'clear')
+  await learn($, 'clear 확인')
   // A session that loaded the note earlier writes it back.
   const history = store.get('history') as Record<string, { at: number; notes: unknown[]; clearedAt: number }>
   history['/proj']!.notes.push({ ...before, id: 'stale' })
@@ -936,6 +963,8 @@ test('concepts from earlier sessions show even before this project has a note', 
   expect(await ui.find({ type: 'Text', text: /지금까지 배운 개념 1개가 있습니다/ })).toBeDefined()
   await ui.unmount()
   expect((await learn($, 'concepts')).text).toContain('**for...of 반복문** ×4')
+  // One record (1.6.0): stats and concepts say the same.
+  expect((await learn($, 'stats')).text).toBe((await learn($, 'concepts')).text)
 })
 
 test('two sessions in one project keep each other\'s notes in the store', async ($, on) => {
@@ -1103,6 +1132,7 @@ test('a concept met once and not since comes back for review, and the reminder s
   await ui.unmount()
   const listed = (await learn($, 'concepts')).text
   expect(listed).toContain('복습할 개념 1개: 클로저')
+  expect((await learn($, 'stats')).text).toBe(listed)
   expect(listed).toContain('**for...of 반복문** ×1 · 최근 2026-10-03 · 아직 떠올려 본 적 없음: ')
   expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
 })
@@ -1203,7 +1233,17 @@ test('/learn days and /learn day read the journal back as a contents list', asyn
 test('/learn help lists every subcommand, and an unknown one shows it', async ($, on) => {
   world(on)
   const help = await learn($, 'help')
-  for (const word of ['quiz', 'ask', 'recap', 'last', 'concepts', 'stats', 'find', 'day', 'days', 'anki', 'merge', 'save', 'clear']) expect(help.text).toContain(`/learn ${word}`)
+  // Korean first and short (1.6.0): the commands by their Korean names, the rarely used ones under 가끔.
+  for (const word of ['퀴즈', '정리', '질문', '기록', '보고서', '찾기', '일지', '마지막', '합치기', '안다', '모른다', '안키', '비우기']) expect(help.text).toContain(`/learn ${word}`)
+  expect(help.text).toContain('- 가끔: `/learn 마지막`')
+  expect(help.text).not.toContain('/learn save')
+  expect(help.text).not.toContain('/learn days')
+  expect(help.text).not.toContain('/learn stats')
+  expect(help.text).not.toContain('/learn concepts')
+  // Grading by hand is said where a quiz is graded, not here.
+  expect(help.text).not.toContain('맞음 1')
+  expect((help.text ?? '').split('\n').length).toBeLessThanOrEqual(15)
+  expect((await learn($, '도움말')).text).toBe(help.text)
   // The panel's keys, the walk-through among them, and no diff view any more.
   expect(help.text).toContain('`r` 예시로 따라가기')
   // The quiz's n back to the note of a concept answered wrong (1.6.0).
@@ -1351,7 +1391,7 @@ test('/learn day reads parts in order, counts a rewrite once and stops at 40 lin
   w.files.set(journalPath(NOTES_DIR, day, '/proj', 2), '# 학습 노트\n\n' + section('12:00', '둘'))
   w.files.set(journalPath(NOTES_DIR, day, '/proj', 10), '# 학습 노트\n\n' + Array.from({ length: 45 }, (_, i) => section(`23:${String(i).padStart(2, '0')}`, `열 ${i}`)).join(''))
   const out = (await learn($, 'day 2026-09-30')).text ?? ''
-  expect(out).toContain('노트 47개')
+  expect(out.split('\n')[0]).toBe('2026-09-30 노트 47개 (일지 파일 3개)')
   const lines = out.split('\n').filter(line => line.startsWith('- '))
   expect(lines).toHaveLength(40)
   expect(lines[0]).toBe('- 09:00 · 첫 — 첫 요약 (다시 씀)')
@@ -1823,8 +1863,10 @@ test('the day\'s notes and answers make the run of days, shown in the concepts v
   expect(stats).toContain('학습 기록 · 연속 1일째 (가장 길게 2일)')
   expect(stats).toContain('- 최근 7일: 노트 4개')
   expect(stats).toContain('- 최근 30일 퀴즈 정답률: 100% (1/1)')
-  expect(stats).toContain('- 10-03 토 ■ 노트 1')
-  expect(stats).toContain('- 10-02 금 · 노트 0')
+  // The week's notes on one line, today first (1.6.0).
+  const [today, ...before] = [0, 1, 2, 3, 4, 5, 6].map(n => '일월화수목금토'[new Date(NOW - n * 86_400_000).getDay()])
+  expect(stats).toContain(`- 최근 7일 노트: ${today} 1 · ${before[0]} 0 · ${before[1]} 2 · ${before[2]} 1 · ${before[3]} 0 · ${before[4]} 0 · ${before[5]} 0\n`)
+  expect(stats).not.toContain('■')
 })
 
 test('a first record is made from the notes earlier sessions kept', async ($, on) => {
@@ -1922,7 +1964,7 @@ test('e rewrites the note in plainer words with an everyday comparison', async (
 test('/learn ask answers about the chosen note, and keeps the question out of the day\'s notes', async ($, on) => {
   const w = world(on)
   await start($)
-  expect((await learn($, 'ask')).text).toContain('쓰는 법: /learn ask 질문')
+  expect((await learn($, 'ask')).text).toContain('쓰는 법: /learn 질문 물을 말')
   expect((await learn($, 'ask 왜 const야?')).text).toContain('물어볼 노트가 없습니다')
   await turn($, () => $.tool.call(EDIT_A), 't1', 'b를 상수로 바꿔줘')
   await finish(w)
@@ -2454,22 +2496,28 @@ test('a later merge into a merged name keeps the record that undoes the earlier 
   expect(Object.values(index).map(one => `${one.name} ×${one.count}`).sort()).toEqual(['X ×2', 'Z ×4'])
 })
 
-test('with autoSave off, a note rewritten after /learn save is saved again by the next one (review)', { options: { autoSave: false } }, async ($, on) => {
-  const w = world(on)
-  await turn($, () => $.tool.call(EDIT_A))
+test('a note an autoSave left off before 1.6.0 kept unsaved goes into the journal with the next save that works', async ($, on) => {
+  const store = new Map<string, unknown>()
+  store.set('history', {
+    '/proj': {
+      at: NOW,
+      notes: [{ id: 'old', turnId: 'old', at: NOW, prompt: '예전 요청', answer: '', changes: [], moreFiles: 0, status: 'ready', text: NOTE_TEXT, savedAs: null, isUnsaved: true, concepts: [], updatedAt: NOW }],
+    },
+  })
+  const w = world(on, 'ok', null, true, store)
+  await start($)
+  expect(w.journal()).toHaveLength(0)
+  await turn($, () => $.tool.call(EDIT_A), 't1', '새 요청')
   await finish(w)
-  expect((await learn($, 'save')).text).toContain('노트 1개를 저장했습니다')
-  const saved = w.journal().length
-  w.answer = NOTE_TEXT.replace('let을 const로 바꿔', '다시 쓴 노트: let을 const로 바꿔')
-  const ui = await pane($)
-  await ui.press({ key: 'write' })
-  await w.clock.settle()
-  await ui.unmount()
-  expect(w.journal().length).toBe(saved)
-  expect((await learn($, 'save')).text).toContain('노트 1개를 저장했습니다')
-  expect(w.files.get(JOURNAL)).toContain('(다시 쓴 노트)')
-  expect(w.files.get(JOURNAL)).toContain('다시 쓴 노트: let을')
-  expect((await learn($, 'save')).text).toContain('저장할 새 노트가 없습니다')
+  const text = w.files.get(JOURNAL) ?? ''
+  expect(text).toContain('**요청**: 새 요청')
+  expect(text).toContain('**요청**: 예전 요청')
+  // Stored as saved: neither a later save nor the next session writes it again.
+  const stored = (store.get('history') as Record<string, { notes: { id: string; isUnsaved?: boolean }[] }>)['/proj']!.notes
+  expect(stored.find(one => one.id === 'old')?.isUnsaved).toBe(false)
+  await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2', '셋째 요청')
+  await finish(w)
+  expect((w.files.get(JOURNAL) ?? '').split('**요청**: 예전 요청')).toHaveLength(2)
 })
 
 test('a note finished after /cd moved the pane is stored as written, not as still writing (review)', async ($, on) => {
@@ -2628,15 +2676,25 @@ test('a failed rewrite is stored back as it was, though a store write meanwhile 
   expect(stored.find(one => one.prompt === '첫 요청')).toMatchObject({ status: 'ready' })
 })
 
-test('a note the journal could not take is written by the next /learn save (review)', async ($, on) => {
+test('a note the journal could not take is written with the next note that saves (1.6.0)', async ($, on) => {
   const w = world(on)
+  await start($)
   w.writeFails = true
-  await turn($, () => $.tool.call(EDIT_A))
+  await turn($, () => $.tool.call(EDIT_A), 't1', '첫 요청')
   await finish(w)
-  expect(w.toasts.some(t => t.includes('파일에 저장하지 못했습니다'))).toBe(true)
+  expect(w.toasts).toContain('학습 노트를 파일에 쓰지 못했습니다 · /config의 saveDir를 확인하면 다음 노트 때 함께 저장됩니다')
+  expect(w.journal()).toHaveLength(0)
   w.writeFails = false
-  expect((await learn($, 'save')).text).toContain('노트 1개를 저장했습니다')
-  expect(w.files.get(JOURNAL)).toContain('let을 const로')
+  await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2', '둘째 요청')
+  await finish(w)
+  const text = w.files.get(JOURNAL) ?? ''
+  expect(text.match(/^## \d{4}-\d{2}-\d{2} /gm)).toHaveLength(2)
+  expect(text).toContain('**요청**: 첫 요청')
+  expect(text).toContain('**요청**: 둘째 요청')
+  // Once only: the next note does not write the first again.
+  await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u3' }), 't3', '셋째 요청')
+  await finish(w)
+  expect((w.files.get(JOURNAL) ?? '').match(/^## \d{4}-\d{2}-\d{2} /gm)).toHaveLength(3)
 })
 
 const BEFORE_AFTER_NOTE = [
@@ -3252,7 +3310,7 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
     expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 10개 · /learn 뒤 q')
     // Every concept due is still counted where they are all listed.
     expect((await learn($, 'concepts')).text).toContain('복습할 개념 25개: 개념0, 개념1, 개념2, 개념3, 개념4 …')
-    expect((await learn($, 'stats')).text).toContain('- 복습할 개념: 25개 · 오늘 10개 (하루 10개까지) · 패널에서 q, 또는 /learn quiz')
+    expect((await learn($, 'stats')).text).toContain('- 복습할 개념 25개: 개념0, 개념1, 개념2, 개념3, 개념4 … · 오늘 10개 (하루 10개까지) · 패널에서 q, 또는 /learn quiz')
   })
 
   test('ten answers graded today take the reminder down', async ($, on) => {
@@ -3261,7 +3319,7 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
     const w = world(on, 'ok', null, true, store)
     await start($)
     expect(w.statuses.at(-1)).toBeUndefined()
-    expect((await learn($, 'stats')).text).toContain('- 복습할 개념: 25개 · 오늘 몫은 마쳤습니다')
+    expect((await learn($, 'stats')).text).toContain(' … · 오늘 몫은 마쳤습니다 · 패널의 퀴즈(4), 또는 /learn quiz')
   })
 
   test('the answer that makes ten today takes the reminder down, and the quiz says the day\'s review is done', async ($, on) => {
@@ -3292,7 +3350,7 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
     expect(await ui.find({ type: 'Text', text: /복습할 개념 \d+개 · 틀린 것 먼저, 잊을 때쯤 다시 나옵니다 · 오늘 몫은 마쳤습니다 · 4로 퀴즈$/ })).toBeDefined()
     await ui.unmount()
     expect((await learn($, 'stats')).text).toContain('· 오늘 몫은 마쳤습니다 · 패널의 퀴즈(4), 또는 /learn quiz')
-    expect((await learn($, 'concepts')).text).toContain(' … · 패널의 퀴즈(4), 또는 /learn quiz')
+    expect((await learn($, 'concepts')).text).toBe((await learn($, 'stats')).text)
   })
 
   test('/learn 안다 takes a concept out of the reviews and the next note; /learn 모른다 puts it back', async ($, on) => {
@@ -3971,5 +4029,166 @@ describe('1.6.0: views on 1 to 4, q for today\'s review, the keys where they are
     expect(focusesOf(w)).toHaveLength(1)
     expect(w.models).toHaveLength(0)
     await ui.unmount()
+  })
+})
+
+describe('1.6.0: fewer commands, one record, a report with no code', () => {
+  const DAY = 86_400_000
+
+  test('/learn 일지 목록 lists the days (days and 날짜 still do), and a day\'s contents name the other days', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A), 't1', '첫 요청')
+    await finish(w)
+    w.files.set(journalPath(NOTES_DIR, Date.UTC(2026, 8, 30, 12), '/proj'), '# 학습 노트\n\n## 2026-09-30 10:00\n\n**요청**: 예전 요청\n\n---\n')
+    const listed = (await learn($, '일지 목록')).text
+    expect(listed).toContain('이 프로젝트의 일지 2일')
+    expect(listed).toContain('/learn 일지 날짜로 그날의 목차를 봅니다.')
+    for (const words of ['days', '날짜', 'day 목록', 'day list']) expect((await learn($, words)).text).toBe(listed)
+    // The head line without the long journal path; the way to the other days at the end.
+    const today = (await learn($, '일지')).text ?? ''
+    expect(today).not.toContain('learning-notes/')
+    expect(today.split('\n')[0]).toBe(`${stamp(NOW).day} 노트 1개`)
+    expect(today).toMatch(/\n\n다른 날: 09-30 · \/learn 일지 09-30$/)
+    // A month and day alone reads as the journal's day.
+    expect((await learn($, '일지 09-30')).text).toContain('예전 요청')
+    expect((await learn($, '일지 9-30')).text).toContain('예전 요청')
+    const md = stamp(NOW).day.slice(5)
+    expect((await learn($, '일지 2026-09-30')).text).toContain(`다른 날: ${md} · /learn 일지 ${md}`)
+    expect((await learn($, '일지 2020-01-01')).text).toBe('2020-01-01의 일지가 없습니다. /learn 일지 목록으로 있는 날짜를 봅니다.')
+    expect((await learn($, '일지 내일')).text).toContain('/learn 일지 목록: 일지가 있는 날짜')
+  })
+
+  test('/learn 기록 is stats and concepts in one, by any of its names, and lists twenty concepts at most', async ($, on) => {
+    const store = new Map<string, unknown>()
+    store.set(
+      'concepts',
+      Object.fromEntries(
+        Array.from({ length: 25 }, (_, i) => [`c:개념${i}`, { name: `개념${i}`, count: 30 - i, firstAt: NOW - 2 * DAY, lastAt: NOW - DAY, blurb: `설명${i}`, files: [] }]),
+      ),
+    )
+    world(on, 'ok', null, true, store)
+    await start($)
+    const record = (await learn($, '기록')).text ?? ''
+    for (const words of ['stats', 'concepts', '개념', '통계']) expect((await learn($, words)).text).toBe(record)
+    const lines = record.split('\n')
+    expect(lines[0]).toBe('학습 기록 · 오늘 시작해 보세요')
+    // The order the reply keeps: the week, the month's answers, the review, the week's notes, then the concepts.
+    expect(lines[2]).toBe('- 최근 7일: 노트 0개 · 새 개념 25개 · 다시 만난 개념 25개')
+    expect(lines[3]).toBe('- 최근 30일 퀴즈 정답률: 아직 채점한 문제가 없습니다')
+    expect(lines[4]).toBe('- 복습할 개념: 지금은 없습니다')
+    expect(lines[5]).toMatch(/^- 최근 7일 노트: (. 0 · ){6}. 0$/)
+    expect(record).toContain('지금까지 배운 개념 25개 · 많이 만난 순')
+    expect(lines.filter(line => line.startsWith('- **'))).toHaveLength(20)
+    expect(record).toContain('- **개념0** ×30 · 최근 ')
+    expect(record).not.toContain('**개념20**')
+    expect(record).toContain('그 밖에 5개는 일지 폴더의 concepts.md에 있습니다.')
+    expect(lines.at(-1)).toBe('학습 노트의 모델 호출: 최근 7일 동안 없습니다')
+  })
+
+  test('with autoSave off the record says concepts.md is kept once autoSave is on', { options: { autoSave: false } }, async ($, on) => {
+    const store = new Map<string, unknown>()
+    store.set(
+      'concepts',
+      Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`c:개념${i}`, { name: `개념${i}`, count: 1, firstAt: NOW, lastAt: NOW, blurb: '', files: [] }])),
+    )
+    world(on, 'ok', null, true, store)
+    await start($)
+    expect((await learn($, '기록')).text).toContain('그 밖에 1개 · /config에서 autoSave를 켜면 concepts.md에 모두 저장됩니다.')
+  })
+
+  test('/learn 보고서 copies a report with no code in it, writes it beside the journals, and calls no model', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = CONCEPT_NOTE(['for...of 반복문', '기본 매개변수'])
+    await turn($, () => $.tool.call(EDIT_A), 't1')
+    await finish(w)
+    w.answer = CONCEPT_NOTE(['for...of 반복문 (복습)', '복합 할당'])
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    await learn($, 'quiz')
+    await learn($, 'quiz 정답')
+    await learn($, 'quiz 틀림 1')
+    const calls = w.models.length
+
+    const reply = (await learn($, '보고서')).text ?? ''
+    expect(w.models).toHaveLength(calls)
+    const path = `${NOTES_DIR}/report-${stamp(NOW - 6 * DAY).day}_${stamp(NOW).day}.md`
+    const written = w.writes.find(one => one.path === path)
+    expect(written).toBeDefined()
+    expect(w.copied).toEqual([written!.text])
+    for (const leak of ['const b = 2', 'src/a.ts', 'a.ts', '상수로', 'for (const item', '`']) expect(written!.text).not.toContain(leak)
+    expect(written!.text).toContain(`# 학습 보고 · ${stamp(NOW - 6 * DAY).day} ~ ${stamp(NOW).day} (최근 7일)`)
+    expect(written!.text).toContain('- 학습 노트 2개')
+    expect(written!.text).toContain('- 새로 배운 개념 3개: for...of 반복문 · ')
+    expect(written!.text).toContain('- 퀴즈 1문제 중 0개 맞힘 (0%)')
+    expect(written!.text).toContain('- 다시 볼 개념(퀴즈에서 틀림): ')
+    expect(written!.text).toContain('- 학습 노트의 모델 호출 3번 (자동 노트 2)')
+    expect(reply).toBe(`학습 보고서를 클립보드에 복사했습니다 · PR 설명이나 팀 채널에 붙이기 전에 한 번 읽어 보세요\n파일: ~/.claude/learning-notes/report-${stamp(NOW - 6 * DAY).day}_${stamp(NOW).day}.md`)
+
+    // 보고 · report say the same; a period it cannot read says how.
+    expect((await learn($, 'report 어제')).text).toContain(`report-${stamp(NOW - DAY).day}_${stamp(NOW - DAY).day}.md`)
+    expect((await learn($, '보고 이번주')).text).toContain('학습 보고서를 클립보드에 복사했습니다')
+    expect((await learn($, '보고서 내일')).text).toBe('쓰는 법: /learn 보고서 (최근 7일 · 이번주 · 어제 · 오늘 · 2026-10-03)')
+    expect(w.models).toHaveLength(calls)
+  })
+
+  test('where nothing can be copied, the report is the reply', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.copyFails = true
+    const reply = (await learn($, '보고서')).text ?? ''
+    expect(reply.split('\n')[0]).toBe(`학습 보고서입니다 · 이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다. 붙이기 전에 한 번 읽어 보세요 · 파일: ~/.claude/learning-notes/report-${stamp(NOW - 6 * DAY).day}_${stamp(NOW).day}.md`)
+    expect(reply).toContain('\n\n# 학습 보고 · ')
+    expect(reply).toContain('- 퀴즈: 아직 채점한 문제가 없습니다')
+  })
+
+  test('a cloud session gets the report as the reply, its clipboard being on a computer nobody sees', async ($, on) => {
+    const w = world(on, 'ok', null, true, new Map(), { CLAUDE_CODE_REMOTE: 'true' })
+    await start($)
+    expect((await learn($, '보고서')).text).toContain('# 학습 보고 · ')
+    expect(w.copied).toEqual([])
+  })
+
+  test('with autoSave off the report is copied but no file is written', { options: { autoSave: false } }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    expect((await learn($, '보고서')).text).toBe('학습 보고서를 클립보드에 복사했습니다 · PR 설명이나 팀 채널에 붙이기 전에 한 번 읽어 보세요')
+    expect(w.copied).toHaveLength(1)
+    expect(w.writes).toHaveLength(0)
+  })
+
+  test('a report the folder refuses is still copied, with a debug line', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.writeFails = true
+    expect((await learn($, '보고서')).text).toBe('학습 보고서를 클립보드에 복사했습니다 · PR 설명이나 팀 채널에 붙이기 전에 한 번 읽어 보세요')
+    expect(w.logs.some(line => line.startsWith('learn-notes: 학습 보고서를 파일에 쓰지 못했습니다'))).toBe(true)
+  })
+
+  test('the recap tells the model the concepts a quiz found missed in its days', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', { 'c:클로저': { name: '클로저', count: 1, firstAt: NOW - 3 * DAY, lastAt: NOW - 3 * DAY, blurb: '', files: [] } }]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A), 't1', '첫 요청')
+    await finish(w)
+    w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    await learn($, 'quiz')
+    await learn($, 'quiz 정답')
+    await learn($, 'quiz 틀림 1')
+    const calls = w.models.length
+    w.answer = '### 한 일\n고쳤다'
+    await learn($, '정리')
+    expect(w.models).toHaveLength(calls + 1)
+    expect(w.models.at(-1)).toContain('## 이 기간에 퀴즈에서 틀린 개념 (아직 다시 맞히지 못한 것)\n클로저\n')
+    // A day before the miss: no such section.
+    const yesterday = stamp(NOW - DAY).day
+    w.files.set(journalPath(NOTES_DIR, NOW - DAY, '/proj'), `# 학습 노트\n\n## ${yesterday} 10:00\n\n**요청**: 어제 요청\n\n### 한 줄 요약\n어제 요약\n\n---\n`)
+    await learn($, '정리 어제')
+    expect(w.models).toHaveLength(calls + 2)
+    expect(w.models.at(-1)).toContain('요청: 어제 요청')
+    expect(w.models.at(-1)).not.toContain('퀴즈에서 틀린 개념')
   })
 })

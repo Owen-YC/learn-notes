@@ -31,8 +31,7 @@
       "description": "노트·퀴즈·채점·질문에 쓰는 모델입니다. haiku가 가장 싸고 빠릅니다",
       "options": [
         "haiku",
-        "sonnet",
-        "opus"
+        "sonnet"
       ],
       "default": "haiku"
     },
@@ -50,19 +49,19 @@
     "autoOpen": {
       "type": "boolean",
       "title": "첫 노트가 생기면 패널 자동으로 열기",
-      "description": "전체 화면 터미널에서 144칸 이상이면 저절로 열립니다. /learn으로 연 적이 있고 손으로 닫지 않았으면(ctrl+x x) 110칸부터 열립니다. 그보다 좁으면 토스트로 알리니 /learn으로 엽니다",
+      "description": "첫 노트가 생기면 대화 오른쪽에 패널을 엽니다. 터미널이 좁으면 대신 알림만 띄웁니다",
       "default": true
     },
     "reviewReminder": {
       "type": "boolean",
       "title": "복습 알림 (상태줄)",
-      "description": "복습할 때가 된 개념이 있으면 프롬프트 아래 상태줄에 '오늘 복습 n개'를 띄웁니다 (하루 10개까지)",
+      "description": "복습할 개념이 생기면 프롬프트 아래에 오늘 복습할 개수를 띄웁니다",
       "default": true
     },
     "autoSave": {
       "type": "boolean",
       "title": "노트를 마크다운 파일로 자동 저장",
-      "description": "날짜·프로젝트별 마크다운 파일(일지)에 노트가 쌓입니다. /learn recap·day도 이 일지를 읽습니다",
+      "description": "날짜별 마크다운 일지에 노트를 씁니다. 끄면 파일을 쓰지 않습니다(패널과 지난 노트에는 남습니다)",
       "default": true
     },
     "saveDir": {
