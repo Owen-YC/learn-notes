@@ -5091,7 +5091,8 @@ describe('1.6.0: what the cross-review found no test held', () => {
     expect(await ui.find({ type: 'Text', text: /^클로저 ×1 · 다음 복습 3일 뒤 · 최근 [\d-]+ · 퀴즈 오늘$/ })).toBeDefined()
     await ui.unmount()
     expect((await learn($, '기록')).text).toContain(`- **클로저** ×1 · 최근 ${stamp(NOW - 10 * DAY).day} · 다음 복습 3일 뒤: 바깥 변수를 기억함`)
-    expect(await record($, 'search', '클로저')).toContain('- **클로저** ×1 · 다음 복습 3일 뒤: 바깥 변수를 기억함')
+    // The tool names a concept without what it is (a blurb the model wrote is no instruction to the model reading it).
+    expect((await record($, 'search', '클로저')).split('\n')).toContain('- **클로저** ×1 · 다음 복습 3일 뒤')
     expect(w.models).toHaveLength(0)
   })
 
@@ -5103,15 +5104,16 @@ describe('1.6.0: what the cross-review found no test held', () => {
     await turn($, () => $.tool.call(EDIT_A))
     await finish(w)
     const recent = await record($, 'recent')
-    expect(recent).toContain('\n\n이 노트들의 개념 1개\n- **for...of 반복문** ×1 · 아직 떠올려 본 적 없음: for...of 반복문에 대한 설명 — `for (const item of items)` (이 기간에 처음 배움)\n')
+    expect(recent).toContain('\n\n이 노트들의 개념 1개\n- **for...of 반복문** ×1 · 아직 떠올려 본 적 없음 (이 기간에 처음 배움)\n')
     expect(recent).not.toContain('클로저')
     await learn($, '안다 클로저')
-    expect(await record($, 'search', '클로저')).toContain('- **클로저** ×1 · 아는 개념: 바깥 변수를 기억함')
+    expect((await record($, 'search', '클로저')).split('\n')).toContain('- **클로저** ×1 · 아는 개념')
   })
 
   test('/learn 퀴즈 with a typed answer that graduates a concept says so, and how to take it back', async ($, on) => {
     const at = { name: '구조 분해 할당', count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: '꺼내서 이름 붙이기', files: [], step: 5, reviewedAt: NOW - 61 * DAY }
-    const store = new Map<string, unknown>([['concepts', { 'c:구조 분해 할당': at }]])
+    // Step 5 as 1.6.0 counts it: given after the store's first 1.6.0 start (stepsFrom), not a 1.5 step read back as 1.
+    const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', { 'c:구조 분해 할당': at }]])
     const w = world(on, 'ok', null, true, store)
     await start($)
     w.answer = 'Q1: 문제 하나\nA1: 답 하나'
