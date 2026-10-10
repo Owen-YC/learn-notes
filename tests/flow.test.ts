@@ -4404,6 +4404,10 @@ describe('1.6.0: views on 1 to 4, q for today\'s review, the keys where they are
     await start($)
     expect((await learn($, '복습')).text).toBe('지금 복습할 개념이 없습니다 · 더 풀려면 패널에서 s, 또는 /learn 퀴즈 새로')
     expect(w.models).toHaveLength(0)
+    // From Remote Control the same: said in the reply, no quiz asked of the model.
+    const away = await $.command.run({ command: 'learn', args: '복습', origin: { kind: 'bridge' }, presentation: { isFullscreen: true, columns: 160 } })
+    expect(away.text).toBe('지금 복습할 개념이 없습니다 · 더 풀려면 /learn 퀴즈 새로')
+    expect(w.models).toHaveLength(0)
     expect(w.focused.at(-1)).toBe(false)
     const ui = await pane($)
     expect(await ui.find({ type: 'Text', text: '4: 퀴즈' })).toBeDefined()

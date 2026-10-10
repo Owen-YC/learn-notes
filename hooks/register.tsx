@@ -2652,19 +2652,22 @@ export const register: Register = (on, options) => {
       // 시작 · 계속 · 해 줘 after it ask for the same review: never an answer to grade.
       const ask = QUIZ_SHOW.test(rest) || REVIEW_PLEASE.test(rest) ? '' : rest
       const index = await read($, concepts)
+      if (ask !== '' || Object.keys(index).length === 0) return { text: await quizCommand($, cfg, ask) }
       // Asked from Remote Control or a chat channel, the pane is on a screen nobody there sees: the quiz comes in the reply.
-      if (ask !== '' || Object.keys(index).length === 0 || isAwayOrigin(e.origin) || (await isCloudSession($))) return { text: await quizCommand($, cfg, ask) }
+      const isAway = isAwayOrigin(e.origin) || (await isCloudSession($))
       const current = await lastQuiz($)
       const now = await $.clock.now()
       const today = todayReview(index, await read($, activity), now)
-      // Nothing due (or today's share done) and nothing left to answer: the quiz view, with no new quiz asked unbidden.
+      // Nothing due (or today's share done) and nothing left to answer: no new quiz asked unbidden, wherever it was asked.
       if (today.left === 0 && !(current?.items.some(item => isAwaited(current, item, now)) ?? false)) {
+        const why = today.due > 0 ? `오늘 몫(하루 ${DAILY_REVIEW}문제)을 마쳤습니다 · 남은 개념은 내일 나옵니다` : '지금 복습할 개념이 없습니다'
+        if (isAway) return { text: `${why} · 더 풀려면 /learn 퀴즈 새로` }
         await update($, autoOpened, () => true)
         await update($, view, () => 'quiz')
         const shown = await $.ui.open({ id: PANE, title: TITLE })
-        const why = today.due > 0 ? `오늘 몫(하루 ${DAILY_REVIEW}문제)을 마쳤습니다 · 남은 개념은 내일 나옵니다` : '지금 복습할 개념이 없습니다'
         return { text: `${why} · 더 풀려면 ${shown.isPlaced ? '패널에서 s, 또는 ' : ''}/learn 퀴즈 새로` }
       }
+      if (isAway) return { text: await quizCommand($, cfg, '') }
       await update($, autoOpened, () => true)
       const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true })
       if (!opened.isPlaced) return { text: await quizCommand($, cfg, '') }
