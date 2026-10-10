@@ -2539,7 +2539,9 @@ export const register: Register = (on, options) => {
     if (arg !== '') return { text: `모르는 하위 명령입니다: '${said}'.\n\n${SHORT_HELP}` }
     await update($, autoOpened, () => true)
     // Sent from an empty prompt, the pane asks for the keys at once (no ctrl+x tab); Esc hands them back and leaves it open.
-    const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true })
+    // A pane with no note and no concept has no key to press: the keys stay in the prompt, for the request that makes the first note.
+    const hasKeys = list.length > 0 || Object.keys(await read($, concepts)).length > 0
+    const opened = await $.ui.open({ id: PANE, title: TITLE, ...(hasKeys ? { focus: true as const } : {}) })
     const last = list.at(-1)
     if (opened.isPlaced && (await isCloudSession($))) {
       // Placed on the cloud computer's own terminal, which nobody sees: say so, and show the note here.
@@ -2549,6 +2551,7 @@ export const register: Register = (on, options) => {
     }
     const root = await $.session.root()
     const hint = isSystemFolder(root) ? `\n\n${systemFolderHint(root)}` : ''
+    if (opened.isPlaced && !hasKeys) return { text: `학습 노트 패널을 열었습니다 · Claude에게 파일을 만들거나 고쳐 달라고 하면, 턴이 끝난 뒤 여기에 노트가 생깁니다.${hint}` }
     if (opened.isPlaced) return { text: `학습 노트 패널을 열었습니다 · 숫자 1~4로 보기를 바꾸고, Esc로 대화로 돌아갑니다.${hint}` }
     $.ui.log(`learn-notes: 패널을 열지 못했습니다 (${opened.reason})`, { to: 'debug' })
     return {
@@ -2603,7 +2606,10 @@ export const register: Register = (on, options) => {
           {e.props.isFocused ? 'Esc: 대화로 돌아가기' : KEYS_HINT}
         </Text>
       ) : null
-    const strip = viewStrip($, cfg, shown, note !== undefined, review.left, el)
+    // q is for the review not on show: the quiz view offers it too once its quiz is all graded (as the status line's
+    // '/learn 뒤 q' says, the view kept from before), not while a question waits for its answer or a quiz is made.
+    const isReviewOn = shown === 'quiz' && (run.isMaking || (current?.items.some(item => item.result === undefined) ?? false))
+    const strip = viewStrip($, cfg, shown, note !== undefined, isReviewOn ? 0 : review.left, el)
 
     if (!note) {
       // The team file read for this project, if any: its notes will follow its rules and terms.
@@ -2760,7 +2766,8 @@ export const register: Register = (on, options) => {
  * The views in one row on keys 1 to 4 (a digit is the same in a Korean input
  * mode), the one shown in bold and underlined: 노트 · 전/후 · 개념 모음 · 퀴즈,
  * or before the first note 노트 · 개념 모음 · 퀴즈 on the same numbers. While
- * today's review has questions `left` and the quiz is not on show, q starts it.
+ * today's review has questions `left` (0 while a quiz is answered or made in
+ * the quiz view), q starts it. 4 puts the keys in the answer field shown.
  */
 function viewStrip($: EngineInterface, cfg: Config, mode: LearnView, hasNote: boolean, left: number, el: ElementTable) {
   const { Box, Text, Button } = el
@@ -2774,7 +2781,8 @@ function viewStrip($: EngineInterface, cfg: Config, mode: LearnView, hasNote: bo
         </Text>
       )
     }
-    return <Button key={`view-${one}`} hotkey={n} plain label={VIEW_LABEL[one]} onPress={() => update($, view, () => one)} />
+    const go = one === 'quiz' ? () => showQuiz($) : () => update($, view, () => one)
+    return <Button key={`view-${one}`} hotkey={n} plain label={VIEW_LABEL[one]} onPress={go} />
   })
   const joined = items.flatMap((item, i) =>
     i > 0
@@ -2790,12 +2798,12 @@ function viewStrip($: EngineInterface, cfg: Config, mode: LearnView, hasNote: bo
     <Box flexWrap="wrap" columnGap={1}>
       {joined}
       {/* A Button draws no colour of its own: the yellow mark beside it says the review is waiting. */}
-      {left > 0 && mode !== 'quiz' && (
+      {left > 0 && (
         <Text key="review-mark" color="yellow">
           ●
         </Text>
       )}
-      {left > 0 && mode !== 'quiz' && <Button key="review" hotkey="q" plain label={`복습 ${left}개`} onPress={() => reviewNow($, cfg)} />}
+      {left > 0 && <Button key="review" hotkey="q" plain label={`복습 ${left}개`} onPress={() => reviewNow($, cfg)} />}
     </Box>
   )
 }
@@ -2808,11 +2816,27 @@ function viewStrip($: EngineInterface, cfg: Config, mode: LearnView, hasNote: bo
 async function reviewNow($: EngineInterface, cfg: Config): Promise<void> {
   await update($, view, () => 'quiz')
   const current = await lastQuiz($)
-  const at = current ? current.items.findIndex(item => item.result === undefined) : -1
   if (!current || !current.items.some(item => isOpen(current, item))) {
     void startQuiz($, cfg)
     return
   }
+  focusShown($, current)
+}
+
+/**
+ * The pane's 4: the quiz view, and as after q the keys in the answer field of
+ * the question it shows, so the answer is typed at once (in either input mode)
+ * and no letter of it presses one of the quiz's buttons.
+ */
+async function showQuiz($: EngineInterface): Promise<void> {
+  await update($, view, () => 'quiz')
+  const current = await lastQuiz($)
+  if (current) focusShown($, current)
+}
+
+/** The keys to the answer field of the question the quiz view shows (the first not graded), while it is still to answer. */
+function focusShown($: EngineInterface, current: Quiz): void {
+  const at = current.items.findIndex(item => item.result === undefined)
   if (at !== -1 && isOpen(current, current.items[at]!)) focusInPane($, quizFieldKey(current.at, at))
 }
 

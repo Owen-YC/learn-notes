@@ -2086,9 +2086,8 @@ test('started in a system folder, the code Claude puts in its scratchpad is note
   await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u9', file_path: '/tmp/claude-0/scratchpad/try.mjs' }), 't2')
   await finish(w)
   expect(w.models).toHaveLength(1)
-  expect((await learn($, '')).text).toBe(
-    '학습 노트 패널을 열었습니다 · 숫자 1~4로 보기를 바꾸고, Esc로 대화로 돌아갑니다.',
-  )
+  // Nothing in this project's pane yet (and no concept): the reply says what makes the first note.
+  expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다 · Claude에게 파일을 만들거나 고쳐 달라고 하면, 턴이 끝난 뒤 여기에 노트가 생깁니다.')
 })
 
 /** The answer field of question `i` in the pane's quiz, keyed by the quiz it belongs to. */
@@ -3890,6 +3889,87 @@ describe('1.6.0: views on 1 to 4, q for today\'s review, the keys where they are
     expect(w.models).toHaveLength(2)
     await ui.press({ key: 'view-split' })
     expect(await ui.find({ type: 'Button', key: 'write' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('/learn takes the keys only for a pane with something to press: an empty one leaves them in the prompt', async ($, on) => {
+    const w = world(on)
+    await start($)
+    // No note, no concept: no view and no button, and the welcome asks for a request typed in the prompt.
+    expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다 · Claude에게 파일을 만들거나 고쳐 달라고 하면, 턴이 끝난 뒤 여기에 노트가 생깁니다.')
+    expect(w.focused).toEqual([false])
+    const ui = await pane($)
+    expect(await ui.findAll({ type: 'Button' })).toEqual([])
+    await ui.unmount()
+
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다 · 숫자 1~4로 보기를 바꾸고, Esc로 대화로 돌아갑니다.')
+    expect(w.focused.at(-1)).toBe(true)
+  })
+
+  test('/learn takes the keys for concepts alone, learned in another project', async ($, on) => {
+    const w = world(on, 'ok', null, true, new Map<string, unknown>([['concepts', DUE]]))
+    await start($)
+    expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다 · 숫자 1~4로 보기를 바꾸고, Esc로 대화로 돌아갑니다.')
+    expect(w.focused).toEqual([true])
+  })
+
+  test('the quiz view offers q once its quiz is all graded, as the status line says; not while one is answered or made', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', DUE]])
+    // A quiz finished before: today's review still has the one due.
+    store.set('quiz', { at: NOW - 2 * DAY, isRevealed: false, items: [{ key: 'c:클로저', name: '클로저', question: '왜 커질까?', answer: '바깥 변수를 기억해서다.', result: 'right' }] })
+    const w = world(on, 'hold', null, true, store)
+    await start($)
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 뒤 q')
+    const ui = await pane($)
+    await ui.press({ key: 'view-quiz' })
+    expect(await ui.find({ type: 'Text', text: /1문제 중 1개 맞혔습니다/ })).toBeDefined()
+    expect((await ui.find({ type: 'Button', key: 'review', text: '복습 1개' }))?.props.hotkey).toBe('q')
+    // All graded: no field to put the keys in.
+    expect(focusesOf(w)).toEqual([])
+
+    w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    await ui.press({ key: 'review' })
+    // Being made, then answered: the review is on show, and q is gone.
+    expect(await ui.find({ type: 'Text', text: '문제를 만드는 중입니다…' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'review' })).toBeUndefined()
+    w.release()
+    await w.clock.settle()
+    expect(w.models).toHaveLength(1)
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/1/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'review' })).toBeUndefined()
+    // Its answer seen and waiting for o or x, it is still on show.
+    await ui.press({ key: 'quiz-answer' })
+    expect(await ui.find({ type: 'Button', key: 'quiz-right' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'review' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('4 puts the keys in the answer field of the question on show, as q does; none once its answer is seen', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', DUE]])
+    store.set('quiz', {
+      at: NOW - DAY,
+      isRevealed: false,
+      items: [
+        { key: 'c:클로저', name: '클로저', question: '왜 커질까?', answer: '바깥 변수를 기억해서다.', result: 'right' },
+        { key: 'c:클로저', name: '클로저', question: '무엇을 기억할까?', answer: '바깥 변수' },
+      ],
+    })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await pane($)
+    await ui.press({ key: 'view-quiz' })
+    expect(await ui.find({ type: 'Text', text: /^문제 2\/2/ })).toBeDefined()
+    expect(focusesOf(w)).toEqual([mineKey(store, 1)])
+
+    // Its answer seen, the question has no field: 4 moves the keys nowhere, and asks the model nothing.
+    await ui.press({ key: 'quiz-answer' })
+    await ui.press({ key: 'view-note' })
+    await ui.press({ key: 'view-quiz' })
+    expect(await ui.find({ type: 'Button', key: 'quiz-wrong' })).toBeDefined()
+    expect(focusesOf(w)).toHaveLength(1)
+    expect(w.models).toHaveLength(0)
     await ui.unmount()
   })
 })
