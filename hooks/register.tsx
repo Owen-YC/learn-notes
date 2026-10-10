@@ -144,6 +144,9 @@ const TITLE = '학습 노트'
 const KEYS_HINT = 'ctrl+x tab: 패널 고르기 · 숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서'
 /** The same line while the pane holds the keys: how to give them back, and the input mode the letter keys need. */
 const FOCUSED_HINT = 'Esc: 대화로 돌아가기 · 글자 키는 영문 상태에서'
+/** The two lines in the quiz view while a question waits in its answer field, which takes the keys first. */
+const ANSWER_KEYS_HINT = 'ctrl+x tab: 답 칸으로 · 보기를 바꾸려면 그 뒤 Tab'
+const ANSWER_FOCUSED_HINT = 'Esc: 대화로 돌아가기 · 답은 한글로 적어도 됩니다'
 
 const notes = atom({ plugin: 'learn-notes', key: 'notes' } as const, [])
 const live = atom({ plugin: 'learn-notes', key: 'live' } as const, null)
@@ -1366,8 +1369,14 @@ async function startQuiz($: EngineInterface, cfg: Config, only?: Pick<LearnNote,
   }
 }
 
+/** Any other move in the quiz takes back a first s: the next s asks again before a new quiz drops what is left. */
+async function disarm($: EngineInterface): Promise<void> {
+  if ((await read($, quizRun)).armedNew != null) await update($, quizRun, run => ({ ...run, armedNew: null }))
+}
+
 /** The pane's h: one question's hint. */
 async function showHint($: EngineInterface, i: number): Promise<void> {
+  await disarm($)
   const current = await lastQuiz($)
   const item = current?.items[i]
   if (!current || !item?.hint || item.isHinted || item.result !== undefined) return
@@ -1376,6 +1385,7 @@ async function showHint($: EngineInterface, i: number): Promise<void> {
 
 /** The pane's a: one question's answer. */
 async function showAnswer($: EngineInterface, i: number): Promise<void> {
+  await disarm($)
   const current = await lastQuiz($)
   const item = current?.items[i]
   if (!current || !item || isAnswerShown(current, item)) return
@@ -1384,6 +1394,7 @@ async function showAnswer($: EngineInterface, i: number): Promise<void> {
 
 /** The pane's o and x: the learner's own grade for one question whose answer they saw. */
 async function gradeQuiz($: EngineInterface, cfg: Config, i: number, result: 'right' | 'wrong'): Promise<void> {
+  await disarm($)
   const current = await lastQuiz($)
   const item = current?.items[i]
   if (!current || !item || item.result !== undefined || !isAnswerShown(current, item)) return
@@ -1472,6 +1483,7 @@ async function regradeQuiz($: EngineInterface, cfg: Config, current: Quiz, i: nu
 
 /** The pane's f: the learner turns Claude's grade of their typed answer the other way. */
 async function flipGrade($: EngineInterface, cfg: Config, i: number): Promise<void> {
+  await disarm($)
   const current = await lastQuiz($)
   const item = current?.items[i]
   if (!current || !item || item.result === undefined || item.verdict === undefined) return
@@ -1520,7 +1532,7 @@ async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: str
   isQuizChecking = true
   let error: string | null = null
   try {
-    await update($, quizRun, run => ({ ...run, checking: i, error: null }))
+    await update($, quizRun, run => ({ ...run, checking: i, error: null, armedNew: null }))
     const graded = await gradeTyped($, cfg, current, i, mine)
     if ('error' in graded) error = graded.error
   } catch (thrown) {
@@ -2092,6 +2104,8 @@ const QUIZ_WORD =
   /^(힌트|정답|문제|새로|새\s*(?:문제|퀴즈)|다음\s*문제|맞|틀|오답|도움말|답\s*적기|적기|채점|(?:hints?|answers?|questions?|right|correct|wrong|missed?|help|new\s+(?:quiz|questions?))\b)/i
 /** The quiz asked for in other words (시작 · 보기 · 계속 …): the quiz being answered, or a new one when none is, as /learn 퀴즈 alone. */
 const QUIZ_SHOW = /^(?:시작|보기|풀기|계속|이어서|다시|열기|start|show|open|continue|resume)(?:\s*(?:하기|해\s*줘|할래))?$/i
+/** What may follow /learn 복습 as a plain request (/learn 복습 해 줘): the review itself. */
+const REVIEW_PLEASE = /^(?:하기|해\s*(?:줘|주세요|줄래)|할래|좀|please)$/i
 /** A new quiz asked for: 새로 · 새 · new, or 새 문제 (받기) · 새 퀴즈 as the replies and the pane's s say it. */
 const QUIZ_NEW = /^(?:새로|새|new)(?:\s*(?:문제|퀴즈|quiz|questions?))?(?:\s*받기)?$/i
 /** The quiz being answered asked for again: 문제, or 다음 (문제) · 목록 as the replies' "다음 문제: …" may be read. */
@@ -2112,7 +2126,8 @@ async function quizCommand($: EngineInterface, cfg: Config, said: string): Promi
   const current = await lastQuiz($)
   // The number first (1 힌트 · 2 정답) is the same ask as after: not an answer to grade.
   const flipped = /^(\d+)\s*번?\s+(힌트|hints?|정답|answers?)(?:\s*보기)?$/i.exec(said)
-  const rest = QUIZ_SHOW.test(said) ? '' : flipped ? `${flipped[2]} ${flipped[1]}` : said
+  const showWord = QUIZ_SHOW.test(said) ? said.trim() : undefined
+  const rest = showWord !== undefined ? '' : flipped ? `${flipped[2]} ${flipped[1]}` : said
   const isNew = QUIZ_NEW.test(rest)
   if (QUIZ_HELP.test(rest)) return QUIZ_USAGE
   // 보기 after it as the pane's a says it: 정답 보기, 정답 2 보기.
@@ -2132,7 +2147,10 @@ async function quizCommand($: EngineInterface, cfg: Config, said: string): Promi
     const checking = (await read($, quizRun)).checking
     const n = hintAsk[1] !== undefined ? Number(hintAsk[1]) : current.items.findIndex((item, i) => i !== checking && isOpen(current, item)) + 1
     const item = current.items[n - 1]
-    if (hintAsk[1] === undefined && !item) return '힌트를 볼 문제가 없습니다 (모두 채점했거나 정답을 봤습니다). 새 문제: /learn 퀴즈 새로'
+    if (hintAsk[1] === undefined && !item) {
+      if (typeof checking === 'number' && current.items[checking] && isOpen(current, current.items[checking]!)) return `${checking + 1}번은 지금 Claude가 채점하고 있습니다. 채점이 끝난 뒤 다시 보세요.`
+      return '힌트를 볼 문제가 없습니다 (모두 채점했거나 정답을 봤습니다). 새 문제: /learn 퀴즈 새로'
+    }
     if (!item) return `문제 번호를 1~${current.items.length} 사이로 알려 주세요. 예: /learn 퀴즈 힌트 1`
     if (checking === n - 1) return `${n}번은 지금 Claude가 채점하고 있습니다. 채점이 끝난 뒤 다시 보세요.`
     if (!isOpen(current, item)) return `${n}번은 이미 채점했거나 정답을 봤습니다. 지금 문제: /learn 퀴즈`
@@ -2218,7 +2236,10 @@ async function quizCommand($: EngineInterface, cfg: Config, said: string): Promi
   if (isQuizMaking) return '패널에서 문제를 만들고 있습니다. 잠시 뒤 /learn 퀴즈로 보세요.'
   // The quiz being answered first: a new one only once none is left open, or when asked for (새로).
   if (!isNew && current && current.items.some(item => isOpen(current, item))) {
-    return quizListText(current, now, '· 새 문제: /learn 퀴즈 새로', (await read($, quizRun)).checking)
+    const listed = quizListText(current, now, '· 새 문제: /learn 퀴즈 새로', (await read($, quizRun)).checking)
+    // 시작 · 계속 may be the answer itself (a program that prints 시작): how to send it as one.
+    const open = firstOpen(current)
+    return showWord !== undefined && open !== -1 ? `${listed}\n\n답으로 적은 말이면 번호를 붙여 보내 주세요: /learn 퀴즈 ${open + 1} ${showWord}` : listed
   }
   if (isQuizChecking) return '답을 채점하고 있습니다. 채점이 끝난 뒤 새 문제를 받으세요.'
   isQuizMaking = true
@@ -2493,8 +2514,21 @@ export const register: Register = (on, options) => {
     if (arg === 'quiz') return { text: await quizCommand($, cfg, rest) }
     // Today's review at once: the pane opens on the quiz holding the keys (its answer field), as the pane's q.
     if (arg === 'review') {
-      const hasConcepts = Object.keys(await read($, concepts)).length > 0
-      if (rest !== '' || !hasConcepts || (await isCloudSession($))) return { text: await quizCommand($, cfg, rest) }
+      // 시작 · 계속 · 해 줘 after it ask for the same review: never an answer to grade.
+      const ask = QUIZ_SHOW.test(rest) || REVIEW_PLEASE.test(rest) ? '' : rest
+      const index = await read($, concepts)
+      // Asked from Remote Control or a chat channel, the pane is on a screen nobody there sees: the quiz comes in the reply.
+      if (ask !== '' || Object.keys(index).length === 0 || isAwayOrigin(e.origin) || (await isCloudSession($))) return { text: await quizCommand($, cfg, ask) }
+      const current = await lastQuiz($)
+      const today = todayReview(index, await read($, activity), await $.clock.now())
+      // Nothing due (or today's share done) and nothing left to answer: the quiz view, with no new quiz asked unbidden.
+      if (today.left === 0 && !(current?.items.some(item => item.result === undefined) ?? false)) {
+        await update($, autoOpened, () => true)
+        await update($, view, () => 'quiz')
+        const shown = await $.ui.open({ id: PANE, title: TITLE })
+        const why = today.due > 0 ? `오늘 몫(하루 ${DAILY_REVIEW}문제)을 마쳤습니다 · 남은 개념은 내일 나옵니다` : '지금 복습할 개념이 없습니다'
+        return { text: `${why} · 더 풀려면 ${shown.isPlaced ? '패널에서 s, 또는 ' : ''}/learn 퀴즈 새로` }
+      }
       await update($, autoOpened, () => true)
       const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true })
       if (!opened.isPlaced) return { text: await quizCommand($, cfg, '') }
@@ -2717,10 +2751,13 @@ export const register: Register = (on, options) => {
     ) : null
     // The terminal's pane takes the keys from /learn 복습, a click or ctrl+x tab; Esc gives them back to the prompt.
     const isTerminalFocus = e.surface === 'terminal' && e.props.isFocused === true
+    // The quiz view with an answer field to type in: the keys go there first (autoFocus), in either input mode.
+    const asked = current ? current.items.findIndex(item => item.result === undefined) : -1
+    const isAnswering = shown === 'quiz' && current !== null && asked !== -1 && isOpen(current, current.items[asked]!) && 'Input' in el && run.checking !== asked
     const keysHint =
       e.surface === 'terminal' ? (
         <Text dimColor wrap="wrap">
-          {e.props.isFocused ? FOCUSED_HINT : KEYS_HINT}
+          {isAnswering ? (e.props.isFocused ? ANSWER_FOCUSED_HINT : ANSWER_KEYS_HINT) : e.props.isFocused ? FOCUSED_HINT : KEYS_HINT}
         </Text>
       ) : null
     // q is for the review not on show: the quiz view offers it too once its quiz is all graded (as the status line's
@@ -2902,7 +2939,13 @@ function viewStrip($: EngineInterface, cfg: Config, mode: LearnView, hasNote: bo
         </Text>
       )
     }
-    const go = one === 'quiz' ? () => showQuiz($) : () => update($, view, () => one)
+    const go =
+      one === 'quiz'
+        ? () => showQuiz($)
+        : async () => {
+            await disarm($)
+            await update($, view, () => one)
+          }
     return <Button key={`view-${one}`} hotkey={n} plain label={VIEW_LABEL[one]} onPress={go} />
   })
   const joined = items.flatMap((item, i) =>
@@ -2937,7 +2980,8 @@ function viewStrip($: EngineInterface, cfg: Config, mode: LearnView, hasNote: bo
 async function reviewNow($: EngineInterface, cfg: Config): Promise<void> {
   await update($, view, () => 'quiz')
   const current = await lastQuiz($)
-  if (!current || !current.items.some(item => isOpen(current, item))) {
+  // A question whose answer was seen still waits for o or x: kept, as s keeps it.
+  if (!current || !current.items.some(item => item.result === undefined)) {
     void startQuiz($, cfg)
     return
   }
@@ -3703,7 +3747,7 @@ function quizView(
           <Button key="quiz-new" hotkey="s" plain label={current ? '새 문제 받기' : '퀴즈 시작'} onPress={() => void pressNew($, cfg)} />
         </Box>
       )}
-      {current && run.armedNew === current.at && items.length > graded.length && !run.isMaking && (
+      {current && run.armedNew === current.at && items.length > graded.length && !run.isMaking && (run.checking ?? null) === null && (
         <Text color="yellow" wrap="wrap">
           풀던 문제 {items.length - graded.length}개가 남았습니다 · s를 한 번 더 누르면 새 문제를 받습니다
         </Text>
@@ -3826,7 +3870,7 @@ function quizView(
                 {/* While the field holds the keys every letter is typed into it: how to reach the buttons. */}
                 {Input && isFocused && (
                   <Text dimColor wrap="wrap">
-                    Enter: 채점 · Tab: 버튼으로 ({[...(item.hint !== undefined && item.isHinted !== true ? ['h 힌트'] : []), 'a 정답', '1~4 보기'].join(' · ')})
+                    답 칸에서 Enter: 채점 · Tab: 버튼으로 ({[...(item.hint !== undefined && item.isHinted !== true ? ['h 힌트'] : []), 'a 정답', '1~4 보기'].join(' · ')})
                   </Text>
                 )}
               </Box>
