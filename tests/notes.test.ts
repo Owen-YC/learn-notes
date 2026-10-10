@@ -2272,3 +2272,13 @@ describe('1.6.0: concept names without a plain-words gloss', () => {
     expect(notePrompt({ prompt: '', answer: '', changes: [], moreFiles: 0 }, 'beginner')).toContain('개념 이름은 짧은 용어만 쓰고')
   })
 })
+
+test('a quiz shows code of two lines or more as a code block, with its lines kept (1.6.0)', () => {
+  expect(QUIZ_SYSTEM).toContain('두 줄 이상이면 줄을 살려 ``` 코드 블록으로')
+  // A question holding a code block is read whole, the block included.
+  const items = parseQuiz(['Q1: 무엇이 출력될까요?', '```js', 'const a = [1, 2]', 'for (const x of a) console.log(x)', '```', 'T1: 예측', 'A1: 1과 2'].join('\n'), [
+    { key: 'c:for...of', name: 'for...of', count: 1, firstAt: 0, lastAt: 0, blurb: '', files: [] },
+  ] as never)
+  expect(items[0]!.question).toContain('for (const x of a) console.log(x)')
+  expect(items[0]!.question).toContain('```js')
+})
