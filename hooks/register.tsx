@@ -49,6 +49,7 @@ import {
   knownMarks,
   recallMarks,
   recallSteps,
+  stepMarks,
   storedConcept,
   storedConcepts,
   withKnownMarks,
@@ -152,9 +153,12 @@ const TITLE = '학습 노트'
 const KEYS_HINT = 'ctrl+x tab: 패널 고르기 · 숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서'
 /** The same line while the pane holds the keys: how to give them back, and the input mode the letter keys need. */
 const FOCUSED_HINT = 'Esc: 대화로 돌아가기 · 글자 키는 영문 상태에서'
-/** The two lines in the quiz view while a question waits in its answer field, which takes the keys first. */
-const ANSWER_KEYS_HINT = 'ctrl+x tab: 답 칸으로 · 보기를 바꾸려면 그 뒤 Tab'
-const ANSWER_FOCUSED_HINT = 'Esc: 대화로 돌아가기 · 답은 한글로 적어도 됩니다'
+/**
+ * The two lines in the quiz view while a question waits in its answer field, which takes the keys first: the answer
+ * may be typed in either input mode, the buttons a Tab away still need the English one for their letter keys.
+ */
+const ANSWER_KEYS_HINT = 'ctrl+x tab: 답 칸으로 · 보기를 바꾸려면 그 뒤 Tab · 글자 키는 영문 상태에서'
+const ANSWER_FOCUSED_HINT = 'Esc: 대화로 돌아가기 · 답은 한/영 상관없이, 버튼의 글자 키는 영문 상태에서'
 
 const notes = atom({ plugin: 'learn-notes', key: 'notes' } as const, [])
 const live = atom({ plugin: 'learn-notes', key: 'live' } as const, null)
@@ -194,9 +198,17 @@ const WELCOMED_KEY = 'welcomed'
 const KNOWN_KEY = 'known'
 /**
  * When a session of 1.6.0 or later first started on this store: a quiz step
- * given before it is 1.5's, begun at the notes that met the concept (recallMarks).
+ * given before it (one a merge record or a graded question keeps) is 1.5's,
+ * begun at the notes that met the concept (recallMarks), and the usage record
+ * began then (uncountedDays). The index's own steps go by STEPS_KEY.
  */
 const STEPS_FROM_KEY = 'stepsFrom'
+/**
+ * The steps past the first 1.6.0 gave, by key (stepMarks), written with the
+ * index: any other step the index holds is 1.5's, a 1.5 session still open
+ * having given it since the update too (recallSteps).
+ */
+const STEPS_KEY = 'steps'
 const WELCOME = 'learn-notes가 켜졌습니다 · 파일을 고치는 요청을 하면 노트가 생깁니다 · /learn으로 패널'
 
 type MergeRecord = { concept: LearnConcept; into: string; both: number }
@@ -683,10 +695,10 @@ async function stepsFrom($: EngineInterface): Promise<number> {
 /**
  * The concept index read back from what the store holds under CONCEPTS_KEY
  * (`raw`), for 1.6.0: a known mark a 1.5 session dropped put back
- * (KNOWN_KEY), a step a 1.5 quiz gave read as 1 at most (STEPS_FROM_KEY).
+ * (KNOWN_KEY), a step a 1.5 quiz gave read as 1 at most (STEPS_KEY).
  */
 async function indexOf($: EngineInterface, raw: unknown, map: Readonly<Record<string, string>>): Promise<Record<string, LearnConcept>> {
-  return recallSteps(withKnownMarks(cleanConcepts(raw, map), await $.store.get(KNOWN_KEY), map), await stepsFrom($))
+  return recallSteps(withKnownMarks(cleanConcepts(raw, map), await $.store.get(KNOWN_KEY), map), await $.store.get(STEPS_KEY), map)
 }
 
 /** The concept index as the store has it now (indexOf). */
@@ -695,11 +707,13 @@ async function storedIndex($: EngineInterface, map: Readonly<Record<string, stri
 }
 
 /**
- * Writes the concept index: its known marks first, apart (KNOWN_KEY), then
- * the index with each name as it was stored (storedConcepts).
+ * Writes the concept index: its known marks and steps first, apart
+ * (KNOWN_KEY, STEPS_KEY), then the index with each name as it was stored
+ * (storedConcepts).
  */
 async function storeIndex($: EngineInterface, index: Readonly<Record<string, LearnConcept>>): Promise<void> {
   await $.store.set(KNOWN_KEY, knownMarks(index))
+  await $.store.set(STEPS_KEY, stepMarks(index))
   await $.store.set(CONCEPTS_KEY, storedConcepts(index))
 }
 
@@ -1211,6 +1225,18 @@ function isAnswerShown(current: Quiz, item: LearnQuizItem): boolean {
 /** True for a question still to answer: not graded, its answer not seen. */
 function isOpen(current: Quiz, item: LearnQuizItem): boolean {
   return item.result === undefined && !isAnswerShown(current, item)
+}
+
+/**
+ * True for a question the quiz still waits on, which q and /learn 복습 keep
+ * rather than start today's review over it: one still to answer, or one of
+ * today's quiz whose answer was seen in the pane (a) and waits for o or x.
+ * One seen in a quiz of another day, or in a quiz kept before 1.6.0 that
+ * showed every answer at once (/learn quiz 정답), waits no more.
+ */
+function isAwaited(current: Quiz, item: LearnQuizItem, now: number): boolean {
+  if (item.result !== undefined) return false
+  return isOpen(current, item) || (item.isShown === true && !current.isRevealed && stamp(current.at).day === stamp(now).day)
 }
 
 /** The pane's answer field for question `i` of the quiz asked at `at`: a new quiz's fields are new elements. */
@@ -2629,9 +2655,10 @@ export const register: Register = (on, options) => {
       // Asked from Remote Control or a chat channel, the pane is on a screen nobody there sees: the quiz comes in the reply.
       if (ask !== '' || Object.keys(index).length === 0 || isAwayOrigin(e.origin) || (await isCloudSession($))) return { text: await quizCommand($, cfg, ask) }
       const current = await lastQuiz($)
-      const today = todayReview(index, await read($, activity), await $.clock.now())
+      const now = await $.clock.now()
+      const today = todayReview(index, await read($, activity), now)
       // Nothing due (or today's share done) and nothing left to answer: the quiz view, with no new quiz asked unbidden.
-      if (today.left === 0 && !(current?.items.some(item => item.result === undefined) ?? false)) {
+      if (today.left === 0 && !(current?.items.some(item => isAwaited(current, item, now)) ?? false)) {
         await update($, autoOpened, () => true)
         await update($, view, () => 'quiz')
         const shown = await $.ui.open({ id: PANE, title: TITLE })
@@ -2871,7 +2898,7 @@ export const register: Register = (on, options) => {
       ) : null
     // q is for the review not on show: the quiz view offers it too once its quiz is all graded (as the status line's
     // view /learn opens on, kept from before), not while a question waits for its answer or a quiz is made.
-    const isReviewOn = shown === 'quiz' && (run.isMaking || (current?.items.some(item => item.result === undefined) ?? false))
+    const isReviewOn = shown === 'quiz' && (run.isMaking || (current?.items.some(item => isAwaited(current, item, now)) ?? false))
     const strip = viewStrip($, cfg, shown, note !== undefined, isReviewOn ? 0 : review.left, el)
 
     if (!note) {
@@ -3089,8 +3116,9 @@ function viewStrip($: EngineInterface, cfg: Config, mode: LearnView, hasNote: bo
 async function reviewNow($: EngineInterface, cfg: Config): Promise<void> {
   await update($, view, () => 'quiz')
   const current = await lastQuiz($)
-  // A question whose answer was seen still waits for o or x: kept, as s keeps it.
-  if (!current || !current.items.some(item => item.result === undefined)) {
+  const now = await $.clock.now()
+  // A question whose answer was seen today still waits for o or x: kept, as s keeps it.
+  if (!current || !current.items.some(item => isAwaited(current, item, now))) {
     void startQuiz($, cfg)
     return
   }
@@ -3512,7 +3540,7 @@ async function recordText($: EngineInterface, cfg: Config, isForTool = false): P
     '',
     ...learned,
     '',
-    usageLine(cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)), now, record),
+    usageLine(cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)), now, record, await stepsFrom($)),
   ].join('\n')
 }
 
@@ -3668,6 +3696,7 @@ async function reportCommand($: EngineInterface, cfg: Config, rest: string, isAw
     level: cfg.level,
     now,
     usage: cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)),
+    since: await stepsFrom($),
   })
   let path: string | undefined
   if (cfg.isAutoSave) {
@@ -3864,7 +3893,7 @@ function quizView(
           <Button key="quiz-new" hotkey="s" plain label={current ? '새 문제 받기' : '퀴즈 시작'} onPress={() => void pressNew($, cfg)} />
         </Box>
       )}
-      {current && run.armedNew === current.at && items.length > graded.length && !run.isMaking && (run.checking ?? null) === null && (
+      {current && run.armedNew === current.at && items.length > graded.length && !run.isMaking && (
         <Text color="yellow" wrap="wrap">
           풀던 문제 {items.length - graded.length}개가 남았습니다 · s를 한 번 더 누르면 새 문제를 받습니다
         </Text>

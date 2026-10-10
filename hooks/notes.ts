@@ -897,17 +897,21 @@ const PLACEHOLDER = /^["']?[$<{%]/
 const SECRET_NAME = /password|passwd|secret|token(?!iz)|api[_-]?key|access[_-]?key|private[_-]?key/i
 /**
  * An upper-case dotenv name with a part that says secret, token, password or key
- * (`OPENAI_API_KEY=`, `DB_PASSWORD=`, `DB_PASS=`, `APIKEY=`), not `KEYBOARD_LAYOUT=`,
- * `MONKEY=`, `BYPASS=` or the shell's `PWD=`.
+ * (`OPENAI_API_KEY=`, `DB_PASSWORD=`, `APIKEY=`), or ending in `_PASS` or `_PWD`
+ * (`DB_PASS=`), not `KEYBOARD_LAYOUT=`, `MONKEY=`, `BYPASS=`, a score to pass
+ * (`PASS_SCORE=`, `PASS=0`) or the shell's `PWD=`.
  */
-const ENV_SECRET_NAME = /(?:^|[\s_])(?:[A-Z0-9]*(?:SECRET|TOKEN|PASSWORD|PASSWD)|PASS|(?<=_)PWD|(?:API|ACCESS|PRIVATE|SECRET|AUTH|MASTER|SIGNING|ENCRYPTION)?KEY)(?:_[A-Z0-9_]*)?=$/
+const ENV_SECRET_NAME = /(?:^|[\s_])(?:[A-Z0-9]*(?:SECRET|TOKEN|PASSWORD|PASSWD)|(?:API|ACCESS|PRIVATE|SECRET|AUTH|MASTER|SIGNING|ENCRYPTION)?KEY)(?:_[A-Z0-9_]*)?=$|_(?:PASS|PWD)=$/
 /** A quoted value's name that says what it is about rather than holding it: `tokenUrl`, `passwordLabel`. */
 const ABOUT_A_SECRET = /(?:url|uri|endpoint|path|file|dir|name|type|label|field|header|length|len|count|min|max|placeholder|hint|message|msg|text|title|error|id)["']?\s*[:=]\s*["'`]$/i
 /** A quoted value's name whose last word is key (`WEATHER_KEY`, `serviceKey`, `app_key`, `TOKEN_KEY`), not `monkey`. */
 const KEY_NAME = /(?:(?<![A-Za-z])key|Key|KEY)["']?\s*[:=]\s*["'`]$/
-/** A key's name that says whose secret it is (`API_KEY`, `secretKey`, `signing_key`): its value is masked whatever it looks like. */
-const SECRET_KEY_NAME = /(?:api|access|private|secret|auth|master|signing|encryption)[_-]?key["']?\s*[:=]\s*["'`]$/i
-/** A quoted value's name whose last word is pass or pwd (`DB_PASS`, `dbPwd`), not `bypass`, `compass` or the shell's `PWD`. */
+/**
+ * A key's name that says whose secret it is (`API_KEY`, `secretKey`, `signing_key`): its value is masked whatever it
+ * looks like. Not an auth key, often the name a login is kept under (`AUTH_KEY = 'auth-user'`): that is judged by its value.
+ */
+const SECRET_KEY_NAME = /(?:api|access|private|secret|master|signing|encryption)[_-]?key["']?\s*[:=]\s*["'`]$/i
+/** A quoted value's name whose last word is pass or pwd (`DB_PASS`, `pass`, `dbPwd`), not `bypass`, `compass` or the shell's `PWD`. */
 const PASS_NAME = /(?:(?<![A-Za-z])(?:pass|PASS)|(?<=[_.-])(?:pwd|PWD)|(?<=[a-z0-9])(?:Pass|Pwd))["']?\s*[:=]\s*["'`]$/
 /** A package's version or range, as package.json gives one: `"jsonwebtoken": "^9.0.2"` names a package, not a token. */
 const VERSION = /^(?:[~^]|[<>]=?|=)?v?\d+(?:\.(?:\d+|[xX*])){1,2}(?:[-+][0-9A-Za-z.-]+)?$/
@@ -917,10 +921,12 @@ const HANGUL = /\p{Script=Hangul}/u
 /**
  * True for a value that looks generated, as an API key does: a run of 16 or
  * more letters and digits (base64 and %-escapes too) with both kinds in it,
- * not a word with a number after it (`learnNotesStateV2`) or words joined by
- * `-`, `.` or `/` (`user-cache-v2`, `uploads/2024/photo.jpg`).
+ * or a UUID, a word and a dash before it or not (`RGAPI-3f2504e0-…`); not a
+ * word with a number after it (`learnNotesStateV2`) or words joined by `-`,
+ * `.` or `/` (`user-cache-v2`, `uploads/2024/photo.jpg`).
  */
 function isKeyShaped(value: string): boolean {
+  if (/^(?:[A-Za-z]+-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return true
   return !/^[A-Za-z]+\d+$/.test(value) && (value.match(/[A-Za-z0-9+=%]{16,}/g) ?? []).some(run => /\d/.test(run) && /[A-Za-z]/.test(run))
 }
 
@@ -929,12 +935,14 @@ function isKeyShaped(value: string): boolean {
  * says what it is about, it stands for one kept elsewhere, it is a version or
  * Korean words. A name ending in key is judged by its value unless it says
  * whose secret it is (`const WEATHER_KEY = "3f9a…"` is masked, `TOKEN_KEY =
- * "accessToken"` is not); one ending in pass or pwd unless its value is a plain word.
+ * "accessToken"` is not). One ending in pass or pwd is masked whatever its
+ * value (a Gmail app password is 16 letters), but for a plain word given to a
+ * camelCase name (`renderPass: 'shadow'`) or the name itself (`PASS = "PASS"`).
  */
 function isNoSecret(secret: string, before: string): boolean {
   if (ABOUT_A_SECRET.test(before) || PLACEHOLDER.test(secret) || VERSION.test(secret) || HANGUL.test(secret)) return true
   if (KEY_NAME.test(before)) return !SECRET_KEY_NAME.test(before) && !isKeyShaped(secret)
-  if (PASS_NAME.test(before)) return /^[A-Za-z]+$/.test(secret)
+  if (PASS_NAME.test(before)) return /^[A-Za-z]+$/.test(secret) && (/[a-z0-9](?:Pass|Pwd)["']?\s*[:=]\s*["'`]$/.test(before) || /^pass$/i.test(secret))
   return !SECRET_NAME.test(before)
 }
 
@@ -983,26 +991,33 @@ const SECRET_RULES: readonly { re: RegExp; keep?: (secret: string, before: strin
   },
 ]
 
-/** A config line's name ending in key (`primary_key: `), and one that says whose secret it is (`api_key = `, `aws_secret_access_key = `). */
+/**
+ * A config line's name ending in key (`primary_key: `, `serviceKey: `), and one that says whose secret it is
+ * (`api_key = `, `aws_secret_access_key = `, `secretKey: `), as SECRET_KEY_NAME says for a quoted value.
+ */
 const CONFIG_KEY_NAME = /key\s*[:=][ \t]*$/i
-const CONFIG_SECRET_KEY_NAME = /(?:api|access|private|secret|auth|master|signing|encryption)[_.-]?key\s*[:=][ \t]*$/i
+const CONFIG_SECRET_KEY_NAME = /(?:api|access|private|secret|master|signing|encryption)[_.-]?key\s*[:=][ \t]*$/i
 
 /**
  * In a config file only: an unquoted value of a name ending in password,
- * secret, token or key (`spring.datasource.password=…`, `  password: …`,
- * `aws_secret_access_key = …`), up to a comment. A value followed by more
- * words is a sentence (`error.password=Wrong password`), and a switch
- * (`id-token: write`, `use_token: true`), a version (`jsonwebtoken: ^9.0.2`)
- * or Korean words are no secret; a key is judged by its value as a quoted
- * one is (`primary_key: id` stays).
+ * secret, token, key or a word pass (`spring.datasource.password=…`,
+ * `  password: …`, `aws_secret_access_key = …`, `apiKey: …`, `mail.pass=…`),
+ * up to a comment. A value followed by more words is a sentence
+ * (`error.password=Wrong password`), and a switch (`id-token: write`,
+ * `use_token: true`), a version (`jsonwebtoken: ^9.0.2`), Korean words, the
+ * name's own last word (a label: `password: Password`) or a token count
+ * (`access_token: 3600`) are no secret; a key is judged by its value as a
+ * quoted one is (`primary_key: id`, `monkey: banana`, `hotkey: ctrl+k` stay).
  */
 const CONFIG_RULE = {
-  re: /^([+\- ]?\s*(?:-\s+)?[\w.-]*?(?:password|passwd|pwd|secret|token|[_.-]key)\s*[:=][ \t]*)([^\s"'#;]\S*)()(?=[ \t]*$|[ \t]+[#;])/gi,
+  re: /^([+\- ]?\s*(?:-\s+)?[\w.-]*?(?:password|passwd|pwd|secret|token|key|(?<![A-Za-z])pass)\s*[:=][ \t]*)([^\s"'#;]\S*)()(?=[ \t]*$|[ \t]+[#;])/gi,
   keep: (secret: string, before: string) =>
     PLACEHOLDER.test(secret) ||
     VERSION.test(secret) ||
     HANGUL.test(secret) ||
     /^(?:true|false|yes|no|on|off|null|none|~|read|write)$/i.test(secret) ||
+    secret.toLowerCase() === (/([A-Za-z]+)\s*[:=][ \t]*$/.exec(before)?.[1] ?? '').toLowerCase() ||
+    (/token\s*[:=][ \t]*$/i.test(before) && /^\d+$/.test(secret)) ||
     (CONFIG_KEY_NAME.test(before) && !CONFIG_SECRET_KEY_NAME.test(before) && !isKeyShaped(secret)),
 }
 
@@ -1036,10 +1051,12 @@ const KEY_BODY = /^\s*["'`]?(?:[A-Za-z0-9+/=]+|(?:Proc-Type|DEK-Info|Comment): .
  * A line of base64 too long to be code, bare or as a quoted piece of a joined
  * string (`"MIIE…\n" +`): a key's body whose BEGIN line fell outside the hunk
  * (letters and digits both, so a `=====` rule is none; in quotes upper and
- * lower case both, so a test's hex digest is none).
+ * lower case both, so a test's hex digest is none). Quoted, it is a piece of
+ * a key only as one is joined: ending in `\n`, or with `+` after it; a string
+ * of its own (`"iVBORw0KGgo…",`, an image a test keeps) is data, not a key.
  */
 const LONG_BASE64 =
-  /^\s*(?:(?=[A-Za-z0-9+/=]*[A-Za-z])(?=[A-Za-z0-9+/=]*\d)[A-Za-z0-9+/=]{60,}|["'`](?=[A-Za-z0-9+/=]*[a-z])(?=[A-Za-z0-9+/=]*[A-Z])(?=[A-Za-z0-9+/=]*\d)[A-Za-z0-9+/=]{60,}(?:\\n)?["'`]\s*[,+;]?)\s*$/
+  /^\s*(?:(?=[A-Za-z0-9+/=]*[A-Za-z])(?=[A-Za-z0-9+/=]*\d)[A-Za-z0-9+/=]{60,}|["'`](?=[A-Za-z0-9+/=]*[a-z])(?=[A-Za-z0-9+/=]*[A-Z])(?=[A-Za-z0-9+/=]*\d)[A-Za-z0-9+/=]{60,}(?:\\n["'`]\s*[,+;]?|["'`]\s*\+))\s*$/
 /** A key's END line with nothing but the key's data on it (`-----END PRIVATE KEY-----`, `"abc==\n-----END PRIVATE KEY-----\n"`), not code that names it. */
 const KEY_END_LINE = /^\s*["'`]?(?:[A-Za-z0-9+/=]+(?:\\n)?)?-----END [A-Z0-9 ]*PRIVATE KEY-----(?:\\n)?["'`]?[\s,+;)]*$/
 /** What stands before a key's END on its line when it is the key's last piece (`"abc==\n`), `\n` escapes taken out. */
@@ -2090,9 +2107,42 @@ export function recallMarks<T extends LearnQuizMarks>(marks: T, since: number): 
   return typeof marks.step === 'number' && marks.step > 1 && !((marks.reviewedAt ?? -1) >= since) ? { ...marks, step: 1 } : marks
 }
 
-/** The index with every step from before `since` read as recallMarks reads it. */
-export function recallSteps(index: Readonly<Record<string, LearnConcept>>, since: number): Record<string, LearnConcept> {
-  return Object.fromEntries(Object.entries(index).map(([key, one]) => [key, recallMarks(one, since)]))
+/**
+ * The steps past the first that 1.6.0 gave, by key, each with when it was
+ * given (`[step, reviewedAt]`), kept under a store key of their own and
+ * written with the index: a step a 1.5 session still open gave after the
+ * update (begun at the notes met, as before it) has no such record.
+ */
+export function stepMarks(index: Readonly<Record<string, LearnConcept>>): Record<string, [number, number]> {
+  return Object.fromEntries(
+    Object.entries(index).flatMap(([key, one]) =>
+      typeof one.step === 'number' && one.step > 1 && typeof one.reviewedAt === 'number' ? [[key, [one.step, one.reviewedAt] as [number, number]]] : [],
+    ),
+  )
+}
+
+/**
+ * The index with every step past the first read as 1 (recallMarks) unless the
+ * steps kept apart (stepMarks, `raw` as the store has it, merges followed)
+ * say 1.6.0 gave it, the same step at the same time: one from before the
+ * update, or one a 1.5 session still open gave since, is 1.5's.
+ */
+export function recallSteps(
+  index: Readonly<Record<string, LearnConcept>>,
+  raw: unknown,
+  aliases: Readonly<Record<string, string>> = {},
+): Record<string, LearnConcept> {
+  const kept = new Map<string, unknown>()
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+    for (const [stored, mark] of Object.entries(raw as Record<string, unknown>)) kept.set(resolveKey(aliases, stored), mark)
+  }
+  return Object.fromEntries(
+    Object.entries(index).map(([key, one]) => {
+      const mark = kept.get(key)
+      const isOwn = Array.isArray(mark) && mark[0] === one.step && mark[1] === one.reviewedAt
+      return [key, isOwn ? one : recallMarks(one, Number.POSITIVE_INFINITY)]
+    }),
+  )
 }
 
 /**
@@ -2295,18 +2345,23 @@ export function lastSeen(one: LearnConcept): number {
 }
 
 /**
- * A note as the store keeps it for later sessions: text and diffs cut down.
- * One the journal is still to get (isUnsaved) stays whole until it has it: a
- * later session's try writes it from this copy (the store's byte budget still holds).
+ * A note as the store keeps it for later sessions: request, answer and
+ * questions cut down, and its text and diffs too unless `isWhole`. One the
+ * journal is still to get (isUnsaved) keeps the text and diffs whole, the
+ * parts its journal section holds, so a later session's try writes it from
+ * this copy; fitHistory cuts such a copy first when the store has no room.
  */
-export function forHistory(note: LearnNote): LearnNote {
-  if (note.isUnsaved === true) return note
-  return {
+export function forHistory(note: LearnNote, isWhole = note.isUnsaved === true): LearnNote {
+  const kept = {
     ...note,
     prompt: cut(note.prompt, 600),
     answer: cut(note.answer, 600),
-    text: note.status === 'ready' ? closeTicks(cut(note.text, HISTORY_TEXT_BUDGET)) : note.text,
     ...(note.asks ? { asks: note.asks.slice(-ASKS_KEPT).map(one => ({ ...one, question: cut(one.question, 400), answer: closeTicks(closeFence(cut(one.answer, 1500))) })) } : {}),
+  }
+  if (isWhole) return kept
+  return {
+    ...kept,
+    text: note.status === 'ready' ? closeTicks(cut(note.text, HISTORY_TEXT_BUDGET)) : note.text,
     changes: note.changes.map(change => {
       if (change.diff.length <= HISTORY_DIFF_BUDGET) return change
       const { diff } = hunksToDiff(parseDiff(change.diff), HISTORY_DIFF_BUDGET)
@@ -2323,11 +2378,32 @@ export function jsonBytes(value: unknown): number {
 export type HistoryEntry = { at: number; notes: LearnNote[]; clearedAt?: number }
 
 /**
- * History cut to `budget` bytes: other projects go first, the least recent
- * first; then the oldest notes of `keep` (the project in use).
+ * History cut to `budget` bytes: first the whole copies of notes the journal
+ * is still to get (forHistory) are cut as other notes are, the oldest first,
+ * in any project; then other projects go, the least recent first; then the
+ * oldest notes of `keep` (the project in use). A whole copy pushes no note out.
  */
 export function fitHistory(history: Record<string, HistoryEntry>, keep: string, budget = HISTORY_MAX_BYTES): Record<string, HistoryEntry> {
   const next: Record<string, HistoryEntry> = { ...history }
+  let bytes = jsonBytes(next)
+  const whole = Object.entries(next)
+    .flatMap(([root, entry]) => entry.notes.flatMap((note, i) => (note.isUnsaved === true ? [{ root, i, at: note.at }] : [])))
+    .sort((a, b) => a.at - b.at)
+  for (const { root, i } of whole) {
+    if (bytes <= budget) break
+    const entry = next[root]!
+    const note = entry.notes[i]!
+    let short: LearnNote
+    try {
+      short = forHistory(note, false)
+    } catch {
+      // A copy some other version kept in another shape: left as it is.
+      continue
+    }
+    // One note's JSON swapped for another's in place: the whole changes by the difference.
+    bytes -= jsonBytes(note) - jsonBytes(short)
+    next[root] = { ...entry, notes: entry.notes.map((one, j) => (j === i ? short : one)) }
+  }
   for (let guard = 0; guard < 1000 && jsonBytes(next) > budget; guard += 1) {
     const others = Object.entries(next)
       .filter(([root]) => root !== keep)
@@ -2355,11 +2431,15 @@ function cell(text: string): string {
   return text.replace(/\s+/g, ' ').replace(/\|/g, '\\|').trim()
 }
 
-/** The concept index as a markdown table, the most met first. */
+/**
+ * The concept index as a markdown table, the most met first. An explanation
+ * is masked (redactText) as it goes into the file: one kept before 1.6.0 was
+ * written from code that was not.
+ */
 export function conceptsMarkdown(index: Readonly<Record<string, LearnConcept>>): string {
   const rows = rankConcepts(index).map(
     one =>
-      `| ${cell(one.name)} | ${one.count} | ${stamp(one.firstAt).day} | ${stamp(one.lastAt).day} | ${cell(one.blurb)} | ${cell(baseNames(one.files).join(', '))} |`,
+      `| ${cell(one.name)} | ${one.count} | ${stamp(one.firstAt).day} | ${stamp(one.lastAt).day} | ${cell(redactText(one.blurb).text)} | ${cell(baseNames(one.files).join(', '))} |`,
   )
   return [
     '# 내가 배운 개념',
@@ -2750,6 +2830,8 @@ export type ReportInput = {
   level: Level
   now: number
   usage?: Readonly<Record<string, LearnDayUsage>>
+  /** When this store first had a 1.6.0 session, which began the usage record (see uncountedDays). */
+  since?: number
 }
 
 /** Names a report lists at most: the new concepts, and the ones a quiz found missed. */
@@ -2763,7 +2845,7 @@ const REPORT_MISSED = 5
  * Concepts go by name only (a blurb may quote code), with no request and no
  * file name; every project's record together, as the store keeps it.
  */
-export function reportMarkdown({ range, activity, index, level, now, usage = {} }: ReportInput): string {
+export function reportMarkdown({ range, activity, index, level, now, usage = {}, since }: ReportInput): string {
   const has = (record: object, day: string) => Object.prototype.hasOwnProperty.call(record, day)
   const days = range.days.map(day => (has(activity, day) ? activity[day]! : { notes: 0, right: 0, wrong: 0 }))
   const total = days.reduce((sum, one) => ({ notes: sum.notes + one.notes, right: sum.right + one.right, wrong: sum.wrong + one.wrong }), { notes: 0, right: 0, wrong: 0 })
@@ -2790,7 +2872,7 @@ export function reportMarkdown({ range, activity, index, level, now, usage = {} 
     },
     { calls: 0, auto: 0, input: 0, output: 0 },
   )
-  const uncounted = uncountedDays(range.days, activity, usage)
+  const uncounted = uncountedDays(range.days, activity, usage, since)
   const span = range.days.length > 1 ? `${range.days[0]} ~ ${range.days.at(-1)}` : (range.days[0] ?? '')
   return [
     `# 학습 보고 · ${span}${range.label === span ? '' : ` (${range.label})`}`,
@@ -2807,7 +2889,7 @@ export function reportMarkdown({ range, activity, index, level, now, usage = {} 
     `- 지금 복습할 개념 ${dueConcepts(index, now).length}개`,
     `- 설명 수준 ${level}`,
     calls.calls > 0
-      ? `- 학습 노트의 모델 호출 ${calls.calls}번${calls.auto > 0 ? ` (자동 노트 ${calls.auto})` : ''} · 입력 ${tokenText(calls.input)} · 출력 ${tokenText(calls.output)} 토큰${uncounted > 0 ? ` · 노트를 쓴 ${uncounted}일은 호출 기록이 없습니다${UNCOUNTED}` : ''}`
+      ? `- 학습 노트의 모델 호출 ${calls.calls}번${calls.auto > 0 ? ` (자동 노트 ${calls.auto})` : ''} · 입력 ${tokenText(calls.input)} · 출력 ${tokenText(calls.output)} 토큰${uncounted > 0 ? ` · ${uncountedText(uncounted)}` : ''}`
       : uncounted > 0
         ? `- 학습 노트의 모델 호출: 이 기간은 기록이 없습니다${UNCOUNTED}`
         : '- 학습 노트의 모델 호출: 없습니다',
@@ -3300,18 +3382,27 @@ export function tokenText(n: number): string {
 /** Said of model calls where the usage record has none for days notes were written: 1.6.0 began the record. */
 const UNCOUNTED = '(1.6.0부터 셉니다)'
 
+/** Said of the `n` days with notes and no call record when other days have calls (see uncountedDays). */
+function uncountedText(n: number): string {
+  return `노트를 쓴 날 중 ${n}일은 1.6.0 전이라 호출 기록이 없습니다`
+}
+
 /**
- * Days among `days` with notes written and no model call counted: before the
- * usage record began (1.6.0), or written by a 1.5 session still open. A note
- * written since is a call counted on its day.
+ * Days among `days` with notes written and no model call counted, before the
+ * usage record began: days before `since`, when this store first had a 1.6.0
+ * session (all of them while it is not kept). A day since then is 1.6.0's own,
+ * whose note may be counted on another day: a note w writes the next day, or
+ * an answer that lands after midnight, is a call on the day it was made.
  */
 export function uncountedDays(
   days: readonly string[],
   activity: Readonly<Record<string, LearnDayActivity>>,
   usage: Readonly<Record<string, LearnDayUsage>>,
+  since = Number.POSITIVE_INFINITY,
 ): number {
   const has = (record: object, day: string) => Object.prototype.hasOwnProperty.call(record, day)
-  return days.filter(day => has(activity, day) && activity[day]!.notes > 0 && !has(usage, day)).length
+  const first = Number.isFinite(since) ? stamp(since).day : null
+  return days.filter(day => (first === null || day < first) && has(activity, day) && activity[day]!.notes > 0 && !has(usage, day)).length
 }
 
 /**
@@ -3320,7 +3411,12 @@ export function uncountedDays(
  * and the days of `activity` with notes the record has no calls for (see
  * uncountedDays). No price: what a token costs differs by account.
  */
-export function usageLine(record: Readonly<Record<string, LearnDayUsage>>, now: number, activity: Readonly<Record<string, LearnDayActivity>> = {}): string {
+export function usageLine(
+  record: Readonly<Record<string, LearnDayUsage>>,
+  now: number,
+  activity: Readonly<Record<string, LearnDayActivity>> = {},
+  since = Number.POSITIVE_INFINITY,
+): string {
   const at = (day: string) => (Object.prototype.hasOwnProperty.call(record, day) ? record[day] : undefined)
   const days = daysBack(now, 7)
   const today = at(days[0]!.day) ?? { calls: 0, auto: 0, input: 0, output: 0 }
@@ -3331,14 +3427,14 @@ export function usageLine(record: Readonly<Record<string, LearnDayUsage>>, now: 
     },
     { calls: 0, input: 0, output: 0 },
   )
-  const uncounted = uncountedDays(days.map(({ day }) => day), activity, record)
+  const uncounted = uncountedDays(days.map(({ day }) => day), activity, record, since)
   if (week.calls === 0) return uncounted > 0 ? `학습 노트의 모델 호출: 최근 7일은 기록이 없습니다${UNCOUNTED}` : '학습 노트의 모델 호출: 최근 7일 동안 없습니다'
   return [
     `학습 노트의 모델 호출: 오늘 ${today.calls}번${today.auto > 0 ? ` (자동 노트 ${today.auto})` : ''}`,
     `최근 7일 ${week.calls}번`,
     `입력 ${tokenText(week.input)}`,
     `출력 ${tokenText(week.output)} 토큰`,
-    ...(uncounted > 0 ? [`노트를 쓴 ${uncounted}일은 호출 기록이 없습니다${UNCOUNTED}`] : []),
+    ...(uncounted > 0 ? [uncountedText(uncounted)] : []),
   ].join(' · ')
 }
 
@@ -3498,18 +3594,21 @@ export function ankiHtml(markdown: string): string {
  * The bank and the concept index as an Anki import file (tab-separated, with
  * the header lines Anki reads): a card per question asked, then a card per
  * concept with an explanation. A card's front is its question or its concept's
- * name, so importing again updates cards instead of adding copies.
+ * name, so importing again updates cards instead of adding copies. Questions,
+ * answers and explanations are masked (redactText) as they go into the file,
+ * which Anki may sync off this computer: ones kept before 1.6.0 were written
+ * from code that was not.
  */
 export function ankiText(bank: readonly BankItem[], index: Readonly<Record<string, LearnConcept>>): { text: string; questions: number; concepts: number } {
   const rows: string[] = []
   for (const one of bank) {
-    rows.push([ankiHtml(one.question), `${ankiHtml(one.answer)}<br><br><small>개념: ${html(one.name)}</small>`, 'learn-notes 퀴즈'].join('\t'))
+    rows.push([ankiHtml(redactText(one.question).text), `${ankiHtml(redactText(one.answer).text)}<br><br><small>개념: ${html(one.name)}</small>`, 'learn-notes 퀴즈'].join('\t'))
   }
   const concepts = rankConcepts(index).filter(one => one.blurb.trim() !== '')
   for (const one of concepts) {
     const files = one.files.length > 0 ? `<br><br><small>파일: ${html(one.files.map(file => file.split('/').at(-1) ?? file).join(', '))}</small>` : ''
     // The name as stored, a gloss and all (fullName): a card imported before 1.6.0 is updated, not doubled.
-    rows.push([`<b>${html(one.fullName ?? one.name)}</b><br>무엇이고, 어디에 썼나요?`, `${ankiHtml(one.blurb)}${files}`, 'learn-notes 개념'].join('\t'))
+    rows.push([`<b>${html(one.fullName ?? one.name)}</b><br>무엇이고, 어디에 썼나요?`, `${ankiHtml(redactText(one.blurb).text)}${files}`, 'learn-notes 개념'].join('\t'))
   }
   // No #notetype: Anki's default (Basic, 기본 in Korean) takes the two fields.
   const head = ['#separator:tab', '#html:true', '#deck:learn-notes', '#tags column:3', '']

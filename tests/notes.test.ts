@@ -115,6 +115,7 @@ import {
   teamText,
   tokenText,
   usageLine,
+  uncountedDays,
   TEAM_BUDGET,
   DAILY_REVIEW,
   dueConcepts,
@@ -1463,6 +1464,13 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
     ['+  serviceKey: "abc%2Bdef1234567890ghijklmnopqrstuvwxyz%3D%3D",', 'abc%2Bdef1234567890'],
     ['+DB_PASS=hunter2hunter2', 'hunter2hunter2'],
     ["+const dbPass = 'hunter2'", 'hunter2'],
+    // A pass name holds a password whatever its letters: a Gmail app password is sixteen of them (nodemailer's auth.pass).
+    ["+  auth: { user: 'me@gmail.com', pass: 'abcdefghijklmnop' },", 'abcdefghijklmnop'],
+    ['+SMTP_PASS = "abcdefghijklmnop"', 'abcdefghijklmnop'],
+    ['+const DB_PASS = "postgres"', 'postgres'],
+    // A key a service gives as a UUID, a word and a dash before it or not (Riot Games).
+    ['+const RIOT_KEY = "RGAPI-3f2504e0-4f89-11d3-9a0c-0305e82c3301"', 'RGAPI-3f2504e0'],
+    ['+const NEIS_KEY = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"', '3f2504e0'],
   ]
 
   test('each common key format is masked, the line and its +/− marker kept', () => {
@@ -1535,6 +1543,14 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
       "+  PWD: '/Users/me/app',",
       '+PWD=/home/user/app',
       '+BYPASS_CACHE=1',
+      // A score or count to pass, the name an auth value is kept under (judged by its value), data a test keeps in base64.
+      '+PASS_COUNT=0',
+      '+PASS=0',
+      '+PASS_SCORE=60',
+      "+const AUTH_KEY = 'auth-user'",
+      '+  localStorageAuthKey: "app.auth",',
+      '+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",',
+      '+  "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PC9zdmc+";',
       // Code that only types or fetches a secret; a dotted name with no digit (no Discord token); a test's hex digest.
       '+  token: string;',
       '+const token = await getToken()',
@@ -1552,6 +1568,14 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
       '+    password: myS3cretPw # local only',
       '+  - POSTGRES_PASSWORD: example',
       '+aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      // camelCase and run-together key names, a nested key, and pass names.
+      '+  secretKey: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      '+  apiKey: 0123456789abcdef0123456789abcdef',
+      '+weather.serviceKey=0123456789abcdef0123456789abcdef',
+      '+    key: 0123456789abcdef0123456789abcdef',
+      '+  pass: hunter2hunter2',
+      '+mail.smtp.pass=hunter2hunter2',
+      '+DB_PASS = hunter2hunter2',
     ]
     expect(redactLines(lines, true)).toEqual({
       lines: [
@@ -1560,8 +1584,15 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
         `+    password: ${REDACTED} # local only`,
         `+  - POSTGRES_PASSWORD: ${REDACTED}`,
         `+aws_secret_access_key = ${REDACTED}`,
+        `+  secretKey: ${REDACTED}`,
+        `+  apiKey: ${REDACTED}`,
+        `+weather.serviceKey=${REDACTED}`,
+        `+    key: ${REDACTED}`,
+        `+  pass: ${REDACTED}`,
+        `+mail.smtp.pass=${REDACTED}`,
+        `+DB_PASS = ${REDACTED}`,
       ],
-      hits: 5,
+      hits: 12,
     })
     const plain = [
       '+    id-token: write',
@@ -1574,6 +1605,18 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
       '+  max_tokens: 1000',
       '+  secretName: my-secret',
       '+  password:',
+      // A label that is the name's own word, a count of tokens, a key judged by its value, words that only end in key or pass.
+      '+    password: Password',
+      '+    token: Token',
+      '+  access_token: 3600',
+      '+  max_token: 1000',
+      '+          PASS_RATE=0.8',
+      '+  monkey: banana',
+      '+  hotkey: ctrl+shift+k',
+      '+        key: password',
+      '+  sortKey: createdAt',
+      '+  bypass: true',
+      '+  compass: north',
     ]
     expect(redactLines(plain, true)).toEqual({ lines: plain, hits: 0 })
     // Code assigns rather than configures: the same shapes in a source file stay.
@@ -1894,14 +1937,63 @@ describe('1.6.0 (교차 검토): a note kept before 1.6.0 screened on its way ou
     expect(screenNote(plain)).toEqual(plain)
   })
 
-  test('a note the journal refused is stored whole until the journal has it', () => {
+  test('a note the journal refused keeps what its journal section holds whole until the journal has it', () => {
     const note = {
-      id: 'n', turnId: 't', at: 0, prompt: 'p'.repeat(2000), answer: '', moreFiles: 0, status: 'ready' as const,
+      id: 'n', turnId: 't', at: 0, prompt: 'p'.repeat(2000), answer: 'a'.repeat(2000), moreFiles: 0, status: 'ready' as const,
       text: '가'.repeat(9000), savedAs: null, isPast: false, concepts: [], root: '/proj', updatedAt: 0, isUnsaved: true,
+      asks: [{ question: 'q'.repeat(1000), answer: 'b'.repeat(3000), at: 1 }],
       changes: [change('a.ts', `@@ -0,0 +1,300 @@\n${Array.from({ length: 300 }, (_, i) => `+line ${i}`).join('\n')}`)],
     }
-    expect(forHistory(note)).toEqual(note)
+    const kept = forHistory(note)
+    expect(kept.text).toBe(note.text)
+    expect(kept.changes).toEqual(note.changes)
+    // The request (the journal takes 400 characters of it), the answer and the questions are cut as any note's are.
+    expect(kept.prompt).toHaveLength(600)
+    expect(kept.answer).toHaveLength(600)
+    expect(kept.asks![0]!.question).toHaveLength(400)
+    expect(journalSection(kept)).toBe(journalSection(note))
     expect(forHistory({ ...note, isUnsaved: false }).text).toHaveLength(HISTORY_TEXT_BUDGET)
+  })
+
+  test('short of room, whole copies are cut first, the oldest first, before another project goes', () => {
+    const lines = Array.from({ length: 300 }, (_, i) => `+line ${i}`).join('\n')
+    const note = (id: string, at: number, root: string, isUnsaved: boolean) => ({
+      id, turnId: id, at, prompt: '', answer: '', moreFiles: 0, status: 'ready' as const, text: '가'.repeat(9000), savedAs: null, isPast: true,
+      concepts: [], root, updatedAt: at, ...(isUnsaved ? { isUnsaved: true } : {}),
+      changes: [change('a.ts', `@@ -0,0 +1,300 @@\n${lines}`)],
+    })
+    const other = forHistory(note('o1', 1, '/other', true))
+    const mine = [2, 3, 4].map(at => forHistory(note(`m${at}`, at, '/me', true)))
+    const history = { '/other': { at: 1, notes: [other] }, '/me': { at: 5, notes: mine } }
+    // Room for every note once the two oldest whole copies are cut: the other project stays, and every note.
+    const cutTwo = jsonBytes(history) - (jsonBytes(other) - jsonBytes(forHistory(other, false))) - (jsonBytes(mine[0]) - jsonBytes(forHistory(mine[0]!, false)))
+    const fit = fitHistory(history, '/me', cutTwo)
+    expect(Object.keys(fit)).toEqual(['/other', '/me'])
+    expect(jsonBytes(fit)).toBe(cutTwo)
+    expect(fit['/other']!.notes[0]!.text).toHaveLength(HISTORY_TEXT_BUDGET)
+    expect(fit['/me']!.notes.map(one => one.text.length)).toEqual([HISTORY_TEXT_BUDGET, 9000, 9000])
+    // Still the journal's to take: a later session writes the cut copy, saying it was cut.
+    expect(fit['/me']!.notes[0]!.isUnsaved).toBe(true)
+    expect(fit['/me']!.notes[0]!.changes[0]!.isCut).toBe(true)
+    // With every copy cut and still no room, the other project goes as before, and every note of this one stays.
+    const allCut = { '/other': { at: 1, notes: [forHistory(other, false)] }, '/me': { at: 5, notes: mine.map(one => forHistory(one, false)) } }
+    const squeezed = fitHistory(history, '/me', jsonBytes(allCut) - 1)
+    expect(Object.keys(squeezed)).toEqual(['/me'])
+    expect(squeezed['/me']!.notes).toHaveLength(3)
+  })
+
+  test('an explanation or a quiz kept before 1.6.0 is masked in the Anki file and concepts.md', () => {
+    const index = { 'c:env': { name: '환경 변수', count: 1, firstAt: 0, lastAt: 0, blurb: `설정 값 — \`const key = "${KEY}"\``, files: [] } }
+    const bank = [{ key: 'c:env', name: '환경 변수', question: `\`${KEY}\`와 \`DB_PASS=hunter2\`는 어디에 두나요?`, answer: `.env에 \`DB_PASS=hunter2\`처럼 둡니다`, at: 1 }]
+    const anki = ankiText(bank, index).text
+    const md = conceptsMarkdown(index)
+    for (const text of [anki, md]) {
+      expect(text).not.toContain('AAAAAAAAAAAAAAA')
+      expect(text).toContain(REDACTED)
+    }
+    expect(anki).not.toContain('hunter2')
+    // The concept's name, a card's front, stays: a card already imported is updated, not doubled.
+    expect(anki).toContain('<b>환경 변수</b><br>무엇이고, 어디에 썼나요?')
   })
 
   test('a journal section of a text the store cut says so; one cut when written, or short, does not', () => {
@@ -2598,12 +2690,28 @@ describe('1.6.0 after 1.5: the store cap, Anki fronts and days with no call reco
     const activity = { ...old, [stamp(now).day]: { notes: 1, right: 0, wrong: 0 } }
     expect(reportMarkdown({ range, activity: old, index: {}, level: 'beginner', now })).toContain('- 학습 노트의 모델 호출: 이 기간은 기록이 없습니다(1.6.0부터 셉니다)')
     expect(reportMarkdown({ range, activity, index: {}, level: 'beginner', now, usage })).toContain(
-      '- 학습 노트의 모델 호출 2번 (자동 노트 1) · 입력 900 · 출력 50 토큰 · 노트를 쓴 2일은 호출 기록이 없습니다(1.6.0부터 셉니다)',
+      '- 학습 노트의 모델 호출 2번 (자동 노트 1) · 입력 900 · 출력 50 토큰 · 노트를 쓴 날 중 2일은 1.6.0 전이라 호출 기록이 없습니다',
     )
     // A day with no note had no call to count: nothing to say.
     expect(reportMarkdown({ range, activity: {}, index: {}, level: 'beginner', now })).toContain('- 학습 노트의 모델 호출: 없습니다')
     expect(usageLine({}, now, old)).toBe('학습 노트의 모델 호출: 최근 7일은 기록이 없습니다(1.6.0부터 셉니다)')
-    expect(usageLine(usage, now, activity)).toBe('학습 노트의 모델 호출: 오늘 2번 (자동 노트 1) · 최근 7일 2번 · 입력 900 · 출력 50 토큰 · 노트를 쓴 2일은 호출 기록이 없습니다(1.6.0부터 셉니다)')
+    expect(usageLine(usage, now, activity)).toBe('학습 노트의 모델 호출: 오늘 2번 (자동 노트 1) · 최근 7일 2번 · 입력 900 · 출력 50 토큰 · 노트를 쓴 날 중 2일은 1.6.0 전이라 호출 기록이 없습니다')
     expect(usageLine({}, now, {})).toBe('학습 노트의 모델 호출: 최근 7일 동안 없습니다')
+  })
+
+  test('a day since 1.6.0 first ran is its own, whose note may be a call on another day: not said to have no record', () => {
+    const now = new Date(2026, 9, 9, 15, 0).getTime()
+    const range = recapRange('최근 7일', now)!
+    // 1.5 wrote notes two days ago; 1.6.0 first ran yesterday, wrote one then and called the model for it today (w, or past midnight).
+    const activity = { [stamp(now - 2 * DAY).day]: { notes: 4, right: 0, wrong: 0 }, [stamp(now - DAY).day]: { notes: 1, right: 0, wrong: 0 } }
+    const usage = { [stamp(now).day]: { calls: 1, auto: 0, input: 1, output: 1 } }
+    const since = now - DAY
+    expect(uncountedDays(range.days, activity, usage, since)).toBe(1)
+    expect(uncountedDays(range.days, activity, usage)).toBe(2)
+    expect(usageLine(usage, now, activity, since)).toBe('학습 노트의 모델 호출: 오늘 1번 · 최근 7일 1번 · 입력 1 · 출력 1 토큰 · 노트를 쓴 날 중 1일은 1.6.0 전이라 호출 기록이 없습니다')
+    expect(reportMarkdown({ range, activity, index: {}, level: 'beginner', now, usage, since })).toContain('노트를 쓴 날 중 1일은 1.6.0 전이라')
+    // Every day with notes is 1.6.0's: nothing to say of them.
+    expect(usageLine(usage, now, activity, now - 2 * DAY)).toBe('학습 노트의 모델 호출: 오늘 1번 · 최근 7일 1번 · 입력 1 · 출력 1 토큰')
+    expect(reportMarkdown({ range, activity, index: {}, level: 'beginner', now, usage, since: now - 2 * DAY })).not.toContain('호출 기록이 없습니다')
   })
 })

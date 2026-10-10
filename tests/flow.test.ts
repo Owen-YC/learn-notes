@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { journalPath, stamp } from '../hooks/notes'
+import { conceptKey, journalPath, stamp } from '../hooks/notes'
 
 const NOW = Date.UTC(2026, 9, 3, 1)
 const NOTES_DIR = '/home/u/.claude/learning-notes'
@@ -2185,6 +2185,16 @@ test('started in a system folder, the code Claude puts in its scratchpad is note
   expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다 · Claude에게 파일을 만들거나 고쳐 달라고 하면, 턴이 끝난 뒤 여기에 노트가 생깁니다.')
 })
 
+/**
+ * The steps past the first of `index` as 1.6.0 keeps them apart when it writes the index (the store's `steps`), for
+ * a fixture whose steps 1.6.0 gave: any other step past the first is read as 1.5's, the first.
+ */
+function ownSteps(index: Record<string, { name: string; step?: number; reviewedAt?: number }>): Record<string, [number, number]> {
+  return Object.fromEntries(
+    Object.values(index).flatMap(one => (one.step !== undefined && one.step > 1 && one.reviewedAt !== undefined ? [[conceptKey(one.name), [one.step, one.reviewedAt]]] : [])),
+  )
+}
+
 /** The answer field of question `i` in the pane's quiz, keyed by the quiz it belongs to. */
 function mineKey(store: Map<string, unknown>, i: number) {
   return `quiz-mine-${(store.get('quiz') as { at: number }).at}-${i}`
@@ -3539,7 +3549,7 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
   const DAY = 86_400_000
   /**
    * Concepts quizzed before, each at `step`, all due by now: the first the longest overdue. Their steps are a 1.6.0
-   * quiz's, so a store with them keeps when 1.6.0 first ran there, before them (stepsFrom; see the 1.5 upgrade tests).
+   * quiz's, so a store with them keeps them apart as well (steps; see the 1.5 upgrade tests).
    */
   const quizzed = (step: number, names: string[]) =>
     Object.fromEntries(
@@ -3557,7 +3567,7 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
     )
 
   test('a hint keeps a right answer\'s step, as the answer seen does; only a right answer recalled alone moves it on', async ($, on) => {
-    const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', quizzed(2, ['클로저', '구조 분해', 'map'])]])
+    const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', quizzed(2, ['클로저', '구조 분해', 'map'])], ['steps', ownSteps(quizzed(2, ['클로저', '구조 분해', 'map']))]])
     const w = world(on, 'ok', null, true, store)
     await start($)
     w.answer = ['Q1: 문제 하나', 'H1: 바깥을 떠올려 보세요', 'A1: 답 하나', 'Q2: 문제 둘', 'H2: 둘째 힌트', 'A2: 답 둘', 'Q3: 문제 셋', 'A3: 답 셋'].join('\n')
@@ -3751,7 +3761,7 @@ describe('1.6.0: reviews go by recall, ten a day; a concept known leaves them', 
   })
 
   test('right again at the last step graduates a concept: the quiz says so, and it leaves the quizzes', async ($, on) => {
-    const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', quizzed(5, ['구조 분해 할당'])]])
+    const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', quizzed(5, ['구조 분해 할당'])], ['steps', ownSteps(quizzed(5, ['구조 분해 할당']))]])
     const w = world(on, 'ok', null, true, store)
     await start($)
     w.answer = 'Q1: 문제 하나\nA1: 답 하나'
@@ -4290,13 +4300,14 @@ describe('1.6.0: views on 1 to 4, q for today\'s review, the keys where they are
     expect(await ui.find({ type: 'Text', text: '답 칸에서 Enter: 채점 · Tab: 버튼으로 (h 힌트 · a 정답 · 1~4 보기)' })).toBeDefined()
     await ui.press({ key: 'quiz-hint' })
     expect(await ui.find({ type: 'Text', text: '답 칸에서 Enter: 채점 · Tab: 버튼으로 (a 정답 · 1~4 보기)' })).toBeDefined()
-    // Over the field the keys line says where the keys go first, and that the answer may be typed in Korean.
-    expect(await ui.find({ type: 'Text', text: 'Esc: 대화로 돌아가기 · 답은 한글로 적어도 됩니다' })).toBeDefined()
+    // Over the field the keys line says where the keys go first, that the answer may be typed in either input mode,
+    // and (as 9795f1a meant) that the buttons a Tab away take their letter keys in the English one.
+    expect(await ui.find({ type: 'Text', text: 'Esc: 대화로 돌아가기 · 답은 한/영 상관없이, 버튼의 글자 키는 영문 상태에서' })).toBeDefined()
     await ui.unmount()
-    // Not holding the keys, the pane says how to reach them instead.
+    // Not holding the keys, the pane says how to reach them instead, the input mode too.
     const idle = await pane($, 'terminal', { ...PANE_PROPS, isFocused: false })
     expect(await idle.find({ type: 'Text', text: /Tab: 버튼으로/ })).toBeUndefined()
-    expect(await idle.find({ type: 'Text', text: 'ctrl+x tab: 답 칸으로 · 보기를 바꾸려면 그 뒤 Tab' })).toBeDefined()
+    expect(await idle.find({ type: 'Text', text: 'ctrl+x tab: 답 칸으로 · 보기를 바꾸려면 그 뒤 Tab · 글자 키는 영문 상태에서' })).toBeDefined()
     await idle.unmount()
   })
 
@@ -4349,11 +4360,20 @@ describe('1.6.0: views on 1 to 4, q for today\'s review, the keys where they are
     // While Claude grades a typed answer, s is gone and so is its notice.
     await ui.press({ key: 'quiz-new' })
     w.model = 'hold'
+    w.answer = '판정: 맞음\n피드백: 정확합니다.'
     await ui.input({ key: mineKey(store, 1), text: '바깥 변수' })
     expect(await ui.find({ type: 'Text', text: '채점하는 중입니다…' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: NOTICE })).toBeUndefined()
     w.release()
     await w.clock.settle()
+    // Graded, the s pressed before it stays taken back: no notice, and the next s asks again instead of dropping the question left.
+    expect(await ui.find({ type: 'Text', text: NOTICE })).toBeUndefined()
+    w.model = 'ok'
+    const calls = w.models.length
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(calls)
+    expect(await ui.find({ type: 'Text', text: NOTICE })).toBeDefined()
     await ui.unmount()
   })
 
@@ -5038,10 +5058,10 @@ describe('1.6.0 after 1.5: steps counted from notes, a 1.5 session still open, t
     await turn($, () => $.tool.call(EDIT_A))
     await finish(w)
     expect(((await learn($, '기록')).text ?? '').split('\n').at(-1)).toBe(
-      '학습 노트의 모델 호출: 오늘 1번 (자동 노트 1) · 최근 7일 1번 · 입력 1 · 출력 1 토큰 · 노트를 쓴 3일은 호출 기록이 없습니다(1.6.0부터 셉니다)',
+      '학습 노트의 모델 호출: 오늘 1번 (자동 노트 1) · 최근 7일 1번 · 입력 1 · 출력 1 토큰 · 노트를 쓴 날 중 3일은 1.6.0 전이라 호출 기록이 없습니다',
     )
     await learn($, '보고서')
-    expect(w.copied.at(-1)).toContain('- 학습 노트의 모델 호출 1번 (자동 노트 1) · 입력 1 · 출력 1 토큰 · 노트를 쓴 3일은 호출 기록이 없습니다(1.6.0부터 셉니다)')
+    expect(w.copied.at(-1)).toContain('- 학습 노트의 모델 호출 1번 (자동 노트 1) · 입력 1 · 출력 1 토큰 · 노트를 쓴 날 중 3일은 1.6.0 전이라 호출 기록이 없습니다')
   })
 
   test('a name stored with its gloss keeps it in the store and on its Anki card, shown short', async ($, on) => {
@@ -5112,8 +5132,8 @@ describe('1.6.0: what the cross-review found no test held', () => {
 
   test('/learn 퀴즈 with a typed answer that graduates a concept says so, and how to take it back', async ($, on) => {
     const at = { name: '구조 분해 할당', count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: '꺼내서 이름 붙이기', files: [], step: 5, reviewedAt: NOW - 61 * DAY }
-    // Step 5 as 1.6.0 counts it: given after the store's first 1.6.0 start (stepsFrom), not a 1.5 step read back as 1.
-    const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', { 'c:구조 분해 할당': at }]])
+    // Step 5 as 1.6.0 counts it: kept apart when it was given (steps), not a 1.5 step read back as 1.
+    const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', { 'c:구조 분해 할당': at }], ['steps', ownSteps({ 'c:구조 분해 할당': at })]])
     const w = world(on, 'ok', null, true, store)
     await start($)
     w.answer = 'Q1: 문제 하나\nA1: 답 하나'
@@ -5258,5 +5278,196 @@ describe('1.6.0: what the cross-review found no test held', () => {
   test('plugin.json has excludePaths in /config, as text', { options: { excludePaths: 5 } }, async ($, on) => {
     world(on)
     await expect(start($)).rejects.toThrow(/userConfig: 노트에서 뺄 파일 must be a string/)
+  })
+})
+
+describe('1.6.0 (교차 검토 마무리): what the reviews of the cross-review fixes found', () => {
+  const DAY = 86_400_000
+  /** A 1.5.1 store: two concepts due, and the last quiz as 1.5's /learn quiz 정답 left it 12 days ago (every answer shown, one not graded). */
+  const store151 = () =>
+    new Map<string, unknown>([
+      [
+        'concepts',
+        {
+          'c:map': { name: 'map', count: 2, firstAt: NOW - 30 * DAY, lastAt: NOW - 20 * DAY, blurb: '새 배열을 만든다', files: [] },
+          'c:filter': { name: 'filter', count: 2, firstAt: NOW - 30 * DAY, lastAt: NOW - 20 * DAY, blurb: '골라낸다', files: [] },
+        },
+      ],
+      [
+        'quiz',
+        {
+          at: NOW - 12 * DAY,
+          isRevealed: true,
+          items: [
+            { key: 'c:old1', name: '옛 개념 1', question: '옛 문제 1', answer: '옛 답 1' },
+            { key: 'c:old2', name: '옛 개념 2', question: '옛 문제 2', answer: '옛 답 2', result: 'right', gradedAt: NOW - 12 * DAY },
+          ],
+        },
+      ],
+    ])
+
+  test('/learn 복습 starts today\'s review over a 1.5 quiz whose answers were all shown and one not graded', async ($, on) => {
+    const store = store151()
+    const w = world(on, 'ok', { isShown: true }, true, store)
+    await start($)
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 2개 · /learn 복습')
+    w.answer = 'Q1: 새 문제 하나\nA1: 답 하나'
+    await learn($, '복습')
+    await w.clock.settle()
+    expect(w.models).toHaveLength(1)
+    expect((store.get('quiz') as { items: { question: string }[] }).items.map(one => one.question)).toEqual(['새 문제 하나'])
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/1/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('q starts it too; a question of today\'s quiz whose answer a showed is kept, one of another day\'s is not', async ($, on) => {
+    const w = world(on, 'ok', { isShown: true }, true, store151())
+    await start($)
+    w.answer = 'Q1: 새 문제 하나\nA1: 답 하나'
+    const ui = await pane($)
+    // The quiz view offers q: the old quiz waits on nothing.
+    await ui.press({ key: 'view-quiz' })
+    expect(await ui.find({ type: 'Button', key: 'review' })).toBeDefined()
+    await ui.press({ key: 'review' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(1)
+    // Today's quiz, its answer seen with a and not graded: it waits for o or x, as s keeps it, and q is not offered.
+    await ui.press({ key: 'quiz-answer' })
+    expect(await ui.find({ type: 'Button', key: 'review' })).toBeUndefined()
+    await learn($, '복습')
+    await w.clock.settle()
+    expect(w.models).toHaveLength(1)
+    // The next day the concepts due ask for today's review over it.
+    await w.clock.advance(DAY)
+    w.answer = 'Q1: 다음 날 문제\nA1: 답'
+    await learn($, '복습')
+    await w.clock.settle()
+    expect(w.models).toHaveLength(2)
+    await ui.unmount()
+  })
+
+  test('a journal folder that refuses writes: whole copies of unsaved notes push no other project, nor any note, out of the store', { timeoutMs: 300_000 }, async ($, on) => {
+    const other = Array.from({ length: 5 }, (_, i) => ({
+      id: `o${i}`, at: NOW - DAY + i, updatedAt: NOW - DAY + i, root: '/other', prompt: '다른 프로젝트의 요청', answer: '', text: '### 한 줄 요약\n다른 프로젝트', status: 'ready',
+      changes: [], moreFiles: 0, concepts: [], savedAs: null, isUnsaved: true,
+    }))
+    const store = new Map<string, unknown>([['history', { '/other': { at: NOW - DAY, notes: other } }]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.writeFails = true
+    w.answer = `### 한 줄 요약\n${'가나다라마바사아자차'.repeat(900)}`
+    const body = Array.from({ length: 200 }, (_, i) => `// ${i}번째 줄: 사용자에게 보여 줄 안내 문구를 한곳에 모아 둡니다 (한글 설명)`).join('\n') + '\n'
+    for (let t = 0; t < 30; t += 1) {
+      await turn(
+        $,
+        async () => {
+          for (let f = 0; f < 12; f += 1) await $.tool.call({ tool: 'Write', tool_use_id: `u${t}-${f}`, file_path: `/proj/src/t${t}/f${f}.ts`, content: body })
+        },
+        `t${t}`,
+        `요청 ${t}: ${'로그인 화면의 안내 문구를 고쳐 주세요 '.repeat(60)}`,
+      )
+      await finish(w)
+    }
+    const history = store.get('history') as Record<string, { notes: { isUnsaved?: boolean; prompt: string }[] }>
+    expect(Object.keys(history).sort()).toEqual(['/other', '/proj'])
+    expect(history['/other']!.notes).toHaveLength(5)
+    expect(history['/proj']!.notes).toHaveLength(30)
+    // Each still the journal's to take, its request cut as any stored note's.
+    expect(history['/proj']!.notes.every(one => one.isUnsaved === true && one.prompt.length <= 600)).toBe(true)
+  })
+
+  test('a note w writes the day after its turn is no day "1.6.0 never counted" (autoNote off)', { options: { autoNote: false } }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    await w.clock.advance(DAY)
+    const ui = await pane($)
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    await finish(w)
+    expect(((await learn($, '기록')).text ?? '').split('\n').at(-1)).toBe('학습 노트의 모델 호출: 오늘 1번 · 최근 7일 1번 · 입력 1 · 출력 1 토큰')
+    await learn($, '보고서')
+    expect(w.copied.at(-1)).not.toContain('호출 기록이 없습니다')
+    await ui.unmount()
+  })
+
+  test('nor is an automatic note whose answer lands after midnight', async ($, on) => {
+    const w = world(on, 'hold')
+    await start($)
+    const midnight = new Date(NOW)
+    midnight.setHours(24, 0, 0, 0)
+    await w.clock.advance(midnight.getTime() - NOW - 5_000)
+    await turn($, () => $.tool.call(EDIT_A))
+    await w.clock.advance(10_000)
+    w.release()
+    await w.clock.settle()
+    await finish(w)
+    expect(((await learn($, '기록')).text ?? '').split('\n').at(-1)).not.toContain('호출 기록이 없습니다')
+  })
+
+  test('a step a 1.5 session still open gave after the update (counted from notes met) is read as 1.5\'s, the first', async ($, on) => {
+    const since = NOW - 2 * DAY
+    // What 1.5.1's markReviewed leaves for map, met in six notes and quizzed for the first time, right, the day after 1.6.0 first ran.
+    const store = new Map<string, unknown>([
+      ['stepsFrom', since],
+      ['concepts', { 'c:map': { name: 'map', count: 6, firstAt: NOW - 90 * DAY, lastAt: NOW - 70 * DAY, blurb: '새 배열', files: [], step: 5, reviewedAt: since + DAY } }],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.models.at(-1)).not.toContain('## 퀴즈로 익힌 개념')
+    const map = (await learn($, '기록')).text?.split('\n').find(line => line.startsWith('- **map**')) ?? ''
+    expect(map).toContain('×6')
+    expect(map).not.toContain('59일')
+    // Written back by 1.6.0 now: at the first step, and kept apart as no step of its own.
+    expect((store.get('concepts') as Record<string, { step?: number }>)['c:map']!.step).toBe(1)
+    expect(store.get('steps')).toEqual({})
+  })
+
+  test('a 1.5 merge record undone reads its step as 1 at once: the concept is due today', async ($, on) => {
+    const store = new Map<string, unknown>([
+      ['stepsFrom', NOW - 2 * DAY],
+      ['concepts', { 'c:map': { name: 'map', count: 6, firstAt: NOW - 90 * DAY, lastAt: NOW - DAY, blurb: '새 배열', files: [], step: 1, reviewedAt: NOW - DAY } }],
+      ['aliases', { 'c:filter': 'c:map' }],
+      [
+        'merges',
+        {
+          'c:filter': {
+            into: 'c:map',
+            both: 0,
+            concept: { name: 'filter', count: 2, firstAt: NOW - 90 * DAY, lastAt: NOW - 70 * DAY, blurb: '골라낸다', files: [], step: 5, reviewedAt: NOW - 30 * DAY },
+          },
+        },
+      ],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    await learn($, '합치기 map = filter')
+    expect(w.statuses.at(-1)).toBe('학습 노트 · 오늘 복습 1개 · /learn 복습')
+  })
+
+  test('merged and undone, a concept stored with its gloss keeps the gloss on its Anki front and in the store', async ($, on) => {
+    const long = '기본값 매개변수(넘기지 않으면 자동으로 채워지는 값)'
+    const store = new Map<string, unknown>([
+      [
+        'concepts',
+        {
+          'c:기본값매개변수': { name: long, count: 2, firstAt: NOW - 9 * DAY, lastAt: NOW - 8 * DAY, blurb: '인자를 안 넘기면 쓰는 값', files: [] },
+          'c:map': { name: 'map', count: 4, firstAt: NOW - 9 * DAY, lastAt: NOW - 8 * DAY, blurb: '새 배열', files: [] },
+        },
+      ],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    await learn($, '합치기 기본값 매개변수 = map')
+    await learn($, '합치기 map = 기본값 매개변수')
+    await learn($, '안키')
+    const anki = [...w.files.entries()].find(([path]) => path.endsWith('learn-notes-anki.txt'))?.[1] ?? ''
+    expect(anki).toContain(`<b>${long}</b>`)
+    expect(Object.values(store.get('concepts') as Record<string, { name: string }>).map(one => one.name)).toContain(long)
   })
 })
