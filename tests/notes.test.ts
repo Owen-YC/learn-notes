@@ -2451,11 +2451,27 @@ describe('1.6.0: the learning report and the recap\'s missed concepts', () => {
     expect(md).toContain('- 다시 만난 개념 1개')
     expect(md).toContain('- 퀴즈 4문제 중 3개 맞힘 (75%)')
     expect(md).toContain('- 다시 볼 개념(퀴즈에서 틀림): 클로저')
+    // Every concept due now, as the review counts them: the missed one, one met yesterday, one met long ago.
+    expect(md).toContain('- 지금 복습할 개념 3개')
     expect(md).toContain('- 설명 수준 beginner')
     expect(md).toContain('- 학습 노트의 모델 호출 4번 (자동 노트 2) · 입력 약 1.2만 · 출력 900 토큰')
     expect(md).toContain('## 이번 기간에 배운 것을 내 말로 한 줄')
     // No explanation, no file, no code.
     for (const leak of ['const b', 'src/a.ts', 'src/b.ts', '바깥 변수를', '`']) expect(md).not.toContain(leak)
+  })
+
+  test('the report names fifteen new concepts and five missed at most, and counts the rest', () => {
+    const crowded: Record<string, LearnConcept> = {}
+    for (let i = 0; i < 16; i++) crowded[`c:새${i}`] = { name: `새${i}`, count: 1, firstAt: now - DAY + i, lastAt: now - DAY + i, blurb: '', files: [] }
+    for (let i = 0; i < 6; i++) {
+      crowded[`c:틀림${i}`] = { name: `틀림${i}`, count: 2, firstAt: now - 40 * DAY, lastAt: now - 40 * DAY, blurb: '', files: [], missedAt: now - DAY + i, reviewedAt: now - DAY + i, step: 0 }
+    }
+    const md = reportMarkdown({ range, activity, index: crowded, level: 'beginner', now })
+    // The most recently met first, the oldest miss first.
+    const fresh = Array.from({ length: 15 }, (_, i) => `새${15 - i}`).join(' · ')
+    expect(md).toContain(`- 새로 배운 개념 16개: ${fresh} 외 1개\n`)
+    expect(md).toContain('- 다시 볼 개념(퀴즈에서 틀림): 틀림0 · 틀림1 · 틀림2 · 틀림3 · 틀림4 외 1개\n')
+    expect(md).toContain('- 지금 복습할 개념 22개')
   })
 
   test('a report with no quiz says so, and a name cannot open code or break a line', () => {

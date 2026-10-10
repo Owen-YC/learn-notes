@@ -62,6 +62,12 @@ type World = {
   tools: string[]
   /** True while no tool can be registered (an engine with no tools for plugins). */
   toolFails: boolean
+  /** The tokens each model call reports from now on. */
+  usage: typeof USAGE
+  /** The model setting each model call asked for, in order. */
+  modelsAsked: string[]
+  /** Each slash command the plugin registered, as it described it. */
+  commands: { name: string; description: string | undefined; argumentHint: string | undefined }[]
   release: () => void
   clock: ReturnType<typeof mock.clock>
 }
@@ -70,7 +76,7 @@ type World = {
 function world(
   on: On,
   model: Model = 'ok',
-  panes: { isShown: boolean } | null = null,
+  panes: { isShown: boolean; isPlaced?: boolean } | null = null,
   isPlaced = true,
   store: Map<string, unknown> = new Map(),
   env: Record<string, string> = {},
@@ -102,13 +108,19 @@ function world(
     transcript: [],
     tools: [],
     toolFails: false,
+    usage: USAGE,
+    modelsAsked: [],
+    commands: [],
     release: () => release(),
     clock: mock.clock(on, { now: Date.UTC(2026, 9, 3, 1) }),
   }
   mock.env(on, { HOME: '/home/u', ...env })
   on('session.root', () => ({ value: w.root }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('command.register', (_$, e) => {
+    w.commands.push({ name: e.name, description: e.description, argumentHint: e.argumentHint })
+    return { value: { command: e.name } }
+  })
   on('tool.register', (_$, e) => {
     if (w.toolFails) throw new Error('no tools for plugins here')
     w.tools.push(e.name)
@@ -167,7 +179,7 @@ function world(
     return { value: undefined }
   })
   on('ui.panes', () => ({
-    value: panes ? [{ id: 'learn-notes', title: '학습 노트', isShown: panes.isShown, isFocused: false, isPlaced: true }] : [],
+    value: panes ? [{ id: 'learn-notes', title: '학습 노트', isShown: panes.isShown, isFocused: false, isPlaced: panes.isPlaced ?? true }] : [],
   }))
   on('ui.open', (_$, e) => {
     w.opened.push(e.id)
@@ -176,11 +188,12 @@ function world(
   })
   on('model.complete', async (_$, e) => {
     w.models.push(e.prompt)
+    w.modelsAsked.push(e.model)
     if (w.model === 'reject') return { deny: 'model blocked by policy' }
     if (w.model === 'hold') await held
     return w.model === 'error'
-      ? { value: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: USAGE } }
-      : { value: { isAnswered: true, text: w.answer, usage: USAGE } }
+      ? { value: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: w.usage } }
+      : { value: { isAnswered: true, text: w.answer, usage: w.usage } }
   })
   on('tool.call', { tool: 'Edit' }, (_$, e) => {
     if (e.file_path.endsWith('broken.ts')) return { isError: true, result: 'boom', text: 'boom' }
@@ -5048,5 +5061,200 @@ describe('1.6.0 after 1.5: steps counted from notes, a 1.5 session still open, t
     const file = w.files.get('/home/u/.claude/learning-notes/learn-notes-anki.txt')!
     expect(file).toContain(`<b>${long}</b><br>무엇이고, 어디에 썼나요?`)
     expect(file).toContain('<b>for...of 반복문</b><br>무엇이고, 어디에 썼나요?')
+  })
+})
+
+describe('1.6.0: what the cross-review found no test held', () => {
+  const DAY = 86_400_000
+  const TOOL = 'mcp__learn-notes__notes'
+  /** What the tool answers the model for one call. */
+  const record = async ($: Engine, action: string, query?: string) =>
+    String((await $.tool.call({ tool: TOOL, action, ...(query === undefined ? {} : { query }) })).result)
+  /** A concept quizzed today at step 1: its next review three days on. */
+  const REVIEWED = { name: '클로저', count: 1, firstAt: NOW - 10 * DAY, lastAt: NOW - 10 * DAY, blurb: '바깥 변수를 기억함', files: [], reviewedAt: NOW, step: 1 }
+
+  test('a model call counts the tokens it read from the cache and wrote to it as input', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.usage = { input_tokens: 5, output_tokens: 2, cache_read_input_tokens: 200, cache_creation_input_tokens: 300 }
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect((await learn($, '기록')).text).toContain('학습 노트의 모델 호출: 오늘 1번 (자동 노트 1) · 최근 7일 1번 · 입력 505 · 출력 2 토큰')
+    expect(Object.values(w.store.get('usage') as object)).toEqual([{ calls: 1, auto: 1, input: 505, output: 2 }])
+  })
+
+  test('a concept quizzed before shows its next review in the concepts view, /learn 기록 and the tool', async ($, on) => {
+    const w = world(on, 'ok', null, true, new Map<string, unknown>([['concepts', { 'c:클로저': REVIEWED }]]))
+    await start($)
+    const ui = await pane($)
+    await ui.press({ key: 'view-concepts' })
+    expect(await ui.find({ type: 'Text', text: /^클로저 ×1 · 다음 복습 3일 뒤 · 최근 [\d-]+ · 퀴즈 오늘$/ })).toBeDefined()
+    await ui.unmount()
+    expect((await learn($, '기록')).text).toContain(`- **클로저** ×1 · 최근 ${stamp(NOW - 10 * DAY).day} · 다음 복습 3일 뒤: 바깥 변수를 기억함`)
+    expect(await record($, 'search', '클로저')).toContain('- **클로저** ×1 · 다음 복습 3일 뒤: 바깥 변수를 기억함')
+    expect(w.models).toHaveLength(0)
+  })
+
+  test('the tool names the next review when none is due, the concepts of the notes it lists, and a concept known as known', async ($, on) => {
+    const w = world(on, 'ok', null, true, new Map<string, unknown>([['concepts', { 'c:클로저': REVIEWED }]]))
+    await start($)
+    expect(await record($, 'due')).toBe('지금 복습할 개념이 없습니다. 다음 복습: 클로저 (3일 뒤)')
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const recent = await record($, 'recent')
+    expect(recent).toContain('\n\n이 노트들의 개념 1개\n- **for...of 반복문** ×1 · 아직 떠올려 본 적 없음: for...of 반복문에 대한 설명 — `for (const item of items)` (이 기간에 처음 배움)\n')
+    expect(recent).not.toContain('클로저')
+    await learn($, '안다 클로저')
+    expect(await record($, 'search', '클로저')).toContain('- **클로저** ×1 · 아는 개념: 바깥 변수를 기억함')
+  })
+
+  test('/learn 퀴즈 with a typed answer that graduates a concept says so, and how to take it back', async ($, on) => {
+    const at = { name: '구조 분해 할당', count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: '꺼내서 이름 붙이기', files: [], step: 5, reviewedAt: NOW - 61 * DAY }
+    const store = new Map<string, unknown>([['concepts', { 'c:구조 분해 할당': at }]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    await learn($, 'quiz')
+    w.answer = '판정: 맞음\n피드백: 정확합니다.'
+    const graded = (await learn($, 'quiz 1 꺼내서 이름 붙이기')).text ?? ''
+    expect(graded).toContain('\n\n졸업: 구조 분해 할당 · 아는 개념으로 옮겨 복습과 퀴즈에서 뺍니다 (되돌리기: /learn 모른다 구조 분해 할당)')
+    const kept = Object.values(store.get('concepts') as Record<string, { name: string; knownAt?: number }>)
+    expect(kept.find(one => one.name === '구조 분해 할당')?.knownAt).toBe(NOW)
+  })
+
+  // The next save with autoSave on writes every note marked unsaved: none may be marked while it is off.
+  test('with autoSave off a note, written or written again, is never marked as one to save', { options: { autoSave: false } }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const ui = await pane($)
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    await ui.unmount()
+    expect(w.models).toHaveLength(2)
+    const stored = (w.store.get('history') as Record<string, { notes: { status: string; isUnsaved?: boolean }[] }>)['/proj']!.notes
+    expect(stored.map(note => note.status)).toEqual(['ready'])
+    expect(stored.some(note => note.isUnsaved === true)).toBe(false)
+  })
+
+  test('/learn is offered with its Korean words; each word in its hint is a command, an unknown one gets the few most used', async ($, on) => {
+    const w = world(on)
+    await start($)
+    expect(w.commands).toEqual([
+      { name: 'learn', description: '학습 노트 패널을 엽니다 · /learn 도움말로 명령 목록', argumentHint: '[복습|퀴즈|정리|질문|기록|보고서|찾기|일지|도움말]' },
+    ])
+    for (const word of (w.commands[0]!.argumentHint ?? '').slice(1, -1).split('|')) {
+      expect((await learn($, word)).text).not.toContain('모르는 하위 명령')
+    }
+    expect((await learn($, 'what')).text).toBe(
+      "모르는 하위 명령입니다: 'what'.\n\n자주 쓰는 것: `/learn` 패널 · `/learn 복습` · `/learn 퀴즈` · `/learn 정리` · `/learn 질문 …` · `/learn 기록` · 전체는 `/learn 도움말`",
+    )
+  })
+
+  test('no hello where only notes are kept (no concept yet): it is marked all the same', async ($, on) => {
+    const kept = {
+      id: 'n1', turnId: 't', at: NOW - DAY, prompt: '요청', answer: '', changes: [], moreFiles: 0, status: 'off', text: '',
+      savedAs: 'off', isPast: false, root: '/proj', updatedAt: NOW - DAY, concepts: [],
+    }
+    const store = new Map<string, unknown>([['history', { '/proj': { at: NOW - DAY, notes: [kept] } }]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(w.toasts).toEqual([])
+    expect(store.get('welcomed')).toBe(true)
+  })
+
+  test('a pane listed but placed nowhere is no pane to show: a written note is a line in the transcript', async ($, on) => {
+    const w = world(on, 'ok', { isShown: false, isPlaced: false })
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.transcript).toEqual(['학습 노트 · let을 const로 바꿔 값이 다시 바뀌지 않게 했다 · /learn으로 보기'])
+    expect(w.toasts).toEqual([])
+  })
+
+  test('excludePaths may put a pattern on each line', { options: { excludePaths: 'legacy/**\n*.generated.ts' } }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call({ ...EDIT_A, file_path: '/proj/legacy/x.ts' }))
+    await finish(w)
+    expect(w.models).toHaveLength(0)
+    await turn($, async () => {
+      await $.tool.call(EDIT_A)
+      await $.tool.call({ ...EDIT_A, tool_use_id: 'u2', file_path: '/proj/src/api.generated.ts' })
+    }, 't2')
+    await finish(w)
+    expect(w.models).toHaveLength(1)
+    expect(w.models[0]).toContain('src/api.generated.ts — 설정으로 빼서 내용을 싣지 않음')
+  })
+
+  test('a note names twelve files it left out at most', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, async () => {
+      await $.tool.call(EDIT_A)
+      for (let i = 0; i < 13; i++) await $.tool.call({ tool: 'Write', tool_use_id: `k${i}`, file_path: `/proj/keys/k${i}.pem`, content: 'key\n' })
+    })
+    await finish(w)
+    const [note] = (w.store.get('history') as Record<string, { notes: { withheld?: { file: string; why: string }[] }[] }>)['/proj']!.notes
+    expect(note!.withheld).toEqual(Array.from({ length: 12 }, (_, i) => ({ file: `keys/k${i}.pem`, why: 'secret' })))
+    expect(w.models[0]).not.toContain('keys/k12.pem')
+  })
+
+  test('/learn 일지 with a month and day early in a year finds last year\'s journal', async ($, on) => {
+    const w = world(on)
+    await w.clock.set(Date.UTC(2027, 0, 2, 12))
+    await start($)
+    w.files.set(journalPath(NOTES_DIR, Date.UTC(2026, 11, 30, 12), '/proj'), '# 학습 노트\n\n## 2026-12-30 10:00\n\n**요청**: 지난해 요청\n\n---\n')
+    const out = (await learn($, '일지 12-30')).text ?? ''
+    expect(out.split('\n')[0]).toBe('2026-12-30 노트 1개')
+    expect(out).toContain('지난해 요청')
+  })
+
+  test('a note of the project left by /cd is written again and asked about without the new project\'s team rules', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A), 't1', '옛 프로젝트 요청')
+    await finish(w)
+    w.root = '/other'
+    w.files.set('/other/.claude/learn-notes.md', '## 규칙\n- 바뀌지 않는 값은 const로 선언한다\n')
+    // The pane still holds the old project until a turn starts in the new one.
+    const ui = await pane($)
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    await ui.unmount()
+    expect(w.models).toHaveLength(2)
+    expect(w.models[1]).toContain('옛 프로젝트 요청')
+    expect(w.models[1]).not.toContain('팀 규칙')
+    await learn($, '질문 왜 const예요?')
+    expect(w.models).toHaveLength(3)
+    expect(w.models[2]).not.toContain('바뀌지 않는 값은 const로 선언한다')
+    // A note of the new project gets them.
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2', file_path: '/other/x.ts' }), 't2')
+    await finish(w)
+    expect(w.models).toHaveLength(4)
+    expect(w.models[3]).toContain('- 바뀌지 않는 값은 const로 선언한다')
+  })
+
+  // A test cannot read plugin.json itself (no file system, no JSON import), but the kit loads the plugin with a
+  // test's options as a load does: checked against plugin.json's userConfig, a value not among a field's options unset.
+  for (const [setting, asked] of [['haiku', 'haiku'], ['sonnet', 'sonnet'], ['opus', 'haiku']] as const) {
+    test(`the model setting ${setting} calls ${asked}: plugin.json offers haiku and sonnet only`, { options: { model: setting } }, async ($, on) => {
+      const w = world(on)
+      await start($)
+      await turn($, () => $.tool.call(EDIT_A))
+      await finish(w)
+      expect(w.modelsAsked).toEqual([asked])
+    })
+  }
+
+  test('plugin.json has dailyAutoNotes in /config, as a number', { options: { dailyAutoNotes: '세 개' } }, async ($, on) => {
+    world(on)
+    await expect(start($)).rejects.toThrow(/userConfig: 하루 자동 노트 최대 개수 must be a number/)
+  })
+
+  test('plugin.json has excludePaths in /config, as text', { options: { excludePaths: 5 } }, async ($, on) => {
+    world(on)
+    await expect(start($)).rejects.toThrow(/userConfig: 노트에서 뺄 파일 must be a string/)
   })
 })
