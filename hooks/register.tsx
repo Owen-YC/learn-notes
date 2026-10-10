@@ -26,6 +26,7 @@ import {
   addUsage,
   cleanUsage,
   usageLine,
+  baseName,
   isFormatOnly,
   parseTeamFile,
   teamText,
@@ -35,8 +36,9 @@ import {
   ankiText,
   cleanBank,
   cleanActivity,
-  statsLine,
+  progressParts,
   statsOf,
+  type LearnStats,
   askPrompt,
   askSection,
   changeOf,
@@ -118,6 +120,7 @@ import {
   TRACE_LABEL,
   TRACE_QUESTION,
   type RankedConcept,
+  shortPath,
   stamp,
   summaryOf,
   turnRequest,
@@ -128,8 +131,11 @@ import {
 
 const PANE = 'learn-notes'
 const TITLE = '학습 노트'
-/** How the pane's keys are reached. A Korean input mode sends `ㅂ` for `q`, which no hotkey matches, so the English one is named. */
-const KEYS_HINT = '단축키는 ctrl+x tab으로 패널을 고른 뒤 영문 상태에서 누릅니다'
+/**
+ * How the pane's keys are reached while it does not hold them. A Korean input mode sends `ㅂ` for `q`, which no
+ * letter hotkey matches, so the English one is named; a digit is the same in both.
+ */
+const KEYS_HINT = 'ctrl+x tab: 패널 고르기 · 숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서'
 
 const notes = atom({ plugin: 'learn-notes', key: 'notes' } as const, [])
 const live = atom({ plugin: 'learn-notes', key: 'live' } as const, null)
@@ -188,10 +194,8 @@ function cleanAliases(raw: unknown): Record<string, string> {
 }
 type History = Record<string, HistoryEntry>
 
-// The note first, then its code before and after, then every concept so far, then a quiz on them.
+// The note first, then its code before and after, then every concept so far, then a quiz on them: keys 1 to 4.
 const VIEWS: readonly LearnView[] = ['note', 'split', 'concepts', 'quiz']
-// v goes round the reading views; the quiz is q's, and v goes back from it to the note.
-const VIEW_NEXT: Record<LearnView, LearnView> = { note: 'split', split: 'concepts', concepts: 'note', quiz: 'note' }
 const VIEW_LABEL: Record<LearnView, string> = { note: '노트', split: '전/후', concepts: '개념 모음', quiz: '퀴즈' }
 /** The view held in state as one of today's: 1.4.0's diff view is the before/after view now. */
 const viewOf = (raw: string): LearnView => ((VIEWS as readonly string[]).includes(raw) ? (raw as LearnView) : raw === 'diff' ? 'split' : 'note')
@@ -1049,6 +1053,9 @@ function isOpen(current: Quiz, item: LearnQuizItem): boolean {
   return item.result === undefined && !isAnswerShown(current, item)
 }
 
+/** The pane's answer field for question `i` of the quiz asked at `at`: a new quiz's fields are new elements. */
+const quizFieldKey = (at: number, i: number) => `quiz-mine-${at}-${i}`
+
 /** A wrong answer: gone over now, back to the first step, and first in the next quiz. */
 const markWrong: Mark = (index, keys, at) => markMissed(markReviewed(index, keys, at), keys, at)
 
@@ -1094,6 +1101,11 @@ function graduatedText(names: readonly string[]): string {
 /** Today's share of the review, for where every concept due is counted: `오늘 n개`, or that today's is done. */
 function todayText(review: { due: number; left: number }): string {
   return review.left > 0 ? `오늘 ${review.left}개 (하루 ${DAILY_REVIEW}개까지)` : '오늘 몫은 마쳤습니다'
+}
+
+/** Where a reply sends the learner for the review: q in the pane while today's has questions left (q is drawn only then), else the quiz view. */
+function reviewWay(left: number): string {
+  return left > 0 ? '패널에서 q, 또는 /learn quiz' : '패널의 퀴즈(4), 또는 /learn quiz'
 }
 
 /** What a finished quiz says of today's review once it is done: undefined while questions are left for today. */
@@ -1183,7 +1195,7 @@ async function withCode($: EngineInterface, picks: readonly RankedConcept[], map
     const changes = [...note.changes].sort((a, b) => Number(one.files.includes(b.file)) - Number(one.files.includes(a.file)))
     for (const change of changes) {
       const text = codeFor(change, one.blurb)
-      if (text) return { ...one, noteId: note.id, code: { file: change.file.split(/[\\/]/).at(-1) ?? change.file, text } }
+      if (text) return { ...one, noteId: note.id, code: { file: baseName(change.file), text } }
     }
     return { ...one, noteId: note.id }
   })
@@ -1204,7 +1216,7 @@ async function makeQuiz(
   cfg: Config,
   now: number,
   only?: Pick<LearnNote, 'id' | 'concepts'>,
-): Promise<{ items: LearnQuizItem[] } | { error: string }> {
+): Promise<{ items: LearnQuizItem[]; at: number } | { error: string }> {
   const index = await read($, concepts)
   const map = await read($, aliases)
   const taught = (only?.concepts ?? [])
@@ -1231,10 +1243,14 @@ async function makeQuiz(
   await keepQuiz($, { at: now, items, isRevealed: false, ...(only ? { from: 'note' as const } : {}) })
   await update($, quizRun, run => ({ ...run, error: null }))
   await bankQuestions($, items, now)
-  return { items }
+  return { items, at: now }
 }
 
-/** The pane's s (or t, on `only` this note's concepts): a new quiz, the pane saying "making" until it is there or failed. */
+/**
+ * The pane's s (or t, on `only` this note's concepts; q for today's review): a
+ * new quiz, the pane saying "making" until it is there or failed, and then the
+ * first question's answer field holding the keys.
+ */
 async function startQuiz($: EngineInterface, cfg: Config, only?: Pick<LearnNote, 'id' | 'concepts'>): Promise<void> {
   if (isQuizMaking) return
   if (isQuizChecking) {
@@ -1246,6 +1262,8 @@ async function startQuiz($: EngineInterface, cfg: Config, only?: Pick<LearnNote,
     await update($, quizRun, () => ({ isMaking: true, error: null }))
     const made = await makeQuiz($, cfg, await $.clock.now(), only)
     await update($, quizRun, () => ({ isMaking: false, error: 'error' in made ? made.error : null }))
+    // A surface with no text field (the mobile app) draws none to focus: the engine says no, and nothing else happens.
+    if (!('error' in made)) focusInPane($, quizFieldKey(made.at, 0))
   } catch (error) {
     $.ui.log(`learn-notes: 퀴즈를 내지 못했습니다 (${String(error)})`, { to: 'debug' })
     await update($, quizRun, () => ({ isMaking: false, error: '퀴즈를 내지 못했습니다. 잠시 뒤 다시 해 보세요.' }))
@@ -1385,7 +1403,11 @@ async function gradeTyped($: EngineInterface, cfg: Config, current: Quiz, i: num
   return { item: latest.items[i] ?? { ...item, mine, ...graded } }
 }
 
-/** Enter in the quiz's answer field: Claude grades the learner's own answer, the pane saying so meanwhile. */
+/**
+ * Enter in the quiz's answer field: Claude grades the learner's own answer, the
+ * pane saying so meanwhile; graded, the keys move on to the next question's
+ * field, or after the last to the button for a new quiz.
+ */
 async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: string): Promise<void> {
   const mine = text.trim()
   const current = await lastQuiz($)
@@ -1396,8 +1418,9 @@ async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: str
     return
   }
   if (mine === '') {
-    const stuck = item.hint ? '막히면 h로 힌트를, a로 정답을 봅니다.' : '모르겠으면 a로 정답을 봅니다.'
-    await update($, quizRun, run => ({ ...run, error: `답을 적은 뒤 Enter를 누르세요. ${stuck}` }))
+    // Recalling first, even wrongly, is what makes it stay: the answer is the last way out, not one of two.
+    const stuck = item.hint !== undefined && item.isHinted !== true ? '막히면 h로 힌트를 봅니다.' : '정말 떠오르지 않으면 a로 정답을 봅니다.'
+    await update($, quizRun, run => ({ ...run, error: `답을 적은 뒤 Enter를 누르세요. 틀려도 괜찮으니 먼저 떠올려 적어 보세요 · ${stuck}` }))
     return
   }
   isQuizChecking = true
@@ -1414,6 +1437,13 @@ async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: str
     // A grade that did not come back leaves the answer in that question's field to send again.
     await update($, quizRun, run => ({ ...run, checking: null, error: error ?? run.error, draft: error !== null ? { at: current.at, i, text: mine } : null }))
   }
+  if (error !== null) return
+  const latest = await lastQuiz($)
+  if (!latest) return
+  // The question the pane shows next: the first not graded. One whose answer was seen has no field; the ring stays put.
+  const next = latest.items.findIndex(one => one.result === undefined)
+  if (next === -1) focusInPane($, 'quiz-new')
+  else if (isOpen(latest, latest.items[next]!)) focusInPane($, quizFieldKey(latest.at, next))
 }
 
 /** The quiz as it stands now, in the session and the store. */
@@ -1483,6 +1513,22 @@ function revealInPane($: EngineInterface, key: string, block: 'start' | 'nearest
     )
   }
   attempt(REVEAL_TRIES)
+}
+
+/**
+ * Moves the pane's focus ring onto an element it is about to draw: the next
+ * answer field, or the button for a new quiz. Only while the pane holds the
+ * keys: otherwise the engine says no, and the reason goes to the debug log.
+ * Not awaited: the engine waits for the element's drawing, bounded.
+ */
+function focusInPane($: EngineInterface, key: string): void {
+  const said = (why: string) => $.ui.log(`learn-notes: ${key}로 초점을 옮기지 않았습니다 (${why})`, { to: 'debug' })
+  void $.ui.focus({ requestId: PANE, key }).then(
+    result => {
+      if (result.deny !== undefined) said(result.deny)
+    },
+    (thrown: unknown) => said(String(thrown)),
+  )
 }
 
 /**
@@ -2087,7 +2133,7 @@ async function quizCommand($: EngineInterface, cfg: Config, rest: string): Promi
     ...(made.items.some(item => item.hint !== undefined) ? ['- 막히면 힌트: /learn 퀴즈 힌트'] : []),
     '- 정답 보기: /learn 퀴즈 정답 (지금 문제 하나 · 그 뒤 맞음·틀림을 번호로 알려 주세요)',
     '',
-    '패널(/learn)의 퀴즈 보기(q)에서도 같은 문제를 이어서 풉니다.',
+    '패널(/learn)의 퀴즈 보기(4)에서도 같은 문제를 이어서 풉니다.',
   ].join('\n')
 }
 
@@ -2346,6 +2392,7 @@ export const register: Register = (on, options) => {
       const index = await read($, concepts)
       const { fresh, again } = progressOf(index, now)
       const due = dueConcepts(index, now)
+      const today = todayReview(index, record, now)
       const graded = stats.month.right + stats.month.wrong
       const bar = (n: number) => (n === 0 ? '·' : '■'.repeat(Math.min(n, 10)) + (n > 10 ? '+' : ''))
       const days = stats.days.map(({ day, weekday, one }) => {
@@ -2358,7 +2405,7 @@ export const register: Register = (on, options) => {
           '',
           `- 최근 7일: 노트 ${stats.week.notes}개 · 새 개념 ${fresh}개 · 다시 만난 개념 ${again}개${stats.week.right + stats.week.wrong > 0 ? ` · 퀴즈 ${stats.week.right}/${stats.week.right + stats.week.wrong} 맞힘` : ''}`,
           `- 최근 30일 퀴즈 정답률: ${graded > 0 ? `${Math.round((stats.month.right / graded) * 100)}% (${stats.month.right}/${graded})` : '아직 채점한 문제가 없습니다'}`,
-          `- 복습할 개념: ${due.length > 0 ? `${due.length}개 · ${todayText(todayReview(index, record, now))} · 패널에서 q, 또는 /learn quiz` : '지금은 없습니다'}`,
+          `- 복습할 개념: ${due.length > 0 ? `${due.length}개 · ${todayText(today)} · ${reviewWay(today.left)}` : '지금은 없습니다'}`,
           '',
           '최근 7일',
           ...days,
@@ -2453,7 +2500,7 @@ export const register: Register = (on, options) => {
       const lines = ranked.slice(0, 30).map(one => `- **${one.name}** ×${one.count} · 최근 ${stamp(one.lastAt).day} · ${reviewText(one, now)}: ${one.blurb}`)
       const review =
         queue.length > 0
-          ? `\n\n복습할 개념 ${due.length}개: ${queue.map(one => (isMissed(one) ? `${one.name} (퀴즈 틀림)` : one.name)).join(', ')}${due.length > queue.length ? ' …' : ''} · 패널에서 q, 또는 /learn quiz`
+          ? `\n\n복습할 개념 ${due.length}개: ${queue.map(one => (isMissed(one) ? `${one.name} (퀴즈 틀림)` : one.name)).join(', ')}${due.length > queue.length ? ' …' : ''} · ${reviewWay(todayReview(index, await read($, activity), now).left)}`
           : ''
       const more = ranked.length > 30 ? `\n\n${moreConceptsText(ranked.length - 30, cfg.isAutoSave)}.` : ''
       const known = knownLine(index)
@@ -2491,7 +2538,8 @@ export const register: Register = (on, options) => {
     }
     if (arg !== '') return { text: `모르는 하위 명령입니다: '${said}'.\n\n${SHORT_HELP}` }
     await update($, autoOpened, () => true)
-    const opened = await $.ui.open({ id: PANE, title: TITLE })
+    // Sent from an empty prompt, the pane asks for the keys at once (no ctrl+x tab); Esc hands them back and leaves it open.
+    const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true })
     const last = list.at(-1)
     if (opened.isPlaced && (await isCloudSession($))) {
       // Placed on the cloud computer's own terminal, which nobody sees: say so, and show the note here.
@@ -2501,7 +2549,7 @@ export const register: Register = (on, options) => {
     }
     const root = await $.session.root()
     const hint = isSystemFolder(root) ? `\n\n${systemFolderHint(root)}` : ''
-    if (opened.isPlaced) return { text: `학습 노트 패널을 열었습니다. ${KEYS_HINT} (한글 상태면 q가 ㅂ으로 들어가 먹지 않습니다).${hint}` }
+    if (opened.isPlaced) return { text: `학습 노트 패널을 열었습니다 · 숫자 1~4로 보기를 바꾸고, Esc로 대화로 돌아갑니다.${hint}` }
     $.ui.log(`learn-notes: 패널을 열지 못했습니다 (${opened.reason})`, { to: 'debug' })
     return {
       text: `이 화면에는 패널을 띄울 수 없어 마지막 노트를 여기에 적습니다. 터미널을 전체 화면(/tui fullscreen)으로 쓰면 오른쪽에 패널이 붙습니다.\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
@@ -2527,7 +2575,7 @@ export const register: Register = (on, options) => {
     const isDock = e.props.placement === 'dock'
     const hasConcepts = Object.keys(index).length > 0
     const days = await read($, activity)
-    const progress = statsLine(statsOf(days, now))
+    const stats = statsOf(days, now)
     const current = await read($, quiz)
     // Today's review, and the concepts the quiz on show graduated.
     const review = { ...todayReview(index, days, now), graduated: graduatedIn(current?.items ?? [], index, map) }
@@ -2548,13 +2596,14 @@ export const register: Register = (on, options) => {
         {systemFolderHint(root)}
       </Text>
     ) : null
+    // The terminal's pane takes the keys from /learn, a click or ctrl+x tab; Esc gives them back to the prompt.
     const keysHint =
-      e.surface === 'terminal' && !e.props.isFocused ? (
+      e.surface === 'terminal' ? (
         <Text dimColor wrap="wrap">
-          {KEYS_HINT}
+          {e.props.isFocused ? 'Esc: 대화로 돌아가기' : KEYS_HINT}
         </Text>
       ) : null
-    const strip = viewStrip($, shown, note !== undefined, el)
+    const strip = viewStrip($, cfg, shown, note !== undefined, review.left, el)
 
     if (!note) {
       // The team file read for this project, if any: its notes will follow its rules and terms.
@@ -2572,7 +2621,7 @@ export const register: Register = (on, options) => {
           </Text>
           {hasConcepts && (
             <Text dimColor wrap="wrap">
-              지금까지 배운 개념 {Object.keys(index).length}개가 있습니다 · v로 보기 · q로 퀴즈
+              지금까지 배운 개념 {Object.keys(index).length}개가 있습니다 · 3으로 보기 · 4로 퀴즈
             </Text>
           )}
           {rules && (
@@ -2590,7 +2639,7 @@ export const register: Register = (on, options) => {
           {hasConcepts && keysHint}
           {hasConcepts && shown !== 'note' ? (
             <Box marginTop={1} flexDirection="column">
-              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, review, list, el) : conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)}
+              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, review, list, el) : conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el)}
             </Box>
           ) : (
             welcome
@@ -2613,12 +2662,12 @@ export const register: Register = (on, options) => {
       shown === 'quiz' ? (
         quizView($, cfg, current, run, hasConcepts, now, review, list, el)
       ) : shown === 'concepts' ? (
-        conceptsView($, index, map, list, now, cfg.isAutoSave, progress, el)
+        conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el)
       ) : shown === 'note' ? (
         <Box flexDirection="column">
           {noteBody(note, isBusy, offText(note, cfg, now), el)}
           {note.status === 'ready' && note.concepts.length > 0 && conceptLine(note, index, map, el)}
-          {note.status === 'ready' && noteTools($, cfg, note, isBusy, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el)}
+          {note.status === 'ready' && noteTools($, cfg, note, isBusy, writeLabel, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el)}
         </Box>
       ) : (
         <Box flexDirection="column">
@@ -2679,14 +2728,17 @@ export const register: Register = (on, options) => {
           <Box flexWrap="wrap" columnGap={2}>
             <Button key="prev" hotkey="p" plain label="◀ 이전" onPress={() => stepNote($, -1)} />
             <Button key="next" hotkey="n" plain label="다음 ▶" onPress={() => stepNote($, 1)} />
-            <Button
-              key="write"
-              hotkey="w"
-              plain
-              dimColor={isBusy}
-              label={writeLabel}
-              onPress={() => void writeNote($, cfg, note.id, { isRewrite: note.savedAs !== null })}
-            />
+            {/* A written note is rewritten from the row under it, dim: up here w is for a note still to write. */}
+            {note.status !== 'ready' && (
+              <Button
+                key="write"
+                hotkey="w"
+                plain
+                dimColor={isBusy}
+                label={writeLabel}
+                onPress={() => void writeNote($, cfg, note.id, { isRewrite: note.savedAs !== null })}
+              />
+            )}
           </Box>
         )}
         {!isWhole(shown) && (
@@ -2705,50 +2757,72 @@ export const register: Register = (on, options) => {
 }
 
 /**
- * The views in one row, the one shown in bold: v goes on through the note's
- * views (노트 → 전/후 → 개념 모음 → 노트), q to the quiz from anywhere,
- * and a click to any of them. Before the first note: 노트 · 개념 모음 · 퀴즈.
+ * The views in one row on keys 1 to 4 (a digit is the same in a Korean input
+ * mode), the one shown in bold and underlined: 노트 · 전/후 · 개념 모음 · 퀴즈,
+ * or before the first note 노트 · 개념 모음 · 퀴즈 on the same numbers. While
+ * today's review has questions `left` and the quiz is not on show, q starts it.
  */
-function viewStrip($: EngineInterface, mode: LearnView, hasNote: boolean, el: ElementTable) {
+function viewStrip($: EngineInterface, cfg: Config, mode: LearnView, hasNote: boolean, left: number, el: ElementTable) {
   const { Box, Text, Button } = el
   const order: readonly LearnView[] = hasNote ? VIEWS : ['note', 'concepts', 'quiz']
-  const next: LearnView = hasNote ? VIEW_NEXT[mode] : mode === 'note' ? 'concepts' : 'note'
   const items = order.map(one => {
+    const n = String(VIEWS.indexOf(one) + 1)
     if (one === mode) {
       return (
         <Text key={`at-${one}`} bold underline>
-          {VIEW_LABEL[one]}
+          {n}: {VIEW_LABEL[one]}
         </Text>
       )
     }
-    const go = () => update($, view, () => one)
-    if (one === 'quiz') return <Button key="quiz" hotkey="q" plain label={VIEW_LABEL[one]} onPress={go} />
-    if (one === next) return <Button key="view" hotkey="v" plain label={VIEW_LABEL[one]} onPress={go} />
-    return <Button key={`view-${one}`} plain dimColor label={VIEW_LABEL[one]} onPress={go} />
+    return <Button key={`view-${one}`} hotkey={n} plain label={VIEW_LABEL[one]} onPress={() => update($, view, () => one)} />
   })
+  const joined = items.flatMap((item, i) =>
+    i > 0
+      ? [
+          <Text key={`sep-${i}`} dimColor>
+            ·
+          </Text>,
+          item,
+        ]
+      : [item],
+  )
   return (
     <Box flexWrap="wrap" columnGap={1}>
-      {items.flatMap((item, i) =>
-        i > 0
-          ? [
-              <Text key={`sep-${i}`} dimColor>
-                ·
-              </Text>,
-              item,
-            ]
-          : [item],
+      {joined}
+      {/* A Button draws no colour of its own: the yellow mark beside it says the review is waiting. */}
+      {left > 0 && mode !== 'quiz' && (
+        <Text key="review-mark" color="yellow">
+          ●
+        </Text>
       )}
+      {left > 0 && mode !== 'quiz' && <Button key="review" hotkey="q" plain label={`복습 ${left}개`} onPress={() => reviewNow($, cfg)} />}
     </Box>
   )
 }
 
 /**
+ * The pane's q: today's review at once. The quiz view, and a new quiz on the
+ * concepts due unless one is still being answered, whose next question's
+ * field then holds the keys.
+ */
+async function reviewNow($: EngineInterface, cfg: Config): Promise<void> {
+  await update($, view, () => 'quiz')
+  const current = await lastQuiz($)
+  const at = current ? current.items.findIndex(item => item.result === undefined) : -1
+  if (!current || !current.items.some(item => isOpen(current, item))) {
+    void startQuiz($, cfg)
+    return
+  }
+  if (at !== -1 && isOpen(current, current.items[at]!)) focusInPane($, quizFieldKey(current.at, at))
+}
+
+/**
  * Under a written note, what to do with it: a quiz on its concepts (t), the
  * note again in plainer words (e), its code followed step by step on one
- * example (r), and a question about it (i, the field below), with the latest
- * questions and their answers.
+ * example (r), a question about it (i, the field below), and last and dim the
+ * note written again (w), with the latest questions and their answers.
  */
-function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boolean, ask: LearnAskRun, el: ElementTable) {
+function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boolean, writeLabel: string, ask: LearnAskRun, el: ElementTable) {
   const { Box, Text, Button, Markdown } = el
   // The mobile app draws no text field yet: there a question goes through /learn ask.
   const Input = 'Input' in el ? el.Input : undefined
@@ -2774,6 +2848,7 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, isBusy: boo
         {Input && (
           <Button key="ask-type" hotkey="i" plain label="질문하기" onPress={() => void $.ui.focus({ requestId: PANE, key: fieldKey }).catch(() => undefined)} />
         )}
+        <Button key="write" hotkey="w" plain dimColor label={writeLabel} onPress={() => void writeNote($, cfg, note.id, { isRewrite: note.savedAs !== null })} />
       </Box>
       {(note.asks ?? []).map((one, i, all) => ({ one, key: askedKey(note.id, all, i) })).slice(-2).map(({ one, key }) => (
         <Box key={key} flexDirection="column" marginTop={1}>
@@ -2812,7 +2887,7 @@ function liveView(running: LearnLive, isDock: boolean, isAutoNote: boolean, el: 
   const count = running.changes.length + running.dropped.length + running.unlisted
   const tail = isAutoNote ? ' · 턴이 끝나면 노트를 씁니다' : ''
   if (!isDock) {
-    const names = running.changes.slice(0, 3).map(change => change.file.split('/').at(-1) ?? change.file)
+    const names = running.changes.slice(0, 3).map(change => baseName(change.file))
     return (
       <Text color="yellow" wrap="truncate-end">
         ● 작업 중: 파일 {count}개 ({names.join(', ')}
@@ -2828,7 +2903,7 @@ function liveView(running: LearnLive, isDock: boolean, isAutoNote: boolean, el: 
       {running.changes.slice(0, 4).map(change => (
         <Text dimColor wrap="truncate-start">
           {'  '}
-          {change.file} +{change.added} −{change.removed}
+          {shortPath(change.file)} +{change.added} −{change.removed}
         </Text>
       ))}
     </Box>
@@ -2881,7 +2956,7 @@ function offText(note: LearnNote, cfg: Config, now: number): string {
     if (stamp(note.at).day !== stamp(now).day) return '그날 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · w로 쓰면 씁니다'
     return `오늘 자동 노트 한도${cfg.dailyAutoNotes > 0 ? `(${cfg.dailyAutoNotes}개)` : ''}에 닿았습니다 · w로 쓰면 씁니다`
   }
-  return '자동 노트가 꺼져 있습니다. w로 노트를 쓰거나 v로 전후 코드를 보세요.'
+  return '자동 노트가 꺼져 있습니다. w로 노트를 쓰거나 2로 전/후 코드를 보세요.'
 }
 
 const ITEM_MARK: Record<ChangeItem['kind'], { mark: string; color?: string }> = {
@@ -3083,9 +3158,10 @@ function knownLine(index: Readonly<Record<string, LearnConcept>>): string | unde
 }
 
 /**
- * Every concept the notes have taught: this week's progress, the ones worth a
- * second look, then all of them but the ones known, the most met first, each
- * with the notes in the pane that taught it; the known ones folded into a line.
+ * Every concept the notes have taught: one head line of how many and this
+ * week's progress, the ones worth a second look (q while today's review has
+ * questions `left`), then all of them but the ones known, the most met first,
+ * each with the notes in the pane that taught it; the known ones folded into a line.
  */
 function conceptsView(
   $: EngineInterface,
@@ -3094,7 +3170,8 @@ function conceptsView(
   list: readonly LearnNote[],
   now: number,
   isAutoSave: boolean,
-  progress: string,
+  stats: LearnStats,
+  left: number,
   el: ElementTable,
 ) {
   const { Box, Text, Markdown, Button } = el
@@ -3104,7 +3181,7 @@ function conceptsView(
   }
   const ranked = rankConcepts(index).filter(one => !isKnown(one))
   const known = knownLine(index)
-  const { fresh, again } = progressOf(index, now)
+  const { fresh } = progressOf(index, now)
   const due = dueConcepts(index, now)
   const queue = due.slice(0, 5)
   const shown = ranked.slice(0, 30)
@@ -3131,7 +3208,7 @@ function conceptsView(
                 key={`open-${note.id}`}
                 plain
                 dimColor
-                label={`${when(note.at, now)} ${note.changes[0]?.file.split('/').at(-1) ?? ''}`.trim()}
+                label={`${when(note.at, now)} ${baseName(note.changes[0]?.file ?? '')}`.trim()}
                 onPress={() => openNote($, note.id)}
               />
             ))}
@@ -3144,18 +3221,13 @@ function conceptsView(
     <Box flexDirection="column">
       <Text wrap="wrap">
         <Text bold>배운 개념 {total}개</Text>
-        <Text dimColor>
-          {' '}
-          · 최근 7일 새로 {fresh} · 다시 만남 {again}
-        </Text>
-      </Text>
-      <Text color="cyan" wrap="wrap">
-        {progress}
+        <Text dimColor> · {[`최근 7일 새로 ${fresh}`, ...progressParts(stats)].join(' · ')}</Text>
       </Text>
       {queue.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Text color="yellow" wrap="wrap">
-            복습할 개념 {due.length}개 <Text dimColor>· 틀린 것 먼저, 잊을 때쯤 다시 나옵니다 · q로 퀴즈</Text>
+            복습할 개념 {due.length}개{' '}
+            <Text dimColor>· 틀린 것 먼저, 잊을 때쯤 다시 나옵니다 · {left > 0 ? 'q로 복습' : '오늘 몫은 마쳤습니다 · 4로 퀴즈'}</Text>
           </Text>
           {queue.map(one => (
             <Text key={`due-${one.key}`} dimColor wrap="truncate-end">
@@ -3213,7 +3285,7 @@ function quizView(
   // The answer graded last, when Claude graded it, stays open with its feedback until the next one is graded.
   const lastAt = graded.length === 0 ? -1 : items.indexOf(graded.reduce((a, b) => ((b.gradedAt ?? 0) >= (a.gradedAt ?? 0) ? b : a)))
   const opened = lastAt !== -1 && items[lastAt]?.verdict !== undefined ? lastAt : -1
-  const fieldKey = (i: number) => `quiz-mine-${current?.at ?? 0}-${i}`
+  const fieldKey = (i: number) => quizFieldKey(current?.at ?? 0, i)
   return (
     <Box flexDirection="column">
       <Text bold wrap="truncate-end">
@@ -3233,8 +3305,7 @@ function quizView(
       {!hasConcepts && <Text dimColor>{NO_CONCEPTS_FOR_QUIZ}</Text>}
       {hasConcepts && items.length === 0 && !run.isMaking && (
         <Text dimColor wrap="wrap">
-          복습할 때가 된 개념(틀린 것 먼저)으로, 내가 만든 코드에서 문제를 냅니다. 답을 적고 Enter를 누르면 Claude가 채점합니다. 막히면 h로 힌트를, a로 정답을
-          봅니다.
+          s를 누르면 복습할 개념으로 내 코드에서 3문제를 냅니다 · 먼저 떠올려 적어 보세요. 틀린 답을 바로잡을 때 더 오래 남습니다
         </Text>
       )}
       {run.isMaking && <Text color="cyan">문제를 만드는 중입니다…</Text>}
@@ -3385,10 +3456,11 @@ const HELP = [
   '- `/learn recap`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
   '',
   '**패널 키**',
-  '- 노트: `p`·`n` 이전·다음 · `v` 보기 바꾸기(노트 → 전/후 → 개념 모음) · `w` 다시 쓰기',
+  '- 보기: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작',
+  '- 노트: `p`·`n` 이전·다음 · `w` 노트 쓰기, 다시 쓰기',
   '- 노트 아래: `t` 이 노트 퀴즈 · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기',
-  '- 키가 먹지 않으면 한/영을 영문 상태로 바꾸세요. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다',
-  '- 퀴즈(`q`): `s` 문제 받기 · `i` 답 적기(Enter로 채점) · `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기 · `n` 틀린 개념을 배운 노트',
+  '- 글자 키가 먹지 않으면 한/영을 영문 상태로 바꾸세요 (한글 상태면 `q`가 `ㅂ`으로 들어갑니다). 숫자 키는 상관없습니다',
+  '- 퀴즈(`4`): `s` 문제 받기 · `i` 답 적기(Enter로 채점) · `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기 · `n` 틀린 개념을 배운 노트',
   '',
   '**더 있는 것**',
   '- 퀴즈: `/learn quiz 새로` 새 문제 · `2 내 답` 그 문제에 답하기 · `힌트` · `정답` 지금 문제의 정답 (`정답 2`도 됩니다) · `맞음 1` · `틀림 2` 스스로 채점',

@@ -75,6 +75,9 @@ import {
   notePrompt,
   parseDiff,
   relative,
+  shortPath,
+  progressParts,
+  statsOf,
   summaryOf,
   askPrompt,
   codeFor,
@@ -2137,5 +2140,28 @@ describe('1.6.0: quiz kinds, spread across notes', () => {
     // One due: then one from each other note first.
     due.delete('a2')
     expect(spreadPicks([a1, a2, a3, b1, c1], 3, isDue).map(one => one.name)).toEqual(['a1', 'b1', 'c1'])
+  })
+})
+
+describe('1.6.0: the pane\'s short lines', () => {
+  test('a changed file outside the project shows by its name, a project file by its path in it', () => {
+    // relative() leaves a file outside the root absolute: Claude's scratchpad from a session in System32, or /tmp.
+    const outside = relative('C:\\Users\\u\\AppData\\Local\\Temp\\s\\hello.js', 'C:\\Windows\\System32')
+    expect(shortPath(outside)).toBe('hello.js')
+    expect(shortPath('/tmp/claude-0/scratchpad/cart.mjs')).toBe('cart.mjs')
+    expect(shortPath('\\\\server\\share\\a.ts')).toBe('a.ts')
+    expect(shortPath(relative('/proj/src/a.ts', '/proj'))).toBe('src/a.ts')
+    expect(shortPath(relative('C:\\proj\\src\\a.ts', 'C:\\proj'))).toBe('src/a.ts')
+    expect(shortPath('notes.txt')).toBe('notes.txt')
+  })
+
+  test('the concepts head line has the run of days only while there is one, and the week\'s quiz once one is graded', () => {
+    const now = Date.UTC(2026, 9, 3, 1)
+    expect(progressParts(statsOf({}, now))).toEqual([])
+    expect(progressParts(statsOf({ '2026-10-03': { notes: 2, right: 0, wrong: 0 } }, now))).toEqual(['연속 1일째'])
+    const days = { '2026-10-02': { notes: 0, right: 3, wrong: 1 }, '2026-10-03': { notes: 1, right: 1, wrong: 1 } }
+    expect(progressParts(statsOf(days, now))).toEqual(['연속 2일째', '퀴즈 4/6'])
+    // Quizzed only more than a week ago: a run of none, and no quiz part.
+    expect(progressParts(statsOf({ '2026-09-20': { notes: 0, right: 2, wrong: 0 } }, now))).toEqual([])
   })
 })

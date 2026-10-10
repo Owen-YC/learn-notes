@@ -704,8 +704,17 @@ export function isUnder(path: string, dir: string): boolean {
 }
 
 /** The last part of a path, either separator. */
-function baseName(path: string): string {
+export function baseName(path: string): string {
   return path.split(/[\\/]/).at(-1) ?? path
+}
+
+/**
+ * A changed file as a short list shows it: a project file by its path in the
+ * project, a file outside it (left absolute by relative(): Claude's scratchpad,
+ * `C:\Users\…\hello.js`) by its name alone.
+ */
+export function shortPath(file: string): string {
+  return /^(?:[A-Za-z]:)?[\\/]/.test(file) ? baseName(file) : file
 }
 
 /** Names of files that hold credentials whatever folder they are in. */
@@ -3001,15 +3010,14 @@ export function statsOf(record: Readonly<Record<string, LearnDayActivity>>, now:
   }
 }
 
-/** One line of the learner's progress: the run of days, the week's notes, the week's quiz answers. */
-export function statsLine(stats: LearnStats): string {
-  const parts = [
-    stats.streak > 0 ? `연속 ${stats.streak}일째${stats.isTodayActive ? '' : ' (오늘도 하면 이어짐)'}` : '오늘 시작해 보세요',
-    `최근 7일 노트 ${stats.week.notes}개`,
-  ]
+/**
+ * The learner's progress for the concepts view's one head line: the run of
+ * days while there is one, and the week's quiz answers right of those graded
+ * once there are any (`연속 3일째`, `퀴즈 4/6`).
+ */
+export function progressParts(stats: LearnStats): string[] {
   const graded = stats.week.right + stats.week.wrong
-  if (graded > 0) parts.push(`퀴즈 ${stats.week.right}/${graded} 맞힘`)
-  return parts.join(' · ')
+  return [...(stats.streak > 0 ? [`연속 ${stats.streak}일째`] : []), ...(graded > 0 ? [`퀴즈 ${stats.week.right}/${graded}`] : [])]
 }
 
 /** One question a quiz asked, kept for exporting as a flash card. */
