@@ -1162,6 +1162,8 @@ test('/learn help lists every subcommand, and an unknown one shows it', async ($
   for (const word of ['quiz', 'ask', 'recap', 'last', 'concepts', 'stats', 'find', 'day', 'days', 'anki', 'merge', 'save', 'clear']) expect(help.text).toContain(`/learn ${word}`)
   // The panel's keys, the walk-through among them, and no diff view any more.
   expect(help.text).toContain('`r` 예시로 따라가기')
+  // The quiz's n back to the note of a concept answered wrong (1.6.0).
+  expect(help.text).toContain('`n` 틀린 개념을 배운 노트')
   expect(help.text).toContain('노트 → 전/후 → 개념 모음')
   expect(help.text).not.toContain('diff')
   expect((await learn($, 'what')).text).toContain('모르는 하위 명령입니다')
@@ -3613,5 +3615,99 @@ describe('1.6.0: quiz kinds, the note that taught a missed concept, and /learn q
     expect(await ui.find({ type: 'Text', text: /^✓ 맞힘 2\. 클로저 · 방금 채점$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /이 개념을 배운 노트/ })).toBeUndefined()
     await ui.unmount()
+  })
+
+  test('words the replies themselves use (새 문제 · 다음 문제 · 내 답) and help are never graded as an answer', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = THREE_QUESTIONS
+    await learn($, 'quiz')
+    const QUIZ_USAGE_TEXT = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 · 정답 · 새로 · 맞음 1 · 틀림 2'
+    // Graded, any of these would be wrong: a model call, a miss and a day's count for words never meant as an answer.
+    w.answer = '판정: 틀림\n피드백: 아닙니다.'
+    for (const words of ['다음', '다음 문제', 'next', '목록']) {
+      const listed = (await learn($, `quiz ${words}`)).text
+      expect(listed).toContain('풀던 퀴즈 · 3문제 중 0개 채점')
+      expect(listed).toContain('답을 적어 채점받기: /learn 퀴즈 1 내 답')
+    }
+    for (const words of ['help', '도움말', '내 답', '쓰는 법']) expect((await learn($, `quiz ${words}`)).text).toBe(QUIZ_USAGE_TEXT)
+    for (const words of ['새 문제 주세요', '다음 문제 보여 줘', 'help me']) {
+      const said = (await learn($, `quiz ${words}`)).text
+      expect(said).toContain('답으로 채점하지 않았습니다')
+      expect(said).not.toContain('채점했습니다\n')
+    }
+    expect(w.models).toHaveLength(1)
+    expect(store.get('activity')).toEqual({})
+    expect((store.get('quiz') as { items: { result?: string }[] }).items.every(one => one.result === undefined)).toBe(true)
+    // An answer that starts with a command word: said not graded, with how to send it as the answer.
+    const answerLike = (await learn($, 'quiz 정답은 3이에요')).text
+    expect(answerLike).toContain('답으로 채점하지 않았습니다')
+    expect(answerLike).toContain('1번의 답이면 번호를 붙여 보내 주세요: /learn 퀴즈 1 정답은 3이에요')
+    expect(answerLike).toContain(QUIZ_USAGE_TEXT)
+    // A question's number alone: how to answer it, not "the answer of 1 is 1번".
+    expect((await learn($, 'quiz 2번')).text).toBe('2번에 답하려면 번호 뒤에 답을 적어 주세요: /learn 퀴즈 2 내 답 · 정답 보기: /learn 퀴즈 정답 2')
+    expect((await learn($, 'quiz 9번')).text).toContain('1~3 사이로')
+    expect(w.models).toHaveLength(1)
+    // "새 문제: /learn 퀴즈 새로" read as "/learn 퀴즈 새 문제": a new quiz, nothing graded.
+    for (const words of ['새 문제', '새 퀴즈', '새 문제 받기', 'new quiz']) {
+      w.answer = THREE_QUESTIONS
+      const made = (await learn($, `quiz ${words}`)).text
+      expect(made).toContain('복습 퀴즈 · 3문제')
+    }
+    expect(w.models).toHaveLength(5)
+    expect(w.models.every(prompt => !prompt.includes('## 학습자의 답'))).toBe(true)
+    expect(store.get('activity')).toEqual({})
+    // The pane's own words for a and h: 정답 보기 · 정답 2 보기 · 힌트 보기.
+    expect((await learn($, 'quiz 정답 보기')).text).toContain('1번 정답\n\n답 하나')
+    expect((await learn($, 'quiz 정답 3 보기')).text).toContain('3번 정답\n\n답 셋')
+    expect((await learn($, 'quiz 힌트 보기')).text).toBe('남은 문제에는 힌트가 없습니다. 정답을 보려면 /learn 퀴즈 정답.')
+    expect(w.models).toHaveLength(5)
+  })
+
+  test('t under an older note asks about that note\'s code, not a later note\'s that met the concept again', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await turn($, () => $.tool.call({ tool: 'Write', tool_use_id: 'w1', file_path: '/proj/src/first.ts', content: 'for (const fruit of fruits) eat(fruit)\n' }), 't1', '첫 요청')
+    await finish(w)
+    await turn($, () => $.tool.call({ tool: 'Write', tool_use_id: 'w2', file_path: '/proj/src/second.ts', content: 'for (const car of cars) drive(car)\n' }), 't2', '둘째 요청')
+    await finish(w)
+    const ui = await pane($)
+    await ui.press({ key: 'prev' })
+    expect(await ui.find({ type: 'Text', text: /^노트 1\/2 · / })).toBeDefined()
+    w.answer = 'T1: 예측\nQ1: 문제 하나\nA1: 답 하나'
+    await ui.press({ key: 'note-quiz' })
+    await w.clock.settle()
+    const asked = w.models.at(-1)!
+    expect(asked).toContain('예측과 바꿔 보기만 낸다')
+    expect(asked).toContain('학습자가 만든 코드 (first.ts)')
+    expect(asked).toContain('eat(fruit)')
+    expect(asked).not.toContain('drive(car)')
+    const notesNow = (store.get('history') as Record<string, { notes: { id: string }[] }>)['/proj']!.notes
+    expect(store.get('quiz')).toMatchObject({ from: 'note', items: [{ noteId: notesNow[0]!.id }] })
+    // A review quiz still asks about the latest code that met it.
+    w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(w.models.at(-1)).toContain('학습자가 만든 코드 (second.ts)')
+    await ui.unmount()
+  })
+
+  test('a grade said politely (맞았어요 · 틀렸어요 2) is still a grade, as it was before only numbers could follow', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = THREE_QUESTIONS
+    await learn($, 'quiz')
+    const name = (i: number) => (store.get('quiz') as { items: { name: string }[] }).items[i]!.name
+    await learn($, 'quiz 정답')
+    expect((await learn($, 'quiz 맞았어요')).text).toBe(`맞힌 것으로 적었습니다: 1. ${name(0)}. 정답을 보고 맞혀 복습 간격은 그대로입니다.`)
+    await learn($, 'quiz 정답 2')
+    expect((await learn($, 'quiz 틀렸어요 2번')).text).toContain(`틀린 것으로 적었습니다: 2. ${name(1)}.`)
+    expect((await learn($, 'quiz 맞혔어요 3')).text).toContain('3번은 아직 정답을 보지 않았습니다')
+    expect(w.models).toHaveLength(1)
+    expect(store.get('quiz')).toMatchObject({ items: [{ result: 'right' }, { result: 'wrong' }, {}] })
   })
 })

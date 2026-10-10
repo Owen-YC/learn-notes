@@ -158,7 +158,7 @@ export type LearnQuizItem = {
    * absent on quizzes made before 1.6.0, or when the model named none.
    */
   kind?: 'predict' | 'why' | 'modify'
-  /** The note that taught its concept, whose code the question was made from (the latest one that did); absent when no note held it. */
+  /** The note that taught its concept, whose code the question was made from (a note quiz's own note, else the latest that did); absent when no note held it. */
   noteId?: string
 }
 
