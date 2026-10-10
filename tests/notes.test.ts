@@ -126,6 +126,7 @@ import {
   spreadPicks,
   recapMissed,
   reportMarkdown,
+  isAwayOrigin,
   type Hunk,
   type QuizPick,
 } from '../hooks/notes'
@@ -2214,6 +2215,23 @@ describe('1.6.0: the learning report and the recap\'s missed concepts', () => {
     expect(md).toContain('- 학습 노트의 모델 호출: 없습니다')
     expect(md).not.toContain('다시 볼 개념')
     expect(reportMarkdown({ range: recapRange('2026-10-01', now)!, activity: {}, index: {}, level: 'beginner', now }).split('\n')[0]).toBe('# 학습 보고 · 2026-10-01')
+  })
+
+  test('a missed concept marked known since (/learn 안다) is not one to look at again, in the report or the recap', () => {
+    const known = { ...index, 'c:closure': { ...index['c:closure']!, knownAt: now - 60_000 } }
+    const md = reportMarkdown({ range, activity, index: known, level: 'beginner', now })
+    expect(md).not.toContain('다시 볼 개념')
+    expect(md).toContain('- 졸업한 개념(아는 개념으로 옮김) 1개')
+    expect(recapMissed(known, range)).toEqual([])
+    expect(recapPrompt(range, [], known, {}, 'beginner')).not.toContain('퀴즈에서 틀린 개념')
+    // Still missed and not known: listed as before.
+    expect(recapMissed(index, range).map(one => one.name)).toEqual(['클로저'])
+  })
+
+  test('a command from Remote Control or a chat channel is read away from this session\'s screens', () => {
+    for (const kind of ['bridge', 'channel', 'slack-ping']) expect(isAwayOrigin({ kind })).toBe(true)
+    for (const kind of ['composer', 'plugin', 'sdk', 'scheduled-trigger', 'unclassified']) expect(isAwayOrigin({ kind })).toBe(false)
+    expect(isAwayOrigin(undefined)).toBe(false)
   })
 
   test('the recap prompt starts what is easy to confuse from the concepts a quiz in its range found missed', () => {

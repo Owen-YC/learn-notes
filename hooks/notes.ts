@@ -2211,6 +2211,14 @@ export function isRequestOrigin(origin: { kind: string; asUser?: boolean } | und
   return REQUEST_ORIGINS.has(origin.kind) || (origin.kind === 'plugin' && origin.asUser === true)
 }
 
+/** Origins whose person reads the reply on another device: a phone or web client through Remote Control, a chat channel, a Slack ping. */
+const AWAY_ORIGINS = new Set(['bridge', 'channel', 'slack-ping'])
+
+/** True when the person who sent a command reads its reply away from this session's screens, so a clipboard here is not theirs. */
+export function isAwayOrigin(origin: { kind: string } | undefined): boolean {
+  return origin !== undefined && AWAY_ORIGINS.has(origin.kind)
+}
+
 /** How many entered prompts are remembered for the turns they start. */
 export const SUBMITS_KEPT = 10
 
@@ -2385,12 +2393,13 @@ const RECAP_MISSED = 10
 
 /**
  * Concepts a quiz in the range was answered wrong on, still missed (a later
- * right answer clears the miss), the oldest miss first: what a recap's
- * 헷갈리기 쉬운 것 starts from, instead of the model's guess.
+ * right answer clears the miss) and not marked known since (/learn 안다), the
+ * oldest miss first: what a recap's 헷갈리기 쉬운 것 starts from, instead of
+ * the model's guess.
  */
 export function recapMissed(index: Readonly<Record<string, LearnConcept>>, range: Pick<RecapRange, 'from' | 'to'>): LearnConcept[] {
   return Object.values(index)
-    .filter(one => typeof one.missedAt === 'number' && one.missedAt >= range.from && one.missedAt < range.to)
+    .filter(one => typeof one.missedAt === 'number' && one.missedAt >= range.from && one.missedAt < range.to && !isKnown(one))
     .sort((a, b) => (a.missedAt ?? 0) - (b.missedAt ?? 0))
     .slice(0, RECAP_MISSED)
 }
@@ -2483,7 +2492,8 @@ export function reportMarkdown({ range, activity, index, level, now, usage = {} 
   const ranked = rankConcepts(index)
   const fresh = ranked.filter(one => isIn(one.firstAt))
   const again = ranked.filter(one => one.count > 1 && isIn(one.lastAt) && one.firstAt < range.from)
-  const missed = ranked.filter(isMissed).sort((a, b) => (a.missedAt ?? 0) - (b.missedAt ?? 0))
+  // Missed and not marked known since: one the learner says they know is no longer to look at again.
+  const missed = ranked.filter(one => isMissed(one) && !isKnown(one)).sort((a, b) => (a.missedAt ?? 0) - (b.missedAt ?? 0))
   const graduated = ranked.filter(one => typeof one.knownAt === 'number' && isIn(one.knownAt))
   // A name as plain text: on one line, no table bar, no backtick to open code with.
   const names = (list: readonly LearnConcept[], max: number) =>

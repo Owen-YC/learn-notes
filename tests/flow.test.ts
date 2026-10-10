@@ -2697,6 +2697,32 @@ test('a note the journal could not take is written with the next note that saves
   expect((w.files.get(JOURNAL) ?? '').match(/^## \d{4}-\d{2}-\d{2} /gm)).toHaveLength(3)
 })
 
+test('a note the journal refused, being written again when another note saves, goes in once: as its rewrite (1.6.0)', { options: { autoNote: false } }, async ($, on) => {
+  const w = world(on)
+  await start($)
+  w.writeFails = true
+  await turn($, () => $.tool.call(EDIT_A), 't1', '첫 요청')
+  await finish(w)
+  expect(w.journal()).toHaveLength(0)
+  w.writeFails = false
+  // w on it: its note is being written while the next note saves.
+  w.model = 'hold'
+  const ui = await pane($)
+  await ui.press({ key: 'write' })
+  await w.clock.advance(1)
+  expect(w.models).toHaveLength(1)
+  await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2', '둘째 요청')
+  await finish(w)
+  expect(w.files.get(JOURNAL) ?? '').toContain('**요청**: 둘째 요청')
+  expect(w.files.get(JOURNAL) ?? '').not.toContain('**요청**: 첫 요청')
+  w.release()
+  await w.clock.settle()
+  await ui.unmount()
+  const text = w.files.get(JOURNAL) ?? ''
+  expect(text.split('**요청**: 첫 요청')).toHaveLength(2)
+  expect(text.match(/^## \d{4}-\d{2}-\d{2} /gm)).toHaveLength(2)
+})
+
 const BEFORE_AFTER_NOTE = [
   '### 한 줄 요약',
   'let을 const로 바꿔 값이 다시 바뀌지 않게 했습니다.',
@@ -4150,6 +4176,20 @@ describe('1.6.0: fewer commands, one record, a report with no code', () => {
     await start($)
     expect((await learn($, '보고서')).text).toContain('# 학습 보고 · ')
     expect(w.copied).toEqual([])
+  })
+
+  test('a person away from this screen (Remote Control, a chat channel) gets the report as the reply, not a copy on the terminal', async ($, on) => {
+    const w = world(on)
+    await start($)
+    for (const origin of [{ kind: 'bridge' as const }, { kind: 'channel' as const, server: 'slack' }, { kind: 'slack-ping' as const }]) {
+      const reply = (await $.command.run({ command: 'learn', args: '보고서', origin, presentation: { isFullscreen: true, columns: 160 } })).text ?? ''
+      expect(reply.split('\n')[0]).toStartWith('학습 보고서입니다 · 이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다.')
+      expect(reply).toContain('\n\n# 학습 보고 · ')
+    }
+    expect(w.copied).toEqual([])
+    // Typed at this session's own prompt, it is copied as before.
+    expect((await learn($, '보고서')).text).toStartWith('학습 보고서를 클립보드에 복사했습니다')
+    expect(w.copied).toHaveLength(1)
   })
 
   test('with autoSave off the report is copied but no file is written', { options: { autoSave: false } }, async ($, on) => {

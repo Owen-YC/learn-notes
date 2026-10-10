@@ -66,6 +66,7 @@ import {
   forHistory,
   isGitMove,
   isRequestOrigin,
+  isAwayOrigin,
   failureText,
   focus,
   isUnder,
@@ -2422,7 +2423,7 @@ export const register: Register = (on, options) => {
     }
     // One record since 1.6.0: the run of days and the concepts learned together (stats · concepts · 기록 · 개념 · 통계).
     if (arg === 'stats' || arg === 'concepts') return { text: await recordText($, cfg) }
-    if (arg === 'report') return { text: await reportCommand($, cfg, rest) }
+    if (arg === 'report') return { text: await reportCommand($, cfg, rest, isAwayOrigin(e.origin)) }
     if (arg === 'ask') {
       if (rest === '') return { text: ASK_USAGE }
       const wanted = await read($, selectedId)
@@ -3222,10 +3223,12 @@ const REPORT_USAGE = '쓰는 법: /learn 보고서 (최근 7일 · 이번주 · 
  * /learn 보고서: the learning report with no code in it (reportMarkdown) for
  * the days asked, the last seven by default, with no model call. It goes on
  * the clipboard and, with autoSave on, into a file beside the journals; the
- * reply only says so. Where nothing could be copied, or in a cloud session
- * (whose clipboard is a computer nobody sees), the reply is the report.
+ * reply only says so. Where nothing could be copied, in a cloud session
+ * (whose clipboard is a computer nobody sees) or for a person away from this
+ * session's screens (`isAway`: a phone through Remote Control, a chat channel;
+ * the clipboard would be the terminal's, not theirs), the reply is the report.
  */
-async function reportCommand($: EngineInterface, cfg: Config, rest: string): Promise<string> {
+async function reportCommand($: EngineInterface, cfg: Config, rest: string, isAway: boolean): Promise<string> {
   const now = await $.clock.now()
   const range = recapRange(rest === '' ? '최근 7일' : rest, now)
   if (!range) return REPORT_USAGE
@@ -3250,7 +3253,7 @@ async function reportCommand($: EngineInterface, cfg: Config, rest: string): Pro
   const home = await homeDir($)
   const file = path === undefined ? undefined : `파일: ${home !== undefined && isUnder(path, home) ? `~${path.slice(home.replace(/[\\/]+$/, '').length)}` : path}`
   let isCopied = false
-  if (!(await isCloudSession($))) {
+  if (!isAway && !(await isCloudSession($))) {
     try {
       isCopied = (await $.ui.copy({ text })).isCopied
     } catch (error) {
