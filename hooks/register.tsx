@@ -51,6 +51,8 @@ import {
   closeConceptBold,
   conceptsOf,
   redactText,
+  screenNote,
+  isStoreCut,
   revealNext,
   withheldOf,
   withheldText,
@@ -301,7 +303,10 @@ let personScrolls = 0
 let shownReminder: string | undefined | null = null
 /** Quiz questions being graded now (quiz time and number), so a second press while the first is written does nothing. */
 const grading = new Set<string>()
-/** Whether the permission rules forbid reading a path, asked once a turn (see isReadDenied); cleared when the turn ends. */
+/**
+ * Whether the permission rules forbid reading a path, asked once a turn (see isReadDenied); cleared when the
+ * next turn starts, so the note a turn's end writes and saves (screened) asks nothing again.
+ */
 const readDenied = new Map<string, boolean>()
 /** Notes a turn's end set to write by themselves whose model call is not in the usage record yet: they count toward the day's limit meanwhile. */
 const autoPending = new Set<string>()
@@ -431,7 +436,7 @@ async function saveNow($: EngineInterface, cfg: Config, note: LearnNote, isRewri
   try {
     // Into the journal of the note's own project, even after a /cd.
     const root = note.root || (await $.session.root())
-    const path = await appendJournal($, cfg, root, note.at, journalSection(note, isRewrite))
+    const path = await appendJournal($, cfg, root, note.at, journalSection(await screened($, cfg, note), isRewrite, isStoreCut(note)))
     await setNote($, note.id, { savedAs: note.status, isUnsaved: false })
     // The folder takes writes again: the notes it refused before go in after this one.
     void flushUnsaved($, cfg, note.id)
@@ -466,8 +471,13 @@ async function flushUnsaved($: EngineInterface, cfg: Config, savedId: string): P
     void enqueue('saving', async () => {
       try {
         // As the note is when its turn comes: a rewrite meanwhile is what goes in.
-        const note = (await read($, notes)).find(one => one.id === id)
-        if (!note || note.isUnsaved !== true || !isFree(note)) return
+        const pane = (await read($, notes)).find(one => one.id === id)
+        if (!pane || pane.isUnsaved !== true || !isFree(pane)) return
+        // Another session in this project may have written it since (its try came first): its newer copy in the store says so.
+        const stored = (await storedNotes($, pane.root || (await $.session.root())).catch(() => [])).find(one => one.id === id)
+        const note = stored && stored.updatedAt > pane.updatedAt ? { ...stored, isPast: pane.isPast } : pane
+        if (note !== pane) await update($, notes, list => list.map(one => (one.id === id ? note : one)))
+        if (note.isUnsaved !== true || !isFree(note)) return
         // Stored as saved, so the next session does not write it again; not awaited: a store write may wait on this lane.
         if (await saveNow($, cfg, note, note.savedAs !== null)) void persist($)
       } finally {
@@ -1280,22 +1290,38 @@ async function askModel(
 /**
  * Each concept with the note it is asked from, while a note still holds it: that note's id, and the learner's
  * code from it. That note is `from` when it taught the concept (a note's own quiz asks about the code of the
- * note it was asked under), else the latest that did.
+ * note it was asked under), else the latest that did. Its code is screened first (a note kept before 1.6.0
+ * may hold a .env), so a file left out is never quoted.
  */
-async function withCode($: EngineInterface, picks: readonly RankedConcept[], map: Readonly<Record<string, string>>, from?: string): Promise<QuizPick[]> {
+async function withCode(
+  $: EngineInterface,
+  cfg: Config,
+  picks: readonly RankedConcept[],
+  map: Readonly<Record<string, string>>,
+  from?: string,
+): Promise<QuizPick[]> {
   const written = (await allNotes($)).filter(note => note.status === 'ready').sort((a, b) => b.at - a.at)
-  return picks.map(one => {
+  const found: QuizPick[] = []
+  for (const one of picks) {
     const teaches = (each: LearnNote) => each.concepts.some(key => resolveKey(map, key) === one.key)
     const note = written.find(each => each.id === from && teaches(each)) ?? written.find(teaches)
-    if (!note) return one
+    if (!note) {
+      found.push(one)
+      continue
+    }
     // The files the concept's explanation quotes first.
-    const changes = [...note.changes].sort((a, b) => Number(one.files.includes(b.file)) - Number(one.files.includes(a.file)))
+    const changes = [...(await screened($, cfg, note)).changes].sort((a, b) => Number(one.files.includes(b.file)) - Number(one.files.includes(a.file)))
+    let code: QuizPick['code']
     for (const change of changes) {
       const text = codeFor(change, one.blurb)
-      if (text) return { ...one, noteId: note.id, code: { file: baseName(change.file), text } }
+      if (text) {
+        code = { file: baseName(change.file), text }
+        break
+      }
     }
-    return { ...one, noteId: note.id }
-  })
+    found.push({ ...one, noteId: note.id, ...(code ? { code } : {}) })
+  }
+  return found
 }
 
 /** Concepts a review quiz looks through: twice the questions it asks, so it can take them from different notes. */
@@ -1331,7 +1357,7 @@ async function makeQuiz(
   }
   // A review quiz goes over more than one note where it can (three concepts from one note make one lesson
   // again), the concepts due before any other.
-  const found = await withCode($, chosen, map, only?.id)
+  const found = await withCode($, cfg, chosen, map, only?.id)
   const picks = only ? found : spreadPicks(found, 3, one => isDue(one, now))
   const asked = await askModel($, cfg, { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level, only ? 'note' : 'review'), maxTokens: 1400 })
   if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
@@ -1582,14 +1608,16 @@ async function askNote(
   const masked = redactText(question).text
   const kept = label === question ? masked : redactText(label).text
   const rules = await teamOf($, note.root)
-  const asked = await askModel($, cfg, { system: ASK_SYSTEM, prompt: askPrompt(note, masked, level, rules), maxTokens: 900 })
+  // A note kept before 1.6.0 may hold a .env diff or a key: neither goes to the model or the journal.
+  const shown = await screened($, cfg, note)
+  const asked = await askModel($, cfg, { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules), maxTokens: 900 })
   if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
   const answer = cut(asked.text, 4000)
   const now = await $.clock.now()
   const latest = (await read($, notes)).find(one => one.id === id) ?? note
   await setNote($, id, { asks: [...(latest.asks ?? []), { question: cut(kept, 1000), answer, at: now }].slice(-ASKS_KEPT) })
   await persist($)
-  const path = cfg.isAutoSave ? await saveAsk($, cfg, note, kept, answer, now) : undefined
+  const path = cfg.isAutoSave ? await saveAsk($, cfg, shown, kept, answer, now) : undefined
   return { answer, note, path, at: now }
 }
 
@@ -1729,7 +1757,8 @@ async function writeNote(
       cfg,
       {
         system: SYSTEM,
-        prompt: notePrompt(note, cfg.level, knownNames(await read($, concepts)), rules),
+        // A note kept before 1.6.0, written again, was never screened.
+        prompt: notePrompt(await screened($, cfg, note), cfg.level, knownNames(await read($, concepts)), rules),
         maxTokens: 1500,
       },
       isAuto ? 'auto' : 'manual',
@@ -1964,6 +1993,20 @@ async function collect($: EngineInterface, cfg: Config, change: LearnChange): Pr
     const isNew = dropped !== undefined && !base.dropped.includes(dropped)
     return { ...base, changes, dropped: isNew ? [...base.dropped, dropped] : base.dropped }
   })
+}
+
+/**
+ * `note` as it may go to a model or into the journal (see screenNote): the
+ * files collect leaves out now (excludePaths, the note's project's team file,
+ * the permission rules) named instead of shown, the rest's secrets masked. A
+ * note kept before 1.6.0, or by an older build, was never screened; the store
+ * keeps it as it is.
+ */
+async function screened<T extends LearnNote>($: EngineInterface, cfg: Config, note: T): Promise<T> {
+  const rules = await teamOf($, note.root)
+  const denied = new Set<string>()
+  for (const change of note.changes) if (await isReadDenied($, change.path)) denied.add(change.path)
+  return screenNote(note, [...cfg.excludePaths, ...(rules?.exclude ?? [])], path => denied.has(path))
 }
 
 async function countUnlisted($: EngineInterface, count: number): Promise<void> {
@@ -2346,6 +2389,8 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     const seen = { list: recentSubmits, lastRequest: lastRequestText }
+    // A file's read permission is asked again this turn: the rules may have changed since the last.
+    readDenied.clear()
     await followRoot($)
     // The team file (TEAM_FILE) of the project the turn works in, so its `## 빼기` holds for every edit; read again only if it changed.
     await loadTeam($)
@@ -2417,8 +2462,6 @@ export const register: Register = (on, options) => {
       return null
     })
     const turn = box.turn
-    // A file's read permission is asked again next turn: the rules may change in between.
-    readDenied.clear()
     // A turn that changed only files left out (a .env, a lock file) makes no note.
     if (turn && turn.changes.length > 0) {
       const at = await $.clock.now()
@@ -2471,6 +2514,14 @@ export const register: Register = (on, options) => {
     // Concepts fall due as time passes: each turn's end looks again.
     await remind($, cfg)
     return next(e)
+  })
+
+  // Every reply goes into the conversation the model reads: masked as the record tool's answers are (see toolText),
+  // since a note, a concept or a quiz kept before 1.6.0 was never masked. Registered first, so it holds the reply
+  // of the hook below; masking twice changes nothing.
+  on('command.run', { command: 'learn' }, async ($, e, next) => {
+    const out = await next(e)
+    return out.text === undefined ? out : { ...out, text: redactText(out.text).text }
   })
 
   on('command.run', { command: 'learn' }, async ($, e) => {
@@ -3360,9 +3411,10 @@ const RECORD_CONCEPTS = 20
  * days, the month's quiz answers, the concepts due (the missed ones said so),
  * the week's notes day by day on one line, then the concepts learned but the
  * known ones (the most met first), those folded into a line, and what the
- * plugin's model calls came to.
+ * plugin's model calls came to. `isForTool`: for the record's tool, the
+ * concepts without what they are (see conceptForTool).
  */
-async function recordText($: EngineInterface, cfg: Config): Promise<string> {
+async function recordText($: EngineInterface, cfg: Config, isForTool = false): Promise<string> {
   const now = await $.clock.now()
   const record = await storedActivity($)
   const stats = statsOf(record, now)
@@ -3386,7 +3438,9 @@ async function recordText($: EngineInterface, cfg: Config): Promise<string> {
       ? ['아직 모인 개념이 없습니다. 노트가 쓰이면 "배울 개념"이 여기에 쌓입니다.']
       : [
           `지금까지 배운 개념 ${total}개 · 많이 만난 순`,
-          ...ranked.slice(0, RECORD_CONCEPTS).map(one => `- **${one.name}** ×${one.count} · 최근 ${stamp(one.lastAt).day} · ${reviewText(one, now)}: ${one.blurb}`),
+          ...ranked
+            .slice(0, RECORD_CONCEPTS)
+            .map(one => `- **${one.name}** ×${one.count} · 최근 ${stamp(one.lastAt).day} · ${reviewText(one, now)}${isForTool ? '' : `: ${one.blurb}`}`),
           ...(ranked.length > RECORD_CONCEPTS ? ['', `${moreConceptsText(ranked.length - RECORD_CONCEPTS, cfg.isAutoSave)}.`] : []),
           ...(known ? ['', `${known} · 되돌리기: /learn 모른다 이름`] : []),
         ]
@@ -3441,10 +3495,15 @@ const TOOL_FULL_NOTES = 2
 /** True once this load registered the tool: the help says a question in the chat works only then. */
 let hasTool = false
 
-/** A concept as the tool lists it: its name, how often met, where its review stands, and what it is. */
+/**
+ * A concept as the tool lists it: its name, how often met and where its review
+ * stands. What it is stays out: a note's model wrote that from a repository's
+ * team file too, and the concepts of every project go to the main Claude here
+ * with no dialog; this project's notes say it in full (search, recent, note).
+ */
 function conceptForTool(one: LearnConcept, now: number): string {
   const state = isKnown(one) ? '아는 개념' : reviewText(one, now)
-  return `- **${one.name}** ×${one.count} · ${state}${one.blurb === '' ? '' : `: ${one.blurb}`}`
+  return `- **${one.name}** ×${one.count} · ${state}`
 }
 
 /** A note as the tool gives it in full: when, the request, the note, then the questions asked under it. */
@@ -3487,7 +3546,7 @@ async function toolText($: EngineInterface, cfg: Config, action: string, query: 
       ...full(found),
     ]
   } else if (action === 'concepts') {
-    lines = [await recordText($, cfg)]
+    lines = [await recordText($, cfg, true)]
   } else if (action === 'due') {
     const due = dueConcepts(index, now)
     const today = todayReview(index, await storedActivity($), now)
