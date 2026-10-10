@@ -124,6 +124,8 @@ import {
   stamp,
   todayReview,
   CONCEPTS_KEPT,
+  KNOWN_IN_PROMPT,
+  storedConcepts,
   KIND_LABEL,
   spreadPicks,
   recapMissed,
@@ -2464,7 +2466,8 @@ describe('1.6.0: the learning report and the recap\'s missed concepts', () => {
     expect(md).toContain('- 퀴즈: 아직 채점한 문제가 없습니다')
     expect(md).toContain('- 새로 배운 개념 1개: useEffect 훅')
     expect(md).toContain('- 학습한 날 1일 · 지금 연속 1일째')
-    expect(md).toContain('- 학습 노트의 모델 호출: 없습니다')
+    // A note with no call counted on its day: before the usage record began (1.6.0).
+    expect(md).toContain('- 학습 노트의 모델 호출: 이 기간은 기록이 없습니다(1.6.0부터 셉니다)')
     expect(md).not.toContain('다시 볼 개념')
     expect(reportMarkdown({ range: recapRange('2026-10-01', now)!, activity: {}, index: {}, level: 'beginner', now }).split('\n')[0]).toBe('# 학습 보고 · 2026-10-01')
   })
@@ -2532,4 +2535,59 @@ test('a quiz shows code of two lines or more as a code block, with its lines kep
   ] as never)
   expect(items[0]!.question).toContain('for (const x of a) console.log(x)')
   expect(items[0]!.question).toContain('```js')
+})
+
+describe('1.6.0 after 1.5: the store cap, Anki fronts and days with no call record', () => {
+  const DAY = 86_400_000
+  const one: LearnConcept = { name: 'A', count: 1, firstAt: 0, lastAt: 0, blurb: '', files: [] }
+
+  test('past the cap, a known concept no note prompt names goes before one still being learned', () => {
+    // Marked known long ago (/learn 안다 takes any number), then a few weeks of notes, one of them missed.
+    const index: Record<string, LearnConcept> = {}
+    for (let i = 0; i < CONCEPTS_KEPT - 20; i += 1) index[`c:known${i}`] = { ...one, name: `아는 ${i}`, firstAt: i, lastAt: i, knownAt: 50_000 }
+    for (let i = 0; i < 20; i += 1) index[`c:learn${i}`] = { ...one, name: `배우는 ${i}`, firstAt: 10_000 + i, lastAt: 10_000 + i, ...(i === 0 ? { missedAt: 60_000, step: 0 } : {}) }
+    const taught = ['x', 'y', 'z'].map(key => ({ key: `c:${key}`, name: key, blurb: '' }))
+    const next = countConcepts(index, taught, [], 70_000, [])
+    expect(Object.keys(next)).toHaveLength(CONCEPTS_KEPT)
+    // Every one still being learned stays, the missed one first of all.
+    for (let i = 0; i < 20; i += 1) expect(next[`c:learn${i}`]).toBeDefined()
+    // The known ones the next note's prompt names stay; the least recent of the others go.
+    expect(knownNames(next).known).toHaveLength(KNOWN_IN_PROMPT)
+    expect(next['c:known0']).toBeUndefined()
+    expect(next[`c:known${CONCEPTS_KEPT - 21}`]).toBeDefined()
+  })
+
+  test('a name read short keeps the name it was stored with for its Anki card, and a rename drops it', () => {
+    const long = '기본값 매개변수(넘기지 않으면 자동으로 채워지는 값)'
+    const index = cleanConcepts({ x: { ...one, name: long, blurb: '값을 안 주면 0' } })
+    expect(Object.values(index).map(c => c.name)).toEqual(['기본값 매개변수'])
+    expect(ankiText([], index).text).toContain(`<b>${long}</b><br>무엇이고, 어디에 썼나요?`)
+    // Met again in a note: still the same card.
+    const met = countConcepts(index, [{ key: conceptKey('기본값 매개변수'), name: '기본값 매개변수', blurb: '새 설명' }], [], DAY, [])
+    expect(ankiText([], met).text).toContain(`<b>${long}</b>`)
+    // Stored (the index, a merge record) by the name it was stored with, and read back the same.
+    expect(Object.values(storedConcepts(met)).map(c => [c.name, c.fullName])).toEqual([[long, undefined]])
+    expect(cleanConcepts(storedConcepts(met))).toEqual(met)
+    // Renamed by the learner (/learn merge to a new name): the card is the new name's.
+    const renamed = mergeConcepts(met, conceptKey(long), 'c:기본인자', '기본 인자')
+    expect(ankiText([], renamed).text).toContain('<b>기본 인자</b><br>')
+    expect(ankiText([], renamed).text).not.toContain(long)
+  })
+
+  test('days with notes and no call record say so: the usage record began with 1.6.0', () => {
+    const now = new Date(2026, 9, 9, 15, 0).getTime()
+    const range = recapRange('최근 7일', now)!
+    const old = { [stamp(now - 2 * DAY).day]: { notes: 4, right: 0, wrong: 0 }, [stamp(now - DAY).day]: { notes: 1, right: 0, wrong: 0 } }
+    const usage = { [stamp(now).day]: { calls: 2, auto: 1, input: 900, output: 50 } }
+    const activity = { ...old, [stamp(now).day]: { notes: 1, right: 0, wrong: 0 } }
+    expect(reportMarkdown({ range, activity: old, index: {}, level: 'beginner', now })).toContain('- 학습 노트의 모델 호출: 이 기간은 기록이 없습니다(1.6.0부터 셉니다)')
+    expect(reportMarkdown({ range, activity, index: {}, level: 'beginner', now, usage })).toContain(
+      '- 학습 노트의 모델 호출 2번 (자동 노트 1) · 입력 900 · 출력 50 토큰 · 노트를 쓴 2일은 호출 기록이 없습니다(1.6.0부터 셉니다)',
+    )
+    // A day with no note had no call to count: nothing to say.
+    expect(reportMarkdown({ range, activity: {}, index: {}, level: 'beginner', now })).toContain('- 학습 노트의 모델 호출: 없습니다')
+    expect(usageLine({}, now, old)).toBe('학습 노트의 모델 호출: 최근 7일은 기록이 없습니다(1.6.0부터 셉니다)')
+    expect(usageLine(usage, now, activity)).toBe('학습 노트의 모델 호출: 오늘 2번 (자동 노트 1) · 최근 7일 2번 · 입력 900 · 출력 50 토큰 · 노트를 쓴 2일은 호출 기록이 없습니다(1.6.0부터 셉니다)')
+    expect(usageLine({}, now, {})).toBe('학습 노트의 모델 호출: 최근 7일 동안 없습니다')
+  })
 })

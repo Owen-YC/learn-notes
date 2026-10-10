@@ -46,6 +46,12 @@ import {
   type ChangeItem,
   cleanConcepts,
   conceptAt,
+  knownMarks,
+  recallMarks,
+  recallSteps,
+  storedConcept,
+  storedConcepts,
+  withKnownMarks,
   conceptKey,
   conceptsMarkdown,
   closeConceptBold,
@@ -184,6 +190,13 @@ const USAGE_KEY = 'usage'
 const LIMIT_TOAST_KEY = 'limitToast'
 /** Set once a new install's first session said hello (welcome), or one found notes or concepts there already. */
 const WELCOMED_KEY = 'welcomed'
+/** The concepts' known marks by key (knownMarks), written with the index: a 1.5 session still open writes the index without them. */
+const KNOWN_KEY = 'known'
+/**
+ * When a session of 1.6.0 or later first started on this store: a quiz step
+ * given before it is 1.5's, begun at the notes that met the concept (recallMarks).
+ */
+const STEPS_FROM_KEY = 'stepsFrom'
 const WELCOME = 'learn-notes가 켜졌습니다 · 파일을 고치는 요청을 하면 노트가 생깁니다 · /learn으로 패널'
 
 type MergeRecord = { concept: LearnConcept; into: string; both: number }
@@ -650,6 +663,47 @@ async function currentAliases($: EngineInterface): Promise<Record<string, string
 }
 
 /**
+ * Keeps when this store first had a session of 1.6.0 or later
+ * (STEPS_FROM_KEY), at the first one's start; never fails the start.
+ */
+async function keepStepsFrom($: EngineInterface): Promise<void> {
+  try {
+    if (typeof (await $.store.get(STEPS_FROM_KEY)) !== 'number') await $.store.set(STEPS_FROM_KEY, await $.clock.now())
+  } catch (error) {
+    $.ui.log(`learn-notes: 1.6.0을 처음 쓴 때를 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+  }
+}
+
+/** STEPS_FROM_KEY as kept; never kept yet (a store that took no write), every step so far is 1.5's. */
+async function stepsFrom($: EngineInterface): Promise<number> {
+  const raw = await $.store.get(STEPS_FROM_KEY)
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : Number.POSITIVE_INFINITY
+}
+
+/**
+ * The concept index read back from what the store holds under CONCEPTS_KEY
+ * (`raw`), for 1.6.0: a known mark a 1.5 session dropped put back
+ * (KNOWN_KEY), a step a 1.5 quiz gave read as 1 at most (STEPS_FROM_KEY).
+ */
+async function indexOf($: EngineInterface, raw: unknown, map: Readonly<Record<string, string>>): Promise<Record<string, LearnConcept>> {
+  return recallSteps(withKnownMarks(cleanConcepts(raw, map), await $.store.get(KNOWN_KEY), map), await stepsFrom($))
+}
+
+/** The concept index as the store has it now (indexOf). */
+async function storedIndex($: EngineInterface, map: Readonly<Record<string, string>>): Promise<Record<string, LearnConcept>> {
+  return indexOf($, await $.store.get(CONCEPTS_KEY), map)
+}
+
+/**
+ * Writes the concept index: its known marks first, apart (KNOWN_KEY), then
+ * the index with each name as it was stored (storedConcepts).
+ */
+async function storeIndex($: EngineInterface, index: Readonly<Record<string, LearnConcept>>): Promise<void> {
+  await $.store.set(KNOWN_KEY, knownMarks(index))
+  await $.store.set(CONCEPTS_KEY, storedConcepts(index))
+}
+
+/**
  * One toast for a brand-new install: the first interactive session with no
  * notes and no concepts kept says what makes a note. Marked first, so a store
  * that takes no writes never shows it again and again; one with notes already
@@ -676,7 +730,8 @@ async function loadHistory($: EngineInterface): Promise<void> {
     if (Object.keys(merged).length > 0 && Object.keys(await read($, aliases)).length === 0) {
       await update($, aliases, () => merged)
     }
-    const index = cleanConcepts(await $.store.get(CONCEPTS_KEY), merged)
+    await keepStepsFrom($)
+    const index = await storedIndex($, merged)
     if (Object.keys(index).length > 0 && Object.keys(await read($, concepts)).length === 0) {
       await update($, concepts, () => index)
     }
@@ -728,13 +783,13 @@ async function learnConceptsNow($: EngineInterface, cfg: Config, note: LearnNote
   try {
     const raw = await $.store.get(CONCEPTS_KEY)
     const index = countConcepts(
-      isRecord(raw) ? cleanConcepts(raw, map) : await read($, concepts),
+      isRecord(raw) ? await indexOf($, raw, map) : await read($, concepts),
       taught.map(({ line, ...one }) => ({ ...one, files: filesFor(line, note.changes) })),
       untaught,
       note.at,
       note.changes.map(change => change.file),
     )
-    await $.store.set(CONCEPTS_KEY, index)
+    await storeIndex($, index)
     await update($, concepts, () => index)
     await remind($, cfg)
     if (cfg.isAutoSave) await saveConcepts($, cfg, index)
@@ -787,7 +842,7 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
   return enqueue('storing', async (): Promise<MergeResult> => {
     try {
       const map = cleanAliases(await $.store.get(ALIASES_KEY))
-      const index = cleanConcepts(await $.store.get(CONCEPTS_KEY), map)
+      const index = await storedIndex($, map)
       const from = resolveKey(map, conceptKey(fromName))
       const named = conceptKey(intoName)
       // 'merge X = Y' where Y was merged into X before: take Y back out under its own name.
@@ -807,7 +862,8 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
       let isSplit = false
       if (record && record.into === from) {
         // Two concepts merged before: each gets its own back; what the merged one met since stays with it.
-        folded = { ...index, [named]: record.concept }
+        // A record a 1.5 merge kept holds its step as 1.5 counted it: read as the index is (recallMarks).
+        folded = { ...index, [named]: recallMarks(record.concept, await stepsFrom($)) }
         folded[from] = { ...gone, count: Math.max(1, gone.count - (record.concept.count - record.both)) }
         isSplit = true
       } else {
@@ -819,12 +875,12 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
               const keys = note.concepts.map(key => resolveKey(map, key))
               return keys.includes(from) && keys.includes(resolveKey(map, into))
             }).length
-        if (!isUndo && conceptAt(index, into)) nextMerges[from] = { concept: gone, into, both }
+        if (!isUndo && conceptAt(index, into)) nextMerges[from] = { concept: storedConcept(gone), into, both }
         folded = mergeConcepts(index, from, into, intoName)
         const kept = folded[into]!
         folded[into] = { ...kept, count: Math.max(1, kept.count - both) }
       }
-      await $.store.set(CONCEPTS_KEY, folded)
+      await storeIndex($, folded)
       await $.store.set(ALIASES_KEY, nextMap)
       await $.store.set(MERGES_KEY, nextMerges)
       await update($, concepts, () => folded)
@@ -852,7 +908,7 @@ function markKnownStored($: EngineInterface, cfg: Config, names: readonly string
   return enqueue('storing', async (): Promise<KnownResult> => {
     try {
       const map = cleanAliases(await $.store.get(ALIASES_KEY))
-      const index = cleanConcepts(await $.store.get(CONCEPTS_KEY), map)
+      const index = await storedIndex($, map)
       const at = await $.clock.now()
       const next: Record<string, LearnConcept> = { ...index }
       const result = { done: [] as string[], already: [] as string[], missing: [] as string[] }
@@ -877,7 +933,7 @@ function markKnownStored($: EngineInterface, cfg: Config, names: readonly string
         result.done.push(one.name)
       }
       if (result.done.length > 0) {
-        await $.store.set(CONCEPTS_KEY, next)
+        await storeIndex($, next)
         await update($, concepts, () => next)
         await remind($, cfg)
         if (cfg.isAutoSave) await saveConcepts($, cfg, next)
@@ -1065,14 +1121,14 @@ function markConcepts(
   return enqueue('storing', async () => {
     try {
       const map = cleanAliases(await $.store.get(ALIASES_KEY))
-      const prior = cleanConcepts(await $.store.get(CONCEPTS_KEY), map)
+      const prior = await storedIndex($, map)
       const resolved = keys.map(key => resolveKey(map, key))
       const before = resolved.map(key => {
         const one = conceptAt(prior, key)
         return one ? marksOf(one) : undefined
       })
       const index = mark(prior, resolved, at)
-      await $.store.set(CONCEPTS_KEY, index)
+      await storeIndex($, index)
       await update($, concepts, () => index)
       await remind($, cfg)
       if (cfg.isAutoSave) await saveConcepts($, cfg, index)
@@ -1493,7 +1549,9 @@ async function regradeQuiz($: EngineInterface, cfg: Config, current: Quiz, i: nu
     const at = item.gradedAt ?? (await $.clock.now())
     // The learner's own word: fully right or fully wrong, never "partly"; right after help keeps the step.
     const right = isHelpedGrade(item) ? markHelped : markReviewed
-    const mark: Mark = (index, keys) => regrade(index, keys[0]!, item.before, at, result === 'right' ? right : markWrong)
+    // Marks a 1.5 grade kept are read as the index is: its step begun at the notes met is 1 at most.
+    const before = item.before && recallMarks(item.before, await stepsFrom($))
+    const mark: Mark = (index, keys) => regrade(index, keys[0]!, before, at, result === 'right' ? right : markWrong)
     if (!(await markConcepts($, cfg, mark, [item.key], at))) return 'failed'
     const latest = (await lastQuiz($)) ?? fresh
     if (latest.at === current.at) {
@@ -3454,7 +3512,7 @@ async function recordText($: EngineInterface, cfg: Config, isForTool = false): P
     '',
     ...learned,
     '',
-    usageLine(cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)), now),
+    usageLine(cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)), now, record),
   ].join('\n')
 }
 
@@ -3606,7 +3664,7 @@ async function reportCommand($: EngineInterface, cfg: Config, rest: string, isAw
   const text = reportMarkdown({
     range,
     activity: await storedActivity($),
-    index: cleanConcepts(await $.store.get(CONCEPTS_KEY), await currentAliases($)),
+    index: await storedIndex($, await currentAliases($)),
     level: cfg.level,
     now,
     usage: cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)),

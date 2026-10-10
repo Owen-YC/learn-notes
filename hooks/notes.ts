@@ -2014,6 +2014,9 @@ export function cleanConcepts(raw: unknown, aliases: Readonly<Record<string, str
       ...(typeof one.step === 'number' && Number.isFinite(one.step) ? { step: Math.max(0, Math.min(REVIEW_DAYS.length - 1, Math.floor(one.step))) } : {}),
     })
     const knownAt = typeof one.knownAt === 'number' && Number.isFinite(one.knownAt) ? one.knownAt : undefined
+    // Shown short, kept whole for the store and the Anki card it was exported as (storedConcept).
+    const name = conceptName(one.name)
+    const fullName = name !== one.name ? one.name : undefined
     index[key] = prior
       ? {
           ...withoutKnown(unmarked(prior)),
@@ -2024,7 +2027,8 @@ export function cleanConcepts(raw: unknown, aliases: Readonly<Record<string, str
           ...knownOf(prior.knownAt, knownAt),
         }
       : {
-          name: conceptName(one.name),
+          name,
+          ...(fullName !== undefined ? { fullName } : {}),
           count: Math.floor(one.count),
           firstAt,
           lastAt,
@@ -2037,13 +2041,69 @@ export function cleanConcepts(raw: unknown, aliases: Readonly<Record<string, str
   return index
 }
 
+/** A concept as the store keeps it: its name as it was stored (fullName), so a 1.5 session and an Anki card read the same name. */
+export function storedConcept(one: LearnConcept): LearnConcept {
+  if (one.fullName === undefined) return one
+  const stored = { ...one, name: one.fullName }
+  delete stored.fullName
+  return stored
+}
+
+/** The index as the store keeps it (storedConcept). */
+export function storedConcepts(index: Readonly<Record<string, LearnConcept>>): Record<string, LearnConcept> {
+  return Object.fromEntries(Object.entries(index).map(([key, one]) => [key, storedConcept(one)]))
+}
+
+/** The known marks of an index by key, kept under a store key of their own: a 1.5 session writing the index drops the field. */
+export function knownMarks(index: Readonly<Record<string, LearnConcept>>): Record<string, number> {
+  return Object.fromEntries(Object.entries(index).flatMap(([key, one]) => (one.knownAt !== undefined ? [[key, one.knownAt]] : [])))
+}
+
+/**
+ * The index with the known marks kept apart (knownMarks) put back on the
+ * concepts that lost theirs: a 1.5 session still open wrote the index without
+ * them. Never on one missed since, and never one 1.6.0 took off: the marks
+ * kept apart are written with the index each time.
+ */
+export function withKnownMarks(
+  index: Readonly<Record<string, LearnConcept>>,
+  raw: unknown,
+  aliases: Readonly<Record<string, string>> = {},
+): Record<string, LearnConcept> {
+  const next: Record<string, LearnConcept> = { ...index }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return next
+  for (const [stored, at] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof at !== 'number' || !Number.isFinite(at)) continue
+    const key = resolveKey(aliases, stored)
+    const one = conceptAt(next, key)
+    if (one && one.knownAt === undefined && !(one.missedAt !== undefined && one.missedAt >= at)) next[key] = { ...one, knownAt: at }
+  }
+  return next
+}
+
+/**
+ * Quiz marks with a step from before `since` (when this store first ran
+ * 1.6.0) read as 1 at most, the step of a concept met again: 1.5 began a
+ * quiz's step at the notes that met it, not at what the learner recalled.
+ */
+export function recallMarks<T extends LearnQuizMarks>(marks: T, since: number): T {
+  return typeof marks.step === 'number' && marks.step > 1 && !((marks.reviewedAt ?? -1) >= since) ? { ...marks, step: 1 } : marks
+}
+
+/** The index with every step from before `since` read as recallMarks reads it. */
+export function recallSteps(index: Readonly<Record<string, LearnConcept>>, since: number): Record<string, LearnConcept> {
+  return Object.fromEntries(Object.entries(index).map(([key, one]) => [key, recallMarks(one, since)]))
+}
+
 /**
  * The index with one note's concepts counted: `taught` adds one each, `untaught`
  * (keys a rewrite of the note no longer names) takes one away, never the last
  * one of a concept marked known (notes are told not to teach it, so a rewrite
  * leaves it out). A note older than what the index knows moves neither date
- * forward. Past CONCEPTS_KEPT the least recent fall out, the known ones only
- * after every one still being learned: no note meets them again to keep them recent.
+ * forward. Past CONCEPTS_KEPT the least recent fall out, the known ones a note's
+ * prompt names (knownNames) only after every one still being learned: no note
+ * meets them again to keep them recent. A known one no prompt names any more
+ * goes by its date like the rest.
  */
 export function countConcepts(
   index: Readonly<Record<string, LearnConcept>>,
@@ -2076,7 +2136,13 @@ export function countConcepts(
   const keys = Object.keys(next)
   if (keys.length > CONCEPTS_KEPT) {
     // This note's own concepts go last of all, so a store full of known ones never drops what was just taught.
-    const rank = (key: string) => (taught.some(one => one.key === key) ? 2 : isKnown(next[key]!) ? 1 : 0)
+    const named = new Set(
+      keys
+        .filter(key => isKnown(next[key]!))
+        .sort((a, b) => next[b]!.lastAt - next[a]!.lastAt)
+        .slice(0, KNOWN_IN_PROMPT),
+    )
+    const rank = (key: string) => (taught.some(one => one.key === key) ? 2 : named.has(key) ? 1 : 0)
     const order = keys.sort((a, b) => rank(a) - rank(b) || next[a]!.lastAt - next[b]!.lastAt)
     for (const key of order.slice(0, keys.length - CONCEPTS_KEPT)) delete next[key]
   }
@@ -2377,7 +2443,8 @@ export function resolveKey(aliases: Readonly<Record<string, string>>, key: strin
 /**
  * The index with concept `from` folded into `into`: counts added, the earliest
  * first date and the latest last date kept, files joined, known only when both
- * were; `into` keeps its name, or takes `name` when it did not exist yet (a rename).
+ * were; `into` keeps its name, or takes `name` when it did not exist yet (a
+ * rename, whose Anki card is the new name's).
  */
 export function mergeConcepts(
   index: Readonly<Record<string, LearnConcept>>,
@@ -2401,7 +2468,14 @@ export function mergeConcepts(
         ...quizMarks(a, b),
         ...knownOf(a.knownAt, b.knownAt),
       }
-    : { ...a, name }
+    : renamed(a, name)
+  return next
+}
+
+/** A concept under a new name, the one it was stored with gone with the old. */
+function renamed(one: LearnConcept, name: string): LearnConcept {
+  const next = { ...one, name }
+  delete next.fullName
   return next
 }
 
@@ -2716,6 +2790,7 @@ export function reportMarkdown({ range, activity, index, level, now, usage = {} 
     },
     { calls: 0, auto: 0, input: 0, output: 0 },
   )
+  const uncounted = uncountedDays(range.days, activity, usage)
   const span = range.days.length > 1 ? `${range.days[0]} ~ ${range.days.at(-1)}` : (range.days[0] ?? '')
   return [
     `# 학습 보고 · ${span}${range.label === span ? '' : ` (${range.label})`}`,
@@ -2732,8 +2807,10 @@ export function reportMarkdown({ range, activity, index, level, now, usage = {} 
     `- 지금 복습할 개념 ${dueConcepts(index, now).length}개`,
     `- 설명 수준 ${level}`,
     calls.calls > 0
-      ? `- 학습 노트의 모델 호출 ${calls.calls}번${calls.auto > 0 ? ` (자동 노트 ${calls.auto})` : ''} · 입력 ${tokenText(calls.input)} · 출력 ${tokenText(calls.output)} 토큰`
-      : '- 학습 노트의 모델 호출: 없습니다',
+      ? `- 학습 노트의 모델 호출 ${calls.calls}번${calls.auto > 0 ? ` (자동 노트 ${calls.auto})` : ''} · 입력 ${tokenText(calls.input)} · 출력 ${tokenText(calls.output)} 토큰${uncounted > 0 ? ` · 노트를 쓴 ${uncounted}일은 호출 기록이 없습니다${UNCOUNTED}` : ''}`
+      : uncounted > 0
+        ? `- 학습 노트의 모델 호출: 이 기간은 기록이 없습니다${UNCOUNTED}`
+        : '- 학습 노트의 모델 호출: 없습니다',
     '',
     '## 이번 기간에 배운 것을 내 말로 한 줄',
     '',
@@ -3220,12 +3297,30 @@ export function tokenText(n: number): string {
   return `약 ${Math.round(n / 10_000_000) / 10}억`
 }
 
+/** Said of model calls where the usage record has none for days notes were written: 1.6.0 began the record. */
+const UNCOUNTED = '(1.6.0부터 셉니다)'
+
+/**
+ * Days among `days` with notes written and no model call counted: before the
+ * usage record began (1.6.0), or written by a 1.5 session still open. A note
+ * written since is a call counted on its day.
+ */
+export function uncountedDays(
+  days: readonly string[],
+  activity: Readonly<Record<string, LearnDayActivity>>,
+  usage: Readonly<Record<string, LearnDayUsage>>,
+): number {
+  const has = (record: object, day: string) => Object.prototype.hasOwnProperty.call(record, day)
+  return days.filter(day => has(activity, day) && activity[day]!.notes > 0 && !has(usage, day)).length
+}
+
 /**
  * One line on what the plugin's model calls came to: today's calls (the
- * automatic notes among them), then the last seven days' calls and tokens.
- * No price: what a token costs differs by account.
+ * automatic notes among them), then the last seven days' calls and tokens,
+ * and the days of `activity` with notes the record has no calls for (see
+ * uncountedDays). No price: what a token costs differs by account.
  */
-export function usageLine(record: Readonly<Record<string, LearnDayUsage>>, now: number): string {
+export function usageLine(record: Readonly<Record<string, LearnDayUsage>>, now: number, activity: Readonly<Record<string, LearnDayActivity>> = {}): string {
   const at = (day: string) => (Object.prototype.hasOwnProperty.call(record, day) ? record[day] : undefined)
   const days = daysBack(now, 7)
   const today = at(days[0]!.day) ?? { calls: 0, auto: 0, input: 0, output: 0 }
@@ -3236,12 +3331,14 @@ export function usageLine(record: Readonly<Record<string, LearnDayUsage>>, now: 
     },
     { calls: 0, input: 0, output: 0 },
   )
-  if (week.calls === 0) return '학습 노트의 모델 호출: 최근 7일 동안 없습니다'
+  const uncounted = uncountedDays(days.map(({ day }) => day), activity, record)
+  if (week.calls === 0) return uncounted > 0 ? `학습 노트의 모델 호출: 최근 7일은 기록이 없습니다${UNCOUNTED}` : '학습 노트의 모델 호출: 최근 7일 동안 없습니다'
   return [
     `학습 노트의 모델 호출: 오늘 ${today.calls}번${today.auto > 0 ? ` (자동 노트 ${today.auto})` : ''}`,
     `최근 7일 ${week.calls}번`,
     `입력 ${tokenText(week.input)}`,
     `출력 ${tokenText(week.output)} 토큰`,
+    ...(uncounted > 0 ? [`노트를 쓴 ${uncounted}일은 호출 기록이 없습니다${UNCOUNTED}`] : []),
   ].join(' · ')
 }
 
@@ -3411,7 +3508,8 @@ export function ankiText(bank: readonly BankItem[], index: Readonly<Record<strin
   const concepts = rankConcepts(index).filter(one => one.blurb.trim() !== '')
   for (const one of concepts) {
     const files = one.files.length > 0 ? `<br><br><small>파일: ${html(one.files.map(file => file.split('/').at(-1) ?? file).join(', '))}</small>` : ''
-    rows.push([`<b>${html(one.name)}</b><br>무엇이고, 어디에 썼나요?`, `${ankiHtml(one.blurb)}${files}`, 'learn-notes 개념'].join('\t'))
+    // The name as stored, a gloss and all (fullName): a card imported before 1.6.0 is updated, not doubled.
+    rows.push([`<b>${html(one.fullName ?? one.name)}</b><br>무엇이고, 어디에 썼나요?`, `${ankiHtml(one.blurb)}${files}`, 'learn-notes 개념'].join('\t'))
   }
   // No #notetype: Anki's default (Basic, 기본 in Korean) takes the two fields.
   const head = ['#separator:tab', '#html:true', '#deck:learn-notes', '#tags column:3', '']

@@ -97,8 +97,14 @@ export type LearnQuizMarks = Pick<LearnConcept, 'reviewedAt' | 'missedAt' | 'ste
 
 /** One concept the notes taught, kept across sessions and projects. */
 export type LearnConcept = {
-  /** The name as a note first wrote it. */
+  /** The name as a note first wrote it (a plain-words gloss on its end left off since 1.6.0, see fullName). */
   name: string
+  /**
+   * The name as it was stored, a gloss and all, where `name` shows it shorter. Never stored itself: the store keeps
+   * it as the name, as it was written (a 1.5 session reads it there). The front of its Anki card, so a card imported
+   * before is the same card. A rename (/learn merge to a new name) drops it.
+   */
+  fullName?: string
   /** How many notes taught it. */
   count: number
   /** Milliseconds since the epoch: the first and the latest note that taught it. */
@@ -116,6 +122,7 @@ export type LearnConcept = {
    * Its spaced-review step once quizzed: due again 1, 3, 7, 14, 30 or 60 days after it was last quizzed (first met,
    * while never quizzed). A right answer moves it a step on (once a day at most), one after a hint or the answer keeps
    * it, a partly right one a step back, a wrong one back to 0; absent, 0 for a concept met once and 1 for one met again.
+   * A step a quiz gave before this store first ran 1.6.0 is read as 1 at most: 1.5 began it at the notes that met it.
    */
   step?: number
   /**
