@@ -1,6 +1,6 @@
 {
   "name": "learn-notes",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "description": "바이브코딩 학습 노트: Claude가 고친 코드가 무엇을 어떻게 달라지게 했는지 턴마다 노트로 보여 주고, 내 코드로 복습 퀴즈까지 이어 준다",
   "author": {
     "name": "Owen-YC",
