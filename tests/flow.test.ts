@@ -56,6 +56,8 @@ type World = {
   copied: string[]
   /** True while the surface has no clipboard to copy on (a remote one). */
   copyFails: boolean
+  /** The lines put in the transcript (a dim row the person sees), as against the debug log alone. */
+  transcript: string[]
   /** The tools the plugin registered for the model, by short name. */
   tools: string[]
   /** True while no tool can be registered (an engine with no tools for plugins). */
@@ -97,6 +99,7 @@ function world(
     links: new Map(),
     copied: [],
     copyFails: false,
+    transcript: [],
     tools: [],
     toolFails: false,
     release: () => release(),
@@ -120,6 +123,7 @@ function world(
   })
   on('ui.log', (_$, e) => {
     w.logs.push(e.text)
+    if (e.to !== 'debug') w.transcript.push(e.text)
     return { value: undefined }
   })
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
@@ -4270,7 +4274,8 @@ describe('1.6.0: e under the note, a line where no pane shows, the record Claude
   /** What the tool answers the model for one call. */
   const record = async ($: Engine, action: string, query?: string) =>
     String((await $.tool.call({ tool: TOOL, action, ...(query === undefined ? {} : { query }) })).result)
-  const noteLines = (w: World) => w.logs.filter(line => line.startsWith('학습 노트 · '))
+  // In the transcript, where the person sees it: the debug log alone would say nothing to them.
+  const noteLines = (w: World) => w.transcript.filter(line => line.startsWith('학습 노트 · '))
 
   test('where no pane can show, a written note is a dim line in the transcript and no toast', async ($, on) => {
     const w = world(on)
@@ -4323,10 +4328,19 @@ describe('1.6.0: e under the note, a line where no pane shows, the record Claude
     expect(store.get('welcomed')).toBe(true)
   })
 
-  test('no hello in a -p run, nor in a cloud session, and none marked there', async ($, on) => {
+  test('no hello in a -p run, and none marked there: the next interactive session says it', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: false })
+    expect(w.toasts).toEqual([])
+    expect(store.has('welcomed')).toBe(false)
+    await start($)
+    expect(w.toasts).toEqual([WELCOME])
+  })
+
+  test('no hello in a cloud session, and none marked there', async ($, on) => {
     const store = new Map<string, unknown>()
     const w = world(on, 'ok', null, true, store, { CLAUDE_CODE_REMOTE: 'true' })
-    await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: false })
     await start($)
     expect(w.toasts).toEqual([])
     expect(store.has('welcomed')).toBe(false)
@@ -4426,6 +4440,53 @@ describe('1.6.0: e under the note, a line where no pane shows, the record Claude
     await start($)
     const verdict = await $.tool.check({ tool: TOOL, input: { action: 'due' } })
     expect(verdict.decision).toBe('allow')
+  })
+
+  test('a rule written against it still holds: a deny, or an ask a settings rule or hook made; the mode\'s own ask does not', async ($, on) => {
+    world(on)
+    let beneath: { decision: 'allow' | 'ask' | 'deny'; reason?: string; rule?: string; hook?: string } = { decision: 'ask', reason: 'mode' }
+    on('tool.check', { tool: TOOL }, () => beneath)
+    await start($)
+    const check = () => $.tool.check({ tool: TOOL, input: { action: 'due' } })
+    // The mode asks about every tool not allowed yet: this one only reads, so no dialog.
+    expect((await check()).decision).toBe('allow')
+    beneath = { decision: 'deny', reason: 'denied by settings', rule: 'mcp__learn-notes__notes' }
+    expect(await check()).toEqual(beneath)
+    // An organization that wants a dialog for it gets one.
+    beneath = { decision: 'ask', reason: 'asked by settings', rule: 'mcp__learn-notes' }
+    expect(await check()).toEqual(beneath)
+    beneath = { decision: 'ask', reason: 'asked by a hook', hook: 'PreToolUse' }
+    expect(await check()).toEqual(beneath)
+  })
+
+  test('what it gives Claude has its secrets masked: a note stored before 1.6.0 was never masked', async ($, on) => {
+    const KEY = 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAA'
+    const old = {
+      id: 'n1',
+      turnId: 't',
+      at: NOW - 1000,
+      prompt: `이 키로 연결해 줘 ${KEY}`,
+      answer: '연결했습니다',
+      moreFiles: 0,
+      status: 'ready',
+      text: `${NOTE_TEXT}\n- \`const key = "${KEY}"\`로 키를 담았다`,
+      savedAs: 'ready',
+      isPast: false,
+      root: '/proj',
+      updatedAt: NOW - 1000,
+      concepts: [],
+      asks: [{ question: `${KEY}는 뭐야?`, answer: `\`${KEY}\`는 API 키입니다.`, at: NOW - 500 }],
+      changes: [{ file: 'src/db.ts', path: '/proj/src/db.ts', tool: 'Edit', kind: 'update', added: 1, removed: 0, diff: `@@ -1,0 +1,1 @@\n+const key = "${KEY}"`, isCut: false }],
+    }
+    const w = world(on, 'ok', null, true, new Map<string, unknown>([['history', { '/proj': { at: NOW, notes: [old] } }]]))
+    await start($)
+    for (const [action, query] of [['note', undefined], ['search', '연결'], ['recent', '최근 7일']] as const) {
+      const text = await record($, action, query)
+      expect(text).toContain('이 키로 연결해 줘 «가림»')
+      expect(text).not.toContain(KEY)
+      expect(text).not.toContain('AAAAAAAAAAAAAAAA')
+    }
+    expect(w.models).toHaveLength(0)
   })
 
   test('an engine with no tools for plugins still starts, and the help leaves the chat line out', async ($, on) => {

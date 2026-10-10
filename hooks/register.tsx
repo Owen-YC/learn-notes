@@ -2272,10 +2272,12 @@ export const register: Register = (on, options) => {
     }
   })
 
-  // It only reads the learner's own record: no permission dialog. A deny rule written against it still holds.
+  // It only reads the learner's own record: no permission dialog where only the mode would ask.
+  // A deny, or an ask a settings rule or a hook made (an organization wanting a dialog for it), still holds.
   on('tool.check', { tool: TOOL_NAME }, async ($, e, next) => {
     const verdict = await next(e).catch(() => undefined)
     if (verdict?.decision === 'deny') return verdict
+    if (verdict?.decision === 'ask' && (verdict.rule !== undefined || verdict.hook !== undefined)) return verdict
     return { decision: 'allow' as const, reason: 'learn-notes의 읽기 전용 학습 기록' }
   })
 
@@ -3357,7 +3359,9 @@ function noteForTool(note: LearnNote, now: number): string {
 /**
  * The tool's answer to one call (see TOOL_SPEC): plain text, TOOL_BUDGET
  * characters at most, whole lists first and notes in full last, so a cut
- * takes the end of a note and never a line of the lists.
+ * takes the end of a note and never a line of the lists. Its secrets are
+ * masked before the cut (so no piece of one is left), as on every way to a
+ * model: a note, a question or a concept kept before 1.6.0 was never masked.
  */
 async function toolText($: EngineInterface, cfg: Config, action: string, query: string): Promise<string> {
   const now = await $.clock.now()
@@ -3424,7 +3428,7 @@ async function toolText($: EngineInterface, cfg: Config, action: string, query: 
   } else {
     return TOOL_USAGE
   }
-  return cut(lines.join('\n'), TOOL_BUDGET)
+  return cut(redactText(lines.join('\n')).text, TOOL_BUDGET)
 }
 
 const REPORT_USAGE = '쓰는 법: /learn 보고서 (최근 7일 · 이번주 · 어제 · 오늘 · 2026-10-03)'
