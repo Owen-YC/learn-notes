@@ -1199,10 +1199,13 @@ function reviewWay(left: number): string {
   return left > 0 ? '/learn 복습 (패널에서는 q)' : '/learn 퀴즈 (패널에서는 4)'
 }
 
-/** What a finished quiz says of today's review once it is done: undefined while questions are left for today. */
-function reviewDoneText(review: { due: number; left: number }): string | undefined {
+/** What a finished quiz says of today's review once it is done: undefined while questions are left for today, or nothing was due and none answered today. */
+function reviewDoneText(review: { due: number; left: number }, days: Readonly<Record<string, LearnDayActivity>>, now: number): string | undefined {
   if (review.left > 0) return undefined
-  return review.due > 0 ? '오늘 복습을 마쳤습니다 · 남은 개념은 내일 나옵니다' : '오늘 복습을 마쳤습니다'
+  if (review.due > 0) return '오늘 복습을 마쳤습니다 · 남은 개념은 내일 나옵니다'
+  // Nothing due: a review done only once an answer was graded today, not a quiz finished on another day.
+  const today = Object.prototype.hasOwnProperty.call(days, stamp(now).day) ? days[stamp(now).day] : undefined
+  return today && today.right + today.wrong > 0 ? '오늘 복습을 마쳤습니다' : undefined
 }
 
 /** Claude's grade of a typed answer, as the pane and /learn quiz say it. */
@@ -2020,7 +2023,9 @@ async function typedAnswer($: EngineInterface, cfg: Config, current: Quiz, n: nu
     const next = after.items.findIndex(one => isOpen(after, one))
     const right = after.items.filter(one => one.result === 'right').length
     const index = await read($, concepts)
-    const finished = reviewDoneText(todayReview(index, await read($, activity), await $.clock.now()))
+    const days = await read($, activity)
+    const at = await $.clock.now()
+    const finished = reviewDoneText(todayReview(index, days, at), days, at)
     const tail =
       next !== -1
         ? `다음 문제: /learn 퀴즈 ${next + 1} 내 답${after.items[next]!.hint && !after.items[next]!.isHinted ? ' · 막히면 /learn 퀴즈 힌트' : ''}`
@@ -2691,7 +2696,8 @@ export const register: Register = (on, options) => {
     const stats = statsOf(days, now)
     const current = await read($, quiz)
     // Today's review, and the concepts the quiz on show graduated.
-    const review = { ...todayReview(index, days, now), graduated: graduatedIn(current?.items ?? [], index, map) }
+    const today = todayReview(index, days, now)
+    const review = { ...today, graduated: graduatedIn(current?.items ?? [], index, map), done: reviewDoneText(today, days, now) }
     const run = await read($, quizRun)
     const asks = await read($, askRun)
 
@@ -3665,7 +3671,7 @@ function quizView(
   run: LearnQuizRun,
   hasConcepts: boolean,
   now: number,
-  review: { due: number; left: number; graduated: readonly string[] },
+  review: { due: number; left: number; graduated: readonly string[]; done: string | undefined },
   list: readonly LearnNote[],
   isFocused: boolean,
   el: ElementTable,
@@ -3833,7 +3839,7 @@ function quizView(
           <Text bold wrap="wrap">
             {items.length}문제 중 {right}개 맞혔습니다
             <Text dimColor>
-              {missesText(items) ? ` · ${missesText(items)}` : ''} · {reviewDoneText(review) ?? 's로 새 문제'}
+              {missesText(items) ? ` · ${missesText(items)}` : ''} · {review.done ?? 's로 새 문제'}
             </Text>
           </Text>
           {review.graduated.length > 0 && (

@@ -4105,6 +4105,19 @@ describe('1.6.0: views on 1 to 4, q for today\'s review, the keys where they are
     await ui.unmount()
   })
 
+  test('a quiz finished on another day, with nothing due and nothing answered today, does not say today\'s review is done', async ($, on) => {
+    const DAY = 86_400_000
+    const store = new Map<string, unknown>([['concepts', { 'c:클로저': { name: '클로저', count: 1, firstAt: NOW - 9 * DAY, lastAt: NOW - 9 * DAY, blurb: '', files: [], reviewedAt: NOW - 2 * DAY, step: 2 } }]])
+    store.set('quiz', { at: NOW - 2 * DAY, isRevealed: false, items: [{ key: 'c:클로저', name: '클로저', question: '왜 커질까?', answer: '바깥 변수를 기억해서다.', result: 'right' }] })
+    world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await pane($)
+    await ui.press({ key: 'view-quiz' })
+    expect(await ui.find({ type: 'Text', text: /^1문제 중 1개 맞혔습니다 · .* · s로 새 문제$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /오늘 복습을 마쳤습니다/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
   test('the quiz view offers q once its quiz is all graded, as the status line says; not while one is answered or made', async ($, on) => {
     const store = new Map<string, unknown>([['concepts', DUE]])
     // A quiz finished before: today's review still has the one due.
