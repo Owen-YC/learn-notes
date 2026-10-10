@@ -1179,8 +1179,9 @@ type Screened = Pick<LearnNote, 'changes' | 'withheld'> & Partial<Pick<LearnNote
  * A note as it may leave the plugin (a model's prompt, a journal section): a
  * changed file 1.6.0 leaves out (see withheldOf; `patterns` the settings' and
  * the team file's, `isDenied` the permission rules') named with why instead
- * of its diff, the secrets of the other diffs, the request, the answer, the
- * note and its questions masked. A note kept before 1.6.0, or by an older
+ * of its diff, the secrets of the other diffs (a config file's unquoted
+ * values too, see isConfigFile), the request, the answer, the note and its
+ * questions masked. A note kept before 1.6.0, or by an older
  * build in another session, was never screened; one screened already comes
  * back the same. The store keeps what it holds.
  */
@@ -1193,7 +1194,8 @@ export function screenNote<T extends Screened>(note: T, patterns: readonly strin
       if (!withheld.some(one => one.file === change.file)) withheld.push({ file: change.file, why })
       continue
     }
-    const masked = redactLines(change.diff.split('\n'))
+    // A config file's unquoted values too, as changeOf masks them now: a note kept before 1.6.0 was never.
+    const masked = redactLines(change.diff.split('\n'), isConfigFile(change.path))
     changes.push(masked.hits > 0 ? { ...change, diff: masked.lines.join('\n'), redacted: (change.redacted ?? 0) + masked.hits } : change)
   }
   const mask = (text: string) => redactText(text).text

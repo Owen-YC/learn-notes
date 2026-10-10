@@ -1877,6 +1877,15 @@ describe('1.6.0 (교차 검토): a note kept before 1.6.0 screened on its way ou
     expect(old.prompt).toContain(KEY)
   })
 
+  test("a config file's unquoted password in a note kept before 1.6.0 is masked on its way out, as changeOf masks it now", () => {
+    const config = change('src/main/resources/application.properties', '@@ -1,0 +1,2 @@\n+spring.datasource.password=hunter2\n+login.password=비밀번호')
+    const out = screenNote({ changes: [config] })
+    expect(out.changes[0]).toMatchObject({ diff: '@@ -1,0 +1,2 @@\n+spring.datasource.password=«가림»\n+login.password=비밀번호', redacted: 1 })
+    expect(screenNote(out)).toEqual(out)
+    // The same line in a file that is no config file is code, judged by the rules for any line.
+    expect(screenNote({ changes: [change('src/a.ts', '@@ -1,0 +1,1 @@\n+user.password=hash')] }).changes[0]!.diff).toContain('user.password=hash')
+  })
+
   test('with no settings, secret and generated files still stay out; a note with nothing to screen comes back the same', () => {
     expect(screenNote(old).withheld!.map(one => one.file)).toEqual(['.npmrc', '.env', 'package-lock.json'])
     const plain = { changes: [ok] }
