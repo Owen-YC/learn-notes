@@ -69,6 +69,7 @@ import {
   diffHunks,
   shellTargets,
   cut,
+  fixEscapedTicks,
   expandHome,
   fitHistory,
   filesFor,
@@ -1366,7 +1367,7 @@ async function askModel(
     return { error: noModelText(cfg) }
   }
   await recordUsage($, reply.usage, kind)
-  return reply.isAnswered ? { text: reply.text } : { error: failureText(reply) }
+  return reply.isAnswered ? { text: fixEscapedTicks(reply.text) } : { error: failureText(reply) }
 }
 
 /**
@@ -1506,7 +1507,12 @@ async function gradeQuiz($: EngineInterface, cfg: Config, i: number, result: 'ri
   const current = await lastQuiz($)
   const item = current?.items[i]
   if (!current || !item || item.result !== undefined || !isAnswerShown(current, item)) return
-  if ((await applyGrade($, cfg, current, i, result, {})) === 'failed') await update($, quizRun, run => ({ ...run, error: GRADE_NOT_KEPT }))
+  if ((await applyGrade($, cfg, current, i, result, {})) === 'failed') {
+    await update($, quizRun, run => ({ ...run, error: GRADE_NOT_KEPT }))
+    return
+  }
+  // As after a typed answer: the next question's field, so the answers go on with Enter.
+  await focusNextQuestion($)
 }
 
 /**
@@ -1654,9 +1660,13 @@ async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: str
     await update($, quizRun, run => ({ ...run, checking: null, error: error ?? run.error, draft: error !== null ? { at: current.at, i, text: mine } : null }))
   }
   if (error !== null) return
+  await focusNextQuestion($)
+}
+
+/** After a grade, the keys to the question the pane shows next: the first not graded, or s once all are. One whose answer was seen has no field; the ring stays put. */
+async function focusNextQuestion($: EngineInterface): Promise<void> {
   const latest = await lastQuiz($)
   if (!latest) return
-  // The question the pane shows next: the first not graded. One whose answer was seen has no field; the ring stays put.
   const next = latest.items.findIndex(one => one.result === undefined)
   if (next === -1) focusInPane($, 'quiz-new')
   else if (isOpen(latest, latest.items[next]!)) focusInPane($, quizFieldKey(latest.at, next))
@@ -1743,13 +1753,31 @@ function revealInPane($: EngineInterface, key: string, block: 'start' | 'nearest
  */
 function focusInPane($: EngineInterface, key: string): void {
   const said = (why: string) => $.ui.log(`learn-notes: ${key}로 초점을 옮기지 않았습니다 (${why})`, { to: 'debug' })
-  void $.ui.focus({ requestId: PANE, key }).then(
-    result => {
-      if (result.deny !== undefined) said(result.deny)
-    },
-    (thrown: unknown) => said(String(thrown)),
-  )
+  void (async () => {
+    // The drawing that brings the field can also move the ring itself (onto the button left where the last field was):
+    // asked again a moment later, the field wins. Each refusal goes to the debug log with its try.
+    for (let tries = 0; tries < FOCUS_TRIES; tries += 1) {
+      try {
+        const result = await $.ui.focus({ requestId: PANE, key })
+        if (result.deny === undefined) return
+        said(`${result.deny} · ${tries + 1}/${FOCUS_TRIES}`)
+      } catch (thrown) {
+        said(`${String(thrown)} · ${tries + 1}/${FOCUS_TRIES}`)
+      }
+      if (tries + 1 === FOCUS_TRIES) return
+      // A wait cut short (the module unloaded, the session ended) ends the tries.
+      try {
+        await $.clock.sleep(FOCUS_RETRY_MS)
+      } catch {
+        return
+      }
+    }
+  })()
 }
+
+/** How often, and how far apart, a field is asked for the keys before giving up. */
+const FOCUS_TRIES = 3
+const FOCUS_RETRY_MS = 150
 
 /**
  * Enter in a note's question field, or r and e (its walk-through, its plainer

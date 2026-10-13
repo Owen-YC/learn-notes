@@ -2,6 +2,7 @@ import type { LearnConcept } from '../types'
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
+  fixEscapedTicks,
   FILES_PER_NOTE,
   beforeAfter,
   changeOf,
@@ -2714,4 +2715,14 @@ describe('1.6.0 after 1.5: the store cap, Anki fronts and days with no call reco
     expect(usageLine(usage, now, activity, now - 2 * DAY)).toBe('학습 노트의 모델 호출: 오늘 1번 · 최근 7일 1번 · 입력 1 · 출력 1 토큰')
     expect(reportMarkdown({ range, activity, index: {}, level: 'beginner', now, usage, since: now - 2 * DAY })).not.toContain('호출 기록이 없습니다')
   })
+})
+
+test('backticks a model escaped inside inline code become a double-backtick span; code blocks and plain spans stay (1.6.1)', () => {
+  expect(fixEscapedTicks('- **템플릿 리터럴**: 값이 들어갑니다 — `return \\`안녕하세요, ${name}님!\\`;`')).toBe(
+    '- **템플릿 리터럴**: 값이 들어갑니다 — `` return `안녕하세요, ${name}님!`; ``',
+  )
+  expect(fixEscapedTicks('plain `code` and `more`')).toBe('plain `code` and `more`')
+  expect(fixEscapedTicks('already `` a`b `` fine')).toBe('already `` a`b `` fine')
+  expect(fixEscapedTicks('```js\nconst s = \\`x\\`\n```')).toBe('```js\nconst s = \\`x\\`\n```')
+  expect(fixEscapedTicks('two `a \\`b\\`` and `c`')).toBe('two `` a `b` `` and `c`')
 })

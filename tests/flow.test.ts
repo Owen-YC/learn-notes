@@ -5475,3 +5475,44 @@ describe('1.6.0 (교차 검토 마무리): what the reviews of the cross-review 
     expect(Object.values(store.get('concepts') as Record<string, { name: string }>).map(one => one.name)).toContain(long)
   })
 })
+
+describe('1.6.1: found in a real terminal', () => {
+  test('o or x on a seen answer puts the keys in the next question\'s field, as Enter on a typed answer does', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = THREE_QUESTIONS
+    await learn($, 'quiz')
+    const ui = await pane($)
+    await ui.press({ key: 'view-quiz' })
+    await ui.press({ key: 'quiz-answer' })
+    await ui.press({ key: 'quiz-right' })
+    await w.clock.settle()
+    expect(focusesOf(w).at(-1)).toBe(mineKey(store, 1))
+    await ui.unmount()
+  })
+
+  test('a field the drawing took the ring away from is asked for again, a short wait apart', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = THREE_QUESTIONS
+    await learn($, 'quiz')
+    const ui = await pane($)
+    await ui.press({ key: 'view-quiz' })
+    w.answer = '판정: 맞음\n피드백: 좋습니다.'
+    await ui.input({ key: mineKey(store, 0), text: '바깥 변수' })
+    await w.clock.settle()
+    // The kit never gives the pane the keys: the first try is refused at once, the next two after a wait each.
+    const tries = () => focusesOf(w).filter(key => key === mineKey(store, 1)).length
+    expect(tries()).toBe(1)
+    await w.clock.advance(150)
+    expect(tries()).toBe(2)
+    await w.clock.advance(150)
+    expect(tries()).toBe(3)
+    await w.clock.advance(1000)
+    expect(tries()).toBe(3)
+    await ui.unmount()
+  })
+})
+

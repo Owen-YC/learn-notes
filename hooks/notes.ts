@@ -52,6 +52,27 @@ export function clean(text: string): string {
   return text.replace(/\r\n?/g, '\n').replace(CONTROL, '')
 }
 
+/**
+ * Inline code whose own backticks a model escaped with a backslash (`return \`hi\``),
+ * which Markdown does not read: the span is opened and closed with two backticks instead.
+ */
+const ESCAPED_SPAN = /(?<![\\`])`((?:\\`|[^`\n])*?\\`(?:\\`|[^`\n])*?)(?<!\\)`(?!`)/g
+
+/** A model's reply with backslash-escaped backticks in inline code made into double-backtick code; fenced blocks are left as written. */
+export function fixEscapedTicks(text: string): string {
+  let isInFence = false
+  return text
+    .split('\n')
+    .map(line => {
+      if (/^\s*(```|~~~)/.test(line)) {
+        isInFence = !isInFence
+        return line
+      }
+      return isInFence ? line : line.replace(ESCAPED_SPAN, (_, inner: string) => `\`\` ${inner.replace(/\\`/g, '`')} \`\``)
+    })
+    .join('\n')
+}
+
 export function cut(text: string, max: number): string {
   const flat = clean(text).trim()
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`
