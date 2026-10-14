@@ -84,11 +84,15 @@ export type LearnNote = {
   quota?: 'five_hour' | 'seven_day'
   /**
    * While an automatic note's call that failed for a while (a busy server, a server error, a dropped connection,
-   * its time limit) waits for its one try again (1.7.0): when that is due, the token its timer holds (a w meanwhile
-   * clears it, so the timer writes nothing), and why the first failed. Status `writing` the while.
+   * its time limit) waits for its one try again (1.7.0), and while that try's call runs: when it is due, the token
+   * its timer holds (a w meanwhile clears it, so the timer writes nothing), and why the first failed. Status
+   * `writing` the while. A reload that cuts the try takes it up as that try, never a third call.
    */
   retry?: { at: number; token: string; why: 'overloaded' | 'server' | 'network' | 'timeout' }
-  /** True once a reload's session start took this note, left being written, up again by itself (1.7.0): never twice. */
+  /**
+   * True once a reload's session start took this note, left being written, up again by itself (1.7.0): never twice,
+   * its own try again included. A w starts the note over and clears it.
+   */
   resumed?: true
 }
 

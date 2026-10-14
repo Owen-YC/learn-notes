@@ -81,6 +81,8 @@ import {
   type ModelFail,
   noteFailText,
   isResumable,
+  isLeftWriting,
+  LEFT_MS,
   quotaOver,
   quotaWhy,
   type QuotaKind,
@@ -414,7 +416,10 @@ const toastDays = new Map<string, string>()
  * and a reload cancels them all (that note is then taken up by the next load's session start, resumeNotes).
  */
 const retryTimers = new Map<string, { cancel: () => void }>()
-/** Notes a reload left being written that this load is about to write again (resumeNotes), until their write starts. */
+/**
+ * Notes a reload left being written that this load writes again (resumeNotes), until that write is over: the pane
+ * says so while its call runs, and not while the same note's try again runs later.
+ */
 const resuming = new Set<string>()
 /**
  * The account's window past its mark (QUOTA_YIELD) as the last turn's end read it, or undefined: the live line
@@ -2305,32 +2310,50 @@ async function journalDays($: EngineInterface, cfg: Config): Promise<{ day: stri
  * for it, not the learner (it counts toward dailyAutoNotes); `isRetry`: the
  * one try again of such a note (armRetry, or resumeNotes for one that waited
  * for it), counted as a call but not toward the limit, and never tried again
- * itself; `isResume`: a reload's session start took it up (resumeNotes).
- * An automatic note whose call failed in a way that clears on its own waits
- * for one try again instead of failing. A rewrite that fails leaves the note
- * as it was and says why in a toast. Never rejects.
+ * itself; `isResume`: a reload's session start took it up (resumeNotes);
+ * `copy`: the note as the store holds it, for a try again whose note a /cd
+ * took from the pane (retryNote). An automatic note whose call failed in a
+ * way that clears on its own waits for one try again instead of failing. A
+ * rewrite that fails leaves the note as it was and says why in a toast.
+ * Never rejects.
  */
 async function writeNote(
   $: EngineInterface,
   cfg: Config,
   id: string,
-  how: { isRewrite?: boolean; isAuto?: boolean; isRetry?: boolean; isResume?: boolean } = {},
+  how: { isRewrite?: boolean; isAuto?: boolean; isRetry?: boolean; isResume?: boolean; copy?: LearnNote } = {},
 ): Promise<void> {
-  const { isRewrite = false, isAuto = false, isRetry = false, isResume = false } = how
-  if (inFlight.has(id)) return
+  const { isRewrite = false, isAuto = false, isRetry = false, isResume = false, copy } = how
+  if (inFlight.has(id)) {
+    // Being written already (a w just before): a reload's take-up has nothing left to do.
+    if (isResume) resuming.delete(id)
+    return
+  }
   inFlight.add(id)
   // Written now (a w while it waits, or the try again itself): its timer has nothing left to do.
   retryTimers.get(id)?.cancel()
   retryTimers.delete(id)
-  resuming.delete(id)
+  // A take-up is drawn as one until its call is over (noteBody); any other write ends one still to start.
+  if (!isResume) resuming.delete(id)
   try {
-    const prior = (await read($, notes)).find(one => one.id === id)
+    const prior = copy ?? (await read($, notes)).find(one => one.id === id)
     if (!prior) return
     // A note counts toward the day's learning the first time it is written, never on a rewrite.
     const isCounted = prior.isCounted === true || prior.status === 'ready'
     const good = prior.status === 'ready' ? { status: prior.status, text: prior.text } : undefined
-    // Written now, it is no longer one a turn's end passed over, nor one waiting for its try again (its token goes).
-    const note = await setNote($, id, { status: 'writing', text: '', skip: undefined, quota: undefined, retry: undefined, resumed: isResume ? true : undefined })
+    // Written now, it is no longer one a turn's end passed over. Its try again keeps its mark while the call runs,
+    // so a reload that cuts it takes it up as that try, never a third call (resumeNotes); a reload's take-up stays
+    // marked through its own try again. A w starts the note over: no try again waits any more, and a reload may
+    // take it up once.
+    const start: Partial<LearnNote> = {
+      status: 'writing',
+      text: '',
+      skip: undefined,
+      quota: undefined,
+      retry: isRetry ? prior.retry : undefined,
+      resumed: isResume || (isAuto && prior.resumed === true) ? true : undefined,
+    }
+    const note = (await setNote($, id, start)) ?? (copy ? { ...copy, ...start } : undefined)
     if (!note) return
     const rules = await teamOf($, note.root)
     const asked = await askModel(
@@ -2355,9 +2378,9 @@ async function writeNote(
       $.ui.toast(`노트를 다시 쓰지 못했습니다: ${asked.error} · 원래 노트는 그대로입니다`, { timeoutMs: 8000 })
       return
     }
-    // Cut short, and not by its own time limit: in a session that goes on, the plugin's environment is going (a
-    // reload). The note stays as being written, nothing saved or stored from here, so the next load takes it up
-    // (resumeNotes); were it not a reload, the pane says it stopped and w writes it.
+    // Cut short, and not by its own time limit: the plugin's environment is going, a reload's or the session's
+    // end. The note stays as being written, nothing saved or stored from here: the next load takes it up, or says it
+    // stopped and journals it (resumeNotes); after a session's end the next session journals it (journalLeft).
     if ('error' in asked && asked.fail?.reason === 'aborted' && asked.fail.isTimeout !== true && isInteractive) return
     // A busy server, a server error, a dropped connection or the call's own time limit clears on its own: a note a
     // turn's end asked for tries once more by itself, half a minute on (and a little more, so windows do not all ask
@@ -2366,10 +2389,13 @@ async function writeNote(
       const now = await $.clock.now()
       const wait = RETRY_MS + Math.floor(Math.random() * RETRY_JITTER_MS)
       const token = `${id}:${now}`
-      // Unsaved where a journal is kept: a session that ends while it waits still leaves its diff there (flushUnsaved).
-      const waiting = await setNote($, id, { status: 'writing', text: '', retry: { at: now + wait, token, why: asked.transient }, ...(cfg.isAutoSave ? { isUnsaved: true } : {}) })
-      if (waiting && armRetry($, cfg, id, token, wait)) {
-        await persist($)
+      // Armed first: the pane drawn from the write below shows the wait, not the call this write still counts as.
+      if (armRetry($, cfg, id, token, wait, note.root)) {
+        const patch: Partial<LearnNote> = { status: 'writing', text: '', retry: { at: now + wait, token, why: asked.transient } }
+        // Not unsaved: nothing refused it. A session that ends while it waits leaves it to the next (journalLeft).
+        // One a /cd took from the pane meanwhile waits in the store, under its own project (retryNote finds it there).
+        const waiting = (await setNote($, id, patch)) ?? { ...note, ...patch, updatedAt: Math.max(now, note.updatedAt + 1) }
+        await persist($, false, [waiting])
         return
       }
     }
@@ -2390,7 +2416,11 @@ async function writeNote(
       }
     }
     // autoSave off means no journal, nothing more: the note stays in the pane and the store.
-    if (cfg.isAutoSave) await save($, cfg, done, isRewrite)
+    if (cfg.isAutoSave) {
+      const path = await save($, cfg, done, isRewrite)
+      // The pane's copy says so already (saveNow); one a /cd took from the pane is stored saying so too.
+      done = { ...done, ...(path ? { savedAs: done.status, isUnsaved: false } : { isUnsaved: true }) }
+    }
     await persist($, false, [done])
     if (done.status === 'ready') await announceNote($, done)
   } catch (error) {
@@ -2398,21 +2428,23 @@ async function writeNote(
   } finally {
     inFlight.delete(id)
     autoPending.delete(id)
+    resuming.delete(id)
   }
 }
 
 /**
- * Arms an automatic note's one try again, `wait` from now (see LearnNote.retry); false when no timer could be
- * had. A reload cancels it with the rest of this load: the next load's session start takes the note up (resumeNotes).
+ * Arms an automatic note's one try again, `wait` from now (see LearnNote.retry), for the note of project `root`;
+ * false when no timer could be had. A reload cancels it with the rest of this load: the next load's session start
+ * takes the note up (resumeNotes).
  */
-function armRetry($: EngineInterface, cfg: Config, id: string, token: string, wait: number): boolean {
+function armRetry($: EngineInterface, cfg: Config, id: string, token: string, wait: number, root: string): boolean {
   retryTimers.get(id)?.cancel()
   try {
     retryTimers.set(
       id,
       $.clock.after(wait, () => {
         retryTimers.delete(id)
-        void retryNote($, cfg, id, token)
+        void retryNote($, cfg, id, token, root)
       }),
     )
     return true
@@ -2423,46 +2455,122 @@ function armRetry($: EngineInterface, cfg: Config, id: string, token: string, wa
 }
 
 /**
- * The try again armRetry set: made only while the note still waits with `token` and is not being written (a w
- * meanwhile wrote it, clearing the token; a /learn 비우기 took it away). Never rejects.
+ * The try again armRetry set: made only while the note still waits with `token` and is not being written. Where
+ * the pane no longer holds it so (a /cd took it away, or brought it back read from the store), the store's copy
+ * under `root` says whether it still waits; a /learn 비우기 left none. A w meanwhile cancelled the timer. Never rejects.
  */
-async function retryNote($: EngineInterface, cfg: Config, id: string, token: string): Promise<void> {
+async function retryNote($: EngineInterface, cfg: Config, id: string, token: string, root: string): Promise<void> {
   try {
+    if (inFlight.has(id)) return
     const one = (await read($, notes)).find(note => note.id === id)
-    if (!one || one.status !== 'writing' || one.retry?.token !== token || inFlight.has(id)) return
-    await writeNote($, cfg, id, { isAuto: true, isRetry: true })
+    if (one?.status === 'writing' && one.retry?.token === token) {
+      await writeNote($, cfg, id, { isRewrite: one.savedAs !== null, isAuto: true, isRetry: true })
+      return
+    }
+    const copy = await waitingCopy($, root, id, token)
+    if (copy) await writeNote($, cfg, id, { isRewrite: copy.savedAs !== null, isAuto: true, isRetry: true, copy })
   } catch (error) {
     void fault($, 'note', faultCode(error), '노트를 다시 쓰지 못했습니다')
   }
 }
 
+/** The store's copy of note `id` of project `root` while it still waits for its try again with `token` (LearnNote.retry). */
+async function waitingCopy($: EngineInterface, root: string, id: string, token: string): Promise<LearnNote | undefined> {
+  const raw = await $.store.get(HISTORY_KEY)
+  const entry = isRecord(raw) ? raw[root] : undefined
+  if (!isRecord(entry) || !Array.isArray(entry.notes)) return undefined
+  const clearedAt = typeof entry.clearedAt === 'number' ? entry.clearedAt : 0
+  const one: unknown = entry.notes.find(note => isRecord(note) && note.id === id)
+  if (!isRecord(one) || one.status !== 'writing' || !isRecord(one.retry) || one.retry.token !== token) return undefined
+  const read = fromHistory(one, root)
+  // As this session left it: being written, waiting (fromHistory reads it back as a past session's failed one).
+  return read && read.at > clearedAt ? { ...read, status: 'writing', text: '', isPast: false, retry: one.retry as LearnNote['retry'] } : undefined
+}
+
 /**
  * At a session start that is a reload (`/reload-plugins`, a /config change): each note the last load left being
  * written (its call cut, or the timer of its try again cancelled) whose turn ended within RESUME_MS is written
- * again by itself, once (isResumable): one that waited for its try again as that try (outside the day's limit),
- * any other as a turn's end would (within it). Only with automatic notes on, in an interactive session. A first
- * session start finds none: the notes it brings back from the store read as failed (fromHistory).
+ * again by itself, once (isResumable): one that waited for its try again, or whose try again the reload cut, as
+ * that try (outside the day's limit), any other as a turn's end would (within it). Only with automatic notes on,
+ * in an interactive session. Any other such note stopped for good: it fails, saying it was cut (w writes it), and
+ * the journal gets it now if it never had it. A first session start finds none: the notes it brings back from the
+ * store read as failed (fromHistory), and those a session left are journalLeft's.
  */
 async function resumeNotes($: EngineInterface, cfg: Config): Promise<void> {
-  if (!cfg.isAutoNote || !isInteractive) return
   try {
     const now = await $.clock.now()
     const day = stamp(now).day
+    const stopped: LearnNote[] = []
     for (const one of await read($, notes)) {
-      if (!isResumable(one, now) || inFlight.has(one.id) || resuming.has(one.id)) continue
+      if (one.status !== 'writing' || inFlight.has(one.id) || resuming.has(one.id)) continue
       const isRetry = one.retry !== undefined
-      if (!isRetry && isLimitReached(cfg, day)) continue
-      if (!(await setNote($, one.id, { resumed: true }))) continue
-      // Counted toward the day's limit from now, as a turn's end counts its note.
-      if (!isRetry) autoPending.add(one.id)
-      resuming.add(one.id)
-      $.clock.after(1, () => {
-        resuming.delete(one.id)
-        void writeNote($, cfg, one.id, { isRewrite: one.savedAs !== null, isAuto: true, isRetry, isResume: true })
-      })
+      if (cfg.isAutoNote && isInteractive && isResumable(one, now) && (isRetry || !isLimitReached(cfg, day))) {
+        resuming.add(one.id)
+        if (!(await setNote($, one.id, { resumed: true }))) {
+          resuming.delete(one.id)
+          continue
+        }
+        // Counted toward the day's limit from now, as a turn's end counts its note.
+        if (!isRetry) autoPending.add(one.id)
+        $.clock.after(1, () => void writeNote($, cfg, one.id, { isRewrite: one.savedAs !== null, isAuto: true, isRetry, isResume: true }))
+        continue
+      }
+      // Its try again still to come in this load (a session start of the same load): left to it.
+      if (retryTimers.has(one.id)) continue
+      const done = await setNote($, one.id, { status: 'failed', text: noteFailText({ reason: 'aborted' }, cfg.model), retry: undefined })
+      if (done) stopped.push(done)
     }
+    if (stopped.length === 0) return
+    if (cfg.isAutoSave) {
+      for (const one of stopped) if (one.savedAs === null) await save($, cfg, one, false)
+    }
+    await persist($)
   } catch (error) {
     void fault($, 'note', faultCode(error), '다시 불러온 뒤 노트를 이어 쓰지 못했습니다')
+  }
+}
+
+/**
+ * At a session start, the notes the store holds for project `root` that a session left being written (it ended
+ * mid-call, or while one waited for its try again) and the journal never took (isLeftWriting): each goes into the
+ * journal as this session reads it back (failed, w writes it) and is stored so, quietly, as nothing refused it.
+ * One whose copy changed within LEFT_MS may be another window's still, being written: looked at again once that
+ * has passed (`seen`, its copy's time then), and journaled only if no window changed it meanwhile. This load's own
+ * notes are resumeNotes'. Never rejects.
+ */
+async function journalLeft($: EngineInterface, cfg: Config, root?: string, seen?: ReadonlyMap<string, number>): Promise<void> {
+  if (!cfg.isAutoSave) return
+  try {
+    const where = root ?? (await $.session.root())
+    const now = await $.clock.now()
+    const raw = await $.store.get(HISTORY_KEY)
+    const entry = isRecord(raw) ? raw[where] : undefined
+    if (!isRecord(entry) || !Array.isArray(entry.notes)) return
+    const clearedAt = typeof entry.clearedAt === 'number' ? entry.clearedAt : 0
+    const pane = await read($, notes)
+    const later = new Map<string, number>()
+    const left: LearnNote[] = []
+    for (const one of entry.notes as unknown[]) {
+      const read = fromHistory(one, where)
+      if (!read || read.at <= clearedAt || read.savedAs !== null) continue
+      // First look: left being written. A later one: the same copy as then (this session may have stored it read back).
+      if (seen ? seen.get(read.id) !== read.updatedAt : !isLeftWriting(one, now)) continue
+      const mine = pane.find(note => note.id === read.id)
+      if (mine?.status === 'writing' || inFlight.has(read.id) || resuming.has(read.id) || retryTimers.has(read.id)) continue
+      if (now - read.updatedAt < LEFT_MS) later.set(read.id, read.updatedAt)
+      else left.push(mine ?? read)
+    }
+    for (const note of left) {
+      const path = await save($, cfg, note, false)
+      // Stored as saved (or as unsaved, the journal having refused it): the pane's copy where it has one, else this.
+      await persist($, false, [{ ...note, savedAs: path ? note.status : null, isUnsaved: path ? false : true, updatedAt: Math.max(now, note.updatedAt + 1) }])
+    }
+    if (later.size > 0) {
+      const due = Math.max(...[...later.values()].map(at => at + LEFT_MS - now))
+      $.clock.after(due, () => void journalLeft($, cfg, where, later))
+    }
+  } catch (error) {
+    void fault($, 'store', faultCode(error, 'store'), '지난 세션이 쓰다 둔 노트를 일지에 남기지 못했습니다')
   }
 }
 
@@ -3002,8 +3110,10 @@ export const register: Register = (on, options) => {
     await loadTeam($)
     await seedActivity($)
     await seedUsage($)
-    // After a reload: a note it cut mid-write goes on by itself (the day's limit read just above).
+    // After a reload: a note it cut mid-write goes on by itself (the day's limit read just above), or says it stopped.
     await resumeNotes($, cfg)
+    // A note a session that ended left being written goes into the journal, quietly; not waited for, as it writes files.
+    void journalLeft($, cfg)
     await remind($, cfg)
     await welcome($)
     await checkAtStart($, cfg)
@@ -3611,7 +3721,8 @@ export const register: Register = (on, options) => {
     const fileCount = note.changes.length + note.moreFiles
     const withheld = note.withheld ?? []
     const redacted = note.changes.reduce((sum, c) => sum + (c.redacted ?? 0), 0)
-    const writeLabel = isBusy ? '쓰는 중…' : isRetryArmed(note) ? '바로 쓰기' : note.status === 'off' ? '노트 쓰기' : '다시 쓰기'
+    // A note waiting for its try again is drawn so before its write lets go (noteBody): no call is being made.
+    const writeLabel = isRetryArmed(note) ? '바로 쓰기' : isBusy ? '쓰는 중…' : note.status === 'off' ? '노트 쓰기' : '다시 쓰기'
     // Above the code, the note's own words on what the change does differently.
     const summary = note.status === 'ready' ? changeSection(note.text) : undefined
 
@@ -3970,8 +4081,7 @@ function noteBody(note: LearnNote, isBusy: boolean, off: string, el: ElementTabl
       </Box>
     )
   }
-  if (note.status === 'writing' && isBusy && note.resumed === true) return <Text color="cyan">다시 불러온 뒤 이어서 씁니다…</Text>
-  if (note.status === 'writing' && isBusy) return <Text color="cyan">노트를 쓰는 중입니다…</Text>
+  // The wait first: the write that set it, still under way while the pane redraws, is no call being made.
   if (note.status === 'writing' && isRetryArmed(note)) {
     return (
       <Text color="yellow" wrap="wrap">
@@ -3979,6 +4089,8 @@ function noteBody(note: LearnNote, isBusy: boolean, off: string, el: ElementTabl
       </Text>
     )
   }
+  if (note.status === 'writing' && isBusy && resuming.has(note.id)) return <Text color="cyan">다시 불러온 뒤 이어서 씁니다…</Text>
+  if (note.status === 'writing' && isBusy) return <Text color="cyan">노트를 쓰는 중입니다…</Text>
   if (note.status === 'writing') return <Text color="yellow">노트를 쓰다 멈췄습니다 · w로 다시 쓰기</Text>
   if (note.status === 'failed') return <Text color="red">노트를 쓰지 못했습니다: {note.text}</Text>
   if (note.skip === 'limit' || note.skip === 'quota') return <Text color="yellow" wrap="wrap">{off}</Text>
@@ -3994,7 +4106,10 @@ function isWriting(id: string): boolean {
   return inFlight.has(id) || resuming.has(id) || autoPending.has(id)
 }
 
-/** True while the note waits for its automatic try again, its timer armed in this load (a reload's cancelled one does not count). */
+/**
+ * True while the note waits for its automatic try again, its timer armed in this load (a reload's cancelled one does
+ * not count, nor a try again under way: its call took the timer).
+ */
 function isRetryArmed(note: LearnNote): boolean {
   return note.status === 'writing' && note.retry !== undefined && retryTimers.has(note.id)
 }

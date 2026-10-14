@@ -1779,6 +1779,26 @@ export function isResumable(note: Pick<LearnNote, 'status' | 'isPast' | 'resumed
   return note.status === 'writing' && note.isPast !== true && note.resumed !== true && now - note.at < RESUME_MS
 }
 
+/**
+ * A note the store holds as being written whose copy has not changed this long is no window's any more: a call's
+ * own time limit (90 s), the wait for its try again (35 s at most) and that call all fit well inside.
+ */
+export const LEFT_MS = 5 * 60_000
+
+/** How old a note a session left being written may be for the next session to journal it: one a build before 1.7.0 left stays as it was. */
+export const LEFT_KEPT_MS = 86_400_000
+
+/**
+ * True for a note as the store holds it (`raw`, not read back yet) that a session left being written (it ended
+ * mid-call, or while the note waited for its try again) and the journal never took: never saved, its turn within
+ * LEFT_KEPT_MS of `now`. The caller waits out LEFT_MS of no change, as another window may still be writing it.
+ */
+export function isLeftWriting(raw: unknown, now: number): boolean {
+  if (typeof raw !== 'object' || raw === null) return false
+  const { status, savedAs, at } = raw as Record<string, unknown>
+  return status === 'writing' && (savedAs === null || savedAs === undefined) && typeof at === 'number' && now - at < LEFT_KEPT_MS
+}
+
 /** A subscription's rate-limit windows an automatic note yields to (1.7.0 D3). */
 export type QuotaKind = 'five_hour' | 'seven_day'
 

@@ -1,12 +1,15 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
+  LEFT_KEPT_MS,
+  LEFT_MS,
   QUOTA_YIELD,
   RESUME_MS,
   RETRY_JITTER_MS,
   RETRY_MS,
   failureText,
   faultLabel,
+  isLeftWriting,
   isResumable,
   journalSection,
   modelCode,
@@ -99,6 +102,22 @@ describe('1.7.0: notes that do not get lost (D3)', () => {
     expect(isResumable({ ...note, isPast: true }, NOW + 1000)).toBe(false)
     for (const status of ['ready', 'failed', 'off'] as const) expect(isResumable({ ...note, status }, NOW + 1000)).toBe(false)
     expect(RESUME_MS).toBe(10 * 60_000)
+  })
+
+  test('(검토) the next session journals a note a session left being written: never saved, within a day of its turn', () => {
+    const raw = { id: 'n', status: 'writing', savedAs: null, at: NOW }
+    expect(isLeftWriting(raw, NOW + 1000)).toBe(true)
+    // A store written before savedAs existed.
+    expect(isLeftWriting({ id: 'n', status: 'writing', at: NOW }, NOW + 1000)).toBe(true)
+    expect(isLeftWriting(raw, NOW + LEFT_KEPT_MS - 1)).toBe(true)
+    // Older: a build before 1.7.0 may have left it, and its journal day is long past.
+    expect(isLeftWriting(raw, NOW + LEFT_KEPT_MS)).toBe(false)
+    // A rewrite cut short: the journal has the note already.
+    expect(isLeftWriting({ ...raw, savedAs: 'ready' }, NOW + 1000)).toBe(false)
+    for (const status of ['ready', 'failed', 'off']) expect(isLeftWriting({ ...raw, status }, NOW + 1000)).toBe(false)
+    for (const bad of [null, undefined, 'writing', 3, { ...raw, at: 'today' }]) expect(isLeftWriting(bad, NOW)).toBe(false)
+    // Another window's call (90 s), its wait (35 s at most) and its try again all fit in the quiet time asked first.
+    expect(LEFT_MS).toBeGreaterThan(90_000 + RETRY_MS + RETRY_JITTER_MS + 90_000)
   })
 
   test('the automatic note yields past 90% of the five-hour window or 95% of the seven-day one; an API key has none', () => {

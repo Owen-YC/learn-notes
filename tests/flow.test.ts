@@ -59,6 +59,8 @@ type World = {
   failNextWrites: number
   /** True while the session's root cannot be read: a hook that needs it throws. */
   rootFails: boolean
+  /** While set, a write of the notes (the store's `history`) waits for it: a slow disk under the store. */
+  historyHold: Promise<void> | null
   /** The settings an administrator locked, as /config lists them (`learn-notes.dailyAutoNotes`). */
   locked: string[]
   /** The version the plugin's own plugin.json gives; null when it cannot be read. */
@@ -129,6 +131,7 @@ function world(
     writeFails: false,
     writeError: "EACCES: permission denied, open '/home/u/.claude/learning-notes/2026-10-03_proj.md'",
     rootFails: false,
+    historyHold: null,
     failNextWrites: 0,
     locked: [],
     version: '1.7.0',
@@ -188,7 +191,8 @@ function world(
   })
   // The store as JSON, as the host keeps it: what goes in comes back a copy.
   on('store.get', (_$, e) => ({ value: w.store.has(e.key) ? JSON.parse(JSON.stringify(w.store.get(e.key))) : undefined }))
-  on('store.set', (_$, e) => {
+  on('store.set', async (_$, e) => {
+    if (e.key === 'history' && w.historyHold) await w.historyHold
     if (w.storeFails) return { deny: 'store over 4 MiB' }
     w.sets.push(e.key)
     w.store.set(e.key, JSON.parse(JSON.stringify(e.value)))
@@ -6381,9 +6385,11 @@ describe('1.7.0: notes that do not get lost: one try again, a reload taken up, t
     const ui = await pane($)
     expect((await ui.find({ type: 'Text', text: WAITING }))?.props.color).toBe('yellow')
     expect(await ui.find({ type: 'Button', key: 'write', text: '바로 쓰기' })).toBeDefined()
-    // The journal waits for the try again; the store holds the note as unsaved, so a session ending meanwhile still journals its code.
+    // The journal waits for the try again; the store holds the note as being written (a session ending meanwhile
+    // leaves it to the next, journalLeft), never as one the journal refused.
     expect(w.journal()).toHaveLength(0)
-    expect(storedNotes(w)[0]).toMatchObject({ status: 'writing', isUnsaved: true })
+    expect(storedNotes(w)[0]).toMatchObject({ status: 'writing' })
+    expect(storedNotes(w)[0]!.isUnsaved).toBeUndefined()
     await w.clock.advance(35_000)
     expect(w.models).toHaveLength(2)
     expect(w.models[1]).toBe(w.models[0])
@@ -6491,14 +6497,16 @@ describe('1.7.0: notes that do not get lost: one try again, a reload taken up, t
     w.replies = ['cut']
     await turn($, () => $.tool.call(EDIT_A))
     await finish(w)
-    // The cut call counted toward the day's one: the reload leaves the note for w.
+    // The cut call counted toward the day's one: the reload leaves the note for w, saying it was cut, and journals its code.
     await start($)
     await w.clock.advance(60_000)
     expect(w.models).toHaveLength(1)
-    expect((await learn($, '공유')).text).toBe(`${NO_TEXT}노트를 쓰다 멈췄습니다 · 패널에서 w로 다시 쓰기`)
+    expect((await learn($, '공유')).text).toBe(`${NO_TEXT}노트를 쓰지 못했습니다: 중간에 끊겨 멈췄습니다 · w로 다시 쓰기`)
+    expect(w.journal()).toHaveLength(1)
+    expect(w.journal()[0]!.text).toContain('_노트를 쓰지 못했다: 중간에 끊겨 멈췄습니다 · w로 다시 쓰기_')
   })
 
-  test('with automatic notes off a reload takes up nothing: a w the reload cut waits for the next w', { options: { autoNote: false } }, async ($, on) => {
+  test('with automatic notes off a reload takes up nothing: a w the reload cut says it was cut, for the next w', { options: { autoNote: false } }, async ($, on) => {
     const w = world(on)
     await start($)
     await turn($, () => $.tool.call(EDIT_A))
@@ -6511,7 +6519,9 @@ describe('1.7.0: notes that do not get lost: one try again, a reload taken up, t
     await start($)
     await w.clock.advance(60_000)
     expect(w.models).toHaveLength(1)
-    expect((await learn($, '공유')).text).toBe(`${NO_TEXT}노트를 쓰다 멈췄습니다 · 패널에서 w로 다시 쓰기`)
+    expect((await learn($, '공유')).text).toBe(`${NO_TEXT}노트를 쓰지 못했습니다: 중간에 끊겨 멈췄습니다 · w로 다시 쓰기`)
+    // The journal had the note's code already (as one not written by itself): not again.
+    expect(w.journal()).toHaveLength(1)
   })
 
   test('a -p run tries no note again: its process ends with its turn', async ($, on) => {
@@ -6669,5 +6679,234 @@ describe('1.7.0: notes that do not get lost: one try again, a reload taken up, t
     await ui.press({ key: 'prev' })
     expect(await ui.find({ type: 'Text', text: 'Claude 사용 한도(7일)를 95% 넘게 써서 자동 노트를 미뤘습니다 · w를 누르면 씁니다' })).toBeDefined()
     await ui.unmount()
+  })
+
+  test('(검토) a pane open all along shows the wait in yellow however slow the store is, then the note', async ($, on) => {
+    const w = world(on)
+    await start($)
+    const ui = await pane($)
+    w.replies = [BUSY, 'ok']
+    await turn($, () => $.tool.call(EDIT_A))
+    // The store takes its time with the waiting note: the pane is drawn again while that write is still on.
+    let letGo = () => {}
+    w.historyHold = new Promise<void>(resolve => {
+      letGo = resolve
+    })
+    await w.clock.advance(5)
+    w.historyHold = null
+    letGo()
+    await w.clock.settle()
+    await w.clock.advance(5_000)
+    expect((await ui.find({ type: 'Text', text: WAITING }))?.props.color).toBe('yellow')
+    expect(await ui.find({ type: 'Text', text: '노트를 쓰는 중입니다…' })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'write', text: '바로 쓰기' })).toBeDefined()
+    await w.clock.advance(35_000)
+    expect(await ui.find({ type: 'Markdown', text: /let을 const로/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('(검토) a note waiting for its try again is no note the journal refused: a reload meanwhile says nothing, 진단 counts none', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.replies = [BUSY, 'ok']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(storedNotes(w)[0]!.isUnsaved).toBeUndefined()
+    expect(await diag($)).toContain('- 일지: 못 쓴 노트 없음')
+    const checks = () => w.transcript.filter(line => line.startsWith('learn-notes 점검'))
+    await start($)
+    await w.clock.advance(5)
+    expect(checks()).toEqual([])
+    expect(w.journal()).toHaveLength(1)
+    // The day's one check line is still there for a save the journal really refuses.
+    w.writeFails = true
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    w.writeFails = false
+    await start($)
+    await w.clock.settle()
+    expect(checks()).toHaveLength(1)
+    expect(checks()[0]).toContain('일지에 아직 못 쓴 노트 1개')
+  })
+
+  test('(검토) the next session journals a note a session left being written: quietly, once, as one not written; never one another window may still write', async ($, on) => {
+    const change = { file: 'src/a.ts', path: '/proj/src/a.ts', tool: 'Edit', kind: 'update', added: 1, removed: 1, diff: '@@ -1,1 +1,1 @@\n-let b = 2\n+const b = 2', isCut: false }
+    const stored = (id: string, at: number, extra: Record<string, unknown> = {}) => ({
+      id, turnId: id, at, prompt: `요청 ${id}`, answer: '', changes: [change], moreFiles: 0, status: 'writing', text: '', savedAs: null, isPast: false, root: '/proj', updatedAt: at, concepts: [], ...extra,
+    })
+    const history = {
+      '/proj': {
+        at: NOW,
+        notes: [
+          // Older than a day: as it was (no notes of before 1.7.0 go into old journals).
+          stored('old', NOW - 3 * 86_400_000),
+          // A rewrite: the journal has the note already.
+          stored('rewrite', NOW - 40 * 60_000, { savedAs: 'ready' }),
+          // The session ended while it waited for its try again, half an hour ago.
+          stored('waited', NOW - 30 * 60_000, { retry: { at: NOW - 29 * 60_000, token: 'x', why: 'overloaded' } }),
+          // Left a minute ago: another window may still be writing these.
+          stored('fresh', NOW - 60_000),
+          stored('other', NOW - 30_000),
+        ],
+      },
+    }
+    const w = world(on, 'ok', null, true, new Map<string, unknown>([['history', history]]))
+    await start($)
+    await w.clock.settle()
+    const asked = () =>
+      [...w.files.entries()]
+        .filter(([path]) => path.startsWith(`${NOTES_DIR}/`) && !path.endsWith('/concepts.md'))
+        .flatMap(([, text]) => text.split('\n').filter(line => line.startsWith('**요청**')))
+        .sort()
+    expect(asked()).toEqual(['**요청**: 요청 waited'])
+    // The other window writes its note meanwhile (that window keeps no journal): its newer copy says so, and the
+    // note stays that window's to journal or not.
+    const live = (w.store.get('history') as Record<string, { notes: Record<string, unknown>[] }>)['/proj']!.notes.find(note => note.id === 'other')!
+    Object.assign(live, { status: 'ready', text: NOTE_TEXT, updatedAt: NOW + 1000 })
+    await w.clock.advance(15 * 60_000)
+    expect(asked()).toEqual(['**요청**: 요청 fresh', '**요청**: 요청 waited'])
+    const text = [...w.files.values()].join('\n')
+    expect(text).toContain('_노트를 쓰지 못했다: 세션이 끝나 노트를 다 쓰지 못했습니다 · w로 다시 쓰기_')
+    expect(text).toContain('+const b = 2')
+    expect(w.transcript.filter(line => line.startsWith('learn-notes 점검'))).toEqual([])
+    expect(await diag($)).toContain('- 일지: 못 쓴 노트 없음')
+    const notes = storedNotes(w)
+    expect(notes.find(note => note.id === 'waited')).toMatchObject({ status: 'failed', savedAs: 'failed' })
+    expect(notes.find(note => note.id === 'fresh')).toMatchObject({ status: 'failed', savedAs: 'failed' })
+    expect(notes.find(note => note.id === 'other')).toMatchObject({ status: 'ready', savedAs: null })
+    // Once: a later start journals none again.
+    await start($)
+    await w.clock.advance(10 * 60_000)
+    expect(asked()).toEqual(['**요청**: 요청 fresh', '**요청**: 요청 waited'])
+  })
+
+  test('(검토) a note a reload leaves and does not take up fails as cut, and the journal keeps its code now', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.replies = ['cut', 'cut']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    // The first reload takes it up, and a second cuts that call too: never taken up twice.
+    await start($)
+    await w.clock.advance(5)
+    expect(w.models).toHaveLength(2)
+    await start($)
+    await w.clock.advance(60_000)
+    expect(w.models).toHaveLength(2)
+    expect((await learn($, '공유')).text).toBe(`${NO_TEXT}노트를 쓰지 못했습니다: 중간에 끊겨 멈췄습니다 · w로 다시 쓰기`)
+    expect(w.journal()).toHaveLength(1)
+    expect(w.journal()[0]!.text).toContain('_노트를 쓰지 못했다: 중간에 끊겨 멈췄습니다 · w로 다시 쓰기_')
+    expect(w.journal()[0]!.text).toContain('+const b = 2')
+    expect(storedNotes(w)[0]).toMatchObject({ status: 'failed', savedAs: 'failed' })
+  })
+
+  test('(검토) a reload that cuts the try again takes it up as that try: one more call, outside the day\'s limit, never a third try', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.replies = [BUSY, 'cut', BUSY, BUSY]
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    await w.clock.advance(36_000)
+    expect(w.models).toHaveLength(2)
+    await start($)
+    await w.clock.advance(5)
+    await w.clock.advance(60_000)
+    expect(w.models).toHaveLength(3)
+    expect(usageOf(w)).toMatchObject({ calls: 3, auto: 1 })
+    expect((await learn($, '공유')).text).toBe(`${NO_TEXT}노트를 쓰지 못했습니다: 서버가 붐빕니다 · w로 다시 쓰기`)
+  })
+
+  test('(검토) a note a reload took up keeps that mark through its try again: a second reload does not take it up again', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.replies = ['cut', BUSY, 'cut', BUSY, 'ok']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    await start($)
+    await w.clock.advance(5)
+    expect(w.models).toHaveLength(2)
+    // Its try again says it is written again, not taken up after a reload.
+    w.model = 'hold'
+    const ui = await pane($)
+    await w.clock.advance(36_000)
+    expect(w.models).toHaveLength(3)
+    await ui.unmount()
+    await start($)
+    await w.clock.advance(60_000)
+    expect(w.models).toHaveLength(3)
+    expect(usageOf(w)).toMatchObject({ calls: 3, auto: 2 })
+    expect((await learn($, '공유')).text).toBe(`${NO_TEXT}노트를 쓰지 못했습니다: 중간에 끊겨 멈췄습니다 · w로 다시 쓰기`)
+  })
+
+  test('(검토) a /cd while it waits: the try again still comes, into its own project\'s journal and store', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.replies = [BUSY, 'ok']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    w.root = '/other'
+    await turn($, async () => {}, 't2', '다른 프로젝트에서 질문')
+    await w.clock.advance(40_000)
+    expect(w.models).toHaveLength(2)
+    expect(w.journal()).toHaveLength(1)
+    expect(w.journal()[0]!.path).toBe(JOURNAL)
+    expect(w.journal()[0]!.text).toContain('let을 const로')
+    expect(storedNotes(w)[0]).toMatchObject({ status: 'ready', savedAs: 'ready' })
+    w.root = '/proj'
+    await turn($, async () => {}, 't3', '돌아왔어')
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Markdown', text: /let을 const로/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('(검토) a /cd away and back while it waits: the try again writes the note in the pane it is back in', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.replies = [BUSY, 'ok']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    w.root = '/other'
+    await turn($, async () => {}, 't2', '다른 프로젝트에서 질문')
+    w.root = '/proj'
+    await turn($, async () => {}, 't3', '돌아왔어')
+    await w.clock.advance(40_000)
+    expect(w.models).toHaveLength(2)
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Markdown', text: /let을 const로/ })).toBeDefined()
+    await ui.unmount()
+    expect(w.journal()).toHaveLength(1)
+  })
+
+  test('(검토) the learner\'s own w that meets a busy server is not tried again by itself: one call, the red line stays', { options: { autoNote: false } }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    w.replies = [BUSY]
+    const ui = await pane($)
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    await w.clock.advance(60_000)
+    expect(w.models).toHaveLength(1)
+    expect((await ui.find({ type: 'Text', text: /^노트를 쓰지 못했습니다: 서버가 붐빕니다 · w로 다시 쓰기$/ }))?.props.color).toBe('red')
+    await ui.unmount()
+  })
+
+  test('(검토) a note a reload takes up counts toward the day\'s limit while its call runs', { options: { dailyAutoNotes: 2 } }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.replies = ['cut']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    w.model = 'hold'
+    await start($)
+    await w.clock.advance(5)
+    expect(w.models).toHaveLength(2)
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    expect(w.models).toHaveLength(2)
+    expect(storedNotes(w).at(-1)).toMatchObject({ status: 'off', skip: 'limit' })
+    w.release()
+    await w.clock.settle()
   })
 })
