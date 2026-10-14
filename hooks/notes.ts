@@ -1639,21 +1639,169 @@ export function summaryOf(text: string): string {
   return first === undefined ? '' : cut(first.replace(/^[-*]\s*/, ''), 120)
 }
 
+/**
+ * A model call that brought no answer, as askModel reports it: the engine's `reason` (with an API error's
+ * `status` and `error` kind), and `isTimeout` when the call's own time limit cut it (an `aborted` that ran
+ * its whole `timeoutMs`), as against one cut short (the plugin's environment unloaded by a reload).
+ */
+export type ModelFail = { reason: string; status?: number | null; error?: string; isTimeout?: boolean }
+
 const API_ERROR_TEXT: Record<string, string> = {
   overloaded: '서버가 붐빕니다. 잠시 뒤 다시 해 보세요',
   rate_limit: '요청 한도에 걸렸습니다. 잠시 뒤 다시 해 보세요',
   authentication_failed: '로그인이 필요합니다 (/login)',
+  oauth_org_not_allowed: '로그인이 필요합니다 (/login)',
+  billing_error: '계정의 사용 한도나 결제 문제입니다. 관리자에게 알려 주세요',
+  account_on_hold: '계정의 사용 한도나 결제 문제입니다. 관리자에게 알려 주세요',
+  invalid_request: '모델이 이 요청을 받지 않았습니다. 계속되면 /learn 진단을 담당자에게 보내 주세요',
+}
+
+/** The model in /config cannot be used by this account: which one, and what to pick instead. */
+function modelMissing(model: string): { why: string; fix: string } {
+  return {
+    why: model === '' ? '이 계정에서 고른 모델을 쓸 수 없습니다' : `이 계정에서 '${model}' 모델을 쓸 수 없습니다`,
+    fix: /haiku/i.test(model) ? '/config에서 다른 모델을 골라 보세요' : '/config에서 haiku를 골라 보세요',
+  }
 }
 
 /** Why a model call brought no answer, in words a learner can act on; the caller says how to try again. */
-export function failureText(reply: { reason: string; status?: number | null; error?: string }): string {
+export function failureText(reply: ModelFail, model = ''): string {
   if (reply.reason === 'api-error') {
+    if (reply.error === 'model_not_found') {
+      const { why, fix } = modelMissing(model)
+      return `${why}. ${fix}`
+    }
     const known = reply.error === undefined ? undefined : API_ERROR_TEXT[reply.error]
-    return known ?? `API 오류${reply.status ? ` ${reply.status}` : ''}. 잠시 뒤 다시 해 보세요`
+    if (known !== undefined) return known
+    const kind = transientOf(reply)
+    if (kind === 'network') return '서버에 닿지 못했습니다. 인터넷 연결을 확인하세요'
+    if (kind === 'server') return `서버 오류입니다${reply.status ? ` (${reply.status})` : ''}. 잠시 뒤 다시 해 보세요`
+    return `API 오류${reply.status ? ` ${reply.status}` : ''}. 잠시 뒤 다시 해 보세요`
   }
   if (reply.reason === 'empty-reply') return '모델이 빈 답을 보냈습니다'
-  if (reply.reason === 'aborted') return '시간이 너무 걸리거나 중간에 끊겨 멈췄습니다'
+  if (reply.reason === 'aborted') return reply.isTimeout === true ? '시간이 너무 걸려 멈췄습니다' : '시간이 너무 걸리거나 중간에 끊겨 멈췄습니다'
   return reply.reason
+}
+
+/**
+ * Why a note's model call failed that may clear on its own (1.7.0 D3): a busy server, a server error, a
+ * connection that dropped before any response (a null status), or the call's own time limit.
+ */
+export type Transient = 'overloaded' | 'server' | 'network' | 'timeout'
+
+/**
+ * API error kinds that waiting never clears, or that a try again would only make worse: the request limit
+ * is the one the main session shares, a login or a bill needs the person, a request the API refused is refused again.
+ */
+const NEVER_AGAIN: ReadonlySet<string> = new Set([
+  'rate_limit',
+  'authentication_failed',
+  'oauth_org_not_allowed',
+  'account_on_hold',
+  'verification_required',
+  'billing_error',
+  'invalid_request',
+  'model_not_found',
+  'max_output_tokens',
+  'cloud_credential_error',
+])
+
+/** Which transient failure a call met (see Transient), or undefined for one a try again would not clear. */
+export function transientOf(fail: ModelFail): Transient | undefined {
+  if (fail.reason === 'aborted') return fail.isTimeout === true ? 'timeout' : undefined
+  if (fail.reason !== 'api-error') return undefined
+  if (fail.error !== undefined && NEVER_AGAIN.has(fail.error)) return undefined
+  if (fail.error === 'overloaded' || fail.status === 529) return 'overloaded'
+  if (fail.error === 'server_error' || (typeof fail.status === 'number' && fail.status >= 500)) return 'server'
+  if (fail.status === null) return 'network'
+  return undefined
+}
+
+/** How long an automatic note waits before its one try again, and how much later at most (spread, so windows do not all ask at once). */
+export const RETRY_MS = 30_000
+export const RETRY_JITTER_MS = 5_000
+
+const RETRY_WHY: Record<Transient, string> = {
+  overloaded: '서버가 붐벼',
+  server: '서버 오류로',
+  network: '연결이 끊겨',
+  timeout: '시간이 너무 걸려',
+}
+
+/** The note's line while its automatic call waits for the try again; `act` how to write it at once, where this line is read. */
+export function retryText(why: Transient, act = 'w로 바로 쓰기'): string {
+  return `${RETRY_WHY[why] ?? RETRY_WHY.overloaded} 30초 뒤 한 번 더 씁니다… · ${act}`
+}
+
+/**
+ * A note's text once its call failed for good, as the pane shows it after `노트를 쓰지 못했습니다: `: the
+ * cause, and what the learner does next (w, mostly; a login first; a bill or a model that is not theirs to fix).
+ */
+export function noteFailText(fail: ModelFail, model: string): string {
+  const again = 'w로 다시 쓰기'
+  if (fail.reason === 'api-error') {
+    switch (fail.error) {
+      case 'rate_limit':
+        return `요청 한도에 걸렸습니다 · 잠시 뒤 ${again}`
+      case 'authentication_failed':
+      case 'oauth_org_not_allowed':
+        return `로그인이 필요합니다 (/login) · 로그인 뒤 ${again}`
+      case 'billing_error':
+      case 'account_on_hold':
+        return '계정의 사용 한도나 결제 문제입니다 · 관리자에게 알려 주세요'
+      case 'model_not_found': {
+        const { why, fix } = modelMissing(model)
+        return `${why} · ${fix}`
+      }
+      case 'invalid_request':
+        return '모델이 이 요청을 받지 않았습니다 · 계속되면 /learn 진단을 담당자에게 보내 주세요'
+    }
+    const kind = transientOf(fail)
+    if (kind === 'overloaded') return `서버가 붐빕니다 · ${again}`
+    if (kind === 'network') return `인터넷 연결을 확인하세요 · 연결되면 ${again}`
+    if (kind === 'server') return `서버 오류입니다${fail.status ? ` (${fail.status})` : ''} · ${again}`
+    return `API 오류${fail.status ? ` ${fail.status}` : ''} · ${again}`
+  }
+  if (fail.reason === 'empty-reply') return `모델이 빈 답을 보냈습니다 · ${again}`
+  if (fail.reason === 'aborted') return fail.isTimeout === true ? `시간이 너무 걸려 멈췄습니다 · ${again}` : `중간에 끊겨 멈췄습니다 · ${again}`
+  return `${fail.reason} · ${again}`
+}
+
+/** A note left writing (a reload cut its call, or the timer of its try again) is taken up again by the next load this long after its turn ended. */
+export const RESUME_MS = 10 * 60_000
+
+/**
+ * True for a note a reload left being written that the new load writes again by itself: this session's
+ * (not one the store brought back, whose unfinished write reads as failed), never taken up before, its turn
+ * ended within RESUME_MS. The caller checks the rest (not being written here, automatic notes on, the day's limit).
+ */
+export function isResumable(note: Pick<LearnNote, 'status' | 'isPast' | 'resumed' | 'at'>, now: number): boolean {
+  return note.status === 'writing' && note.isPast !== true && note.resumed !== true && now - note.at < RESUME_MS
+}
+
+/** A subscription's rate-limit windows an automatic note yields to (1.7.0 D3). */
+export type QuotaKind = 'five_hour' | 'seven_day'
+
+/** How much of each window (percent used) may be gone before a turn's end writes no note by itself: constants, no setting. */
+export const QUOTA_YIELD: Readonly<Record<QuotaKind, number>> = { five_hour: 90, seven_day: 95 }
+
+/**
+ * The window past its mark (QUOTA_YIELD) in `$.session.usage()`'s rate limits, the five-hour one first; undefined
+ * for none, and for an API key's session (its list is empty) or anything that is not such a list.
+ */
+export function quotaOver(limits: unknown): QuotaKind | undefined {
+  if (!Array.isArray(limits)) return undefined
+  for (const kind of ['five_hour', 'seven_day'] as const) {
+    const used = limits.find(one => typeof one === 'object' && one !== null && (one as { kind?: unknown }).kind === kind) as { percentUsed?: unknown } | undefined
+    if (typeof used?.percentUsed === 'number' && used.percentUsed >= QUOTA_YIELD[kind]) return kind
+  }
+  return undefined
+}
+
+/** Why a turn's end passed over its note for the account's limit (skip `quota`), the window named; an unknown one reads as the five-hour. */
+export function quotaWhy(kind: QuotaKind | undefined): string {
+  const window = kind === 'seven_day' ? 'seven_day' : 'five_hour'
+  return `Claude 사용 한도(${window === 'seven_day' ? '7일' : '5시간'})를 ${QUOTA_YIELD[window]}% 넘게 써서 자동 노트를 미뤘습니다`
 }
 
 /** `ms` as local `YYYY-MM-DD` and `HH:MM`. */
@@ -1712,6 +1860,7 @@ export function dayBefore(now: number): string {
 const SKIP_JOURNAL: Record<NonNullable<LearnNote['skip']>, string> = {
   format: '띄어쓰기·줄바꿈만 바뀌어',
   limit: '하루 자동 노트 한도에 닿아',
+  quota: 'Claude 사용 한도를 거의 다 써서',
 }
 
 /**
@@ -3736,11 +3885,14 @@ export function faultCode(error: unknown, kind: 'fs' | 'store' = 'fs'): string {
   return kind === 'store' ? 'store-reject' : 'error'
 }
 
-/** A model call's failure as a classification code: `api-error:<kind>:<status>` (`none` with no response), `empty`, `aborted`. */
-export function modelCode(reply: { reason: string; status?: number | null; error?: string }): string {
+/**
+ * A model call's failure as a classification code: `api-error:<kind>:<status>` (`none` with no response), `empty`,
+ * `timeout` (its own time limit ran out, see ModelFail), else `aborted`.
+ */
+export function modelCode(reply: ModelFail): string {
   if (reply.reason === 'api-error') return faultWord(`api-error:${reply.error ?? 'unknown'}:${reply.status ?? 'none'}`)
   if (reply.reason === 'empty-reply') return 'empty'
-  if (reply.reason === 'aborted') return 'aborted'
+  if (reply.reason === 'aborted') return reply.isTimeout === true ? 'timeout' : 'aborted'
   return faultWord(reply.reason)
 }
 
@@ -3845,6 +3997,7 @@ const CODE_LABEL: Record<string, string> = {
   'store-reject': '저장소가 받지 않음',
   empty: '빈 답',
   aborted: '시간 초과·끊김',
+  timeout: '시간 초과',
   blocked: '모델을 부를 수 없음',
   unreadable: '답을 읽지 못함',
   focus: '초점 거절',

@@ -76,9 +76,20 @@ export type LearnNote = {
   withheld?: LearnWithheld[]
   /**
    * Why a turn's note was not written by itself (status `off`): `format` its files changed only in spaces and
-   * line breaks, `limit` the day's automatic notes (dailyAutoNotes) were used up. w writes it all the same.
+   * line breaks, `limit` the day's automatic notes (dailyAutoNotes) were used up, `quota` (1.7.0) the account's
+   * five-hour or seven-day window was nearly used up (see `quota`). w writes it all the same.
    */
-  skip?: 'format' | 'limit'
+  skip?: 'format' | 'limit' | 'quota'
+  /** With skip `quota`: which window was past its mark (QUOTA_YIELD). */
+  quota?: 'five_hour' | 'seven_day'
+  /**
+   * While an automatic note's call that failed for a while (a busy server, a server error, a dropped connection,
+   * its time limit) waits for its one try again (1.7.0): when that is due, the token its timer holds (a w meanwhile
+   * clears it, so the timer writes nothing), and why the first failed. Status `writing` the while.
+   */
+  retry?: { at: number; token: string; why: 'overloaded' | 'server' | 'network' | 'timeout' }
+  /** True once a reload's session start took this note, left being written, up again by itself (1.7.0): never twice. */
+  resumed?: true
 }
 
 /** One question about a note and the model's answer; a key's (r, e) is kept as its label (`예시로 따라가기`, `더 쉽게`). */

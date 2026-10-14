@@ -342,7 +342,7 @@ describe('the note', () => {
 
   test('failures read as what to do next', () => {
     expect(failureText({ reason: 'api-error', status: 429, error: 'rate_limit' })).toBe('요청 한도에 걸렸습니다. 잠시 뒤 다시 해 보세요')
-    expect(failureText({ reason: 'api-error', status: 500, error: 'server_error' })).toBe('API 오류 500. 잠시 뒤 다시 해 보세요')
+    expect(failureText({ reason: 'api-error', status: 500, error: 'server_error' })).toBe('서버 오류입니다 (500). 잠시 뒤 다시 해 보세요')
     expect(failureText({ reason: 'api-error', status: 401, error: 'authentication_failed' })).toBe('로그인이 필요합니다 (/login)')
     expect(failureText({ reason: 'aborted' })).toContain('멈췄습니다')
   })

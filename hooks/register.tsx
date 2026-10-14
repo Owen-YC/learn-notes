@@ -78,6 +78,17 @@ import {
   isRequestOrigin,
   isAwayOrigin,
   failureText,
+  type ModelFail,
+  noteFailText,
+  isResumable,
+  quotaOver,
+  quotaWhy,
+  type QuotaKind,
+  retryText,
+  RETRY_JITTER_MS,
+  RETRY_MS,
+  type Transient,
+  transientOf,
   focus,
   isUnder,
   isSystemFolder,
@@ -225,6 +236,11 @@ const ANKI_FILE = 'learn-notes-anki.txt'
 const USAGE_KEY = 'usage'
 /** The last day the daily limit's toast showed, in any session: it shows once a day. */
 const LIMIT_TOAST_KEY = 'limitToast'
+/**
+ * The last day the toast that an automatic note yielded to the account's limit showed (1.7.0), in any session:
+ * once a day, as the daily limit's. One `YYYY-MM-DD`.
+ */
+const QUOTA_TOAST_KEY = 'quotaToast'
 /** Set once a new install's first session said hello (welcome), or one found notes or concepts there already. */
 const WELCOMED_KEY = 'welcomed'
 /** The concepts' known marks by key (knownMarks), written with the index: a 1.5 session still open writes the index without them. */
@@ -391,8 +407,20 @@ const autoPending = new Set<string>()
  * line goes by to say whether the turn's end will write one.
  */
 let autoDone: { day: string; auto: number } | undefined
-/** The day the daily limit's toast last showed here (the store keeps it for every session, LIMIT_TOAST_KEY). */
-let limitToastDay: string | undefined
+/** The day each once-a-day toast last showed here, by its store key (LIMIT_TOAST_KEY, QUOTA_TOAST_KEY): the store keeps it for every session. */
+const toastDays = new Map<string, string>()
+/**
+ * The timer of each automatic note's one try again in this load (see LearnNote.retry): a w meanwhile cancels it,
+ * and a reload cancels them all (that note is then taken up by the next load's session start, resumeNotes).
+ */
+const retryTimers = new Map<string, { cancel: () => void }>()
+/** Notes a reload left being written that this load is about to write again (resumeNotes), until their write starts. */
+const resuming = new Set<string>()
+/**
+ * The account's window past its mark (QUOTA_YIELD) as the last turn's end read it, or undefined: the live line
+ * promises no note while it is set, as the turn's end will write none by itself.
+ */
+let quotaHeld: QuotaKind | undefined
 /** The project's team file as last read (TEAM_FILE), with its stamp: read again only once that changes. */
 let team: { path: string; mtimeMs: number; size: number; parsed: TeamFile } | null = null
 /**
@@ -714,7 +742,11 @@ function fromHistory(raw: unknown, root: string): LearnNote | undefined {
       : [],
     // Anything but a list of them is dropped, not kept from the spread above: such a note left nothing out.
     withheld: Array.isArray(raw.withheld) ? raw.withheld.filter(isWithheld) : undefined,
-    skip: raw.skip === 'format' || raw.skip === 'limit' ? raw.skip : undefined,
+    skip: raw.skip === 'format' || raw.skip === 'limit' || raw.skip === 'quota' ? raw.skip : undefined,
+    quota: raw.skip === 'quota' && (raw.quota === 'five_hour' || raw.quota === 'seven_day') ? raw.quota : undefined,
+    // What a load's own timers stood for (a try again, a reload's take-up): the write they waited on is over.
+    retry: undefined,
+    resumed: undefined,
   }
 }
 
@@ -1395,9 +1427,10 @@ function recordActivity($: EngineInterface, day: string, delta: Partial<LearnDay
 
 /**
  * Counts one model call on today's usage record, with the tokens it read
- * (cached ones too) and wrote; never fails the caller.
+ * (cached ones too) and wrote; never fails the caller. `kind` `auto` counts
+ * toward the day's limit too; an automatic note's try again (`retry`) does not.
  */
-function recordUsage($: EngineInterface, usage: ModelUsage | undefined, kind: 'auto' | 'manual'): Promise<void> {
+function recordUsage($: EngineInterface, usage: ModelUsage | undefined, kind: CallKind): Promise<void> {
   return enqueue('storing', async () => {
     try {
       const tokens = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? n : 0)
@@ -1457,22 +1490,35 @@ function seedUsage($: EngineInterface): Promise<void> {
 }
 
 /**
- * True the first time on `day` the daily limit's toast is to show, in this
+ * True the first time on `day` the toast kept under `key` (the daily limit's,
+ * LIMIT_TOAST_KEY; the account limit's, QUOTA_TOAST_KEY) is to show, in this
  * session or any other: the store keeps the day it last showed. A store that
  * cannot keep it only lets it show again.
  */
-function isFirstLimitToast($: EngineInterface, day: string): Promise<boolean> {
-  if (limitToastDay === day) return Promise.resolve(false)
-  limitToastDay = day
+function isFirstToastOn($: EngineInterface, key: string, day: string): Promise<boolean> {
+  if (toastDays.get(key) === day) return Promise.resolve(false)
+  toastDays.set(key, day)
   return enqueue('storing', async () => {
     try {
-      if ((await $.store.get(LIMIT_TOAST_KEY)) === day) return false
-      await $.store.set(LIMIT_TOAST_KEY, day)
+      if ((await $.store.get(key)) === day) return false
+      await $.store.set(key, day)
     } catch (error) {
       void fault($, 'store', faultCode(error, 'store'), '한도 알림을 띄운 날을 남기지 못했습니다')
     }
     return true
   })
+}
+
+/**
+ * The account's rate-limit window past its mark (QUOTA_YIELD) as the status line has it now, for a turn's end to
+ * yield its automatic note to the work; undefined off a subscription (no window read), or where it cannot be read.
+ */
+async function quotaNow($: EngineInterface): Promise<QuotaKind | undefined> {
+  try {
+    return quotaOver((await $.session.usage()).rateLimits)
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -1718,24 +1764,40 @@ function noModelText(cfg: Config): string {
 }
 
 /**
+ * Who made a model call, for the usage record: a turn's end by itself (`auto`, counted toward the day's limit),
+ * the learner (`manual`), or an automatic note's one try again after a failure that clears on its own (`retry`).
+ */
+type CallKind = 'auto' | 'manual' | 'retry'
+
+/** How long a model call may take unless its caller says otherwise. */
+const MODEL_TIMEOUT_MS = 90_000
+/** An `aborted` call that ran this close to its whole time limit was cut by that limit, not by a reload. */
+const TIMEOUT_SLACK_MS = 1_000
+
+/**
  * One model call for the learner: its text, or why there is none in words they
- * can act on. The prompt's secrets are masked once more on the way out: a note
- * stored or a journal written before 1.6.0, or a typed quiz answer, was never masked.
- * Every call that reached the model is counted in the usage record, answered or
- * not; `kind` says whether a turn's end made it by itself (an automatic note).
- * A call with no answer is a fault of `area` (its code, never its text); one
- * answered marks the area's faults gone through.
+ * can act on (`error`), with the failure as askModel saw it (`fail`; absent
+ * where the engine refused to make the call) and, for one that may clear on its
+ * own, which (`transient`). The prompt's secrets are masked once more on the
+ * way out: a note stored or a journal written before 1.6.0, or a typed quiz
+ * answer, was never masked. Every call that reached the model is counted in the
+ * usage record, answered or not (`kind`, see CallKind). A call with no answer
+ * is a fault of `area` (its code, never its text); one answered marks the
+ * area's faults gone through.
  */
 async function askModel(
   $: EngineInterface,
   cfg: Config,
   area: 'note' | 'quiz' | 'grade' | 'ask' | 'recap',
   call: { system: string; prompt: string; maxTokens: number; timeoutMs?: number },
-  kind: 'auto' | 'manual' = 'manual',
-): Promise<{ text: string } | { error: string }> {
+  kind: CallKind = 'manual',
+): Promise<{ text: string } | { error: string; fail?: ModelFail; transient?: Transient }> {
+  const timeoutMs = call.timeoutMs ?? MODEL_TIMEOUT_MS
+  // When it began, to tell its own time limit from a reload that cut it (both resolve `aborted`).
+  const startedAt = await $.clock.now().catch(() => undefined)
   let reply
   try {
-    reply = await $.model.complete({ model: cfg.model, effort: 'low', timeoutMs: 90_000, ...call, prompt: redactText(call.prompt).text })
+    reply = await $.model.complete({ model: cfg.model, effort: 'low', ...call, timeoutMs, prompt: redactText(call.prompt).text })
   } catch {
     void fault($, area, 'blocked', '모델을 부르지 못했습니다')
     return { error: noModelText(cfg) }
@@ -1745,8 +1807,13 @@ async function askModel(
     faultOk($, area)
     return { text: fixEscapedTicks(reply.text) }
   }
-  void fault($, area, modelCode(reply), '모델이 답하지 않았습니다')
-  return { error: failureText(reply) }
+  const endedAt = reply.reason === 'aborted' && startedAt !== undefined ? await $.clock.now().catch(() => undefined) : undefined
+  const isTimeout = startedAt !== undefined && endedAt !== undefined && endedAt - startedAt >= timeoutMs - TIMEOUT_SLACK_MS
+  const fail: ModelFail =
+    reply.reason === 'api-error' ? { reason: reply.reason, status: reply.status, error: reply.error } : { reason: reply.reason, ...(isTimeout ? { isTimeout: true } : {}) }
+  void fault($, area, modelCode(fail), '모델이 답하지 않았습니다')
+  const transient = transientOf(fail)
+  return { error: failureText(fail, cfg.model), fail, ...(transient !== undefined ? { transient } : {}) }
 }
 
 /**
@@ -2235,26 +2302,35 @@ async function journalDays($: EngineInterface, cfg: Config): Promise<{ day: stri
 /**
  * Writes the note for `id` with the model; the pane redraws as its status
  * moves. `isRewrite`: the journal has it already; `isAuto`: a turn's end asked
- * for it, not the learner (it counts toward dailyAutoNotes). A rewrite that
- * fails leaves the note as it was and says why in a toast. Never rejects.
+ * for it, not the learner (it counts toward dailyAutoNotes); `isRetry`: the
+ * one try again of such a note (armRetry, or resumeNotes for one that waited
+ * for it), counted as a call but not toward the limit, and never tried again
+ * itself; `isResume`: a reload's session start took it up (resumeNotes).
+ * An automatic note whose call failed in a way that clears on its own waits
+ * for one try again instead of failing. A rewrite that fails leaves the note
+ * as it was and says why in a toast. Never rejects.
  */
 async function writeNote(
   $: EngineInterface,
   cfg: Config,
   id: string,
-  how: { isRewrite?: boolean; isAuto?: boolean } = {},
+  how: { isRewrite?: boolean; isAuto?: boolean; isRetry?: boolean; isResume?: boolean } = {},
 ): Promise<void> {
-  const { isRewrite = false, isAuto = false } = how
+  const { isRewrite = false, isAuto = false, isRetry = false, isResume = false } = how
   if (inFlight.has(id)) return
   inFlight.add(id)
+  // Written now (a w while it waits, or the try again itself): its timer has nothing left to do.
+  retryTimers.get(id)?.cancel()
+  retryTimers.delete(id)
+  resuming.delete(id)
   try {
     const prior = (await read($, notes)).find(one => one.id === id)
     if (!prior) return
     // A note counts toward the day's learning the first time it is written, never on a rewrite.
     const isCounted = prior.isCounted === true || prior.status === 'ready'
     const good = prior.status === 'ready' ? { status: prior.status, text: prior.text } : undefined
-    // Written now, it is no longer one a turn's end passed over.
-    const note = await setNote($, id, { status: 'writing', text: '', skip: undefined })
+    // Written now, it is no longer one a turn's end passed over, nor one waiting for its try again (its token goes).
+    const note = await setNote($, id, { status: 'writing', text: '', skip: undefined, quota: undefined, retry: undefined, resumed: isResume ? true : undefined })
     if (!note) return
     const rules = await teamOf($, note.root)
     const asked = await askModel(
@@ -2267,7 +2343,7 @@ async function writeNote(
         prompt: notePrompt(await screened($, cfg, note), cfg.level, knownNames(await read($, concepts)), rules),
         maxTokens: 1500,
       },
-      isAuto ? 'auto' : 'manual',
+      isRetry ? 'retry' : isAuto ? 'auto' : 'manual',
     )
     // Counted in the usage record now (or never made): no longer one being written.
     autoPending.delete(id)
@@ -2279,8 +2355,28 @@ async function writeNote(
       $.ui.toast(`노트를 다시 쓰지 못했습니다: ${asked.error} · 원래 노트는 그대로입니다`, { timeoutMs: 8000 })
       return
     }
+    // Cut short, and not by its own time limit: in a session that goes on, the plugin's environment is going (a
+    // reload). The note stays as being written, nothing saved or stored from here, so the next load takes it up
+    // (resumeNotes); were it not a reload, the pane says it stopped and w writes it.
+    if ('error' in asked && asked.fail?.reason === 'aborted' && asked.fail.isTimeout !== true && isInteractive) return
+    // A busy server, a server error, a dropped connection or the call's own time limit clears on its own: a note a
+    // turn's end asked for tries once more by itself, half a minute on (and a little more, so windows do not all ask
+    // at once). Not in a -p run, whose process ends with its turn; never a try again's own failure.
+    if ('error' in asked && asked.transient !== undefined && isAuto && isInteractive && !isRetry) {
+      const now = await $.clock.now()
+      const wait = RETRY_MS + Math.floor(Math.random() * RETRY_JITTER_MS)
+      const token = `${id}:${now}`
+      // Unsaved where a journal is kept: a session that ends while it waits still leaves its diff there (flushUnsaved).
+      const waiting = await setNote($, id, { status: 'writing', text: '', retry: { at: now + wait, token, why: asked.transient }, ...(cfg.isAutoSave ? { isUnsaved: true } : {}) })
+      if (waiting && armRetry($, cfg, id, token, wait)) {
+        await persist($)
+        return
+      }
+    }
     const patch: Partial<LearnNote> =
-      'error' in asked ? { status: 'failed', text: `${asked.error} · w로 다시 쓰기` } : { status: 'ready', text: closeConceptBold(cut(asked.text, 9000)) }
+      'error' in asked
+        ? { status: 'failed', text: asked.fail ? noteFailText(asked.fail, cfg.model) : `${asked.error} · w로 다시 쓰기`, retry: undefined }
+        : { status: 'ready', text: closeConceptBold(cut(asked.text, 9000)), retry: undefined }
     // A note cleared from the pane meanwhile, or left behind by a /cd, is still saved and stored from this copy.
     let done = (await setNote($, id, patch)) ?? { ...note, ...patch }
     if (done.status === 'ready') {
@@ -2302,6 +2398,71 @@ async function writeNote(
   } finally {
     inFlight.delete(id)
     autoPending.delete(id)
+  }
+}
+
+/**
+ * Arms an automatic note's one try again, `wait` from now (see LearnNote.retry); false when no timer could be
+ * had. A reload cancels it with the rest of this load: the next load's session start takes the note up (resumeNotes).
+ */
+function armRetry($: EngineInterface, cfg: Config, id: string, token: string, wait: number): boolean {
+  retryTimers.get(id)?.cancel()
+  try {
+    retryTimers.set(
+      id,
+      $.clock.after(wait, () => {
+        retryTimers.delete(id)
+        void retryNote($, cfg, id, token)
+      }),
+    )
+    return true
+  } catch {
+    retryTimers.delete(id)
+    return false
+  }
+}
+
+/**
+ * The try again armRetry set: made only while the note still waits with `token` and is not being written (a w
+ * meanwhile wrote it, clearing the token; a /learn 비우기 took it away). Never rejects.
+ */
+async function retryNote($: EngineInterface, cfg: Config, id: string, token: string): Promise<void> {
+  try {
+    const one = (await read($, notes)).find(note => note.id === id)
+    if (!one || one.status !== 'writing' || one.retry?.token !== token || inFlight.has(id)) return
+    await writeNote($, cfg, id, { isAuto: true, isRetry: true })
+  } catch (error) {
+    void fault($, 'note', faultCode(error), '노트를 다시 쓰지 못했습니다')
+  }
+}
+
+/**
+ * At a session start that is a reload (`/reload-plugins`, a /config change): each note the last load left being
+ * written (its call cut, or the timer of its try again cancelled) whose turn ended within RESUME_MS is written
+ * again by itself, once (isResumable): one that waited for its try again as that try (outside the day's limit),
+ * any other as a turn's end would (within it). Only with automatic notes on, in an interactive session. A first
+ * session start finds none: the notes it brings back from the store read as failed (fromHistory).
+ */
+async function resumeNotes($: EngineInterface, cfg: Config): Promise<void> {
+  if (!cfg.isAutoNote || !isInteractive) return
+  try {
+    const now = await $.clock.now()
+    const day = stamp(now).day
+    for (const one of await read($, notes)) {
+      if (!isResumable(one, now) || inFlight.has(one.id) || resuming.has(one.id)) continue
+      const isRetry = one.retry !== undefined
+      if (!isRetry && isLimitReached(cfg, day)) continue
+      if (!(await setNote($, one.id, { resumed: true }))) continue
+      // Counted toward the day's limit from now, as a turn's end counts its note.
+      if (!isRetry) autoPending.add(one.id)
+      resuming.add(one.id)
+      $.clock.after(1, () => {
+        resuming.delete(one.id)
+        void writeNote($, cfg, one.id, { isRewrite: one.savedAs !== null, isAuto: true, isRetry, isResume: true })
+      })
+    }
+  } catch (error) {
+    void fault($, 'note', faultCode(error), '다시 불러온 뒤 노트를 이어 쓰지 못했습니다')
   }
 }
 
@@ -2841,6 +3002,8 @@ export const register: Register = (on, options) => {
     await loadTeam($)
     await seedActivity($)
     await seedUsage($)
+    // After a reload: a note it cut mid-write goes on by itself (the day's limit read just above).
+    await resumeNotes($, cfg)
     await remind($, cfg)
     await welcome($)
     await checkAtStart($, cfg)
@@ -2999,8 +3162,13 @@ export const register: Register = (on, options) => {
       const at = await $.clock.now()
       const day = stamp(at).day
       const withheld = turn.withheld ?? []
-      // No model call by itself for spaces and line breaks alone, nor past the day's limit: w writes the note all the same.
-      const skip = turn.changes.every(isFormatOnly) ? 'format' : cfg.isAutoNote && (await isOverLimit($, cfg, day)) ? 'limit' : undefined
+      // No model call by itself for spaces and line breaks alone, past the day's limit, nor while the account's
+      // five-hour or seven-day window is nearly used up (the note yields to the work): w writes it all the same.
+      const isFormat = turn.changes.every(isFormatOnly)
+      const isLimit = !isFormat && cfg.isAutoNote && (await isOverLimit($, cfg, day))
+      const quota = !isFormat && !isLimit && cfg.isAutoNote ? await quotaNow($) : undefined
+      if (!isFormat && !isLimit) quotaHeld = quota
+      const skip = isFormat ? 'format' : isLimit ? 'limit' : quota !== undefined ? 'quota' : undefined
       const isAuto = cfg.isAutoNote && skip === undefined
       const note: LearnNote = {
         id: `${e.turnId}-${at}`,
@@ -3013,6 +3181,7 @@ export const register: Register = (on, options) => {
         ...(withheld.length > 0 ? { withheld } : {}),
         status: isAuto ? 'writing' : 'off',
         ...(skip ? { skip } : {}),
+        ...(skip === 'quota' ? { quota } : {}),
         text: '',
         savedAs: null,
         isPast: false,
@@ -3032,8 +3201,11 @@ export const register: Register = (on, options) => {
       } else if (cfg.isAutoSave) {
         await save($, cfg, note, false)
       }
-      if (skip === 'limit' && (await isFirstLimitToast($, day))) {
+      if (skip === 'limit' && (await isFirstToastOn($, LIMIT_TOAST_KEY, day))) {
         $.ui.toast(`학습 노트: 오늘 자동 노트 한도(${cfg.dailyAutoNotes}개)에 닿았습니다 · 패널에서 w를 누르면 씁니다`, { timeoutMs: 8000 })
+      }
+      if (skip === 'quota' && (await isFirstToastOn($, QUOTA_TOAST_KEY, day))) {
+        $.ui.toast(`학습 노트: ${quotaWhy(quota)} · 패널에서 w를 누르면 씁니다`, { timeoutMs: 8000 })
       }
       // Stored at once, so a session that ends mid-note still leaves it for the next one.
       if (isInteractive || note.status !== 'writing') await persist($)
@@ -3364,8 +3536,9 @@ export const register: Register = (on, options) => {
     // Before the first note, a note's own view (전/후) shows the note view's welcome.
     const shown: LearnView = note || isWhole(mode) ? mode : 'note'
 
-    // Past today's limit (dailyAutoNotes) the turn's end writes no note: the live line promises none.
-    const willWrite = cfg.isAutoNote && !isLimitReached(cfg, stamp(now).day)
+    // Past today's limit (dailyAutoNotes), or with the account's window nearly used up as the last turn's end read
+    // it, the turn's end writes no note: the live line promises none.
+    const willWrite = cfg.isAutoNote && !isLimitReached(cfg, stamp(now).day) && quotaHeld === undefined
     const liveBlock = running && running.changes.length > 0 ? liveView(running, isDock, willWrite, el) : null
     const root = await $.session.root()
     const systemHint = isSystemFolder(root) ? (
@@ -3432,13 +3605,13 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const isBusy = inFlight.has(note.id)
+    const isBusy = isWriting(note.id)
     const totalAdded = note.changes.reduce((sum, c) => sum + c.added, 0)
     const totalRemoved = note.changes.reduce((sum, c) => sum + c.removed, 0)
     const fileCount = note.changes.length + note.moreFiles
     const withheld = note.withheld ?? []
     const redacted = note.changes.reduce((sum, c) => sum + (c.redacted ?? 0), 0)
-    const writeLabel = isBusy ? '쓰는 중…' : note.status === 'off' ? '노트 쓰기' : '다시 쓰기'
+    const writeLabel = isBusy ? '쓰는 중…' : isRetryArmed(note) ? '바로 쓰기' : note.status === 'off' ? '노트 쓰기' : '다시 쓰기'
     // Above the code, the note's own words on what the change does differently.
     const summary = note.status === 'ready' ? changeSection(note.text) : undefined
 
@@ -3797,10 +3970,18 @@ function noteBody(note: LearnNote, isBusy: boolean, off: string, el: ElementTabl
       </Box>
     )
   }
+  if (note.status === 'writing' && isBusy && note.resumed === true) return <Text color="cyan">다시 불러온 뒤 이어서 씁니다…</Text>
   if (note.status === 'writing' && isBusy) return <Text color="cyan">노트를 쓰는 중입니다…</Text>
+  if (note.status === 'writing' && isRetryArmed(note)) {
+    return (
+      <Text color="yellow" wrap="wrap">
+        {retryText(note.retry!.why)}
+      </Text>
+    )
+  }
   if (note.status === 'writing') return <Text color="yellow">노트를 쓰다 멈췄습니다 · w로 다시 쓰기</Text>
   if (note.status === 'failed') return <Text color="red">노트를 쓰지 못했습니다: {note.text}</Text>
-  if (note.skip === 'limit') return <Text color="yellow" wrap="wrap">{off}</Text>
+  if (note.skip === 'limit' || note.skip === 'quota') return <Text color="yellow" wrap="wrap">{off}</Text>
   return (
     <Text dimColor wrap="wrap">
       {off}
@@ -3808,13 +3989,24 @@ function noteBody(note: LearnNote, isBusy: boolean, off: string, el: ElementTabl
   )
 }
 
+/** True while this load writes the note, or is about to: its call made, a turn's end or a reload's take-up about to make it. */
+function isWriting(id: string): boolean {
+  return inFlight.has(id) || resuming.has(id) || autoPending.has(id)
+}
+
+/** True while the note waits for its automatic try again, its timer armed in this load (a reload's cancelled one does not count). */
+function isRetryArmed(note: LearnNote): boolean {
+  return note.status === 'writing' && note.retry !== undefined && retryTimers.has(note.id)
+}
+
 /**
  * Why a note was not written by itself, as the pane says it: only spaces and
- * line breaks changed, the day's limit was reached (today's limit named), or
- * automatic notes are off.
+ * line breaks changed, the day's limit was reached (today's limit named), the
+ * account's window was nearly used up (which), or automatic notes are off.
  */
 function offText(note: LearnNote, cfg: Config, now: number): string {
   if (note.skip === 'format') return '띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다 · w로 쓰기'
+  if (note.skip === 'quota') return `${quotaWhy(note.quota)} · w를 누르면 씁니다`
   if (note.skip === 'limit') {
     if (stamp(note.at).day !== stamp(now).day) return '그날 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · w를 누르면 씁니다'
     return `오늘 자동 노트 한도${cfg.dailyAutoNotes > 0 ? `(${cfg.dailyAutoNotes}개)` : ''}에 닿았습니다 · w를 누르면 씁니다`
@@ -4811,12 +5003,14 @@ const MERGE_USAGE =
   '쓰는 법: /learn 합치기 합칠 개념 = 남길 개념  (예: /learn 합치기 Destructuring = 구조 분해 할당 · = 대신 => -> → | 도 됩니다 · 거꾸로 하면 되돌립니다)'
 const EMPTY_TEXT = '아직 학습 노트가 없습니다. Claude가 파일을 고친 턴이 끝나면 생깁니다.'
 
-/** Why a note has no text to read yet: being written, failed (with why), or not written by itself (and why). */
+/** Why a note has no text to read yet: being written (or waiting to try again), failed (with why), or not written by itself (and why). */
 function noteState(note: LearnNote): string {
-  if (note.status === 'writing') return '노트를 쓰는 중입니다'
+  if (isRetryArmed(note)) return retryText(note.retry!.why, '패널에서 w로 바로 쓰기')
+  if (note.status === 'writing') return isWriting(note.id) ? '노트를 쓰는 중입니다' : '노트를 쓰다 멈췄습니다 · 패널에서 w로 다시 쓰기'
   if (note.status === 'failed') return `노트를 쓰지 못했습니다: ${note.text}`
   if (note.skip === 'format') return '띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기'
   if (note.skip === 'limit') return '하루 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기'
+  if (note.skip === 'quota') return `${quotaWhy(note.quota)} · 패널에서 w로 쓰기`
   return '자동 노트가 꺼져 있습니다'
 }
 
