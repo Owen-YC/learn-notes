@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, EngineInterface, ModelUsage, Register } from 'claude-code'
+import type { ElementTable, EngineInterface, HookFailure, ModelUsage, Register } from 'claude-code'
 
 import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnDayUsage, LearnLive, LearnNote, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSubmit, LearnView, LearnWithheld } from '../types'
 import {
@@ -143,6 +143,24 @@ import {
   when,
   type Hunk,
   type Level,
+  addFault,
+  appName,
+  checkLine,
+  cleanFaults,
+  diagText,
+  type DiagInput,
+  type Fault,
+  type FaultArea,
+  faultCode,
+  faultWord,
+  faultsOk,
+  fileWhy,
+  fitFaults,
+  jsonBytes,
+  mergeFaults,
+  modelCode,
+  saveFailText,
+  storeFailText,
 } from './notes'
 
 const PANE = 'learn-notes'
@@ -210,6 +228,11 @@ const STEPS_FROM_KEY = 'stepsFrom'
  * having given it since the update too (recallSteps).
  */
 const STEPS_KEY = 'steps'
+/**
+ * What failed lately and how (FaultRecord: the last 7 days' faults as classification codes, 4KB at most),
+ * for /learn 진단, and the day the session-start check line last showed. Written at most once a minute.
+ */
+const FAULTS_KEY = 'faults'
 const WELCOME = 'learn-notes가 켜졌습니다 · 파일을 고치는 요청을 하면 노트가 생깁니다 · /learn으로 패널'
 
 type MergeRecord = { concept: LearnConcept; into: string; both: number }
@@ -358,8 +381,27 @@ function enqueue<T>(lane: keyof typeof lanes, work: () => Promise<T>): Promise<T
   lanes[lane] = run
   return run
 }
-let hasWarnedSave = false
-let hasWarnedStore = false
+/** This build's version, read from its plugin.json at session start (/learn 도움말, /learn 진단); undefined until then, or when unreadable. */
+let myVersion: string | undefined
+/**
+ * The pane as last drawn, for /learn 진단: where the surface seated it and how wide. Kept in the module, since a
+ * render hook may not write state.
+ */
+let lastDraw: { placement: 'dock' | 'inline'; columns: number } | undefined
+/** The terminal as the spinner was last drawn on it: its width, and whether it is fullscreen. */
+let lastViewport: { columns: number; isFullscreen: boolean } | undefined
+/** This load's faults (see fault), the newest last: /learn 진단 reads them with the store's. */
+let faults: readonly Fault[] = []
+/** True while `faults` holds what the store does not have yet. */
+let isFaultsDirty = false
+/** The pending write of the faults to the store: one a minute at most. */
+let faultTimer: { cancel: () => void } | undefined
+/** How long a fault waits before it is written to the store, with any that follow it meanwhile. */
+const FAULT_FLUSH_MS = 60_000
+/** The causes whose toast showed this session (`save:EACCES`, `store:store-full`): each once. */
+const warned = new Set<string>()
+/** How long a journal write a file another program holds (EBUSY, EPERM) waits before its one quiet try again. */
+const SAVE_RETRY_MS = 500
 /** False for a `-p` run or an SDK host: there a note is stored only once written, since the process may end first. */
 let isInteractive = true
 /**
@@ -372,6 +414,89 @@ let lastRequestText: string | undefined
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Keeps one failure for /learn 진단 (see Fault): where (`area`) and its classification code, never the error's
+ * text or a path; the debug log gets `what` with the code. A fault of the same kind within ten minutes counts on
+ * the last. Written to the store a minute later at most (with any that follow), and at the session's end.
+ * Resolves once it is held; never rejects.
+ */
+async function fault($: EngineInterface, area: FaultArea, code: string, what: string): Promise<void> {
+  const word = faultWord(code)
+  try {
+    $.ui.log(`learn-notes: ${what} (${word})`, { to: 'debug' })
+  } catch {
+    // A handler answering in a hook's place may have no `$` to log with.
+  }
+  try {
+    const at = await $.clock.now().catch(() => Date.now())
+    faults = addFault(faults, area, word, at)
+    isFaultsDirty = true
+    scheduleFaults($)
+  } catch {
+    // Kept or not, the work that failed goes on as it would.
+  }
+}
+
+/** The work of `area` went through: its faults still open are marked so (`다시 써서 됨` in /learn 진단). */
+function faultOk($: EngineInterface, area: FaultArea): void {
+  const next = faultsOk(faults, area)
+  if (next === faults) return
+  faults = next
+  isFaultsDirty = true
+  scheduleFaults($)
+}
+
+/** Writes the faults to the store FAULT_FLUSH_MS from now, unless a write is already waiting. */
+function scheduleFaults($: EngineInterface): void {
+  if (faultTimer !== undefined) return
+  try {
+    faultTimer = $.clock.after(FAULT_FLUSH_MS, () => {
+      faultTimer = undefined
+      void flushFaults($)
+    })
+  } catch {
+    faultTimer = undefined
+  }
+}
+
+/**
+ * Merges this load's faults into the store's (FAULTS_KEY), after any store write still running; `noticeDay`
+ * keeps the day the session-start check line showed. A store that refuses it says so in the debug log alone:
+ * that failure is not kept as a fault, or it would ask for this write again.
+ */
+function flushFaults($: EngineInterface, noticeDay?: string): Promise<void> {
+  return enqueue('storing', async () => {
+    if (!isFaultsDirty && noticeDay === undefined) return
+    const mine = faults
+    isFaultsDirty = false
+    try {
+      const now = await $.clock.now()
+      const stored = cleanFaults(await $.store.get(FAULTS_KEY), now)
+      const day = noticeDay ?? stored.noticeDay
+      await $.store.set(FAULTS_KEY, fitFaults({ list: mergeFaults(stored.list, mine, now), ...(day !== undefined ? { noticeDay: day } : {}) }))
+    } catch (error) {
+      isFaultsDirty = true
+      $.ui.log(`learn-notes: 진단 기록을 저장소에 남기지 못했습니다 (${faultCode(error, 'store')})`, { to: 'debug' })
+    }
+  })
+}
+
+/** A failure's toast, once a session for each cause (`key`): `text` names the cause in words the learner can act on. */
+function warnOnce($: EngineInterface, key: string, text: string): void {
+  if (warned.has(key)) return
+  warned.add(key)
+  $.ui.toast(text, { timeoutMs: 8000 })
+}
+
+/**
+ * A hook that threw or ran out of time, as its `.catch` keeps it: a fault (`hook:<event>`, `:timeout` after it
+ * past its budget) in `area`. Re-entry is no failure: the engine asked the handler in the hook's place.
+ */
+function hookFailed($: EngineInterface, failure: HookFailure, area: FaultArea, event: string): void {
+  if (failure.kind === 're-entry') return
+  void fault($, area, `hook:${event}${failure.kind === 'timeout' ? ':timeout' : ''}`, `${event} 훅이 멈췄습니다`)
 }
 
 /** A stored note read back by a newer build: the fields it may lack filled in, an unfinished one failed. */
@@ -424,6 +549,16 @@ async function isBookkeeping($: EngineInterface, path: string): Promise<boolean>
   return temps.some(dir => dir !== undefined && dir !== '' && isUnder(path, dir))
 }
 
+/** This build's version as its plugin.json (under `$.plugin.root`) gives it; undefined when it cannot be read. */
+async function readVersion($: EngineInterface): Promise<string | undefined> {
+  try {
+    const raw: unknown = JSON.parse(String(await $.fs.read(`${$.plugin.root.replace(/[\\/]+$/, '')}/.claude-plugin/plugin.json`)))
+    return isRecord(raw) && typeof raw.version === 'string' && /^\d+\.\d+\.\d+[0-9A-Za-z.+-]*$/.test(raw.version) ? raw.version : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** True in a cloud session (Claude Code on the web, an app's cloud session): its own terminal is drawn for no one. */
 async function isCloudSession($: EngineInterface): Promise<boolean> {
   return (await $.env.get('CLAUDE_CODE_REMOTE')) === 'true'
@@ -455,26 +590,30 @@ async function appendJournal($: EngineInterface, cfg: Config, root: string, at: 
 }
 
 /**
- * A failure is a toast once and a debug line, never a broken turn; the note
- * stays unsaved, and the next save that works writes it too (flushUnsaved).
+ * A failure is a fault and a toast naming its cause (once a session for each),
+ * never a broken turn; the note stays unsaved, and the next save that works
+ * writes it too (flushUnsaved). A file another program holds (EBUSY, EPERM:
+ * an antivirus scan, a sync client) is tried once more, quietly, half a second later.
  */
 async function saveNow($: EngineInterface, cfg: Config, note: LearnNote, isRewrite: boolean): Promise<string | undefined> {
-  try {
-    // Into the journal of the note's own project, even after a /cd.
-    const root = note.root || (await $.session.root())
-    const path = await appendJournal($, cfg, root, note.at, journalSection(await screened($, cfg, note), isRewrite, isStoreCut(note)))
-    await setNote($, note.id, { savedAs: note.status, isUnsaved: false })
-    // The folder takes writes again: the notes it refused before go in after this one.
-    void flushUnsaved($, cfg, note.id)
-    return path
-  } catch (error) {
-    await setNote($, note.id, { isUnsaved: true }).catch(() => undefined)
-    $.ui.log(`learn-notes: 노트를 파일에 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
-    if (!hasWarnedSave) {
-      hasWarnedSave = true
-      $.ui.toast('학습 노트를 파일에 쓰지 못했습니다 · /config의 saveDir를 확인하면 다음 노트 때 함께 저장됩니다', { timeoutMs: 8000 })
+  for (let tries = 1; ; tries += 1) {
+    try {
+      // Into the journal of the note's own project, even after a /cd.
+      const root = note.root || (await $.session.root())
+      const path = await appendJournal($, cfg, root, note.at, journalSection(await screened($, cfg, note), isRewrite, isStoreCut(note)))
+      await setNote($, note.id, { savedAs: note.status, isUnsaved: false })
+      faultOk($, 'save')
+      // The folder takes writes again: the notes it refused before go in after this one.
+      void flushUnsaved($, cfg, note.id)
+      return path
+    } catch (error) {
+      const code = faultCode(error)
+      await fault($, 'save', code, '노트를 파일에 쓰지 못했습니다')
+      if (tries === 1 && (code === 'EBUSY' || code === 'EPERM') && (await $.clock.sleep(SAVE_RETRY_MS).then(() => true, () => false))) continue
+      await setNote($, note.id, { isUnsaved: true }).catch(() => undefined)
+      warnOnce($, `save:${code}`, saveFailText(code))
+      return undefined
     }
-    return undefined
   }
 }
 
@@ -563,7 +702,7 @@ function saveAsk($: EngineInterface, cfg: Config, note: LearnNote, question: str
       // Into the journal of the note's own day: asking never makes a journal day with no notes.
       return await appendJournal($, cfg, note.root || (await $.session.root()), note.at, askSection(note, question, answer, at))
     } catch (error) {
-      $.ui.log(`learn-notes: 질문과 답을 파일에 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'save', faultCode(error), '질문과 답을 파일에 쓰지 못했습니다')
       return undefined
     }
   })
@@ -576,7 +715,7 @@ function saveRecap($: EngineInterface, cfg: Config, root: string, range: RecapRa
       // Under the day of the last note it covers, so a recap never makes a journal day with no notes.
       return await appendJournal($, cfg, root, dayNoon(day), recapSection(range, text, at, day))
     } catch (error) {
-      $.ui.log(`learn-notes: 정리를 파일에 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'save', faultCode(error), '정리를 파일에 쓰지 못했습니다')
       return undefined
     }
   })
@@ -637,6 +776,7 @@ async function persistNow($: EngineInterface, forget: boolean, extra: readonly L
         .slice(0, HISTORY_PROJECTS),
     )
     await $.store.set(HISTORY_KEY, fitHistory(recent, root))
+    faultOk($, 'store')
     if (fresher.length > 0) {
       await update($, notes, current =>
         current.map(one => {
@@ -647,13 +787,9 @@ async function persistNow($: EngineInterface, forget: boolean, extra: readonly L
       )
     }
   } catch (error) {
-    $.ui.log(`learn-notes: 노트 이력을 저장하지 못했습니다 (${String(error)})`, { to: 'debug' })
-    if (!hasWarnedStore) {
-      hasWarnedStore = true
-      $.ui.toast('학습 노트 이력을 저장하지 못했습니다 · 다음 세션에 지난 노트가 빠질 수 있습니다 (일지 파일은 그대로)', {
-        timeoutMs: 8000,
-      })
-    }
+    const code = faultCode(error, 'store')
+    void fault($, 'store', code, '노트 이력을 저장하지 못했습니다')
+    warnOnce($, `store:${code}`, storeFailText(code))
   }
 }
 
@@ -683,7 +819,7 @@ async function keepStepsFrom($: EngineInterface): Promise<void> {
   try {
     if (typeof (await $.store.get(STEPS_FROM_KEY)) !== 'number') await $.store.set(STEPS_FROM_KEY, await $.clock.now())
   } catch (error) {
-    $.ui.log(`learn-notes: 1.6.0을 처음 쓴 때를 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+    void fault($, 'store', faultCode(error, 'store'), '1.6.0을 처음 쓴 때를 남기지 못했습니다')
   }
 }
 
@@ -734,7 +870,30 @@ async function welcome($: EngineInterface): Promise<void> {
     await $.store.set(WELCOMED_KEY, true)
     if (isNew) $.ui.toast(WELCOME, { timeoutMs: 8000 })
   } catch (error) {
-    $.ui.log(`learn-notes: 첫 세션 안내를 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+    void fault($, 'store', faultCode(error, 'store'), '첫 세션 안내를 남기지 못했습니다')
+  }
+}
+
+/**
+ * Once a day, at an interactive session's start, a dim transcript line (never sent to the model) while a problem
+ * remains: this project's notes the journal has not taken yet, with the cause the last failed save gave, or a
+ * store that refused a write in the last day (checkLine). The day it showed is kept with the faults.
+ */
+async function checkAtStart($: EngineInterface, cfg: Config): Promise<void> {
+  if (!isInteractive) return
+  try {
+    const now = await $.clock.now()
+    const day = stamp(now).day
+    const record = cleanFaults(await $.store.get(FAULTS_KEY), now)
+    if (record.noticeDay === day) return
+    const unsaved = cfg.isAutoSave ? (await storedNotes($, await $.session.root())).filter(one => one.isUnsaved === true).length : 0
+    const open = (area: FaultArea, within: number) => record.list.filter(one => one.area === area && one.ok !== true && now - one.last < within).at(-1)?.code
+    const line = checkLine(unsaved, open('save', Number.POSITIVE_INFINITY), open('store', 86_400_000))
+    if (line === undefined) return
+    $.ui.log(line)
+    await flushFaults($, day)
+  } catch (error) {
+    void fault($, 'store', faultCode(error, 'store'), '시작 점검을 하지 못했습니다')
   }
 }
 
@@ -757,7 +916,7 @@ async function loadHistory($: EngineInterface): Promise<void> {
     const past = await storedNotes($, root)
     if (past.length > 0) await update($, notes, list => (list.length > 0 ? list : past.slice(-NOTES_KEPT)))
   } catch (error) {
-    $.ui.log(`learn-notes: 지난 노트를 불러오지 못했습니다 (${String(error)})`, { to: 'debug' })
+    void fault($, 'store', faultCode(error, 'store'), '지난 노트를 불러오지 못했습니다')
   }
 }
 
@@ -809,7 +968,7 @@ async function learnConceptsNow($: EngineInterface, cfg: Config, note: LearnNote
     await remind($, cfg)
     if (cfg.isAutoSave) await saveConcepts($, cfg, index)
   } catch (error) {
-    $.ui.log(`learn-notes: 개념을 모으지 못했습니다 (${String(error)})`, { to: 'debug' })
+    void fault($, 'store', faultCode(error, 'store'), '개념을 모으지 못했습니다')
   }
   return keys
 }
@@ -819,8 +978,9 @@ function saveConcepts($: EngineInterface, cfg: Config, index: Record<string, Lea
   return enqueue('saving', async () => {
     try {
       await $.fs.write(`${(await journalDir($, cfg)).replace(/[\\/]+$/, '')}/concepts.md`, conceptsMarkdown(index))
+      faultOk($, 'concepts')
     } catch (error) {
-      $.ui.log(`learn-notes: 개념 모음을 파일에 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'concepts', faultCode(error), '개념 모음을 파일에 쓰지 못했습니다')
     }
   })
 }
@@ -906,7 +1066,7 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
       if (cfg.isAutoSave) await saveConcepts($, cfg, folded)
       return isSplit ? { isDone: true, gone: folded[named]!, kept: folded[from]!, isSplit } : { isDone: true, gone, kept: folded[into]!, isSplit }
     } catch (error) {
-      $.ui.log(`learn-notes: 개념을 합치지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'store', faultCode(error, 'store'), '개념을 합치지 못했습니다')
       return { isDone: false, text: '개념을 합치지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.' }
     }
   })
@@ -955,7 +1115,7 @@ function markKnownStored($: EngineInterface, cfg: Config, names: readonly string
       }
       return result
     } catch (error) {
-      $.ui.log(`learn-notes: 아는 개념 표시를 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'store', faultCode(error, 'store'), '아는 개념 표시를 남기지 못했습니다')
       return { error: '아는 개념 표시를 남기지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.' }
     }
   })
@@ -990,7 +1150,7 @@ function bankQuestions($: EngineInterface, items: readonly LearnQuizItem[], at: 
       const bank = addToBank(cleanBank(await $.store.get(BANK_KEY)), items.map(({ key, name, question, answer }) => ({ key, name, question, answer })), at)
       await $.store.set(BANK_KEY, bank)
     } catch (error) {
-      $.ui.log(`learn-notes: 퀴즈 문제를 모아 두지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'store', faultCode(error, 'store'), '퀴즈 문제를 모아 두지 못했습니다')
     }
   })
 }
@@ -1008,7 +1168,7 @@ function seedActivity($: EngineInterface): Promise<void> {
       if (raw === undefined) await $.store.set(ACTIVITY_KEY, record)
       await update($, activity, () => record)
     } catch (error) {
-      $.ui.log(`learn-notes: 학습 기록을 읽지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'store', faultCode(error, 'store'), '학습 기록을 읽지 못했습니다')
     }
   })
 }
@@ -1021,7 +1181,7 @@ function recordActivity($: EngineInterface, day: string, delta: Partial<LearnDay
       await $.store.set(ACTIVITY_KEY, next)
       await update($, activity, () => next)
     } catch (error) {
-      $.ui.log(`learn-notes: 학습 기록을 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'store', faultCode(error, 'store'), '학습 기록을 남기지 못했습니다')
     }
   })
 }
@@ -1041,7 +1201,7 @@ function recordUsage($: EngineInterface, usage: ModelUsage | undefined, kind: 'a
       await $.store.set(USAGE_KEY, next)
       autoDone = { day, auto: autoOn(next, day) }
     } catch (error) {
-      $.ui.log(`learn-notes: 모델 호출 수를 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'store', faultCode(error, 'store'), '모델 호출 수를 남기지 못했습니다')
     }
   })
 }
@@ -1084,7 +1244,7 @@ function seedUsage($: EngineInterface): Promise<void> {
       const day = stamp(await $.clock.now()).day
       autoDone = { day, auto: autoOn(cleanUsage(await $.store.get(USAGE_KEY)), day) }
     } catch (error) {
-      $.ui.log(`learn-notes: 모델 호출 수를 읽지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'store', faultCode(error, 'store'), '모델 호출 수를 읽지 못했습니다')
     }
   })
 }
@@ -1102,7 +1262,7 @@ function isFirstLimitToast($: EngineInterface, day: string): Promise<boolean> {
       if ((await $.store.get(LIMIT_TOAST_KEY)) === day) return false
       await $.store.set(LIMIT_TOAST_KEY, day)
     } catch (error) {
-      $.ui.log(`learn-notes: 한도 알림을 띄운 날을 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'store', faultCode(error, 'store'), '한도 알림을 띄운 날을 남기지 못했습니다')
     }
     return true
   })
@@ -1149,7 +1309,7 @@ function markConcepts(
       if (cfg.isAutoSave) await saveConcepts($, cfg, index)
       return before
     } catch (error) {
-      $.ui.log(`learn-notes: 복습을 기록하지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'store', faultCode(error, 'store'), '복습을 기록하지 못했습니다')
       return undefined
     }
   })
@@ -1353,10 +1513,13 @@ function noModelText(cfg: Config): string {
  * stored or a journal written before 1.6.0, or a typed quiz answer, was never masked.
  * Every call that reached the model is counted in the usage record, answered or
  * not; `kind` says whether a turn's end made it by itself (an automatic note).
+ * A call with no answer is a fault of `area` (its code, never its text); one
+ * answered marks the area's faults gone through.
  */
 async function askModel(
   $: EngineInterface,
   cfg: Config,
+  area: 'note' | 'quiz' | 'grade' | 'ask' | 'recap',
   call: { system: string; prompt: string; maxTokens: number; timeoutMs?: number },
   kind: 'auto' | 'manual' = 'manual',
 ): Promise<{ text: string } | { error: string }> {
@@ -1364,10 +1527,16 @@ async function askModel(
   try {
     reply = await $.model.complete({ model: cfg.model, effort: 'low', timeoutMs: 90_000, ...call, prompt: redactText(call.prompt).text })
   } catch {
+    void fault($, area, 'blocked', '모델을 부르지 못했습니다')
     return { error: noModelText(cfg) }
   }
   await recordUsage($, reply.usage, kind)
-  return reply.isAnswered ? { text: fixEscapedTicks(reply.text) } : { error: failureText(reply) }
+  if (reply.isAnswered) {
+    faultOk($, area)
+    return { text: fixEscapedTicks(reply.text) }
+  }
+  void fault($, area, modelCode(reply), '모델이 답하지 않았습니다')
+  return { error: failureText(reply) }
 }
 
 /**
@@ -1442,10 +1611,13 @@ async function makeQuiz(
   // again), the concepts due before any other.
   const found = await withCode($, cfg, chosen, map, only?.id)
   const picks = only ? found : spreadPicks(found, 3, one => isDue(one, now))
-  const asked = await askModel($, cfg, { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level, only ? 'note' : 'review'), maxTokens: 1400 })
+  const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level, only ? 'note' : 'review'), maxTokens: 1400 })
   if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
   const items = parseQuiz(asked.text, picks)
-  if (items.length === 0) return { error: '퀴즈를 내지 못했습니다: 모델의 답을 문제로 읽지 못했습니다. 다시 해 보세요.' }
+  if (items.length === 0) {
+    void fault($, 'quiz', 'unreadable', '모델의 답을 문제로 읽지 못했습니다')
+    return { error: '퀴즈를 내지 못했습니다: 모델의 답을 문제로 읽지 못했습니다. 다시 해 보세요.' }
+  }
   await keepQuiz($, { at: now, items, isRevealed: false, ...(only ? { from: 'note' as const } : {}) })
   await update($, quizRun, run => ({ ...run, error: null }))
   await bankQuestions($, items, now)
@@ -1471,7 +1643,7 @@ async function startQuiz($: EngineInterface, cfg: Config, only?: Pick<LearnNote,
     // A surface with no text field (the mobile app) draws none to focus: the engine says no, and nothing else happens.
     if (!('error' in made)) focusInPane($, quizFieldKey(made.at, 0))
   } catch (error) {
-    $.ui.log(`learn-notes: 퀴즈를 내지 못했습니다 (${String(error)})`, { to: 'debug' })
+    void fault($, 'quiz', faultCode(error), '퀴즈를 내지 못했습니다')
     await update($, quizRun, () => ({ isMaking: false, error: '퀴즈를 내지 못했습니다. 잠시 뒤 다시 해 보세요.' }))
   } finally {
     isQuizMaking = false
@@ -1612,10 +1784,13 @@ async function flipGrade($: EngineInterface, cfg: Config, i: number): Promise<vo
 async function gradeTyped($: EngineInterface, cfg: Config, current: Quiz, i: number, mine: string): Promise<{ item: LearnQuizItem } | { error: string }> {
   const item = current.items[i]
   if (!item) return { error: '없는 문제입니다.' }
-  const asked = await askModel($, cfg, { system: CHECK_SYSTEM, prompt: checkPrompt(item, mine, cfg.level), maxTokens: 400, timeoutMs: 60_000 })
+  const asked = await askModel($, cfg, 'grade', { system: CHECK_SYSTEM, prompt: checkPrompt(item, mine, cfg.level), maxTokens: 400, timeoutMs: 60_000 })
   if ('error' in asked) return { error: `채점하지 못했습니다: ${asked.error}` }
   const graded = parseCheck(asked.text)
-  if (!graded) return { error: '채점 결과를 읽지 못했습니다. 다시 보내 보세요.' }
+  if (!graded) {
+    void fault($, 'grade', 'unreadable', '채점 결과를 읽지 못했습니다')
+    return { error: '채점 결과를 읽지 못했습니다. 다시 보내 보세요.' }
+  }
   // Almost right is not right yet: counted wrong, its concept a step back.
   const kept = await applyGrade($, cfg, current, i, graded.verdict === 'right' ? 'right' : 'wrong', { mine: cut(mine, 1500), ...graded })
   if (kept === 'failed') return { error: GRADE_NOT_KEPT }
@@ -1652,7 +1827,7 @@ async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: str
     const graded = await gradeTyped($, cfg, current, i, mine)
     if ('error' in graded) error = graded.error
   } catch (thrown) {
-    $.ui.log(`learn-notes: 답을 채점하지 못했습니다 (${String(thrown)})`, { to: 'debug' })
+    void fault($, 'grade', faultCode(thrown), '답을 채점하지 못했습니다')
     error = '채점하지 못했습니다. 잠시 뒤 다시 해 보세요.'
   } finally {
     isQuizChecking = false
@@ -1678,7 +1853,7 @@ async function keepQuiz($: EngineInterface, next: Quiz): Promise<void> {
   try {
     await $.store.set(QUIZ_KEY, next)
   } catch (error) {
-    $.ui.log(`learn-notes: 퀴즈를 저장소에 남기지 못했습니다 (${String(error)})`, { to: 'debug' })
+    void fault($, 'store', faultCode(error, 'store'), '퀴즈를 저장소에 남기지 못했습니다')
   }
 }
 
@@ -1704,7 +1879,7 @@ async function askNote(
   const rules = await teamOf($, note.root)
   // A note kept before 1.6.0 may hold a .env diff or a key: neither goes to the model or the journal.
   const shown = await screened($, cfg, note)
-  const asked = await askModel($, cfg, { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules), maxTokens: 900 })
+  const asked = await askModel($, cfg, 'ask', { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules), maxTokens: 900 })
   if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
   const answer = cut(asked.text, 4000)
   const now = await $.clock.now()
@@ -1730,16 +1905,16 @@ async function isNoteShown($: EngineInterface, id: string): Promise<boolean> {
  * `since` (personScrolls then) leaves the window where they put it.
  */
 function revealInPane($: EngineInterface, key: string, block: 'start' | 'nearest', since: number): void {
-  const said = (why: string) => $.ui.log(`learn-notes: ${key} (${block}, ${PANE})로 스크롤하지 않았습니다 (${why})`, { to: 'debug' })
+  const said = () => void fault($, 'focus', 'scroll', `${key} (${block}, ${PANE})로 스크롤하지 않았습니다`)
   const attempt = (left: number) => {
     if (personScrolls !== since) return
     void $.ui.scroll({ to: { key }, in: PANE, block }).then(
       result => {
         const next = revealNext(result.deny, left)
         if (next === 'again') $.clock.after(REVEAL_RETRY_MS, () => attempt(left - 1))
-        else if (next === 'stop') said(result.deny ?? '')
+        else if (next === 'stop') said()
       },
-      (thrown: unknown) => said(String(thrown)),
+      () => said(),
     )
   }
   attempt(REVEAL_TRIES)
@@ -1748,21 +1923,24 @@ function revealInPane($: EngineInterface, key: string, block: 'start' | 'nearest
 /**
  * Moves the pane's focus ring onto an element it is about to draw: the next
  * answer field, or the button for a new quiz. Only while the pane holds the
- * keys: otherwise the engine says no, and the reason goes to the debug log.
+ * keys: otherwise the engine says no, kept as a fault of the pane's focus.
  * Not awaited: the engine waits for the element's drawing, bounded.
  */
 function focusInPane($: EngineInterface, key: string): void {
-  const said = (why: string) => $.ui.log(`learn-notes: ${key}로 초점을 옮기지 않았습니다 (${why})`, { to: 'debug' })
+  const said = (tries: number) => void fault($, 'focus', 'focus', `${key}로 초점을 옮기지 않았습니다 · ${tries}/${FOCUS_TRIES}`)
   void (async () => {
     // The drawing that brings the field can also move the ring itself (onto the button left where the last field was):
-    // asked again a moment later, the field wins. Each refusal goes to the debug log with its try.
+    // asked again a moment later, the field wins. Each refusal is kept with its try.
     for (let tries = 0; tries < FOCUS_TRIES; tries += 1) {
       try {
         const result = await $.ui.focus({ requestId: PANE, key })
-        if (result.deny === undefined) return
-        said(`${result.deny} · ${tries + 1}/${FOCUS_TRIES}`)
-      } catch (thrown) {
-        said(`${String(thrown)} · ${tries + 1}/${FOCUS_TRIES}`)
+        if (result.deny === undefined) {
+          faultOk($, 'focus')
+          return
+        }
+        said(tries + 1)
+      } catch {
+        said(tries + 1)
       }
       if (tries + 1 === FOCUS_TRIES) return
       // A wait cut short (the module unloaded, the session ended) ends the tries.
@@ -1808,7 +1986,7 @@ async function askInPane($: EngineInterface, cfg: Config, id: string, text: stri
     if ('error' in asked) error = asked.error
     else answeredAt = asked.at
   } catch (thrown) {
-    $.ui.log(`learn-notes: 질문에 답하지 못했습니다 (${String(thrown)})`, { to: 'debug' })
+    void fault($, 'ask', faultCode(thrown), '질문에 답하지 못했습니다')
     error = '답하지 못했습니다. 잠시 뒤 다시 해 보세요.'
   } finally {
     asking.delete(id)
@@ -1867,6 +2045,7 @@ async function writeNote(
     const asked = await askModel(
       $,
       cfg,
+      'note',
       {
         system: SYSTEM,
         // A note kept before 1.6.0, written again, was never screened.
@@ -1896,7 +2075,7 @@ async function writeNote(
         if (!isCounted) await recordActivity($, stamp(done.at).day, { notes: 1 })
         if (!done.isCounted) done = (await setNote($, id, { isCounted: true })) ?? { ...done, isCounted: true }
       } catch (error) {
-        $.ui.log(`learn-notes: 노트의 개념을 세지 못했습니다 (${String(error)})`, { to: 'debug' })
+        void fault($, 'note', faultCode(error), '노트의 개념을 세지 못했습니다')
       }
     }
     // autoSave off means no journal, nothing more: the note stays in the pane and the store.
@@ -1904,7 +2083,7 @@ async function writeNote(
     await persist($, false, [done])
     if (done.status === 'ready') await announceNote($, done)
   } catch (error) {
-    $.ui.log(`learn-notes: 노트를 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
+    void fault($, 'note', faultCode(error), '노트를 쓰지 못했습니다')
   } finally {
     inFlight.delete(id)
     autoPending.delete(id)
@@ -1961,7 +2140,7 @@ async function readTargets($: EngineInterface, command: string): Promise<Map<str
     for (const path of shellTargets(command, cwd || root, await homeDir($))) before.set(path, await readForDiff($, path))
     return before
   } catch (error) {
-    $.ui.log(`learn-notes: 명령이 바꿀 파일을 미리 읽지 못했습니다 (${String(error)})`, { to: 'debug' })
+    void fault($, 'capture', faultCode(error), '명령이 바꿀 파일을 미리 읽지 못했습니다')
     return undefined
   }
 }
@@ -2005,7 +2184,7 @@ async function collectShell(
       await collectShellChanges($, cfg, tool, before)
     }
   } catch (error) {
-    $.ui.log(`learn-notes: ${tool} 명령의 변경을 잡지 못했습니다 (${String(error)})`, { to: 'debug' })
+    void fault($, 'capture', faultCode(error), `${tool} 명령의 변경을 잡지 못했습니다`)
   }
 }
 
@@ -2062,7 +2241,7 @@ async function loadTeam($: EngineInterface): Promise<TeamFile | undefined> {
     team = { path, mtimeMs: stat.mtimeMs, size: stat.size, parsed }
     return parsed
   } catch (error) {
-    $.ui.log(`learn-notes: 팀 규칙 파일을 읽지 못했습니다 (${String(error)})`, { to: 'debug' })
+    void fault($, 'team', faultCode(error), '팀 규칙 파일을 읽지 못했습니다')
     team = null
     return undefined
   }
@@ -2433,17 +2612,19 @@ export const register: Register = (on, options) => {
     try {
       await $.tool.register(TOOL_SPEC)
       hasTool = true
-    } catch (error) {
+    } catch {
       hasTool = false
-      $.ui.log(`learn-notes: 학습 기록 도구를 등록하지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'tool', 'unregistered', '학습 기록 도구를 등록하지 못했습니다')
     }
     isInteractive = e.isInteractive
+    myVersion = await readVersion($)
     await loadHistory($)
     await loadTeam($)
     await seedActivity($)
     await seedUsage($)
     await remind($, cfg)
     await welcome($)
+    await checkAtStart($, cfg)
     // A quiz request a reload cut off is not coming back; the last quiz is there for the pane to draw.
     if (!isQuizMaking && !isQuizChecking) await update($, quizRun, () => ({ isMaking: false, error: null, checking: null }))
     // A question a reload cut off is not coming back: its field is there again.
@@ -2462,9 +2643,12 @@ export const register: Register = (on, options) => {
     try {
       return { result: await toolText($, cfg, action, query) }
     } catch (error) {
-      $.ui.log(`learn-notes: 학습 기록 도구가 답하지 못했습니다 (${String(error)})`, { to: 'debug' })
-      return { result: '학습 기록을 읽지 못했습니다. 잠시 뒤 다시 해 보세요.' }
+      void fault($, 'tool', faultCode(error), '학습 기록 도구가 답하지 못했습니다')
+      return { result: TOOL_FAILED }
     }
+  }).catch(($, e, next) => {
+    hookFailed($, next.error, 'tool', 'tool.call')
+    return { result: TOOL_FAILED }
   })
 
   // It only reads the learner's own record: no permission dialog where only the mode would ask.
@@ -2474,11 +2658,16 @@ export const register: Register = (on, options) => {
     if (verdict?.decision === 'deny') return verdict
     if (verdict?.decision === 'ask' && (verdict.rule !== undefined || verdict.hook !== undefined)) return verdict
     return { decision: 'allow' as const, reason: 'learn-notes의 읽기 전용 학습 기록' }
+  }).catch(($, e, next) => {
+    // The engine's own verdict, the dialog where it would ask: never an allow this hook could not judge.
+    hookFailed($, next.error, 'tool', 'tool.check')
+    return next(e)
   })
 
-  // Only reads where the spinner is drawn, to know whether a pane would dock.
+  // Only reads where the spinner is drawn, to know whether a pane would dock (and, for /learn 진단, the terminal's width).
   on('ui.render', { component: 'Spinner' }, ($, e, next) => {
     canDock = e.surface === 'desktop' || (e.surface === 'terminal' && e.viewport?.isFullscreen === true)
+    if (e.surface === 'terminal' && e.viewport) lastViewport = { columns: e.viewport.columns, isFullscreen: e.viewport.isFullscreen === true }
     return next(e)
   })
 
@@ -2497,6 +2686,9 @@ export const register: Register = (on, options) => {
       lastRequest: kept.lastRequest ?? prior.lastRequest,
     }))
     return result
+  }).catch(($, e, next) => {
+    hookFailed($, next.error, 'hook', 'prompt.submit')
+    return next(e)
   })
 
   on('turn.start', async ($, e, next) => {
@@ -2519,29 +2711,30 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // A change that cannot be caught (the session's root unreadable, a state write refused) fails the hook: its
+  // .catch keeps the fault and hands on what the tool did, as this hook would have.
   on('tool.call', { tool: ['Edit', 'Write'] }, async ($, e, next) => {
     const ran = await next(e)
-    try {
-      if (ran.deny !== undefined || ran.isError || !ran.result) return ran
-      const root = await $.session.root()
-      if (e.tool === 'Edit' && 'oldString' in ran.result) {
-        const r = ran.result
-        if (r.staged || (await isBookkeeping($, r.filePath))) return ran
-        await collect($, cfg, changeOf({ path: r.filePath, root, tool: 'Edit', kind: 'update', hunks: r.structuredPatch }))
-      } else if (e.tool === 'Write' && 'content' in ran.result) {
-        const r = ran.result
-        if (r.staged || (await isBookkeeping($, r.filePath))) return ran
-        const kind = r.type === 'create' ? 'create' : 'update'
-        if (kind === 'update' && r.structuredPatch.length === 0 && r.originalFile === r.content) return ran
-        // An update with no patch (too large, or the diff timed out) still shows, marked as having no diff.
-        const hunks: Hunk[] =
-          r.structuredPatch.length > 0 ? r.structuredPatch : kind === 'create' ? [creationHunk(r.content)] : []
-        await collect($, cfg, changeOf({ path: r.filePath, root, tool: 'Write', kind, hunks }))
-      }
-    } catch (error) {
-      $.ui.log(`learn-notes: 바뀐 코드를 잡지 못했습니다 (${String(error)})`, { to: 'debug' })
+    if (ran.deny !== undefined || ran.isError || !ran.result) return ran
+    const root = await $.session.root()
+    if (e.tool === 'Edit' && 'oldString' in ran.result) {
+      const r = ran.result
+      if (r.staged || (await isBookkeeping($, r.filePath))) return ran
+      await collect($, cfg, changeOf({ path: r.filePath, root, tool: 'Edit', kind: 'update', hunks: r.structuredPatch }))
+    } else if (e.tool === 'Write' && 'content' in ran.result) {
+      const r = ran.result
+      if (r.staged || (await isBookkeeping($, r.filePath))) return ran
+      const kind = r.type === 'create' ? 'create' : 'update'
+      if (kind === 'update' && r.structuredPatch.length === 0 && r.originalFile === r.content) return ran
+      // An update with no patch (too large, or the diff timed out) still shows, marked as having no diff.
+      const hunks: Hunk[] =
+        r.structuredPatch.length > 0 ? r.structuredPatch : kind === 'create' ? [creationHunk(r.content)] : []
+      await collect($, cfg, changeOf({ path: r.filePath, root, tool: 'Write', kind, hunks }))
     }
     return ran
+  }).catch(($, e, next) => {
+    hookFailed($, next.error, 'capture', 'tool.call')
+    return next(e)
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
@@ -2550,6 +2743,9 @@ export const register: Register = (on, options) => {
     const ran = await next(e)
     await collectShell($, cfg, 'Bash', e.command, ran, before)
     return ran
+  }).catch(($, e, next) => {
+    hookFailed($, next.error, 'capture', 'tool.call')
+    return next(e)
   })
 
   // Claude Code on Windows runs commands with its PowerShell tool (always without Git Bash). Not every
@@ -2563,6 +2759,9 @@ export const register: Register = (on, options) => {
     const ran = await next(e)
     await collectShell($, cfg, 'PowerShell', command, ran, before)
     return ran
+  }).catch(($, e, next) => {
+    hookFailed($, next.error, 'capture', 'tool.call')
+    return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -2634,6 +2833,15 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'learn' }, async ($, e, next) => {
     const out = await next(e)
     return out.text === undefined ? out : { ...out, text: redactText(out.text).text }
+  }).catch(async ($, e, next) => {
+    hookFailed($, next.error, 'hook', 'command.run')
+    // What could not be masked is not shown: the reply goes into the conversation the model reads.
+    const out = await next(e)
+    try {
+      return out.text === undefined ? out : { ...out, text: redactText(out.text).text }
+    } catch {
+      return { text: COMMAND_FAILED }
+    }
   })
 
   on('command.run', { command: 'learn' }, async ($, e) => {
@@ -2719,9 +2927,12 @@ export const register: Register = (on, options) => {
       const path = `${(await journalDir($, cfg)).replace(/[\\/]+$/, '')}/${ANKI_FILE}`
       try {
         await $.fs.write(path, out.text)
+        faultOk($, 'anki')
       } catch (error) {
-        $.ui.log(`learn-notes: Anki 파일을 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
-        return { text: `Anki 파일을 쓰지 못했습니다 (${path}). 폴더에 쓸 수 있는지 확인하거나 /config에서 저장 폴더(saveDir)를 바꾸세요.` }
+        const code = faultCode(error)
+        void fault($, 'anki', code, 'Anki 파일을 쓰지 못했습니다')
+        const why = fileWhy(code)
+        return { text: `Anki 파일을 쓰지 못했습니다${why ? `: ${why}` : ''} (${path}). 폴더에 쓸 수 있는지 확인하거나 /config에서 저장 폴더(saveDir)를 바꾸세요.` }
       }
       return {
         text: [
@@ -2735,6 +2946,7 @@ export const register: Register = (on, options) => {
     // One record since 1.6.0: the run of days and the concepts learned together (stats · concepts · 기록 · 개념 · 통계).
     if (arg === 'stats' || arg === 'concepts') return { text: await recordText($, cfg) }
     if (arg === 'report') return { text: await reportCommand($, cfg, rest, isAwayOrigin(e.origin)) }
+    if (arg === 'doctor') return { text: await diagCommand($, cfg, isAwayOrigin(e.origin)) }
     if (arg === 'ask') {
       if (rest === '') return { text: ASK_USAGE }
       const wanted = await read($, selectedId)
@@ -2772,7 +2984,7 @@ export const register: Register = (on, options) => {
       if (chosen.length === 0) return { text: `${range.label}의 노트가 이 프로젝트에 없습니다.` }
       const isPartial = written.length === 0 && kept.length >= HISTORY_PER_PROJECT && Math.min(...kept.map(note => note.at)) > range.from
       const lastDay = chosen.map(entry => entry.day).sort().at(-1)!
-      const asked = await askModel($, cfg, { system: RECAP_SYSTEM, prompt: recapPrompt(range, chosen, index, map, cfg.level, isPartial), maxTokens: 1200 })
+      const asked = await askModel($, cfg, 'recap', { system: RECAP_SYSTEM, prompt: recapPrompt(range, chosen, index, map, cfg.level, isPartial), maxTokens: 1200 })
       if ('error' in asked) return { text: `정리를 쓰지 못했습니다: ${asked.error}` }
       const text = cut(asked.text, 6000)
       const path = cfg.isAutoSave ? await saveRecap($, cfg, root, range, text, now, lastDay) : undefined
@@ -2869,19 +3081,26 @@ export const register: Register = (on, options) => {
       const review = left > 0 ? ` · 오늘 복습 ${left}개: /learn 복습` : ''
       return { text: `학습 노트 패널을 열었습니다 · 패널의 키를 쓰려면 ctrl+x tab(또는 패널 클릭)${review}${hint}` }
     }
-    $.ui.log(`learn-notes: 패널을 열지 못했습니다 (${opened.reason})`, { to: 'debug' })
+    void fault($, 'pane', 'unplaced', '패널을 열지 못했습니다')
     return {
       text: `이 화면에는 패널을 띄울 수 없어 마지막 노트를 여기에 적습니다. 터미널을 전체 화면(/tui fullscreen)으로 쓰면 오른쪽에 패널이 붙습니다.\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
     }
+  }).catch(($, e, next) => {
+    hookFailed($, next.error, 'hook', 'command.run')
+    return { text: COMMAND_FAILED }
   })
 
   // The person's own moves of the pane's window, counted so an answer arriving later does not pull them away (revealInPane).
   on('ui.scroll', { requestId: PANE }, ($, e, next) => {
     if (e.origin.kind === 'person') personScrolls += 1
     return next(e)
+  }).catch(($, e, next) => {
+    hookFailed($, next.error, 'pane', 'ui.scroll')
+    return next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    lastDraw = { placement: e.props.placement, columns: e.props.bodyColumns }
     const el = $.ui.resolve(e)
     const { Box, Text, Button } = el
     const list = await read($, notes)
@@ -3084,6 +3303,31 @@ export const register: Register = (on, options) => {
         </Box>
       </Box>
     )
+  }).catch(($, e, next) => {
+    // Two lines in place of an empty pane: what to send, and what still works in the conversation.
+    if (next.error.kind !== 're-entry') void fault($, 'pane', 'render', '패널을 그리지 못했습니다')
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Text color="yellow" wrap="wrap">
+          {RENDER_FAILED}
+        </Text>
+        <Text dimColor wrap="wrap">
+          {RENDER_STILL}
+        </Text>
+      </Box>
+    )
+  })
+
+  // At the session's end, the faults not yet in the store go in, within the exit's one short bound.
+  on('session.end', async ($, e, next) => {
+    faultTimer?.cancel()
+    faultTimer = undefined
+    const room = Math.min(next.budget.remainingMs - 200, 2_000)
+    if (isFaultsDirty && room > 0) {
+      await Promise.race([flushFaults($), $.clock.sleep(room, { signal: next.signal }).catch(() => undefined)])
+    }
+    return next(e)
   })
 }
 
@@ -3512,7 +3756,7 @@ async function openNote($: EngineInterface, id: string): Promise<void> {
 /** The quiz's n under a question answered wrong: the note that taught its concept, while the pane holds it. */
 async function openTaughtNote($: EngineInterface, id: string): Promise<void> {
   if ((await read($, notes)).some(note => note.id === id)) await openNote($, id)
-  else $.ui.log(`learn-notes: 이 개념을 배운 노트(${id})가 패널에 없어 열지 않았습니다`, { to: 'debug' })
+  else void fault($, 'pane', 'note-gone', '이 개념을 배운 노트가 패널에 없어 열지 않았습니다')
 }
 
 /** Where the concepts beyond the list are: concepts.md when it is kept, else how to have it kept. */
@@ -3734,23 +3978,118 @@ async function reportCommand($: EngineInterface, cfg: Config, rest: string, isAw
     const target = `${(await journalDir($, cfg)).replace(/[\\/]+$/, '')}/report-${range.days[0]}_${range.days.at(-1)}.md`
     try {
       await $.fs.write(target, text)
+      faultOk($, 'report')
       path = target
     } catch (error) {
-      $.ui.log(`learn-notes: 학습 보고서를 파일에 쓰지 못했습니다 (${String(error)})`, { to: 'debug' })
+      void fault($, 'report', faultCode(error), '학습 보고서를 파일에 쓰지 못했습니다')
     }
   }
   const home = await homeDir($)
   const file = path === undefined ? undefined : `파일: ${home !== undefined && isUnder(path, home) ? `~${path.slice(home.replace(/[\\/]+$/, '').length)}` : path}`
-  let isCopied = false
-  if (!isAway && !(await isCloudSession($))) {
-    try {
-      isCopied = (await $.ui.copy({ text })).isCopied
-    } catch (error) {
-      $.ui.log(`learn-notes: 학습 보고서를 클립보드에 복사하지 못했습니다 (${String(error)})`, { to: 'debug' })
-    }
-  }
-  if (isCopied) return ['학습 보고서를 클립보드에 복사했습니다 · PR 설명이나 팀 채널에 붙이기 전에 한 번 읽어 보세요', ...(file ? [file] : [])].join('\n')
+  if (await deliver($, text, isAway)) return ['학습 보고서를 클립보드에 복사했습니다 · PR 설명이나 팀 채널에 붙이기 전에 한 번 읽어 보세요', ...(file ? [file] : [])].join('\n')
   return [`학습 보고서입니다 · 이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다. 붙이기 전에 한 번 읽어 보세요${file ? ` · ${file}` : ''}`, '', text].join('\n')
+}
+
+/** /learn 진단's first two lines: where the text went, and what it does not hold. */
+const DIAG_COPIED = '진단 내용을 클립보드에 복사했습니다 · 팀 채널이나 담당자에게 그대로 붙여 주세요'
+const DIAG_HERE = '이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다'
+const DIAG_PRIVATE = '코드 · 요청 · 파일 이름 · 경로 · 개념 이름은 들어 있지 않습니다'
+/** Store keys /learn 진단 names with their size, the biggest first. */
+const DIAG_KEYS = 3
+/** The settings /learn 진단 says an administrator locked, by their userConfig field. */
+const SETTING_FIELDS = ['autoNote', 'model', 'dailyAutoNotes', 'level', 'autoSave', 'saveDir', 'autoOpen', 'excludePaths'] as const
+
+/**
+ * /learn 진단: a page to paste to whoever looks after the plugin, made with no model call (diagText): the
+ * versions, the screen, the settings and which an administrator locked, today's counts, the store's size, notes
+ * the journal has not taken, the last week's faults. Copied as /learn 보고서 is (deliver), and always in the reply
+ * too. Each piece that cannot be read is left out or said unknown: it is what is asked for when things fail.
+ */
+async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Promise<string> {
+  const now = await $.clock.now()
+  const day = stamp(now).day
+  const quiet = <T,>(work: Promise<T>, fallback: T) => work.catch(() => fallback)
+  const version = myVersion ?? (await readVersion($))
+  const engine = (await quiet($.session.version(), undefined))?.version
+  const surfaces = await quiet($.session.surfaces(), [] as const)
+  const mine = (await quiet($.ui.panes(), [] as const)).find(one => one.id === PANE)
+  const pane: DiagInput['pane'] = !mine ? 'closed' : !mine.isPlaced ? 'unplaced' : (lastDraw ?? 'open')
+  const apps = [
+    (await $.env.get('WT_SESSION').catch(() => undefined)) ? 'Windows Terminal' : undefined,
+    (await $.env.get('TMUX').catch(() => undefined)) ? 'tmux' : undefined,
+    appName(await $.env.get('TERM_PROGRAM').catch(() => undefined)),
+  ].filter((one, i, all): one is string => one !== undefined && all.indexOf(one) === i)
+  const rows = await quiet($.config.list(), [])
+  const locked = SETTING_FIELDS.filter(field => rows.some(row => row.key === `learn-notes.${field}` && row.isLocked))
+  const stored = cleanFaults(await quiet($.store.get(FAULTS_KEY), undefined), now)
+  const list = mergeFaults(stored.list, faults, now)
+  const lastSave = list.filter(one => one.area === 'save').at(-1)
+  const saveDir = /^(?:\\\\|\/\/)/.test(cfg.saveDir) || lastSave?.code === 'network' ? 'network' : cfg.saveDir === '' ? 'default' : 'custom'
+  const dir = await journalDir($, cfg)
+  const hasFolder = saveDir === 'network' ? undefined : await $.fs.stat(dir).then(stat => stat.kind === 'dir', () => false)
+  let store: DiagInput['store']
+  try {
+    const sizes: { key: string; bytes: number }[] = []
+    for (const key of await $.store.keys()) sizes.push({ key, bytes: jsonBytes((await $.store.get(key)) ?? null) })
+    sizes.sort((a, b) => b.bytes - a.bytes)
+    store = { bytes: sizes.reduce((sum, one) => sum + one.bytes, 0), keys: sizes.slice(0, DIAG_KEYS) }
+  } catch {
+    store = undefined
+  }
+  const activityToday = cleanActivity(await quiet($.store.get(ACTIVITY_KEY), undefined))
+  const usageToday = cleanUsage(await quiet($.store.get(USAGE_KEY), undefined))
+  const has = (record: object) => Object.prototype.hasOwnProperty.call(record, day)
+  const root = (await read($, paneRoot)) ?? (await $.session.root())
+  const unsaved = (await quiet(allNotes($), [])).filter(note => (note.root || root) === root && note.isUnsaved === true).length
+  const text = diagText({
+    now,
+    ...(version !== undefined ? { version } : {}),
+    ...(engine !== undefined ? { engine } : {}),
+    surfaces,
+    pane,
+    isPaneFocused: mine?.isFocused === true,
+    ...(lastViewport ? { terminal: lastViewport } : {}),
+    apps,
+    settings: {
+      isAutoNote: cfg.isAutoNote,
+      model: cfg.model.replace(/[^\w.[\]-]+/g, '').slice(0, 40) || '?',
+      dailyAutoNotes: cfg.dailyAutoNotes,
+      level: cfg.level,
+      isAutoSave: cfg.isAutoSave,
+      isAutoOpen: cfg.isAutoOpen,
+      saveDir,
+      ...(hasFolder !== undefined ? { hasFolder } : {}),
+      excluded: cfg.excludePaths.length,
+      locked,
+    },
+    today: { notes: has(activityToday) ? activityToday[day]!.notes : 0, calls: has(usageToday) ? usageToday[day]!.calls : 0 },
+    ...(store ? { store } : {}),
+    unsaved,
+    faults: list,
+  })
+  const isCopied = await deliver($, text, isAway)
+  return [isCopied ? DIAG_COPIED : DIAG_HERE, DIAG_PRIVATE, '', text].join('\n')
+}
+
+/**
+ * Puts `text` on the clipboard of the screen the command came from, for /learn 보고서 and /learn 진단: true once
+ * copied. Nothing is copied for a person away from this session's screens (`isAway`: a phone through Remote
+ * Control, a chat channel; the clipboard would be the terminal's, not theirs) or in a cloud session (a computer
+ * nobody sees): the caller then gives the text in its reply, as it does when the copy fails (a fault of its own).
+ */
+async function deliver($: EngineInterface, text: string, isAway: boolean): Promise<boolean> {
+  if (isAway || (await isCloudSession($))) return false
+  try {
+    const copied = await $.ui.copy({ text })
+    if (copied.isCopied) {
+      faultOk($, 'copy')
+      return true
+    }
+    void fault($, 'copy', `copy:${copied.reason}`, '클립보드에 복사하지 못했습니다')
+  } catch (error) {
+    void fault($, 'copy', faultCode(error), '클립보드에 복사하지 못했습니다')
+  }
+  return false
 }
 
 /** When a concept comes back, as a concepts list says it: never quizzed, missed, or the next review. */
@@ -4096,14 +4435,21 @@ const HELP = [
   '- `/learn 찾기 말`: 지난 노트 찾기 · `/learn 일지`: 오늘 노트 목차 (`어제` · `2026-10-03` · `목록`도 됩니다)',
   '- 가끔: `/learn 마지막` 마지막 노트 · `/learn 합치기 A = B` 개념 합치기 · `/learn 안다 이름` 복습에서 빼기 · `/learn 모른다 이름` 되돌리기 · `/learn 안키` Anki 카드 · `/learn 비우기` 패널 비우기',
 ].join('\n')
+/** The pane's two lines when drawing it failed (the Pane render's .catch). */
+const RENDER_FAILED = '패널을 그리지 못했습니다 · /learn 진단을 복사해 팀에 보내 주세요'
+const RENDER_STILL = '대화창의 /learn 퀴즈 · /learn 기록은 그대로 됩니다'
+/** /learn's reply when its hook failed (its .catch). */
+const COMMAND_FAILED = '이 명령을 마치지 못했습니다 · /learn 진단으로 무엇이 막혔는지 볼 수 있습니다'
+/** The learning record tool's answer when it could not read the record. */
+const TOOL_FAILED = '학습 기록을 읽지 못했습니다. 잠시 뒤 다시 해 보세요.'
 /** Said at the top of the help while the learning record tool is there (hasTool): the record answers a plain question. */
 const CHAT_HINT = '대화창에 그냥 물어봐도 됩니다: "오늘 배운 거 알려 줘"'
 
-/** /learn 도움말: HELP, with CHAT_HINT under its title while the tool is registered. */
+/** /learn 도움말: HELP, its title naming this build's version once read, with CHAT_HINT under it while the tool is registered. */
 function commandHelp(): string {
-  if (!hasTool) return HELP
-  const [title, ...rest] = HELP.split('\n')
-  return [title, CHAT_HINT, ...rest].join('\n')
+  const [title = '', ...rest] = HELP.split('\n')
+  const head = myVersion === undefined ? title : title.replace('learn-notes', `learn-notes ${myVersion}`)
+  return [head, ...(hasTool ? [CHAT_HINT] : []), ...rest].join('\n')
 }
 /** What an unknown subcommand gets: the few most used, and where the rest are. */
 const SHORT_HELP = '자주 쓰는 것: `/learn` 패널 · `/learn 복습` · `/learn 퀴즈` · `/learn 정리` · `/learn 질문 …` · `/learn 기록` · 전체는 `/learn 도움말`'
@@ -4137,6 +4483,7 @@ const COMMAND_WORDS: Record<string, string> = {
   저장: 'save',
   비우기: 'clear',
   안키: 'anki',
+  진단: 'doctor',
 }
 /** What /learn save answers with autoSave off, now that a note is saved by itself. */
 const SAVE_OFF = '노트는 저절로 저장됩니다. 파일로 남기려면 /config에서 learn-notes.autoSave(노트를 마크다운 파일로 자동 저장)를 켜세요.'

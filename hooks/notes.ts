@@ -3635,3 +3635,375 @@ export function ankiText(bank: readonly BankItem[], index: Readonly<Record<strin
   const head = ['#separator:tab', '#html:true', '#deck:learn-notes', '#tags column:3', '']
   return { text: head.join('\n') + rows.join('\n') + (rows.length > 0 ? '\n' : ''), questions: bank.length, concepts: concepts.length }
 }
+
+// Faults and /learn 진단 (1.7.0): what failed, kept as classification codes only, and the diagnosis made of them.
+
+/**
+ * Where a failure happened, as /learn 진단 names it. `focus` holds the pane's refused focus and scroll moves:
+ * the engine says no while the pane does not hold the keys, so they are counted apart from the failures.
+ */
+export const FAULT_AREAS = {
+  note: '노트 쓰기',
+  save: '일지 저장',
+  store: '저장소',
+  quiz: '퀴즈 만들기',
+  grade: '채점',
+  ask: '질문',
+  recap: '정리',
+  report: '보고서 파일',
+  anki: 'Anki 파일',
+  concepts: '개념 모음 파일',
+  team: '팀 파일',
+  capture: '바뀐 코드 잡기',
+  tool: '학습 기록 도구',
+  pane: '패널',
+  focus: '패널 초점',
+  copy: '클립보드 복사',
+  hook: '훅',
+} as const
+
+export type FaultArea = keyof typeof FAULT_AREAS
+
+/**
+ * One kind of failure kept for /learn 진단: where (`area`) and how, as a classification code (an errno,
+ * `api-error:<kind>:<status>`, `focus`, `hook:<event>` …), never an error's text or a path. `at` is its first
+ * time, `last` its latest, `n` how often it came, each within FAULT_FOLD_MS of the one before; `ok` once the
+ * same work went through after it.
+ */
+export type Fault = { at: number; last: number; area: string; code: string; n: number; ok?: true }
+
+/** What the store keeps under its faults key: the last FAULT_DAYS days' faults, and the day the session-start check line last showed. */
+export type FaultRecord = { list: Fault[]; noticeDay?: string }
+
+/** Faults one module load holds in memory, the newest last. */
+export const FAULTS_KEPT = 30
+/** A fault again within this long of the last of its kind counts on that one. */
+export const FAULT_FOLD_MS = 10 * 60_000
+/** Days the store keeps a fault after its latest time. */
+export const FAULT_DAYS = 7
+/** Bytes of JSON the faults key may take in the store. */
+export const FAULT_MAX_BYTES = 4096
+
+/** A code as kept: letters, digits and `_.:-` only (never a path separator), 48 characters at most. */
+export function faultWord(code: string): string {
+  const word = code.replace(/[^A-Za-z0-9_.:-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48)
+  return word === '' ? 'error' : word
+}
+
+/** The OS refusals a file write may meet that /learn 진단 names, Windows' sharing violation among them (EBUSY). */
+const ERRNOS = new Set([
+  'ENOSPC',
+  'EACCES',
+  'EPERM',
+  'EBUSY',
+  'EROFS',
+  'ENOENT',
+  'EEXIST',
+  'EISDIR',
+  'ENOTDIR',
+  'EMFILE',
+  'ENFILE',
+  'EIO',
+  'EINVAL',
+  'ENAMETOOLONG',
+  'ELOOP',
+  'EXDEV',
+  'EAGAIN',
+  'ETIMEDOUT',
+  'EDQUOT',
+  'EFBIG',
+])
+
+function errorWords(error: unknown): { code?: string; text: string } {
+  const isObject = typeof error === 'object' && error !== null
+  const code = isObject && typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : undefined
+  const message = isObject && typeof (error as { message?: unknown }).message === 'string' ? (error as { message: string }).message : undefined
+  return { ...(code !== undefined ? { code } : {}), text: message ?? String(error) }
+}
+
+/**
+ * A failed call's classification code (Fault): the errno an OS refusal carries (its `code`, or its message's
+ * `ENOSPC: …`), `network` for a network location the engine does not reach, `too-big` past the 4 MiB a read or
+ * write takes; for the store (`kind` store) `store-full` past its 4 MiB and `store-reject` for any other refusal;
+ * else `error`. Only the code is kept: the message, and any path in it, are not.
+ */
+export function faultCode(error: unknown, kind: 'fs' | 'store' = 'fs'): string {
+  const { code, text } = errorWords(error)
+  if (code !== undefined && ERRNOS.has(code)) return code
+  if (/network location/i.test(text)) return 'network'
+  for (const found of text.matchAll(/\b(E[A-Z]{2,11})\b/g)) if (ERRNOS.has(found[1]!)) return found[1]!
+  if (/\b4\s?MiB\b|too large|exceed|over \d/i.test(text)) return kind === 'store' ? 'store-full' : 'too-big'
+  return kind === 'store' ? 'store-reject' : 'error'
+}
+
+/** A model call's failure as a classification code: `api-error:<kind>:<status>` (`none` with no response), `empty`, `aborted`. */
+export function modelCode(reply: { reason: string; status?: number | null; error?: string }): string {
+  if (reply.reason === 'api-error') return faultWord(`api-error:${reply.error ?? 'unknown'}:${reply.status ?? 'none'}`)
+  if (reply.reason === 'empty-reply') return 'empty'
+  if (reply.reason === 'aborted') return 'aborted'
+  return faultWord(reply.reason)
+}
+
+/** `list` with one more fault: counted on the last of its kind still open within FAULT_FOLD_MS, else added; FAULTS_KEPT at most. */
+export function addFault(list: readonly Fault[], area: string, code: string, at: number): Fault[] {
+  const word = faultWord(code)
+  const i = list.findLastIndex(one => one.area === area && one.code === word && one.ok !== true && at - one.last < FAULT_FOLD_MS)
+  if (i !== -1) return list.map((one, j) => (j === i ? { ...one, last: Math.max(one.last, at), n: one.n + 1 } : one))
+  return [...list, { at, last: at, area, code: word, n: 1 }].slice(-FAULTS_KEPT)
+}
+
+/** `list` with `area`'s open faults marked gone through (ok); the same list when none was open. */
+export function faultsOk(list: readonly Fault[], area: string): readonly Fault[] {
+  if (!list.some(one => one.area === area && one.ok !== true)) return list
+  return list.map(one => (one.area === area && one.ok !== true ? { ...one, ok: true as const } : one))
+}
+
+/** The faults record as the store holds it, read back: well-formed entries of the last FAULT_DAYS days, their words made safe. */
+export function cleanFaults(raw: unknown, now: number): FaultRecord {
+  const record = typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
+  const list: Fault[] = []
+  for (const one of Array.isArray(record.list) ? record.list : []) {
+    if (typeof one !== 'object' || one === null) continue
+    const { at, last, area, code, n, ok } = one as Record<string, unknown>
+    if (typeof at !== 'number' || typeof last !== 'number' || typeof area !== 'string' || typeof code !== 'string' || typeof n !== 'number') continue
+    if (!Number.isFinite(at) || !Number.isFinite(last) || now - last >= FAULT_DAYS * DAY) continue
+    list.push({ at, last, area: faultWord(area), code: faultWord(code), n: Math.max(1, Math.floor(n) || 1), ...(ok === true ? { ok: true as const } : {}) })
+  }
+  const day = record.noticeDay
+  return { list: list.sort((a, b) => a.at - b.at), ...(typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day) ? { noticeDay: day } : {}) }
+}
+
+/** The store's faults and this load's together, one entry each (this load's copy wins), the last FAULT_DAYS days, oldest first. */
+export function mergeFaults(stored: readonly Fault[], mine: readonly Fault[], now: number): Fault[] {
+  const key = (one: Fault) => `${one.at}|${one.area}|${one.code}`
+  const byKey = new Map(stored.map(one => [key(one), one]))
+  for (const one of mine) byKey.set(key(one), one)
+  return [...byKey.values()].filter(one => now - one.last < FAULT_DAYS * DAY).sort((a, b) => a.at - b.at)
+}
+
+/** The record cut to FAULT_MAX_BYTES of JSON, the oldest faults first. */
+export function fitFaults(record: FaultRecord): FaultRecord {
+  let list = record.list.slice(-FAULTS_KEPT * 2)
+  while (list.length > 0 && jsonBytes({ ...record, list }) > FAULT_MAX_BYTES) list = list.slice(1)
+  return { ...record, list }
+}
+
+/** How an OS refusal is named in /learn 진단, its errno after it. */
+const ERRNO_LABEL: Record<string, string> = {
+  ENOSPC: '디스크 가득 참',
+  EACCES: '쓸 권한 없음',
+  EPERM: '쓸 권한 없음',
+  EBUSY: '다른 프로그램이 파일을 잡고 있음',
+  EROFS: '읽기 전용 위치',
+  ENOENT: '폴더 없음',
+}
+
+/** An API error's kind as /learn 진단 names it, its status after it. */
+const API_LABEL: Record<string, string> = {
+  overloaded: '서버 붐빔',
+  rate_limit: '요청 한도',
+  authentication_failed: '로그인 필요',
+  server_error: '서버 오류',
+  invalid_request: '잘못된 요청',
+  billing_error: '결제 문제',
+  model_not_found: '모델 없음',
+  max_output_tokens: '답이 너무 김',
+  oauth_org_not_allowed: '조직에서 허용하지 않음',
+  account_on_hold: '계정 보류',
+  verification_required: '인증 필요',
+  cloud_credential_error: '클라우드 인증 오류',
+}
+
+/** The other codes as /learn 진단 names them. */
+const CODE_LABEL: Record<string, string> = {
+  network: '네트워크 위치',
+  'too-big': '4MB 넘음',
+  'store-full': '저장소 4MB 넘음',
+  'store-reject': '저장소가 받지 않음',
+  empty: '빈 답',
+  aborted: '시간 초과·끊김',
+  blocked: '모델을 부를 수 없음',
+  unreadable: '답을 읽지 못함',
+  focus: '초점 거절',
+  scroll: '스크롤 거절',
+  unplaced: '패널 자리 없음',
+  render: '그리기 실패',
+  'note-gone': '노트가 패널에 없음',
+  unregistered: '등록 안 됨',
+  error: '알 수 없는 오류',
+}
+
+/** A fault's code in words: `서버 붐빔(529)`, `쓸 권한 없음(EACCES)`, `tool.call 훅 멈춤` (`… 훅 시간 초과` past its budget). */
+export function faultLabel(code: string): string {
+  const errno = ERRNO_LABEL[code]
+  if (errno !== undefined) return `${errno}(${code})`
+  if (ERRNOS.has(code)) return `파일 오류(${code})`
+  const api = /^api-error:([^:]*):(.*)$/.exec(code)
+  if (api) {
+    const [, kind = '', status = ''] = api
+    if (status === 'none') return `연결 끊김(${kind})`
+    return `${API_LABEL[kind] ?? `API 오류 ${kind}`}(${status})`
+  }
+  const hook = /^hook:(.+?)(:timeout)?$/.exec(code)
+  if (hook) return `${hook[1]} 훅 ${hook[2] ? '시간 초과' : '멈춤'}`
+  if (code.startsWith('copy:')) return `복사 안 됨(${code.slice(5)})`
+  return CODE_LABEL[code] ?? code
+}
+
+/** One fault as /learn 진단 lists it: `10-13 13:57 노트 쓰기 · 서버 붐빔(529) ×2 · 다시 써서 됨`. */
+export function faultLine(one: Fault): string {
+  const { day, time } = stamp(one.at)
+  const area = (FAULT_AREAS as Record<string, string>)[one.area] ?? one.area
+  const done = one.ok === true ? (one.area === 'note' || one.area === 'save' ? ' · 다시 써서 됨' : ' · 그 뒤 됨') : ''
+  return `${day.slice(5)} ${time} ${area} · ${faultLabel(one.code)}${one.n > 1 ? ` ×${one.n}` : ''}${done}`
+}
+
+/** Why a file could not be written, in a sentence, and what to do where the next try would meet the same. */
+const FILE_WHY: Record<string, { why: string; short: string; fix?: string }> = {
+  ENOSPC: { why: '디스크가 가득 찼습니다', short: '디스크 가득 참' },
+  EACCES: { why: "폴더에 쓸 권한이 없습니다(Windows의 '제어된 폴더 액세스'나 보안 프로그램이 막았을 수 있습니다)", short: '폴더에 쓸 권한 없음' },
+  EPERM: { why: "폴더에 쓸 권한이 없습니다(Windows의 '제어된 폴더 액세스'나 보안 프로그램이 막았을 수 있습니다)", short: '폴더에 쓸 권한 없음' },
+  EBUSY: { why: '다른 프로그램이 파일을 잡고 있습니다', short: '다른 프로그램이 파일을 잡고 있음' },
+  EROFS: { why: '읽기 전용 위치입니다', short: '읽기 전용 위치', fix: '/config의 saveDir를 쓸 수 있는 폴더로 바꿔 주세요' },
+  ENOENT: { why: '저장 폴더가 없습니다', short: '폴더 없음', fix: '/config의 saveDir를 확인해 주세요' },
+  network: { why: '네트워크 위치입니다', short: '네트워크 위치', fix: '/config의 saveDir를 내 컴퓨터 폴더로 바꿔 주세요' },
+}
+
+/** Why a file could not be written, as a sentence for a reply (`디스크가 가득 찼습니다`); undefined for a cause with no words. */
+export function fileWhy(code: string): string | undefined {
+  return FILE_WHY[code]?.why
+}
+
+/**
+ * The toast for a journal write that failed, by its cause (faultCode): what happened and what follows.
+ * `학습 노트를 파일에 쓰지 못했습니다: 디스크가 가득 찼습니다 · 다음 노트 때 다시 씁니다 · /learn 진단`
+ */
+export function saveFailText(code: string): string {
+  const cause = FILE_WHY[code]
+  return `학습 노트를 파일에 쓰지 못했습니다${cause ? `: ${cause.why}` : ''} · ${cause?.fix ?? '다음 노트 때 다시 씁니다'} · /learn 진단`
+}
+
+/** The toast for a store that refused the notes' history, by its cause. */
+export function storeFailText(code: string): string {
+  const why = code === 'store-full' ? '저장소가 4MB를 넘었습니다' : FILE_WHY[code]?.why
+  return `학습 노트 이력을 저장하지 못했습니다${why ? `: ${why}` : ''} · 다음 세션에 지난 노트가 빠질 수 있습니다 (일지 파일은 그대로) · /learn 진단`
+}
+
+/**
+ * The dim line a session's start leaves while a problem remains, or undefined when none does: notes the
+ * journal has not taken yet (`unsaved`, with the cause the last failed save gave), a store that refused a write.
+ */
+export function checkLine(unsaved: number, saveCode?: string, storeCode?: string): string | undefined {
+  const parts: string[] = []
+  if (unsaved > 0) {
+    const short = saveCode === undefined ? undefined : (FILE_WHY[saveCode]?.short ?? faultLabel(saveCode))
+    parts.push(`일지에 아직 못 쓴 노트 ${unsaved}개${short ? ` (${short})` : ''}`)
+  }
+  if (storeCode !== undefined) parts.push(`저장소에 쓰지 못한 기록이 있음 (${faultLabel(storeCode)})`)
+  return parts.length === 0 ? undefined : `learn-notes 점검: ${parts.join(' · ')} · /learn 진단`
+}
+
+/** Bytes as /learn 진단 says them: `2.3MB`, `610KB`. */
+export function sizeText(bytes: number): string {
+  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)}MB`
+  return `${Math.max(bytes > 0 ? 1 : 0, Math.round(bytes / 1024))}KB`
+}
+
+/** Faults /learn 진단 lists at most: its reply goes into the conversation. */
+export const DIAG_FAULTS = 8
+
+/** What /learn 진단 is made of, every piece gathered with no model call; none of it a path, a request, code or a concept. */
+export type DiagInput = {
+  now: number
+  /** This build's version, and Claude Code's. */
+  version?: string
+  engine?: string
+  /** The surfaces the session draws on. */
+  surfaces: readonly string[]
+  /** The pane: closed, open but not placed, placed and not drawn yet, or as last drawn. */
+  pane: 'closed' | 'unplaced' | 'open' | { placement: 'dock' | 'inline'; columns: number }
+  isPaneFocused: boolean
+  /** The terminal as the spinner was last drawn on it. */
+  terminal?: { columns: number; isFullscreen: boolean }
+  /** The terminal programs the environment names: Windows Terminal, tmux, TERM_PROGRAM's name. */
+  apps: readonly string[]
+  settings: {
+    isAutoNote: boolean
+    model: string
+    dailyAutoNotes: number
+    level: string
+    isAutoSave: boolean
+    isAutoOpen: boolean
+    saveDir: 'default' | 'custom' | 'network'
+    /** Whether the journal folder is there; undefined when not looked at. */
+    hasFolder?: boolean
+    excluded: number
+    /** The settings an administrator locked, by field name (autoNote, dailyAutoNotes …). */
+    locked: readonly string[]
+  }
+  today: { notes: number; calls: number }
+  /** The store's size in all and its biggest keys; undefined when it could not be read. */
+  store?: { bytes: number; keys: readonly { key: string; bytes: number }[] }
+  unsaved: number
+  faults: readonly Fault[]
+}
+
+/** The terminal program's name as TERM_PROGRAM gives it, made plain: letters, digits and `._ -`, 30 characters at most. */
+export function appName(raw: string | undefined): string | undefined {
+  const name = (raw ?? '').replace(/[^A-Za-z0-9._ -]+/g, '').trim().slice(0, 30)
+  return name === '' ? undefined : name
+}
+
+/**
+ * /learn 진단's text, to paste to whoever looks after the plugin: versions, the screen, the settings, today's
+ * counts, the store's size, the journal, and the last FAULT_DAYS days' faults (newest first, the pane's
+ * refused focus apart from today's failures). No path, request, code or concept name.
+ */
+export function diagText(input: DiagInput): string {
+  const { now, settings: s } = input
+  const { day, time } = stamp(now)
+  const locked = (field: string) => (s.locked.includes(field) ? '(관리자 잠금)' : '')
+  const pane =
+    input.pane === 'closed'
+      ? '패널 닫힘'
+      : input.pane === 'unplaced'
+        ? '패널 자리 없음'
+        : input.pane === 'open'
+          ? '패널 열림'
+          : `패널 ${input.pane.placement === 'dock' ? '오른쪽' : '프롬프트 위'} ${input.pane.columns}칸`
+  const screen = [
+    input.surfaces.length > 0 ? input.surfaces.join('+') : '그리는 화면 없음',
+    pane,
+    ...(input.terminal ? [`터미널 ${input.terminal.columns}칸${input.terminal.isFullscreen ? '' : '(전체 화면 아님)'}`] : []),
+    `키는 ${input.isPaneFocused ? '패널에' : '대화에'}`,
+    ...input.apps,
+  ]
+  const folder = s.saveDir === 'default' ? '기본 폴더' : s.saveDir === 'network' ? '네트워크 폴더' : '바꾼 폴더'
+  const settings = [
+    `자동 노트 ${s.isAutoNote ? '켬' : '끔'}${locked('autoNote')}`,
+    `${s.model}${locked('model')}`,
+    `${s.dailyAutoNotes > 0 ? `하루 한도 ${s.dailyAutoNotes}` : '하루 한도 없음'}${locked('dailyAutoNotes')}`,
+    `일지 ${s.isAutoSave ? `켬(${folder}${s.hasFolder === false ? ', 아직 없음' : ''})` : '끔'}${locked('autoSave') || locked('saveDir')}`,
+    `패널 자동 열기 ${s.isAutoOpen ? '켬' : '끔'}${locked('autoOpen')}`,
+    `설명 수준 ${s.level}${locked('level')}`,
+    ...(s.excluded > 0 ? [`뺄 파일 규칙 ${s.excluded}개${locked('excludePaths')}`] : []),
+  ]
+  const failures = input.faults.filter(one => one.area !== 'focus' && stamp(one.last).day === day).reduce((sum, one) => sum + one.n, 0)
+  const store = input.store
+    ? `${sizeText(input.store.bytes)} / 4MB${input.store.keys.length > 0 ? ` (${input.store.keys.map(one => `${one.key} ${sizeText(one.bytes)}`).join(' · ')})` : ''}`
+    : '읽지 못함'
+  const recent = [...input.faults].sort((a, b) => b.last - a.last)
+  const listed = recent.slice(0, DIAG_FAULTS).map(one => `  - ${faultLine(one)}`)
+  return [
+    `learn-notes 진단 · ${day} ${time}`,
+    `- 버전: learn-notes ${input.version ?? '알 수 없음'} · Claude Code ${input.engine ?? '알 수 없음'}`,
+    `- 화면: ${screen.join(' · ')}`,
+    `- 설정: ${settings.join(' · ')}`,
+    `- 오늘: 노트 ${input.today.notes}개 · 모델 호출 ${input.today.calls}번 · 실패 ${failures}번`,
+    `- 저장소: ${store}`,
+    `- 일지: ${!s.isAutoSave ? '저장 꺼짐' : input.unsaved > 0 ? `아직 못 쓴 노트 ${input.unsaved}개` : '못 쓴 노트 없음'}`,
+    recent.length === 0 ? `- 최근 ${FAULT_DAYS}일 문제: 없습니다` : `- 최근 ${FAULT_DAYS}일 문제 ${recent.length}건 (최근 것부터)`,
+    ...listed,
+    ...(recent.length > listed.length ? [`  - 그 밖에 ${recent.length - listed.length}건`] : []),
+  ].join('\n')
+}

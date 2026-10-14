@@ -38,8 +38,16 @@ type World = {
   answer: string
   root: string
   storeFails: boolean
-  /** True while every disk write fails (a folder that cannot be written). */
+  /** True while every disk write fails (a folder that cannot be written), refused with `writeError`. */
   writeFails: boolean
+  /** What a refused disk write says, an OS refusal with its errno and the path, as the engine passes it on. */
+  writeError: string
+  /** How many of the next disk writes are refused with `writeError`, the ones after them taken. */
+  failNextWrites: number
+  /** True while the session's root cannot be read: a hook that needs it throws. */
+  rootFails: boolean
+  /** The settings an administrator locked, as /config lists them (`learn-notes.dailyAutoNotes`). */
+  locked: string[]
   journal: () => { path: string; text: string }[]
   toasts: string[]
   statuses: (string | undefined)[]
@@ -94,6 +102,10 @@ function world(
     root: '/proj',
     storeFails: false,
     writeFails: false,
+    writeError: "EACCES: permission denied, open '/home/u/.claude/learning-notes/2026-10-03_proj.md'",
+    rootFails: false,
+    failNextWrites: 0,
+    locked: [],
     journal: () => w.writes.filter(write => !write.path.endsWith('/concepts.md')),
     toasts: [],
     statuses: [],
@@ -115,8 +127,24 @@ function world(
     clock: mock.clock(on, { now: Date.UTC(2026, 9, 3, 1) }),
   }
   mock.env(on, { HOME: '/home/u', ...env })
-  on('session.root', () => ({ value: w.root }))
+  on('session.root', () => {
+    if (w.rootFails) throw new Error('root unreadable')
+    return { value: w.root }
+  })
+  on('session.version', () => ({ value: { version: '2.1.296', base: '2.1.296' } }))
+  on('session.surfaces', () => ({ value: ['terminal' as const] }))
+  on('config.list', () => ({
+    value: ['autoNote', 'model', 'dailyAutoNotes', 'level', 'autoSave', 'saveDir'].map(field => ({
+      key: `learn-notes.${field}`,
+      label: field,
+      kind: 'text' as const,
+      value: '',
+      provider: { plugin: 'learn-notes', tier: 'user' as const },
+      isLocked: w.locked.includes(`learn-notes.${field}`),
+    })),
+  }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('command.register', (_$, e) => {
     w.commands.push({ name: e.name, description: e.description, argumentHint: e.argumentHint })
     return { value: { command: e.name } }
@@ -129,10 +157,11 @@ function world(
   // The store as JSON, as the host keeps it: what goes in comes back a copy.
   on('store.get', (_$, e) => ({ value: w.store.has(e.key) ? JSON.parse(JSON.stringify(w.store.get(e.key))) : undefined }))
   on('store.set', (_$, e) => {
-    if (w.storeFails) throw new Error('store over 4 MiB')
+    if (w.storeFails) return { deny: 'store over 4 MiB' }
     w.store.set(e.key, JSON.parse(JSON.stringify(e.value)))
     return { value: undefined }
   })
+  on('store.keys', () => ({ value: [...w.store.keys()] }))
   on('ui.log', (_$, e) => {
     w.logs.push(e.text)
     if (e.to !== 'debug') w.transcript.push(e.text)
@@ -146,21 +175,29 @@ function world(
   on('fs.exists', (_$, e) => ({ value: w.files.has(e.path) }))
   on('fs.stat', (_$, e) => ({
     value: {
-      kind: 'file' as const,
+      // A path some file lies under is a folder (the journal folder once a journal is in it).
+      kind: [...w.files.keys()].some(path => path.startsWith(`${e.path}/`)) ? ('dir' as const) : ('file' as const),
       size: (w.files.get(e.path) ?? '').length,
       mtimeMs: w.mtimes.get(e.path) ?? 0,
       isLink: w.links.has(e.path),
       ...(e.resolve ? { realPath: w.links.get(e.path) ?? e.path } : {}),
     },
   }))
-  on('fs.read', (_$, e) => ({ value: w.files.get(e.path) ?? '' }))
+  // The plugin's own manifest, as a release ships it: what /learn 도움말 and /learn 진단 name.
+  on('fs.read', (_$, e) => ({
+    value: w.files.get(e.path) ?? (e.path.endsWith('/.claude-plugin/plugin.json') ? JSON.stringify({ name: 'learn-notes', version: '1.7.0' }) : ''),
+  }))
   on('fs.list', (_$, e) => ({
     value: [...w.files.keys()]
       .filter(path => path.startsWith(`${e.path}/`) && !path.slice(e.path.length + 1).includes('/'))
       .map(path => ({ name: path.slice(e.path.length + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
   }))
   on('fs.write', (_$, e) => {
-    if (w.writeFails) throw new Error('EACCES: permission denied')
+    if (w.writeFails) return { deny: w.writeError }
+    if (w.failNextWrites > 0) {
+      w.failNextWrites -= 1
+      return { deny: w.writeError }
+    }
     w.writes.push({ path: e.path, text: e.text })
     w.files.set(e.path, e.text)
     return { value: undefined }
@@ -777,7 +814,8 @@ test('/learn prints the last note where no pane can be placed', async ($, on) =>
   const shown = await learn($, '')
   expect(shown.text).toContain('이 화면에는 패널을 띄울 수 없어')
   expect(shown.text).toContain('let을 const로')
-  expect(w.logs.join('\n')).toContain('no surface places panes')
+  // The debug log keeps why as a code, never the engine's words (1.7.0).
+  expect(w.logs.join('\n')).toContain('learn-notes: 패널을 열지 못했습니다 (unplaced)')
 })
 
 test('with autoOpen off the pane never opens itself', { options: { autoOpen: false } }, async ($, on) => {
@@ -2750,7 +2788,8 @@ test('a note the journal could not take is written with the next note that saves
   w.writeFails = true
   await turn($, () => $.tool.call(EDIT_A), 't1', '첫 요청')
   await finish(w)
-  expect(w.toasts).toContain('학습 노트를 파일에 쓰지 못했습니다 · /config의 saveDir를 확인하면 다음 노트 때 함께 저장됩니다')
+  // The toast names the cause since 1.7.0: here a folder that refuses writes.
+  expect(w.toasts).toContain("학습 노트를 파일에 쓰지 못했습니다: 폴더에 쓸 권한이 없습니다(Windows의 '제어된 폴더 액세스'나 보안 프로그램이 막았을 수 있습니다) · 다음 노트 때 다시 씁니다 · /learn 진단")
   expect(w.journal()).toHaveLength(0)
   w.writeFails = false
   await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2', '둘째 요청')
@@ -4926,7 +4965,7 @@ describe('1.6.0: e under the note, a line where no pane shows, the record Claude
     await start($)
     expect(w.tools).toEqual([])
     const help = (await learn($, '도움말')).text ?? ''
-    expect(help).toContain('learn-notes 명령')
+    expect(help.split('\n')[0]).toBe('learn-notes 1.7.0 명령')
     expect(help).not.toContain('대화창에 그냥 물어봐도 됩니다')
     expect(w.logs.some(line => line.startsWith('learn-notes: 학습 기록 도구를 등록하지 못했습니다'))).toBe(true)
   })
@@ -4935,7 +4974,7 @@ describe('1.6.0: e under the note, a line where no pane shows, the record Claude
     world(on)
     await start($)
     const help = (await learn($, '도움말')).text ?? ''
-    expect(help.split('\n').slice(0, 2)).toEqual(['learn-notes 명령', '대화창에 그냥 물어봐도 됩니다: "오늘 배운 거 알려 줘"'])
+    expect(help.split('\n').slice(0, 2)).toEqual(['learn-notes 1.7.0 명령', '대화창에 그냥 물어봐도 됩니다: "오늘 배운 거 알려 줘"'])
     expect(help.split('\n').length).toBeLessThanOrEqual(15)
   })
 })
@@ -5516,3 +5555,233 @@ describe('1.6.1: found in a real terminal', () => {
   })
 })
 
+
+describe('1.7.0: /learn 진단, and failures that say their cause', () => {
+  const DIAG_COPIED = '진단 내용을 클립보드에 복사했습니다 · 팀 채널이나 담당자에게 그대로 붙여 주세요'
+  const DIAG_HERE = '이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다'
+  const DIAG_PRIVATE = '코드 · 요청 · 파일 이름 · 경로 · 개념 이름은 들어 있지 않습니다'
+  const FULL_DISK = "HooksError: ENOSPC: no space left on device, open '/home/u/.claude/learning-notes/2026-10-03_proj_abcde.md'"
+  const FULL_DISK_TOAST = '학습 노트를 파일에 쓰지 못했습니다: 디스크가 가득 찼습니다 · 다음 노트 때 다시 씁니다 · /learn 진단'
+  const diag = async ($: Engine) => (await learn($, '진단')).text ?? ''
+  const end = ($: Engine) => $.session.end({ reason: 'prompt_input_exit', sessionId: 's1', resume: { id: 's1' } })
+
+  test('/learn 진단 is copied and written in the reply, with no model call: versions, screen, settings, today, store, journal', { options: { dailyAutoNotes: 40 } }, async ($, on) => {
+    const w = world(on, 'ok', { isShown: true }, true, new Map(), { WT_SESSION: '{a1b2}', TERM_PROGRAM: 'vscode' })
+    w.locked = ['learn-notes.dailyAutoNotes']
+    await start($)
+    await fullscreen($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const ui = await pane($)
+    await ui.unmount()
+    const reply = await diag($)
+    const lines = reply.split('\n')
+    expect(lines.slice(0, 3)).toEqual([DIAG_COPIED, DIAG_PRIVATE, ''])
+    expect(w.copied).toEqual([lines.slice(3).join('\n')])
+    expect(lines[3]).toMatch(/^learn-notes 진단 · 2026-10-0[23] \d\d:\d\d$/)
+    expect(lines).toContain('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
+    expect(lines).toContain('- 화면: terminal · 패널 오른쪽 60칸 · 터미널 200칸 · 키는 대화에 · Windows Terminal · vscode')
+    expect(reply).toContain('- 설정: 자동 노트 켬 · haiku · 하루 한도 40(관리자 잠금) · 일지 켬(기본 폴더) · 패널 자동 열기 켬 · 설명 수준 beginner')
+    expect(lines).toContain('- 오늘: 노트 1개 · 모델 호출 1번 · 실패 0번')
+    expect(reply).toMatch(/\n- 저장소: \d+KB \/ 4MB \(history \d+KB · /)
+    expect(lines).toContain('- 일지: 못 쓴 노트 없음')
+    expect(lines).toContain('- 최근 7일 문제: 없습니다')
+    expect(lines.length).toBeLessThanOrEqual(18)
+    // The note's call alone: the diagnosis asks the model nothing.
+    expect(w.models).toHaveLength(1)
+    expect((await learn($, 'doctor')).text?.split('\n').slice(0, 2)).toEqual([DIAG_COPIED, DIAG_PRIVATE])
+  })
+
+  test('the diagnosis holds no request, path, file name, code or concept name, whatever failed', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.answer = CONCEPT_NOTE(['클로저 캡처'])
+    w.writeFails = true
+    await turn($, () => $.tool.call(EDIT_A), 't1', '아주 은밀한 요청 문장으로 b를 고쳐줘')
+    await finish(w)
+    const reply = await diag($)
+    for (const kept of ['은밀한', '/proj', 'a.ts', 'src', '/home/u', 'learning-notes/', '클로저', 'const b', 'let b', 'items']) expect(reply).not.toContain(kept)
+    expect(reply).toContain('일지 저장 · 쓸 권한 없음(EACCES)')
+  })
+
+  test('a full disk: its toast says so once, and the diagnosis keeps ENOSPC alone, never the path its message held', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.writeFails = true
+    w.writeError = FULL_DISK
+    await turn($, () => $.tool.call(EDIT_A), 't1')
+    await finish(w)
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    expect(w.toasts.filter(text => text.includes('파일에 쓰지 못했습니다'))).toEqual([FULL_DISK_TOAST])
+    const reply = await diag($)
+    expect(reply).toContain('일지 저장 · 디스크 가득 참(ENOSPC) ×2')
+    expect(reply).toContain('- 일지: 아직 못 쓴 노트 2개')
+    expect(reply).toContain('실패 2번')
+    expect(reply).not.toContain('/home/u')
+    // The debug log has the code too, not the message.
+    expect(w.logs).toContain('learn-notes: 노트를 파일에 쓰지 못했습니다 (ENOSPC)')
+    expect(w.logs.some(line => line.includes('2026-10-03_proj_abcde'))).toBe(false)
+    // A minute later the store has it, as a code.
+    expect(w.store.get('faults')).toBeUndefined()
+    await w.clock.advance(60_000)
+    const kept = JSON.stringify(w.store.get('faults'))
+    expect(kept).toContain('"code":"ENOSPC"')
+    expect(kept).not.toMatch(/[\\/]/)
+    // Another cause has a toast of its own, with what to do.
+    w.writeError = '$.fs.write: a network location is not reached from here'
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u3' }), 't3')
+    await finish(w)
+    expect(w.toasts.filter(text => text.includes('파일에 쓰지 못했습니다'))).toEqual([
+      FULL_DISK_TOAST,
+      '학습 노트를 파일에 쓰지 못했습니다: 네트워크 위치입니다 · /config의 saveDir를 내 컴퓨터 폴더로 바꿔 주세요 · /learn 진단',
+    ])
+    expect(await diag($)).toContain('일지 켬(네트워크 폴더)')
+  })
+
+  test('a journal file another program holds is written half a second later, quietly', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.failNextWrites = 1
+    w.writeError = "EBUSY: resource busy or locked, open 'C:\\Users\\u\\.claude\\learning-notes\\x.md'"
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.journal()).toHaveLength(0)
+    await w.clock.advance(500)
+    expect(w.journal()).toHaveLength(1)
+    expect(w.toasts.filter(text => text.includes('파일에 쓰지 못했습니다'))).toEqual([])
+    const reply = await diag($)
+    expect(reply).toContain('일지 저장 · 다른 프로그램이 파일을 잡고 있음(EBUSY) · 다시 써서 됨')
+    expect(reply).toContain('- 일지: 못 쓴 노트 없음')
+  })
+
+  test('a busy server is named with its status, and a note written after it says it went through', async ($, on) => {
+    const w = world(on, 'error')
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(await diag($)).toMatch(/ 노트 쓰기 · 서버 붐빔\(529\)$/m)
+    w.model = 'ok'
+    const ui = await pane($)
+    await ui.press({ key: 'write' })
+    await finish(w)
+    await ui.unmount()
+    expect(await diag($)).toContain('노트 쓰기 · 서버 붐빔(529) · 다시 써서 됨')
+  })
+
+  test('away from this screen, or where the copy fails, the whole diagnosis is in the reply', async ($, on) => {
+    const w = world(on)
+    await start($)
+    for (const origin of [{ kind: 'bridge' as const }, { kind: 'channel' as const, server: 'slack' }]) {
+      const reply = (await $.command.run({ command: 'learn', args: '진단', origin, presentation: { isFullscreen: true, columns: 160 } })).text ?? ''
+      expect(reply.split('\n').slice(0, 3)).toEqual([DIAG_HERE, DIAG_PRIVATE, ''])
+      expect(reply).toContain('\n- 버전: learn-notes 1.7.0 · Claude Code 2.1.296\n')
+    }
+    expect(w.copied).toEqual([])
+    w.copyFails = true
+    const reply = await diag($)
+    expect(reply.split('\n')[0]).toBe(DIAG_HERE)
+    expect(reply).toContain('\n- 최근 7일 문제: 없습니다')
+    // The refused copy is kept: the next diagnosis names it.
+    expect(await diag($)).toContain('클립보드 복사 · 복사 안 됨(no-clipboard)')
+  })
+
+  test('a pane that fails to draw shows two lines instead of nothing', async ($, on) => {
+    const w = world(on, 'ok', { isShown: true })
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    w.rootFails = true
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: '패널을 그리지 못했습니다 · /learn 진단을 복사해 팀에 보내 주세요' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '대화창의 /learn 퀴즈 · /learn 기록은 그대로 됩니다' })).toBeDefined()
+    await ui.unmount()
+    w.rootFails = false
+    expect(await diag($)).toContain('패널 · 그리기 실패')
+  })
+
+  test('a tool.call hook that throws hands on what the tool did, and says so in the diagnosis', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await $.turn.start({ text: '고쳐줘', turnId: 't1' })
+    w.rootFails = true
+    const ran = await $.tool.call(EDIT_A)
+    w.rootFails = false
+    expect(ran).toMatchObject({ result: { filePath: '/proj/src/a.ts', newString: 'const' } })
+    await $.turn.complete({ answer: '바꿨습니다', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
+    await finish(w)
+    // Nothing was caught: no note, no model call.
+    expect(w.models).toHaveLength(0)
+    expect(await diag($)).toContain('바뀐 코드 잡기 · tool.call 훅 멈춤')
+  })
+
+  test('faults go to the store at the session\'s end too; a hundred stay within 4KB, none with a path', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.writeFails = true
+    w.writeError = FULL_DISK
+    await learn($, '보고서')
+    expect(w.store.get('faults')).toBeUndefined()
+    await end($)
+    expect(JSON.stringify(w.store.get('faults'))).toContain('"area":"report","code":"ENOSPC"')
+    const errors = [
+      FULL_DISK,
+      "EACCES: permission denied, open 'C:\\Users\\u\\notes\\report.md'",
+      "EROFS: read-only file system, open '/Volumes/disk/x.md'",
+      "ENOENT: no such file or directory, open '//server/share/x.md'",
+      '$.fs.write: a network location is not reached from here',
+      'something else at /home/u/secret/path',
+    ]
+    for (let i = 0; i < 100; i += 1) {
+      w.writeError = errors[i % errors.length]!
+      await learn($, '보고서')
+      await w.clock.advance(11 * 60_000)
+    }
+    const kept = w.store.get('faults') as { list: { area: string; code: string }[] }
+    expect(new TextEncoder().encode(JSON.stringify(kept)).length).toBeLessThanOrEqual(4096)
+    expect(kept.list.length).toBeGreaterThan(10)
+    for (const one of kept.list) expect(`${one.area} ${one.code}`).not.toMatch(/[\\/]/)
+    expect(new Set(kept.list.map(one => one.code))).toEqual(new Set(['ENOSPC', 'EACCES', 'EROFS', 'ENOENT', 'network', 'error']))
+  })
+
+  test('a session\'s start says once a day what is still wrong: notes the journal has not taken, and why', async ($, on) => {
+    const unsaved = { id: 'old', turnId: 'old', at: NOW - 3_600_000, prompt: '예전 요청', answer: '', changes: [], moreFiles: 0, status: 'ready', text: NOTE_TEXT, savedAs: null, isUnsaved: true, concepts: [], updatedAt: NOW }
+    const store = new Map<string, unknown>([
+      ['history', { '/proj': { at: NOW, notes: [unsaved, { ...unsaved, id: 'old2' }] } }],
+      ['faults', { list: [{ at: NOW - 3_600_000, last: NOW - 3_600_000, area: 'save', code: 'EACCES', n: 2 }] }],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(w.transcript).toEqual(['learn-notes 점검: 일지에 아직 못 쓴 노트 2개 (폴더에 쓸 권한 없음) · /learn 진단'])
+    expect((store.get('faults') as { noticeDay?: string }).noticeDay).toBe(stamp(NOW).day)
+  })
+
+  test('the check line shows once a day, and not at all while nothing is wrong', async ($, on) => {
+    const unsaved = { id: 'old', turnId: 'old', at: NOW - 3_600_000, prompt: '예전 요청', answer: '', changes: [], moreFiles: 0, status: 'ready', text: NOTE_TEXT, savedAs: null, isUnsaved: true, concepts: [], updatedAt: NOW }
+    const store = new Map<string, unknown>([
+      ['history', { '/proj': { at: NOW, notes: [unsaved] } }],
+      ['faults', { list: [], noticeDay: stamp(NOW).day }],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(w.transcript).toEqual([])
+    // A store that refused a write in the last day is a problem too, said with its cause.
+    store.set('faults', { list: [{ at: NOW - 60_000, last: NOW - 60_000, area: 'store', code: 'store-full', n: 1 }] })
+    store.set('history', {})
+    await start($)
+    expect(w.transcript).toEqual(['learn-notes 점검: 저장소에 쓰지 못한 기록이 있음 (저장소 4MB 넘음) · /learn 진단'])
+  })
+
+  test('a store that refuses the history names its cause, once', async ($, on) => {
+    const w = world(on)
+    w.storeFails = true
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A), 't1')
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    expect(w.toasts.filter(text => text.includes('이력을 저장하지 못했습니다'))).toEqual([
+      '학습 노트 이력을 저장하지 못했습니다: 저장소가 4MB를 넘었습니다 · 다음 세션에 지난 노트가 빠질 수 있습니다 (일지 파일은 그대로) · /learn 진단',
+    ])
+    expect(await diag($)).toContain('저장소 · 저장소 4MB 넘음')
+  })
+})
