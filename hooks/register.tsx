@@ -166,7 +166,9 @@ import {
   STAMP_EVERY_MS,
   STORE_SCHEMA,
   cleanStamps,
+  compareVersions,
   isSchemaAhead,
+  logParts,
   newerBuild,
   newerText,
   otherStamps,
@@ -658,8 +660,9 @@ async function lookNewer($: EngineInterface): Promise<void> {
 /**
  * Says in an older window, as a dim transcript line (never sent to the model) and a toast, that a newer build was
  * stamped in another window within STAMP_LIVE_MS, and that the schema guard is on (newerText). Each thing once a
- * session (newerSaid, which a reload keeps). None in a -p run, nor while this build's version is unknown and the
- * guard is off. Never fails the caller.
+ * session (newerSaid, which a reload keeps): a build newer than any said before, the guard the first time it is on.
+ * A window that goes quiet and comes back, or an older build seen once the newest went quiet, is not news. None in
+ * a -p run, nor while this build's version is unknown and the guard is off. Never fails the caller.
  */
 async function sayNewer($: EngineInterface, at?: number): Promise<void> {
   if (!isInteractive) return
@@ -667,11 +670,16 @@ async function sayNewer($: EngineInterface, at?: number): Promise<void> {
     const now = at ?? (await $.clock.now())
     const stamps = cleanStamps(await $.store.get(SESSIONS_KEY), now)
     const newer = myVersion === undefined ? undefined : newerBuild(stamps, mySessionId, myVersion, now)
+    const said = await read($, newerSaid)
+    // A value of another shape (a build before this one kept a string) counts as nothing said.
+    const before = isRecord(said) ? said : null
+    const newest = typeof before?.newest === 'string' ? before.newest : undefined
+    const isNewer = newer !== undefined && (newest === undefined || compareVersions(newer, newest) > 0)
+    const isGuardNew = isBehind && before?.isBehind !== true
+    if (!isNewer && !isGuardNew) return
     const text = newerText(newer, myVersion, isBehind)
     if (text === undefined) return
-    const key = `${newer ?? ''}|${isBehind ? 'behind' : ''}`
-    if ((await read($, newerSaid)) === key) return
-    await update($, newerSaid, () => key)
+    await update($, newerSaid, () => ({ newest: isNewer ? newer : (newest ?? null), isBehind: isBehind || before?.isBehind === true }))
     $.ui.log(text)
     $.ui.toast(text, { timeoutMs: 10_000 })
   } catch {
@@ -3260,8 +3268,11 @@ export const register: Register = (on, options) => {
       if (note.status !== 'ready') return { text: `이 노트는 아직 복사할 글이 없습니다 · ${noteState(note)}` }
       const text = await shareOf($, cfg, note)
       if (await deliver($, text, isAwayOrigin(e.origin))) return { text: SHARE_REPLY }
-      // A chat channel reads the reply alone: the note goes there, as /learn 보고서 does.
-      return { text: `${SHARE_HERE}\n\n${text}` }
+      // A chat channel, a Slack ping or a -p run reads the reply alone: the note goes there, as /learn 보고서 does.
+      if (!isInteractive || e.origin.kind === 'channel' || e.origin.kind === 'slack-ping') return { text: `${SHARE_REPLY_HERE}\n\n${text}` }
+      // Elsewhere (Remote Control's phone, a cloud session, a copy refused) the dim lines c leaves: the model never reads them.
+      logShare($, text, e.origin.kind === 'bridge' ? SHARE_HERE : SHARE_HERE_MOUSE)
+      return { text: SHARE_LOGGED }
     }
     if (arg === 'clear') {
       // Asked once more first: the pane's notes do not come back.
@@ -4218,39 +4229,57 @@ async function reportCommand($: EngineInterface, cfg: Config, rest: string, isAw
   return [`학습 보고서입니다 · 이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다. 붙이기 전에 한 번 읽어 보세요${file ? ` · ${file}` : ''}`, '', text].join('\n')
 }
 
-/** What c and /learn 공유 say once the note is on the clipboard, and the line over it where it could not be. */
+/** What c and /learn 공유 say once the note is on the clipboard. */
 const SHARE_COPIED = '노트를 복사했습니다 · 요청과 질문은 빼고 비밀값은 가렸습니다 · 붙이기 전에 읽어 보세요'
 const SHARE_REPLY = '노트를 클립보드에 복사했습니다 · 붙이기 전에 한 번 읽어 보세요'
+/** The line over the note where it could not be copied: on a touch screen (the mobile app, Remote Control), or with a mouse. */
 const SHARE_HERE = '복사할 수 없어 여기에 적습니다 · 길게 눌러 복사하세요'
+const SHARE_HERE_MOUSE = '복사할 수 없어 여기에 적습니다 · 마우스로 끌어 골라 복사하세요'
+/** What /learn 공유 answers once the note went in the transcript instead (the reply goes to the model, the note does not). */
+const SHARE_LOGGED = '복사할 수 없어 노트를 흐린 줄로 적었습니다 · 그 줄은 Claude에게 가지 않습니다'
+/** The line over the note in /learn 공유's reply, where the reply is all the person reads (a chat channel, a -p run). */
+const SHARE_REPLY_HERE = '복사할 수 없어 여기에 적습니다 · 붙이기 전에 한 번 읽어 보세요'
 
 /**
- * A written note as c and /learn 공유 copy it (shareText), screened as a journal section is: the concepts it taught
- * by the names the index has for them now (a merge followed), else as the note wrote them.
+ * A written note as c and /learn 공유 copy it (shareText), screened as a journal section is: each concept it taught
+ * by the name the index has for it now (a merge followed), else as the note wrote it (one the index never counted:
+ * the schema guard was on, or it has since left the index).
  */
 async function shareOf($: EngineInterface, cfg: Config, note: LearnNote): Promise<string> {
   const index = await read($, concepts)
   const map = await read($, aliases)
-  const named = note.concepts.flatMap(key => conceptAt(index, resolveKey(map, key))?.name ?? [])
-  const names = (named.length > 0 ? named : conceptsOf(note.text).map(one => one.name)).filter((name, i, all) => all.indexOf(name) === i)
+  const written = conceptsOf(note.text)
+  const keys = note.concepts.length > 0 ? note.concepts : written.map(one => one.key)
+  const names = keys
+    .flatMap(key => conceptAt(index, resolveKey(map, key))?.name ?? written.find(one => one.key === key)?.name ?? [])
+    .filter((name, i, all) => all.indexOf(name) === i)
   return shareText(await screened($, cfg, note), names)
 }
 
 /**
+ * The note for a mentor where it could not be copied: dim transcript lines (never sent to the model) under `head`,
+ * each within what a terminal draws of one (logParts), so the blank to ask in is there too.
+ */
+function logShare($: EngineInterface, text: string, head: string): void {
+  for (const part of logParts(`${head}\n\n${text}`)) $.ui.log(part)
+}
+
+/**
  * The pane's c under a written note: the note copied for a mentor (shareOf) on the clipboard of the surface the
- * press came from, and a toast saying what was left out. Where nothing can be copied (the mobile app, which has no
- * clipboard to write yet, a cloud session, a copy refused) the same text goes in the transcript as a dim line, never
- * sent to the model. Nothing is stored.
+ * press came from, and a toast saying what was left out. Where nothing can be copied (an app that takes no copy yet,
+ * a cloud session, a copy refused) the same text goes in the transcript as dim lines, never sent to the model, under
+ * a line for a touch screen (the mobile app) or a mouse. Nothing is stored.
  */
 async function shareNote($: EngineInterface, cfg: Config, id: string, surface?: RenderSurface): Promise<void> {
   try {
     const note = (await read($, notes)).find(one => one.id === id)
     if (!note || note.status !== 'ready') return
     const text = await shareOf($, cfg, note)
-    if (surface !== 'mobile' && (await deliver($, text, false, surface))) {
+    if (await deliver($, text, false, surface)) {
       $.ui.toast(SHARE_COPIED, { timeoutMs: 6000 })
       return
     }
-    $.ui.log(`${SHARE_HERE}\n\n${text}`)
+    logShare($, text, surface === 'mobile' ? SHARE_HERE : SHARE_HERE_MOUSE)
   } catch (error) {
     void fault($, 'copy', faultCode(error), '노트를 복사하지 못했습니다')
   }
@@ -4353,7 +4382,8 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
  * /learn 보고서, /learn 진단, /learn 공유 and the pane's c: true once copied. Nothing is copied for a person away from
  * this session's screens (`isAway`: a phone through Remote Control, a chat channel; the clipboard would be the
  * terminal's, not theirs) or in a cloud session (a computer nobody sees): the caller then gives the text where it
- * can be read, as it does when the copy fails (a fault of its own).
+ * can be read, as it does when the copy fails (a fault of its own). A remote app that takes no copy yet (Claude
+ * Code Desktop, VS Code, the mobile app answer `no-clipboard`) is no fault: nothing broke.
  */
 async function deliver($: EngineInterface, text: string, isAway: boolean, surface?: RenderSurface): Promise<boolean> {
   if (isAway || (await isCloudSession($).catch(() => false))) return false
@@ -4363,6 +4393,9 @@ async function deliver($: EngineInterface, text: string, isAway: boolean, surfac
       faultOk($, 'copy')
       return true
     }
+    // Left out, the surface is the session's first, as the engine copies on it.
+    const target = surface ?? (await $.session.surfaces().catch(() => []))[0]
+    if (copied.reason === 'no-clipboard' && target !== undefined && target !== 'terminal') return false
     void fault($, 'copy', `copy:${copied.reason}`, '클립보드에 복사하지 못했습니다')
   } catch (error) {
     void fault($, 'copy', faultCode(error), '클립보드에 복사하지 못했습니다')

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { LearnChange, LearnNote } from '../types'
-import { shareText, withoutPaths } from '../hooks/notes'
+import { logParts, shareText, withoutPaths } from '../hooks/notes'
 
 const AT = new Date(2026, 9, 13, 14, 5).getTime()
 const KEY = 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAA'
@@ -111,5 +111,55 @@ describe('1.7.0: a note copied for a mentor (c, /learn 공유)', () => {
   test('a relative path, a route in code, a URL and a pair of words with a slash stay', () => {
     const kept = "src/api/fetcher.ts · src\\api\\x.ts · `fetch('/api/users/1')` · https://example.com/home/a · async/await · 전 / 후 · /learn 진단 · 10/13/2026 · src/proj/a.ts"
     expect(withoutPaths(kept, '/proj')).toBe(kept)
+  })
+
+  test('(검토) the project however a Windows shell spells it (Git Bash, WSL, Cygwin, either slash, any case) goes on from there', () => {
+    const root = 'C:\\Users\\kimminsu\\projects\\shop'
+    expect(withoutPaths('/c/Users/kimminsu/projects/shop/src/api/fetcher.ts를 고쳤습니다', root)).toBe('src/api/fetcher.ts를 고쳤습니다')
+    expect(withoutPaths('`/mnt/c/Users/kimminsu/projects/shop/src/a.ts` · C:/Users/kimminsu/projects/shop/b.ts · /cygdrive/c/Users/kimminsu/projects/shop/c.ts', root)).toBe('`src/a.ts` · b.ts · c.ts')
+    expect(withoutPaths('c:\\users\\KIMMINSU\\Projects\\shop\\src\\a.ts · `C:\\\\Users\\\\kimminsu\\\\projects\\\\shop` 에서', root)).toBe('src\\a.ts · `shop` 에서')
+    // A project WSL opened on the Windows drive: its Windows spelling is the same folder.
+    expect(withoutPaths('C:\\Users\\kim\\proj\\a.ts · /mnt/c/Users/kim/proj/b.ts', '/mnt/c/Users/kim/proj')).toBe('a.ts · b.ts')
+  })
+
+  test('(검토) a local path outside the project in any of those spellings, a file URL, /var/home and /Volumes keep only their last name', () => {
+    const text = '/mnt/c/Users/kim/other/x.py · /c/Users/kim/other/y.py · /cygdrive/d/work/z.py · /mnt/d/work/q.py · /var/home/kim/w.py · /Volumes/Work/kim/v.py · file:///home/kim/other/u.html · file:///C:/Users/kim/t.html'
+    expect(withoutPaths(text, '/mnt/c/Users/kim/proj')).toBe('x.py · y.py · z.py · q.py · w.py · v.py · u.html · t.html')
+    expect(withoutPaths('/c/Users/kim · /mnt/c/Users/kim/ 아래 · file:///home/kim')).toBe('~ · ~ 아래 · ~')
+  })
+
+  test("(검토) a project at the home folder is ~, never its owner's name; a user name with a space goes whole", () => {
+    expect(withoutPaths('`C:\\Users\\kimminsu` 에서 · C:\\Users\\kimminsu 폴더에 hello.py를 · C:\\Users\\kimminsu\\hello.py', 'C:\\Users\\kimminsu')).toBe('`~` 에서 · ~ 폴더에 hello.py를 · hello.py')
+    expect(withoutPaths('/Users/kimminsu 에서 · /Users/kimminsu/hello.py', '/Users/kimminsu/')).toBe('~ 에서 · hello.py')
+    // The owner's home, known from the project's folder, goes whole however the sentence goes on.
+    const root = 'C:\\Users\\Kim Min\\proj'
+    expect(withoutPaths('C:\\Users\\Kim Min\\other\\x.py · `C:\\Users\\Kim Min` · C:\\Users\\Kim Min 폴더에 · C:\\Users\\Kim Min\\proj\\a.ts', root)).toBe('x.py · `~` · ~ 폴더에 · a.ts')
+    // Someone else's, with no project to tell: a space in it is taken up to the separator or quote that ends it.
+    expect(withoutPaths('C:\\Users\\Lee Joon\\other\\x.py · `C:\\Users\\Lee Joon` · C:\\Users\\lee 폴더에서', '/proj')).toBe('x.py · `~` · ~ 폴더에서')
+  })
+
+  test('(검토) code that only looks like a drive or a network share is left as written', () => {
+    const kept = '- **객체**: — `const rules = {a:/^x$/}` · `re.compile("\\\\d+\\\\.\\\\d+")` · `name.split("\\\\")[-1]` · `"a\\\\b"`'
+    expect(withoutPaths(kept, '/proj')).toBe(kept)
+    // A real one in a string literal, its backslashes doubled, still goes.
+    expect(withoutPaths('`open("C:\\\\Users\\\\kim\\\\secret.txt")` · `"\\\\\\\\server\\\\share\\\\a.txt"`', '/proj')).toBe('`open("secret.txt")` · `"a.txt"`')
+  })
+
+  test('(검토) a dim line too long for a terminal is cut at a paragraph, else a line, else anywhere but inside a character', () => {
+    expect(logParts('짧은 글')).toEqual(['짧은 글'])
+    expect(logParts('aaaa\n\nbbbb\ncccc', 10)).toEqual(['aaaa', 'bbbb\ncccc'])
+    expect(logParts('aaaa\nbbbb\ncccc', 10)).toEqual(['aaaa\nbbbb', 'cccc'])
+    expect(logParts('a'.repeat(9) + '😀b', 10)).toEqual(['a'.repeat(9), '😀b'])
+    const long = Array.from({ length: 300 }, (_, i) => `${i}번째 줄입니다`).join('\n')
+    const parts = logParts(long)
+    expect(parts.every(part => part.length <= 2000)).toBe(true)
+    expect(parts.join('\n')).toBe(long)
+  })
+
+  test('(검토) a file left out from outside the project goes by its name alone', () => {
+    const text = shareText(note({ withheld: [{ file: '/opt/keys/prod.env', why: 'secret' }, { file: 'D:\\vault\\id_rsa', why: 'secret' }, { file: 'config/.env', why: 'secret' }] }), [])
+    expect(text).toContain('노트에서 뺀 파일: prod.env (비밀값이 들 수 있는 파일) · id_rsa (비밀값이 들 수 있는 파일) · config/.env (비밀값이 들 수 있는 파일)')
+    expect(text).not.toContain('/opt/keys')
+    expect(text).not.toContain('vault')
   })
 })

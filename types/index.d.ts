@@ -226,10 +226,10 @@ declare module 'claude-code' {
       /** The latest prompts that entered and the last real request: read when a turn starts, kept here so a reload keeps them. */
       submitted: { list: LearnSubmit[]; lastRequest: string | null }
       /**
-       * What the notice that a newer build is open last said this session (its version, and whether the store was
-       * newer): kept here, so a reload of an old window does not say it again.
+       * What the notice that a newer build is open has said this session: the newest version it named, and whether it
+       * said the store was newer. Only ever raised; kept here, so a reload of an old window does not say it again.
        */
-      newerSaid: string | null
+      newerSaid: { newest: string | null; isBehind: boolean } | null
     }
   }
 }

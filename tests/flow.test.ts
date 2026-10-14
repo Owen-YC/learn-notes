@@ -70,6 +70,10 @@ type World = {
   copied: string[]
   /** True while the surface has no clipboard to copy on (a remote one). */
   copyFails: boolean
+  /** The surface each copy that went in was asked for (undefined: left to the engine), as `copied`. */
+  copiedOn: (string | undefined)[]
+  /** Surfaces whose app does not answer a copy (`no-clipboard` there), as a remote app may not yet. */
+  clipless: string[]
   /** The lines put in the transcript (a dim row the person sees), as against the debug log alone. */
   transcript: string[]
   /** The tools the plugin registered for the model, by short name. */
@@ -126,6 +130,8 @@ function world(
     links: new Map(),
     copied: [],
     copyFails: false,
+    copiedOn: [],
+    clipless: [],
     transcript: [],
     tools: [],
     toolFails: false,
@@ -218,8 +224,9 @@ function world(
     return { value: undefined }
   })
   on('ui.copy', (_$, e) => {
-    if (w.copyFails) return { value: { isCopied: false as const, reason: 'no-clipboard' as const } }
+    if (w.copyFails || (e.surface !== undefined && w.clipless.includes(e.surface))) return { value: { isCopied: false as const, reason: 'no-clipboard' as const } }
     w.copied.push(e.text)
+    w.copiedOn.push(e.surface)
     return { value: { isCopied: true as const } }
   })
   on('ui.status', (_$, e) => {
@@ -6065,12 +6072,59 @@ describe('1.7.0: the version stamp, and the schema guard', () => {
     // The note itself is written and kept as ever.
     expect(w.journal()[0]!.text).toContain('반복문을 바꿨다')
   })
+
+  test('(검토) each newer build is said once: not again when its window goes quiet and comes back, nor for an older one when the newest goes quiet', async ($, on) => {
+    const store = stamps({ 'session-new': { v: '1.7.1', at: NOW - MINUTE } }, [['schema', 4]])
+    const w = world(on, 'ok', null, true, store)
+    const stampOther = (id: string, v: string, at: number) => store.set('sessions', { ...(store.get('sessions') as object), [id]: { v, at } })
+    await start($)
+    expect(said(w.transcript)).toEqual([`${NOTICE} · ${TAIL}`])
+    // The newer window goes quiet (a meeting): 31 minutes on, a turn here ends.
+    await w.clock.advance(31 * MINUTE)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    // It writes a note again: its stamp is fresh once more.
+    stampOther('session-new', '1.7.1', NOW + 31 * MINUTE)
+    await w.clock.advance(11 * MINUTE)
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    expect(said(w.transcript)).toHaveLength(1)
+    expect(said(w.toasts)).toHaveLength(1)
+    // A still newer build opens in a third window: that is news.
+    stampOther('session-newest', '1.8.0', NOW + 42 * MINUTE)
+    await w.clock.advance(11 * MINUTE)
+    await learn($, '')
+    expect(said(w.transcript)).toHaveLength(2)
+    expect(said(w.transcript)[1]).toStartWith('learn-notes 새 버전(1.8.0)이 다른 창에서 쓰이고 있습니다')
+    // It goes quiet while 1.7.1 writes on: nothing more to say.
+    await w.clock.advance(31 * MINUTE)
+    stampOther('session-new', '1.7.1', NOW + 84 * MINUTE)
+    await learn($, '')
+    expect(said(w.transcript)).toHaveLength(2)
+    expect(said(w.toasts)).toHaveLength(2)
+  })
+
+  test('(검토) a -p run says nothing of a newer build, nor of a newer layout', async ($, on) => {
+    const w = world(on, 'ok', null, true, stamps({ 'session-new': { v: '1.7.1', at: NOW - 3 * MINUTE } }, [['schema', 4]]))
+    await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: false })
+    w.answer = CONCEPT_NOTE(['클로저'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(said(w.transcript)).toEqual([])
+    expect(said(w.toasts)).toEqual([])
+    expect(w.sets).not.toContain('concepts')
+  })
 })
 
 describe('1.7.0: a note copied for a mentor: c and /learn 공유', () => {
   const COPIED = '노트를 복사했습니다 · 요청과 질문은 빼고 비밀값은 가렸습니다 · 붙이기 전에 읽어 보세요'
   const REPLY = '노트를 클립보드에 복사했습니다 · 붙이기 전에 한 번 읽어 보세요'
   const HERE = '복사할 수 없어 여기에 적습니다 · 길게 눌러 복사하세요'
+  // With a mouse (the terminal, Claude Code Desktop, VS Code) there is nothing to press long (검토).
+  const HERE_MOUSE = '복사할 수 없어 여기에 적습니다 · 마우스로 끌어 골라 복사하세요'
+  // What /learn 공유 answers when the note went in the transcript instead; a chat channel or a -p run reads the note in the reply.
+  const LOGGED = '복사할 수 없어 노트를 흐린 줄로 적었습니다 · 그 줄은 Claude에게 가지 않습니다'
+  const HERE_REPLY = '복사할 수 없어 여기에 적습니다 · 붙이기 전에 한 번 읽어 보세요'
   const REQUEST = '/home/u/work/shop/src/a.ts의 b를 상수로 바꿔 줘'
 
   async function written($: Engine, w: World) {
@@ -6123,36 +6177,49 @@ describe('1.7.0: a note copied for a mentor: c and /learn 공유', () => {
     expect(w.copied).toEqual([])
     expect(w.toasts).not.toContain(COPIED)
     const line = w.transcript.at(-1) ?? ''
-    expect(line.split('\n').slice(0, 3)).toEqual([HERE, '', '**[학습 노트] 반복문을 바꿨다**'])
+    expect(line.split('\n').slice(0, 3)).toEqual([HERE_MOUSE, '', '**[학습 노트] 반복문을 바꿨다**'])
     expectShareable(line)
     await ui.unmount()
+    // A terminal that refused the copy is a fault the diagnosis names.
+    w.copyFails = false
+    expect((await learn($, '진단')).text).toContain('클립보드 복사 · 복사 안 됨(no-clipboard)')
   })
 
-  test('the mobile app and a cloud session have no clipboard to write: c writes the note in the transcript there', async ($, on) => {
+  test('a cloud session has no clipboard to write: c, and /learn 공유, write the note in the transcript there', async ($, on) => {
     const w = world(on, 'ok', null, true, new Map(), { CLAUDE_CODE_REMOTE: 'true' })
     await written($, w)
     const ui = await pane($)
     await ui.press({ key: 'share' })
     await w.clock.settle()
     expect(w.copied).toEqual([])
-    expect(w.transcript.at(-1)).toMatch(new RegExp(`^${HERE}\\n\\n\\*\\*\\[학습 노트\\] 반복문을 바꿨다\\*\\*`))
+    expect(w.transcript.at(-1)).toMatch(new RegExp(`^${HERE_MOUSE}\\n\\n\\*\\*\\[학습 노트\\] 반복문을 바꿨다\\*\\*`))
     await ui.unmount()
-    // /learn 공유 there answers with the note, as /learn 보고서 does.
+    // /learn 공유 there leaves the same dim line, and answers in one line: the note never goes to the model (검토).
+    const lines = w.transcript.length
     const reply = (await learn($, '공유')).text ?? ''
-    expect(reply.split('\n').slice(0, 3)).toEqual([HERE, '', '**[학습 노트] 반복문을 바꿨다**'])
-    expectShareable(reply)
+    expect(reply).toBe(LOGGED)
+    expect(w.transcript.slice(lines)).toHaveLength(1)
+    expect(w.transcript.at(-1)?.split('\n').slice(0, 3)).toEqual([HERE_MOUSE, '', '**[학습 노트] 반복문을 바꿨다**'])
+    expectShareable(w.transcript.at(-1) ?? '')
     expect(w.copied).toEqual([])
   })
 
-  test('a press from the mobile app is not copied, and leaves the note in the transcript', async ($, on) => {
+  test('a press from the mobile app is copied there when its app takes copies, else leaves the note in the transcript; no fault either way', async ($, on) => {
     const w = world(on)
     await written($, w)
     const ui = await $.ui.mount({ plugin: 'learn-notes', surface: 'mobile', component: 'Pane', requestId: 'learn-notes', props: PANE_PROPS })
     await ui.press({ key: 'share' })
     await w.clock.settle()
-    expect(w.copied).toEqual([])
+    expect(w.copiedOn).toEqual(['mobile'])
+    expect(w.toasts.at(-1)).toBe(COPIED)
+    // An app that does not answer a copy yet.
+    w.clipless = ['mobile']
+    await ui.press({ key: 'share' })
+    await w.clock.settle()
+    expect(w.copied).toHaveLength(1)
     expect(w.transcript.at(-1)?.split('\n')[0]).toBe(HERE)
     await ui.unmount()
+    expect((await learn($, '진단')).text).not.toContain('클립보드 복사')
   })
 
   test('/learn 공유 copies the note picked in the pane, else the last; 마지막 and last are the same; the reply is one line', async ($, on) => {
@@ -6174,7 +6241,7 @@ describe('1.7.0: a note copied for a mentor: c and /learn 공유', () => {
     expect(w.copied).toHaveLength(5)
   })
 
-  test('/learn 공유 from Remote Control or a chat channel answers with the note itself; a note with no text yet, or none, says so', async ($, on) => {
+  test('/learn 공유 from Remote Control leaves the note in the transcript, a chat channel reads it in the reply; a note with no text yet, or none, says so', async ($, on) => {
     const w = world(on, 'error')
     await start($)
     expect((await learn($, '공유')).text).toBe('아직 학습 노트가 없습니다. Claude가 파일을 고친 턴이 끝나면 생깁니다.')
@@ -6187,10 +6254,84 @@ describe('1.7.0: a note copied for a mentor: c and /learn 공유', () => {
     await ui.press({ key: 'write' })
     await w.clock.settle()
     await ui.unmount()
-    for (const origin of [{ kind: 'bridge' as const }, { kind: 'channel' as const, server: 'slack' }]) {
-      const away = await $.command.run({ command: 'learn', args: '공유', origin, presentation: { isFullscreen: true, columns: 160 } })
-      expect(away.text?.split('\n').slice(0, 3)).toEqual([HERE, '', '**[학습 노트] 반복문을 바꿨다**'])
+    const away = (origin: { kind: 'bridge' } | { kind: 'channel'; server: string } | { kind: 'slack-ping' }) => $.command.run({ command: 'learn', args: '공유', origin, presentation: { isFullscreen: true, columns: 160 } })
+    // Remote Control draws the transcript on the phone: a dim line there, never the model's to read (검토).
+    expect((await away({ kind: 'bridge' })).text).toBe(LOGGED)
+    expect(w.transcript.at(-1)?.split('\n').slice(0, 3)).toEqual([HERE, '', '**[학습 노트] 반복문을 바꿨다**'])
+    // A chat channel or a Slack ping sees the reply alone: the note goes there.
+    for (const origin of [{ kind: 'channel' as const, server: 'slack' }, { kind: 'slack-ping' as const }]) {
+      expect((await away(origin)).text?.split('\n').slice(0, 3)).toEqual([HERE_REPLY, '', '**[학습 노트] 반복문을 바꿨다**'])
     }
     expect(w.copied).toEqual([])
+  })
+
+  test('(검토) /learn 공유 at a terminal that refused the copy leaves the note as a dim line for the mouse; a -p run reads it in the reply', async ($, on) => {
+    const w = world(on)
+    await written($, w)
+    w.copyFails = true
+    expect((await learn($, '공유')).text).toBe(LOGGED)
+    expect(w.transcript.at(-1)?.split('\n').slice(0, 3)).toEqual([HERE_MOUSE, '', '**[학습 노트] 반복문을 바꿨다**'])
+    await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: false })
+    const lines = w.transcript.length
+    const reply = (await $.command.run({ command: 'learn', args: '공유', origin: { kind: 'sdk' }, presentation: { isFullscreen: false, columns: 80 } })).text ?? ''
+    expect(reply.split('\n').slice(0, 3)).toEqual([HERE_REPLY, '', '**[학습 노트] 반복문을 바꿨다**'])
+    expectShareable(reply)
+    expect(w.transcript).toHaveLength(lines)
+  })
+
+  test('(검토) c copies on the surface the press came from; Claude Code Desktop or VS Code that takes no copy leaves a dim line, and no fault', async ($, on) => {
+    const w = world(on)
+    await written($, w)
+    for (const surface of ['desktop', 'terminal'] as const) {
+      const ui = await pane($, surface)
+      await ui.press({ key: 'share' })
+      await w.clock.settle()
+      await ui.unmount()
+    }
+    expect(w.copiedOn).toEqual(['desktop', 'terminal'])
+    w.clipless = ['desktop', 'vscode']
+    for (const surface of ['desktop', 'vscode'] as const) {
+      const ui = await $.ui.mount({ plugin: 'learn-notes', surface, component: 'Pane', requestId: 'learn-notes', props: PANE_PROPS })
+      await ui.press({ key: 'share' })
+      await w.clock.settle()
+      expect(w.transcript.at(-1)?.split('\n')[0]).toBe(HERE_MOUSE)
+      await ui.unmount()
+    }
+    expect(w.copied).toHaveLength(2)
+    expect((await learn($, '진단')).text).not.toContain('클립보드 복사')
+  })
+
+  test('(검토) a note longer than a terminal draws of one line goes in as several, each drawn whole, the blank to ask in last', async ($, on) => {
+    const w = world(on)
+    await start($)
+    const reasons = Array.from({ length: 60 }, (_, i) => `- ${i + 1}번째 이유를 길게 적은 줄입니다 · 같은 말을 되풀이해 노트의 길이를 채웁니다`)
+    w.answer = ['### 한 줄 요약', '긴 노트를 썼다', '### 왜 이렇게 바꿨을까', ...reasons, '### 배울 개념', '- **반복문**: 반복문에 대한 설명 — `for (const item of items)`'].join('\n')
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect((await learn($, '공유')).text).toBe(REPLY)
+    const whole = w.copied.at(-1) ?? ''
+    expect(whole.length).toBeGreaterThan(2000)
+    w.copyFails = true
+    const ui = await pane($)
+    const lines = w.transcript.length
+    await ui.press({ key: 'share' })
+    await w.clock.settle()
+    await ui.unmount()
+    const parts = w.transcript.slice(lines)
+    expect(parts.length).toBeGreaterThan(1)
+    for (const part of parts) expect(part.length).toBeLessThanOrEqual(2000)
+    expect(parts[0]!.split('\n')[0]).toBe(HERE_MOUSE)
+    expect(parts.at(-1)!.endsWith('**묻고 싶은 것**: ')).toBe(true)
+    expect(parts.join('').replace(/\s+/g, '')).toBe(`${HERE_MOUSE}${whole}`.replace(/\s+/g, ''))
+  })
+
+  test("(검토) the second line names each concept the note taught, one the index never counted (the guard was on) by the note's own name", async ($, on) => {
+    const w = world(on, 'ok', null, true, new Map<string, unknown>([['schema', 4], ['concepts', THREE_CONCEPTS]]))
+    await start($)
+    w.answer = CONCEPT_NOTE(['클로저', '새 개념'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect((await learn($, '공유')).text).toBe(REPLY)
+    expect(w.copied.at(-1)?.split('\n')[1]).toBe(`${stamp(NOW).day.slice(5)} · 파일 1개 · 개념: 클로저 · 새 개념`)
   })
 })

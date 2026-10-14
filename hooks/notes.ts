@@ -4165,27 +4165,100 @@ export function newerText(newer: string | undefined, mine: string | undefined, i
   return `learn-notes 새 버전이 다른 창에서 학습 기록을 새 구조로 썼습니다${mine !== undefined ? ` · 이 창은 ${mine}입니다` : ''} · /reload-plugins로 바꿉니다${tail}`
 }
 
+/** Where a Windows home lies however a shell spells it (`C:\Users\u`, Git Bash's `/c/Users/u`, WSL's `/mnt/c/Users/u`), a space in its owner's name allowed when a separator or a quote ends it. */
+const WINDOWS_HOME = /(?<![\w:/\\.~-])(?:[A-Za-z]:|\/(?:mnt\/|cygdrive\/)?[A-Za-z])[\\/]+Users[\\/]+(?:[^\s\\/`'"()<>*|]+(?: [^\s\\/`'"()<>*|]+){1,2}(?=[\\/`'"])[\\/]*)?/
+/** A home (`/home/u`, `/Users/u`, `/var/home/u`, `/root`, `~`), a mounted volume (`/Volumes/…`) or a drive as WSL or Cygwin mounts it (`/mnt/d/…`). */
+const HOME_OR_MOUNT = /(?<![\w:/\\.~-])(?:~|\/(?:home|Users|root|var\/home|Volumes|(?:mnt|cygdrive)\/[A-Za-z]))[\\/]+/
+/** A drive (`D:\…`, its backslashes doubled in a string literal too) or a network share (`\\server\…`), only where a word starts: `{a:/^x$/}` and `"\\d+"` are code. */
+const DRIVE_OR_SHARE = /(?<![^\s`'"([<=,])(?:[A-Za-z]:[\\/]+(?![\s^*?|<>`'")])|\\{2,}[\w.-]+[\\/]+)/
+/** A `file://` URL, whatever folder it names. */
+const FILE_URL = /\bfile:\/\/[^\s\\/`'"()<>*|]*\/+(?:[A-Za-z]:[\\/]+)?/
 /**
- * A path that tells where on this computer something lies: under a home folder (`/home/u/…`, `/Users/u/…`,
- * `C:\Users\u\…`, `~/…`), on a drive (`D:\work\…`) or a network share (`\\server\share\…`); the last
- * name is caught. A URL, a relative path (`src/a.ts`), a route in code (`/api/users`) or `async/await` is not one.
+ * A path that tells where on this computer something lies, its last name caught: under a home folder (WINDOWS_HOME,
+ * HOME_OR_MOUNT), on a drive or a network share (DRIVE_OR_SHARE), or a file URL. A web URL, a relative path
+ * (`src/a.ts`), a route in code (`/api/users`) or `async/await` is not one.
  */
-const LOCAL_PATH = /(?<![\w:/\\.~-])(?:~[\\/]|\/(?:home|Users|root)[\\/]|[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/])(?:[^\s\\/`'"()<>*|]+[\\/])*([^\s\\/`'"()<>*|]*)/g
-/** A home folder alone, which a path's last name would name by its owner. */
-const HOME_ONLY = /^(?:~|\/(?:home|Users)[\\/][^\\/]+|\/root|[A-Za-z]:[\\/]Users[\\/][^\\/]+)[\\/]?$/i
+const LOCAL_PATH = new RegExp(
+  `(?:${[WINDOWS_HOME, HOME_OR_MOUNT, DRIVE_OR_SHARE, FILE_URL].map(one => one.source).join('|')})(?:[^\\s\\\\/\`'"()<>*|]+[\\\\/]+)*([^\\s\\\\/\`'"()<>*|]*)`,
+  'g',
+)
+/** A home folder alone, which a path's last name would name by its owner; WINDOWS_HOME's spellings too. */
+const HOME_ONLY = /^(?:~|\/(?:home|Users|var\/home)[\\/]+[^\\/]+|\/root|\/?(?:[A-Za-z]:|\/(?:mnt\/|cygdrive\/)?[A-Za-z])[\\/]+Users[\\/]+[^\\/]+)[\\/]*$/i
+/** The home folder a path lies in, slashes forward: `/home/u`, `/Users/u`, `C:/Users/u` (or as Git Bash or WSL spell it). */
+const HOME_OF = /^(?:\/(?:home|Users|var\/home)\/[^/]+|\/root|(?:[A-Za-z]:|\/(?:mnt\/|cygdrive\/)?[A-Za-z])\/Users\/[^/]+)(?=\/|$)/i
 
 /**
- * `text` with no word of where the project lies on this computer: under `root` (the note's project) a path goes on
- * from there (`src/a.ts`) and the root itself by its last name; any other local path (LOCAL_PATH) by its last
- * name alone, a home folder as `~`.
+ * A folder as a pattern for each way a shell spells it: on a Windows drive, `C:\a`, `C:/a`, Git Bash's `/c/a`, WSL's
+ * `/mnt/c/a` and Cygwin's `/cygdrive/c/a` alike, in any case (`flags` says so); else as it is. A separator may be
+ * doubled (a string literal's). Undefined for a drive or the file system's root.
+ */
+function folderPattern(folder: string): { source: string; flags: string } | undefined {
+  const slashed = folder.replace(/\\/g, '/').replace(/\/+$/, '')
+  const drive = /^(?:([A-Za-z]):|\/(?:mnt\/|cygdrive\/)?([A-Za-z])(?=\/|$))(.*)$/.exec(slashed)
+  const names = (drive ? drive[3]! : slashed)
+    .split('/')
+    .filter(name => name !== '')
+    .map(name => name.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&'))
+  if (names.length === 0) return undefined
+  const sep = '[\\\\/]+'
+  if (!drive) return { source: `/${names.join(sep)}`, flags: 'g' }
+  const letter = (drive[1] ?? drive[2])!
+  return { source: `(?:${letter}:|/(?:mnt/|cygdrive/)?${letter})${sep}${names.join(sep)}`, flags: 'gi' }
+}
+
+/**
+ * `text` with `folder` (each spelling folderPattern knows) taken out: a path inside it goes on from there (`src/a.ts`, or
+ * `inside` before it), and the folder itself becomes `bare`.
+ */
+function withoutFolder(text: string, folder: string, bare: string, inside = ''): string {
+  const pattern = folderPattern(folder)
+  if (!pattern) return text
+  // The folder, then separators before a name (what follows is inside it), or the end of its last name.
+  const found = new RegExp(`(?<![\\w.~-])${pattern.source}(?:([\\\\/]+)(?=[^\\s\\\\/\`'"()<>*|])|[\\\\/]*(?![\\w.-]))`, pattern.flags)
+  return text.replace(found, (_whole: string, sep: string | undefined) => (sep !== undefined ? inside : bare))
+}
+
+/**
+ * `text` with no word of where the project lies on this computer, however a shell spells it: under `root` (the note's
+ * project) a path goes on from there (`src/a.ts`) and the root itself by its last name (`~` when it is the home
+ * folder); its owner's home folder as `~`; any other local path (LOCAL_PATH) by its last name alone, a home folder
+ * as `~`.
  */
 export function withoutPaths(text: string, root = ''): string {
   const base = root.replace(/[\\/]+$/, '')
-  const escaped = base.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&')
-  // The root, then a separator (what follows is inside it) or the end of its last name.
-  const under = new RegExp(`(?<![\\w.~-])${escaped}(?:[\\\\/]|(?![\\w.-]))`, 'g')
-  const inRoot = base.length < 2 ? text : text.replace(under, found => (found.length > base.length ? '' : baseName(base)))
-  return inRoot.replace(LOCAL_PATH, (whole: string, name: string) => (HOME_ONLY.test(whole) ? '~' : name))
+  const isHome = HOME_ONLY.test(base)
+  const inRoot = base.length < 2 ? text : withoutFolder(text, base, isHome ? '~' : baseName(base))
+  // The owner's home, known from the project's folder: whole, a space in its name and all.
+  const home = isHome ? undefined : HOME_OF.exec(base.replace(/\\/g, '/'))?.[0]
+  const inHome = home === undefined ? inRoot : withoutFolder(inRoot, home, '~', '~/')
+  return inHome.replace(LOCAL_PATH, (whole: string, name: string) => (HOME_ONLY.test(whole.replace(/^file:\/\/[^/\\]*/, '')) ? '~' : name))
+}
+
+/** What a terminal draws of one transcript line ($.ui.log): its first 2000 characters (a remote surface, 10000). */
+export const LOG_CHARS = 2000
+
+/**
+ * `text` as transcript lines a terminal draws whole, LOG_CHARS at most each: cut at the last paragraph break that
+ * fits, else the last line break, else anywhere (never inside a character).
+ */
+export function logParts(text: string, max = LOG_CHARS): string[] {
+  const parts: string[] = []
+  let rest = text
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf('\n\n', max)
+    let gap = 2
+    if (cut <= 0) {
+      cut = rest.lastIndexOf('\n', max)
+      gap = 1
+    }
+    if (cut <= 0) {
+      cut = /[\uDC00-\uDFFF]/.test(rest[max]!) ? max - 1 : max
+      gap = 0
+    }
+    parts.push(rest.slice(0, cut))
+    rest = rest.slice(cut + gap)
+  }
+  return [...parts, rest]
 }
 
 /** A note's text as a shared copy holds it: no summary section (the title says it), headings in bold, no code block. */
@@ -4227,7 +4300,8 @@ export function shareText(note: Pick<LearnNote, 'at' | 'text' | 'changes' | 'mor
   const summary = summaryOf(note.text).replace(/\*\*/g, '').trim()
   const facts = [stamp(note.at).day.slice(5), `파일 ${note.changes.length + note.moreFiles}개`, ...(names.length > 0 ? [`개념: ${names.join(' · ')}`] : [])]
   const body = shareBody(note.text)
-  const withheld = note.withheld ?? []
+  // A file left out from outside the project is named as the pane names it: by its name alone.
+  const withheld = (note.withheld ?? []).map(one => ({ ...one, file: shortPath(one.file) }))
   const parts = [
     `**[학습 노트]${summary === '' ? '' : ` ${summary}`}**\n${facts.join(' · ')}`,
     ...(body !== '' ? [body] : []),
