@@ -3744,18 +3744,42 @@ export function modelCode(reply: { reason: string; status?: number | null; error
   return faultWord(reply.reason)
 }
 
+/**
+ * `list` cut while `isOver` says so: the pane's refused focus (area `focus`, no failure) goes first, the oldest
+ * of it first, then the oldest of the rest; so a week of refusals never pushes out a journal that failed.
+ */
+function dropFaults(list: readonly Fault[], isOver: (list: readonly Fault[]) => boolean): Fault[] {
+  let kept = [...list]
+  while (kept.length > 0 && isOver(kept)) {
+    const i = kept.findIndex(one => one.area === 'focus')
+    kept = i === -1 ? kept.slice(1) : kept.filter((_, j) => j !== i)
+  }
+  return kept
+}
+
 /** `list` with one more fault: counted on the last of its kind still open within FAULT_FOLD_MS, else added; FAULTS_KEPT at most. */
 export function addFault(list: readonly Fault[], area: string, code: string, at: number): Fault[] {
   const word = faultWord(code)
   const i = list.findLastIndex(one => one.area === area && one.code === word && one.ok !== true && at - one.last < FAULT_FOLD_MS)
   if (i !== -1) return list.map((one, j) => (j === i ? { ...one, last: Math.max(one.last, at), n: one.n + 1 } : one))
-  return [...list, { at, last: at, area, code: word, n: 1 }].slice(-FAULTS_KEPT)
+  return dropFaults([...list, { at, last: at, area, code: word, n: 1 }], kept => kept.length > FAULTS_KEPT)
 }
 
 /** `list` with `area`'s open faults marked gone through (ok); the same list when none was open. */
 export function faultsOk(list: readonly Fault[], area: string): readonly Fault[] {
   if (!list.some(one => one.area === area && one.ok !== true)) return list
   return list.map(one => (one.area === area && one.ok !== true ? { ...one, ok: true as const } : one))
+}
+
+/**
+ * `list` with each open fault marked gone through (ok) where its area's work went through after its latest time
+ * (`okAt`, by area): a fault an earlier session or load kept in the store, once this load's same work worked.
+ */
+export function faultsOkSince(list: readonly Fault[], okAt: ReadonlyMap<string, number>): Fault[] {
+  return list.map(one => {
+    const at = okAt.get(one.area)
+    return one.ok !== true && at !== undefined && one.last <= at ? { ...one, ok: true as const } : one
+  })
 }
 
 /** The faults record as the store holds it, read back: well-formed entries of the last FAULT_DAYS days, their words made safe. */
@@ -3781,10 +3805,9 @@ export function mergeFaults(stored: readonly Fault[], mine: readonly Fault[], no
   return [...byKey.values()].filter(one => now - one.last < FAULT_DAYS * DAY).sort((a, b) => a.at - b.at)
 }
 
-/** The record cut to FAULT_MAX_BYTES of JSON, the oldest faults first. */
+/** The record cut to FAULTS_KEPT × 2 faults and FAULT_MAX_BYTES of JSON: the pane's refused focus first, then the oldest faults. */
 export function fitFaults(record: FaultRecord): FaultRecord {
-  let list = record.list.slice(-FAULTS_KEPT * 2)
-  while (list.length > 0 && jsonBytes({ ...record, list }) > FAULT_MAX_BYTES) list = list.slice(1)
+  const list = dropFaults(record.list, kept => kept.length > FAULTS_KEPT * 2 || jsonBytes({ ...record, list: kept }) > FAULT_MAX_BYTES)
   return { ...record, list }
 }
 
@@ -3944,7 +3967,8 @@ export type DiagInput = {
   today: { notes: number; calls: number }
   /** The store's size in all and its biggest keys; undefined when it could not be read. */
   store?: { bytes: number; keys: readonly { key: string; bytes: number }[] }
-  unsaved: number
+  /** This project's notes the journal has not taken; undefined when the project could not be read. */
+  unsaved?: number
   faults: readonly Fault[]
 }
 
@@ -3956,8 +3980,9 @@ export function appName(raw: string | undefined): string | undefined {
 
 /**
  * /learn 진단's text, to paste to whoever looks after the plugin: versions, the screen, the settings, today's
- * counts, the store's size, the journal, and the last FAULT_DAYS days' faults (newest first, the pane's
- * refused focus apart from today's failures). No path, request, code or concept name.
+ * counts, the store's size, the journal, and the last FAULT_DAYS days' faults (newest first). The pane's refused
+ * focus is no failure: it is summed on a line of its own, never in today's failures nor among the listed ones,
+ * where a week of quizzes would push a journal that failed out of sight. No path, request, code or concept name.
  */
 export function diagText(input: DiagInput): string {
   const { now, settings: s } = input
@@ -3992,8 +4017,22 @@ export function diagText(input: DiagInput): string {
   const store = input.store
     ? `${sizeText(input.store.bytes)} / 4MB${input.store.keys.length > 0 ? ` (${input.store.keys.map(one => `${one.key} ${sizeText(one.bytes)}`).join(' · ')})` : ''}`
     : '읽지 못함'
-  const recent = [...input.faults].sort((a, b) => b.last - a.last)
+  const recent = input.faults.filter(one => one.area !== 'focus').sort((a, b) => b.last - a.last)
   const listed = recent.slice(0, DIAG_FAULTS).map(one => `  - ${faultLine(one)}`)
+  const refused = input.faults.filter(one => one.area === 'focus').sort((a, b) => b.last - a.last)
+  const byCode = new Map<string, number>()
+  for (const one of refused) byCode.set(one.code, (byCode.get(one.code) ?? 0) + one.n)
+  const lastRefused = refused[0] === undefined ? undefined : stamp(refused[0].last)
+  const focus = lastRefused
+    ? [`- ${FAULT_AREAS.focus}(최근 ${FAULT_DAYS}일): ${[...byCode].map(([code, n]) => `${faultLabel(code)} ×${n}`).join(' · ')} · 마지막 ${lastRefused.day.slice(5)} ${lastRefused.time}`]
+    : []
+  const journal = !s.isAutoSave
+    ? '저장 꺼짐'
+    : input.unsaved === undefined
+      ? '못 쓴 노트 수를 알 수 없음'
+      : input.unsaved > 0
+        ? `아직 못 쓴 노트 ${input.unsaved}개`
+        : '못 쓴 노트 없음'
   return [
     `learn-notes 진단 · ${day} ${time}`,
     `- 버전: learn-notes ${input.version ?? '알 수 없음'} · Claude Code ${input.engine ?? '알 수 없음'}`,
@@ -4001,9 +4040,10 @@ export function diagText(input: DiagInput): string {
     `- 설정: ${settings.join(' · ')}`,
     `- 오늘: 노트 ${input.today.notes}개 · 모델 호출 ${input.today.calls}번 · 실패 ${failures}번`,
     `- 저장소: ${store}`,
-    `- 일지: ${!s.isAutoSave ? '저장 꺼짐' : input.unsaved > 0 ? `아직 못 쓴 노트 ${input.unsaved}개` : '못 쓴 노트 없음'}`,
+    `- 일지: ${journal}`,
     recent.length === 0 ? `- 최근 ${FAULT_DAYS}일 문제: 없습니다` : `- 최근 ${FAULT_DAYS}일 문제 ${recent.length}건 (최근 것부터)`,
     ...listed,
     ...(recent.length > listed.length ? [`  - 그 밖에 ${recent.length - listed.length}건`] : []),
+    ...focus,
   ].join('\n')
 }

@@ -154,6 +154,7 @@ import {
   faultCode,
   faultWord,
   faultsOk,
+  faultsOkSince,
   fileWhy,
   fitFaults,
   jsonBytes,
@@ -392,11 +393,26 @@ let lastDraw: { placement: 'dock' | 'inline'; columns: number } | undefined
 let lastViewport: { columns: number; isFullscreen: boolean } | undefined
 /** This load's faults (see fault), the newest last: /learn 진단 reads them with the store's. */
 let faults: readonly Fault[] = []
-/** True while `faults` holds what the store does not have yet. */
+/**
+ * When each area's work first went through in this load (faultOk): a fault the store kept from before then (an
+ * earlier session's, or this one's before a reload) is marked gone through too, in the store and in /learn 진단.
+ */
+const okAt = new Map<string, number>()
+/** True while the store lacks what this load knows: a fault, or that one went through. */
 let isFaultsDirty = false
-/** The pending write of the faults to the store: one a minute at most. */
+/** True while among it is a fault the store has not had yet: that one is written at once, unless a write was just made. */
+let isFaultsUrgent = false
+/** The pending write of the faults to the store. */
 let faultTimer: { cancel: () => void } | undefined
-/** How long a fault waits before it is written to the store, with any that follow it meanwhile. */
+/** Writes of the faults queued or under way: one that ends looks again for what came meanwhile. */
+let faultFlushes = 0
+/** When the store was last asked to take the faults: the next write waits until a minute after it. */
+let faultsWrittenAt = Number.NEGATIVE_INFINITY
+/**
+ * The faults go to the store once a minute at most: a new fault at once if none went in the last minute (a reload,
+ * which a toast's `/config의 saveDir를 바꿔 주세요` brings, ends the module and its timers with no word), what
+ * follows it a minute after, and a mark that one went through a minute later at most.
+ */
 const FAULT_FLUSH_MS = 60_000
 /** The causes whose toast showed this session (`save:EACCES`, `store:store-full`): each once. */
 const warned = new Set<string>()
@@ -416,43 +432,78 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** A line for the debug log alone; a handler answering in a hook's place may have no `$` to log with. */
+function debugLog($: EngineInterface, text: string): void {
+  try {
+    $.ui.log(text, { to: 'debug' })
+  } catch {
+    // Nowhere to say it.
+  }
+}
+
 /**
  * Keeps one failure for /learn 진단 (see Fault): where (`area`) and its classification code, never the error's
  * text or a path; the debug log gets `what` with the code. A fault of the same kind within ten minutes counts on
- * the last. Written to the store a minute later at most (with any that follow), and at the session's end.
- * Resolves once it is held; never rejects.
+ * the last. Written to the store at once, or with those that follow it a minute after the last write (see
+ * FAULT_FLUSH_MS), and at the session's end. Resolves once it is held; never rejects.
  */
 async function fault($: EngineInterface, area: FaultArea, code: string, what: string): Promise<void> {
   const word = faultWord(code)
-  try {
-    $.ui.log(`learn-notes: ${what} (${word})`, { to: 'debug' })
-  } catch {
-    // A handler answering in a hook's place may have no `$` to log with.
-  }
+  debugLog($, `learn-notes: ${what} (${word})`)
   try {
     const at = await $.clock.now().catch(() => Date.now())
     faults = addFault(faults, area, word, at)
     isFaultsDirty = true
-    scheduleFaults($)
+    isFaultsUrgent = true
+    scheduleFaults($, at)
   } catch {
     // Kept or not, the work that failed goes on as it would.
   }
 }
 
-/** The work of `area` went through: its faults still open are marked so (`다시 써서 됨` in /learn 진단). */
+/**
+ * The work of `area` went through: its faults still open are marked so (`다시 써서 됨` in /learn 진단), this
+ * load's at once and, the first time in this load, those the store kept from before (okAt).
+ */
 function faultOk($: EngineInterface, area: FaultArea): void {
   const next = faultsOk(faults, area)
-  if (next === faults) return
+  const isFirst = !okAt.has(area)
+  if (next === faults && !isFirst) return
   faults = next
   isFaultsDirty = true
-  scheduleFaults($)
+  // Held until the time is read, so a second success meanwhile does not ask again.
+  if (isFirst) okAt.set(area, Number.NEGATIVE_INFINITY)
+  void $.clock.now().then(
+    at => {
+      if (isFirst) {
+        okAt.set(area, at)
+        // Asked again: a write that began meanwhile read okAt before it held this time.
+        isFaultsDirty = true
+      }
+      scheduleFaults($, at)
+    },
+    () => undefined,
+  )
 }
 
-/** Writes the faults to the store FAULT_FLUSH_MS from now, unless a write is already waiting. */
-function scheduleFaults($: EngineInterface): void {
+/**
+ * Writes the faults to the store: a new fault at once when no write was asked in the last FAULT_FLUSH_MS, else
+ * when that minute is up; a mark that one went through FAULT_FLUSH_MS from now. Nothing while a write is queued:
+ * it looks again for what came meanwhile once it is done.
+ */
+function scheduleFaults($: EngineInterface, now: number): void {
+  if (faultFlushes > 0) return
+  // A time that could not be read waits the whole minute, so a clock that fails never spins a write after a write.
+  const wait = isFaultsUrgent && Number.isFinite(now) ? faultsWrittenAt + FAULT_FLUSH_MS - now : FAULT_FLUSH_MS
+  if (wait <= 0) {
+    faultTimer?.cancel()
+    faultTimer = undefined
+    void flushFaults($)
+    return
+  }
   if (faultTimer !== undefined) return
   try {
-    faultTimer = $.clock.after(FAULT_FLUSH_MS, () => {
+    faultTimer = $.clock.after(wait, () => {
       faultTimer = undefined
       void flushFaults($)
     })
@@ -462,23 +513,37 @@ function scheduleFaults($: EngineInterface): void {
 }
 
 /**
- * Merges this load's faults into the store's (FAULTS_KEY), after any store write still running; `noticeDay`
- * keeps the day the session-start check line showed. A store that refuses it says so in the debug log alone:
- * that failure is not kept as a fault, or it would ask for this write again.
+ * Merges this load's faults into the store's (FAULTS_KEY), after any store write still running, with the store's
+ * own marked gone through where this load's same work went through after them (okAt); `noticeDay` keeps the day
+ * the session-start check line showed. Nothing is written when the store holds that already. A store that refuses
+ * it says so in the debug log alone: that failure is not kept as a fault, or it would ask for this write again.
  */
 function flushFaults($: EngineInterface, noticeDay?: string): Promise<void> {
+  faultFlushes += 1
   return enqueue('storing', async () => {
-    if (!isFaultsDirty && noticeDay === undefined) return
-    const mine = faults
-    isFaultsDirty = false
+    let now = faultsWrittenAt
     try {
-      const now = await $.clock.now()
-      const stored = cleanFaults(await $.store.get(FAULTS_KEY), now)
-      const day = noticeDay ?? stored.noticeDay
-      await $.store.set(FAULTS_KEY, fitFaults({ list: mergeFaults(stored.list, mine, now), ...(day !== undefined ? { noticeDay: day } : {}) }))
-    } catch (error) {
-      isFaultsDirty = true
-      $.ui.log(`learn-notes: 진단 기록을 저장소에 남기지 못했습니다 (${faultCode(error, 'store')})`, { to: 'debug' })
+      if (!isFaultsDirty && noticeDay === undefined) return
+      const mine = faults
+      isFaultsDirty = false
+      isFaultsUrgent = false
+      try {
+        now = await $.clock.now()
+        const stored = cleanFaults(await $.store.get(FAULTS_KEY), now)
+        const day = noticeDay ?? stored.noticeDay
+        const record = fitFaults({ list: faultsOkSince(mergeFaults(stored.list, mine, now), okAt), ...(day !== undefined ? { noticeDay: day } : {}) })
+        if (JSON.stringify(record) === JSON.stringify(stored)) return
+        faultsWrittenAt = now
+        await $.store.set(FAULTS_KEY, record)
+      } catch (error) {
+        // Tried all the same: the next try waits the minute.
+        faultsWrittenAt = now
+        isFaultsDirty = true
+        debugLog($, `learn-notes: 진단 기록을 저장소에 남기지 못했습니다 (${faultCode(error, 'store')})`)
+      }
+    } finally {
+      faultFlushes -= 1
+      if (isFaultsDirty && faultFlushes === 0) scheduleFaults($, now)
     }
   })
 }
@@ -593,23 +658,30 @@ async function appendJournal($: EngineInterface, cfg: Config, root: string, at: 
  * A failure is a fault and a toast naming its cause (once a session for each),
  * never a broken turn; the note stays unsaved, and the next save that works
  * writes it too (flushUnsaved). A file another program holds (EBUSY, EPERM:
- * an antivirus scan, a sync client) is tried once more, quietly, half a second later.
+ * an antivirus scan, a sync client) is tried once more, quietly, half a second later;
+ * the note's failure is kept once all the same, gone through or not.
  */
 async function saveNow($: EngineInterface, cfg: Config, note: LearnNote, isRewrite: boolean): Promise<string | undefined> {
+  // The first refusal of a held file, kept once the try again has told how it went.
+  let held: string | undefined
   for (let tries = 1; ; tries += 1) {
     try {
       // Into the journal of the note's own project, even after a /cd.
       const root = note.root || (await $.session.root())
       const path = await appendJournal($, cfg, root, note.at, journalSection(await screened($, cfg, note), isRewrite, isStoreCut(note)))
       await setNote($, note.id, { savedAs: note.status, isUnsaved: false })
+      if (held !== undefined) await fault($, 'save', held, '노트를 파일에 쓰지 못했습니다')
       faultOk($, 'save')
       // The folder takes writes again: the notes it refused before go in after this one.
       void flushUnsaved($, cfg, note.id)
       return path
     } catch (error) {
       const code = faultCode(error)
+      if (tries === 1 && (code === 'EBUSY' || code === 'EPERM') && (await $.clock.sleep(SAVE_RETRY_MS).then(() => true, () => false))) {
+        held = code
+        continue
+      }
       await fault($, 'save', code, '노트를 파일에 쓰지 못했습니다')
-      if (tries === 1 && (code === 'EBUSY' || code === 'EPERM') && (await $.clock.sleep(SAVE_RETRY_MS).then(() => true, () => false))) continue
       await setNote($, note.id, { isUnsaved: true }).catch(() => undefined)
       warnOnce($, `save:${code}`, saveFailText(code))
       return undefined
@@ -1923,14 +1995,19 @@ function revealInPane($: EngineInterface, key: string, block: 'start' | 'nearest
 /**
  * Moves the pane's focus ring onto an element it is about to draw: the next
  * answer field, or the button for a new quiz. Only while the pane holds the
- * keys: otherwise the engine says no, kept as a fault of the pane's focus.
- * Not awaited: the engine waits for the element's drawing, bounded.
+ * keys: otherwise the engine says no, kept as a fault of the pane's focus once
+ * every try was refused. Not awaited: the engine waits for the element's drawing, bounded.
  */
 function focusInPane($: EngineInterface, key: string): void {
-  const said = (tries: number) => void fault($, 'focus', 'focus', `${key}로 초점을 옮기지 않았습니다 · ${tries}/${FOCUS_TRIES}`)
+  const said = (tries: number) => {
+    const what = `${key}로 초점을 옮기지 않았습니다 · ${tries}/${FOCUS_TRIES}`
+    // A refusal the next try may still win (the usual first one after grading in a real terminal) is the debug log's alone.
+    if (tries < FOCUS_TRIES) debugLog($, `learn-notes: ${what} (focus)`)
+    else void fault($, 'focus', 'focus', what)
+  }
   void (async () => {
     // The drawing that brings the field can also move the ring itself (onto the button left where the last field was):
-    // asked again a moment later, the field wins. Each refusal is kept with its try.
+    // asked again a moment later, the field wins. Each refusal is logged with its try.
     for (let tries = 0; tries < FOCUS_TRIES; tries += 1) {
       try {
         const result = await $.ui.focus({ requestId: PANE, key })
@@ -2835,9 +2912,13 @@ export const register: Register = (on, options) => {
     return out.text === undefined ? out : { ...out, text: redactText(out.text).text }
   }).catch(async ($, e, next) => {
     hookFailed($, next.error, 'hook', 'command.run')
+    // The engine asks this handler, the first registered, for the whole chain of this plugin's /learn hooks: when the
+    // reply below threw or ran out of time, `called` is false (that hook never calls next) and nothing beneath has a
+    // reply of its own (its own `.catch` is not asked). Said so, rather than the engine's error.
+    if (!next.called) return { text: COMMAND_FAILED }
     // What could not be masked is not shown: the reply goes into the conversation the model reads.
-    const out = await next(e)
     try {
+      const out = await next(e)
       return out.text === undefined ? out : { ...out, text: redactText(out.text).text }
     } catch {
       return { text: COMMAND_FAILED }
@@ -3086,6 +3167,7 @@ export const register: Register = (on, options) => {
       text: `이 화면에는 패널을 띄울 수 없어 마지막 노트를 여기에 적습니다. 터미널을 전체 화면(/tui fullscreen)으로 쓰면 오른쪽에 패널이 붙습니다.\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
     }
   }).catch(($, e, next) => {
+    // Not asked while the masking hook above holds this chain (its handler answers for it); kept for an engine that asks each.
     hookFailed($, next.error, 'hook', 'command.run')
     return { text: COMMAND_FAILED }
   })
@@ -4006,7 +4088,7 @@ const SETTING_FIELDS = ['autoNote', 'model', 'dailyAutoNotes', 'level', 'autoSav
  * too. Each piece that cannot be read is left out or said unknown: it is what is asked for when things fail.
  */
 async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Promise<string> {
-  const now = await $.clock.now()
+  const now = await $.clock.now().catch(() => Date.now())
   const day = stamp(now).day
   const quiet = <T,>(work: Promise<T>, fallback: T) => work.catch(() => fallback)
   const version = myVersion ?? (await readVersion($))
@@ -4022,11 +4104,14 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
   const rows = await quiet($.config.list(), [])
   const locked = SETTING_FIELDS.filter(field => rows.some(row => row.key === `learn-notes.${field}` && row.isLocked))
   const stored = cleanFaults(await quiet($.store.get(FAULTS_KEY), undefined), now)
-  const list = mergeFaults(stored.list, faults, now)
-  const lastSave = list.filter(one => one.area === 'save').at(-1)
-  const saveDir = /^(?:\\\\|\/\/)/.test(cfg.saveDir) || lastSave?.code === 'network' ? 'network' : cfg.saveDir === '' ? 'default' : 'custom'
-  const dir = await journalDir($, cfg)
-  const hasFolder = saveDir === 'network' ? undefined : await $.fs.stat(dir).then(stat => stat.kind === 'dir', () => false)
+  const list = faultsOkSince(mergeFaults(stored.list, faults, now), okAt)
+  // The folder as set now: a share by its name, or one this load's journal writes still find out of reach. A network
+  // failure kept from before (a saveDir since changed, a reload since) stays in the faults' list alone.
+  const lastSave = faults.filter(one => one.area === 'save').sort((a, b) => a.last - b.last).at(-1)
+  const isShare = /^(?:\\\\|\/\/)/.test(cfg.saveDir) || (lastSave?.code === 'network' && lastSave.ok !== true)
+  const saveDir = isShare ? 'network' : cfg.saveDir === '' ? 'default' : 'custom'
+  const dir = await quiet(journalDir($, cfg), undefined)
+  const hasFolder = saveDir === 'network' || dir === undefined ? undefined : await $.fs.stat(dir).then(stat => stat.kind === 'dir', () => false)
   let store: DiagInput['store']
   try {
     const sizes: { key: string; bytes: number }[] = []
@@ -4039,8 +4124,8 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
   const activityToday = cleanActivity(await quiet($.store.get(ACTIVITY_KEY), undefined))
   const usageToday = cleanUsage(await quiet($.store.get(USAGE_KEY), undefined))
   const has = (record: object) => Object.prototype.hasOwnProperty.call(record, day)
-  const root = (await read($, paneRoot)) ?? (await $.session.root())
-  const unsaved = (await quiet(allNotes($), [])).filter(note => (note.root || root) === root && note.isUnsaved === true).length
+  const root = (await read($, paneRoot)) ?? (await quiet($.session.root(), undefined))
+  const unsaved = root === undefined ? undefined : (await quiet(allNotes($), [])).filter(note => (note.root || root) === root && note.isUnsaved === true).length
   const text = diagText({
     now,
     ...(version !== undefined ? { version } : {}),
@@ -4064,7 +4149,7 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
     },
     today: { notes: has(activityToday) ? activityToday[day]!.notes : 0, calls: has(usageToday) ? usageToday[day]!.calls : 0 },
     ...(store ? { store } : {}),
-    unsaved,
+    ...(unsaved !== undefined ? { unsaved } : {}),
     faults: list,
   })
   const isCopied = await deliver($, text, isAway)
@@ -4078,7 +4163,7 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
  * nobody sees): the caller then gives the text in its reply, as it does when the copy fails (a fault of its own).
  */
 async function deliver($: EngineInterface, text: string, isAway: boolean): Promise<boolean> {
-  if (isAway || (await isCloudSession($))) return false
+  if (isAway || (await isCloudSession($).catch(() => false))) return false
   try {
     const copied = await $.ui.copy({ text })
     if (copied.isCopied) {

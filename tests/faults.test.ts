@@ -18,6 +18,7 @@ import {
   faultLine,
   faultWord,
   faultsOk,
+  faultsOkSince,
   fileWhy,
   fitFaults,
   jsonBytes,
@@ -29,6 +30,7 @@ import {
 } from '../hooks/notes'
 
 const DAY = 86_400_000
+const HOUR = 3_600_000
 const MINUTE = 60_000
 const AT = new Date(2026, 9, 13, 13, 57).getTime()
 
@@ -121,6 +123,44 @@ describe('1.7.0: faults kept as codes, and /learn 진단 made of them', () => {
     for (let i = 0; i < FAULTS_KEPT + 10; i += 1) list = addFault(list, 'save', `E${i}`, AT + i * FAULT_FOLD_MS)
     expect(list).toHaveLength(FAULTS_KEPT)
     expect(list[0]!.code).toBe('E10')
+  })
+
+  test('the pane\'s refused focus goes first when faults are cut: a week of quizzes never pushes out a journal that failed', () => {
+    // A journal refusal, then pane focus refused at each of many quizzes, each gone through before the next.
+    let list = addFault([], 'save', 'EACCES', AT)
+    for (let i = 1; i <= FAULTS_KEPT + 5; i += 1) list = [...faultsOk(addFault(list, 'focus', 'focus', AT + i * 2 * MINUTE), 'focus')]
+    expect(list).toHaveLength(FAULTS_KEPT)
+    expect(list[0]).toEqual({ at: AT, last: AT, area: 'save', code: 'EACCES', n: 1 })
+    // Five days of them in the store: the journal's fault is still there, and the record is within its bytes.
+    let record = cleanFaults(undefined, AT)
+    for (let day = 0; day < 5; day += 1) {
+      for (let i = 0; i < 10; i += 1) list = [...faultsOk(addFault(list, 'focus', 'focus', AT + day * DAY + i * 2 * MINUTE + MINUTE), 'focus')]
+      record = fitFaults({ list: mergeFaults(record.list, list, AT + day * DAY + DAY / 2) })
+    }
+    expect(jsonBytes(record)).toBeLessThanOrEqual(FAULT_MAX_BYTES)
+    expect(record.list.filter(one => one.area === 'save')).toEqual([{ at: AT, last: AT, area: 'save', code: 'EACCES', n: 1 }])
+    // With no refused focus to drop, the oldest fault goes.
+    const full: Fault[] = Array.from({ length: FAULTS_KEPT * 2 + 1 }, (_, i) => ({ at: AT + i, last: AT + i, area: 'quiz', code: 'empty', n: 1 }))
+    const fitted = fitFaults({ list: full }).list
+    expect(fitted.length).toBeLessThanOrEqual(FAULTS_KEPT * 2)
+    expect(fitted.map(one => one.at)).toEqual(full.slice(-fitted.length).map(one => one.at))
+  })
+
+  test('a fault the store kept from before is marked gone through once the same work went through after it', () => {
+    const stored: Fault[] = [
+      { at: AT, last: AT + MINUTE, area: 'save', code: 'EACCES', n: 2 },
+      { at: AT, last: AT, area: 'store', code: 'store-reject', n: 1 },
+      { at: AT + DAY, last: AT + DAY, area: 'save', code: 'ENOSPC', n: 1 },
+    ]
+    const okAt = new Map([['save', AT + HOUR]])
+    expect(faultsOkSince(stored, okAt)).toEqual([
+      { ...stored[0]!, ok: true },
+      // Another area's work is not this one's.
+      stored[1]!,
+      // A fault after the success (another window's, say) stays open.
+      stored[2]!,
+    ])
+    expect(faultsOkSince(stored, new Map())).toEqual(stored)
   })
 
   test('after a hundred faults the record is 4KB at most, and no fault holds a path separator', () => {
@@ -228,10 +268,11 @@ describe('1.7.0: faults kept as codes, and /learn 진단 made of them', () => {
       '- 오늘: 노트 3개 · 모델 호출 7번 · 실패 2번',
       '- 저장소: 2.3MB / 4MB (history 1.2MB)',
       '- 일지: 아직 못 쓴 노트 2개',
-      '- 최근 7일 문제 3건 (최근 것부터)',
+      '- 최근 7일 문제 2건 (최근 것부터)',
       '  - 10-14 08:57 일지 저장 · 쓸 권한 없음(EACCES) ×2',
-      '  - 10-14 07:57 패널 초점 · 초점 거절 ×9',
       '  - 10-13 13:57 노트 쓰기 · 서버 붐빔(529) ×2 · 다시 써서 됨',
+      // Nor among the problems listed: summed on a line of its own.
+      '- 패널 초점(최근 7일): 초점 거절 ×9 · 마지막 10-14 07:57',
     ])
   })
 
@@ -261,5 +302,29 @@ describe('1.7.0: faults kept as codes, and /learn 진단 made of them', () => {
     expect(diagText(input({ pane: 'unplaced', terminal: { columns: 90, isFullscreen: false } }))).toContain('패널 자리 없음 · 터미널 90칸(전체 화면 아님)')
     expect(diagText(input({ pane: { placement: 'inline', columns: 80 }, isPaneFocused: true }))).toContain('패널 프롬프트 위 80칸 · 터미널 132칸 · 키는 패널에')
     expect(diagText(input({ settings: { ...input().settings, saveDir: 'custom', hasFolder: false } }))).toContain('일지 켬(바꾼 폴더, 아직 없음)')
+    // A project that could not be read: how many notes wait is not known.
+    expect(diagText(input({ unsaved: undefined }))).toContain('- 일지: 못 쓴 노트 수를 알 수 없음')
+  })
+
+  test('the pane\'s refused focus never pushes a failure off the listed lines: its kinds are summed apart', () => {
+    const refusals: Fault[] = Array.from({ length: DIAG_FAULTS + 2 }, (_, i) => ({ at: AT + (i + 1) * 11 * MINUTE, last: AT + (i + 1) * 11 * MINUTE, area: 'focus', code: 'focus', n: 3 }))
+    const text = diagText(
+      input({
+        faults: [
+          { at: AT, last: AT, area: 'save', code: 'EACCES', n: 1 },
+          ...refusals,
+          { at: AT + HOUR, last: AT + HOUR, area: 'focus', code: 'scroll', n: 1, ok: true },
+        ],
+        unsaved: 1,
+      }),
+    )
+    const lines = text.split('\n')
+    expect(lines.slice(-3)).toEqual([
+      '- 최근 7일 문제 1건 (최근 것부터)',
+      '  - 10-13 13:57 일지 저장 · 쓸 권한 없음(EACCES)',
+      `- 패널 초점(최근 7일): 초점 거절 ×${3 * (DIAG_FAULTS + 2)} · 스크롤 거절 ×1 · 마지막 10-13 15:47`,
+    ])
+    // Refused focus alone is no problem listed.
+    expect(diagText(input({ faults: refusals.slice(0, 1) })).split('\n').slice(-2)).toEqual(['- 최근 7일 문제: 없습니다', '- 패널 초점(최근 7일): 초점 거절 ×3 · 마지막 10-13 14:08'])
   })
 })

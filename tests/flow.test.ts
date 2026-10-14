@@ -5622,11 +5622,12 @@ describe('1.7.0: /learn 진단, and failures that say their cause', () => {
     // The debug log has the code too, not the message.
     expect(w.logs).toContain('learn-notes: 노트를 파일에 쓰지 못했습니다 (ENOSPC)')
     expect(w.logs.some(line => line.includes('2026-10-03_proj_abcde'))).toBe(false)
-    // A minute later the store has it, as a code.
-    expect(w.store.get('faults')).toBeUndefined()
+    // The store has the first at once, as a code (a reload a minute later would not lose it); the one after it within
+    // the minute goes in when that minute is up.
+    expect(JSON.stringify(w.store.get('faults'))).toContain('"code":"ENOSPC","n":1}')
     await w.clock.advance(60_000)
     const kept = JSON.stringify(w.store.get('faults'))
-    expect(kept).toContain('"code":"ENOSPC"')
+    expect(kept).toContain('"code":"ENOSPC","n":2}')
     expect(kept).not.toMatch(/[\\/]/)
     // Another cause has a toast of its own, with what to do.
     w.writeError = '$.fs.write: a network location is not reached from here'
@@ -5721,9 +5722,13 @@ describe('1.7.0: /learn 진단, and failures that say their cause', () => {
     w.writeFails = true
     w.writeError = FULL_DISK
     await learn($, '보고서')
-    expect(w.store.get('faults')).toBeUndefined()
-    await end($)
     expect(JSON.stringify(w.store.get('faults'))).toContain('"area":"report","code":"ENOSPC"')
+    // One more within the minute waits for it, unless the session ends first.
+    w.copyFails = true
+    await learn($, '보고서')
+    expect(JSON.stringify(w.store.get('faults'))).not.toContain('"area":"copy"')
+    await end($)
+    expect(JSON.stringify(w.store.get('faults'))).toContain('"area":"copy","code":"copy:no-clipboard"')
     const errors = [
       FULL_DISK,
       "EACCES: permission denied, open 'C:\\Users\\u\\notes\\report.md'",
@@ -5741,7 +5746,7 @@ describe('1.7.0: /learn 진단, and failures that say their cause', () => {
     expect(new TextEncoder().encode(JSON.stringify(kept)).length).toBeLessThanOrEqual(4096)
     expect(kept.list.length).toBeGreaterThan(10)
     for (const one of kept.list) expect(`${one.area} ${one.code}`).not.toMatch(/[\\/]/)
-    expect(new Set(kept.list.map(one => one.code))).toEqual(new Set(['ENOSPC', 'EACCES', 'EROFS', 'ENOENT', 'network', 'error']))
+    expect(new Set(kept.list.map(one => one.code))).toEqual(new Set(['ENOSPC', 'EACCES', 'EROFS', 'ENOENT', 'network', 'error', 'copy:no-clipboard']))
   })
 
   test('a session\'s start says once a day what is still wrong: notes the journal has not taken, and why', async ($, on) => {
@@ -5783,5 +5788,124 @@ describe('1.7.0: /learn 진단, and failures that say their cause', () => {
       '학습 노트 이력을 저장하지 못했습니다: 저장소가 4MB를 넘었습니다 · 다음 세션에 지난 노트가 빠질 수 있습니다 (일지 파일은 그대로) · /learn 진단',
     ])
     expect(await diag($)).toContain('저장소 · 저장소 4MB 넘음')
+  })
+
+  test('a fault an earlier session left is marked gone through once the same work goes through: the next morning says nothing', async ($, on) => {
+    const store = new Map<string, unknown>([
+      [
+        'faults',
+        {
+          list: [
+            { at: NOW - 60_000, last: NOW - 60_000, area: 'store', code: 'store-reject', n: 1 },
+            { at: NOW - 50_000, last: NOW - 50_000, area: 'save', code: 'EACCES', n: 2 },
+          ],
+          noticeDay: stamp(NOW).day,
+        },
+      ],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.journal()).toHaveLength(1)
+    const reply = await diag($)
+    expect(reply).toMatch(/ 일지 저장 · 쓸 권한 없음\(EACCES\) ×2 · 다시 써서 됨$/m)
+    expect(reply).toMatch(/ 저장소 · 저장소가 받지 않음 · 그 뒤 됨$/m)
+    // The store has it too, a minute later at most.
+    await w.clock.advance(60_000)
+    const kept = (store.get('faults') as { list: { code: string; ok?: true }[] }).list
+    expect(kept.map(one => [one.code, one.ok])).toEqual([
+      ['store-reject', true],
+      ['EACCES', true],
+    ])
+    // The next morning, within a day of the store's refusal: nothing is wrong any more, so no check line.
+    await end($)
+    await w.clock.advance(23 * 3_600_000)
+    w.transcript.length = 0
+    await start($)
+    expect(w.transcript).toEqual([])
+  })
+
+  test('the diagnosis names the journal folder as set now: a network failure kept from before stays in the list alone', { options: { saveDir: '~/notes' } }, async ($, on) => {
+    const store = new Map<string, unknown>([
+      ['faults', { list: [{ at: NOW - 2 * 86_400_000, last: NOW - 2 * 86_400_000, area: 'save', code: 'network', n: 2 }], noticeDay: stamp(NOW).day }],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(await diag($)).toContain('일지 켬(바꾼 폴더, 아직 없음)')
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const reply = await diag($)
+    expect(reply).toContain('일지 켬(바꾼 폴더)')
+    expect(reply).toContain('일지 저장 · 네트워크 위치 ×2 · 다시 써서 됨')
+  })
+
+  test('the pane\'s refused focus is kept once a move, apart from the failures: a journal that failed stays in view', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.writeFails = true
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    w.writeFails = false
+    const ui = await pane($)
+    await ui.press({ key: 'view-quiz' })
+    for (let i = 0; i < 9; i += 1) {
+      w.answer = THREE_QUESTIONS
+      await ui.press({ key: 'quiz-new' })
+      await ui.press({ key: 'quiz-new' })
+      await w.clock.settle()
+      await w.clock.advance(11 * 60_000)
+    }
+    await ui.unmount()
+    const reply = await diag($)
+    expect(reply).toContain('- 일지: 아직 못 쓴 노트 1개')
+    expect(reply).toContain('- 최근 7일 문제 1건 (최근 것부터)')
+    expect(reply).toMatch(/ 일지 저장 · 쓸 권한 없음\(EACCES\)$/m)
+    // Each move asked three times (the kit never gives the pane the keys) is one refusal, not three.
+    expect(reply).toMatch(/^- 패널 초점\(최근 7일\): 초점 거절 ×9 · 마지막 /m)
+    expect(reply).toContain('실패 1번')
+  })
+
+  test('a journal file held with EPERM: written half a second later, or kept once when it stays held', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.failNextWrites = 1
+    w.writeError = "EPERM: operation not permitted, open 'C:\\Users\\u\\Documents\\notes\\x.md'"
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.journal()).toHaveLength(0)
+    await w.clock.advance(500)
+    expect(w.journal()).toHaveLength(1)
+    expect(w.toasts.filter(text => text.includes('파일에 쓰지 못했습니다'))).toEqual([])
+    expect(await diag($)).toMatch(/ 일지 저장 · 쓸 권한 없음\(EPERM\) · 다시 써서 됨$/m)
+    // A folder that stays refused (Windows' controlled folder access): one note is one failure, not two.
+    w.writeFails = true
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    await w.clock.advance(600)
+    const reply = await diag($)
+    expect(reply).toMatch(/ 일지 저장 · 쓸 권한 없음\(EPERM\)$/m)
+    expect(reply).toContain('실패 2번')
+    expect(w.toasts.filter(text => text.includes('파일에 쓰지 못했습니다'))).toHaveLength(1)
+  })
+
+  test('a /learn reply that fails says so, and /learn 진단 answers with no project or home to read', async ($, on) => {
+    const COMMAND_FAILED = '이 명령을 마치지 못했습니다 · /learn 진단으로 무엇이 막혔는지 볼 수 있습니다'
+    const w = world(on, 'ok', null, true, new Map(), { HOME: '' })
+    w.rootFails = true
+    await start($)
+    // Neither the project nor the journal folder (under the project with no home) can be read: said unknown.
+    const first = await diag($)
+    expect(first.split('\n').slice(0, 2)).toEqual([DIAG_COPIED, DIAG_PRIVATE])
+    expect(first).toContain('- 일지: 못 쓴 노트 수를 알 수 없음')
+    expect(first).toContain('일지 켬(기본 폴더) ·')
+    w.rootFails = false
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    // The session's root cannot be read now: the reply below the masking hook throws, and says so.
+    w.rootFails = true
+    expect((await learn($, '찾기 const')).text).toBe(COMMAND_FAILED)
+    expect(await diag($)).toContain('훅 · command.run 훅 멈춤')
   })
 })
