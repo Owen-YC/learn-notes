@@ -225,6 +225,11 @@ declare module 'claude-code' {
       activity: Record<string, LearnDayActivity>
       /** The latest prompts that entered and the last real request: read when a turn starts, kept here so a reload keeps them. */
       submitted: { list: LearnSubmit[]; lastRequest: string | null }
+      /**
+       * What the notice that a newer build is open last said this session (its version, and whether the store was
+       * newer): kept here, so a reload of an old window does not say it again.
+       */
+      newerSaid: string | null
     }
   }
 }

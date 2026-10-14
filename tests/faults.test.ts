@@ -327,4 +327,19 @@ describe('1.7.0: faults kept as codes, and /learn 진단 made of them', () => {
     // Refused focus alone is no problem listed.
     expect(diagText(input({ faults: refusals.slice(0, 1) })).split('\n').slice(-2)).toEqual(['- 최근 7일 문제: 없습니다', '- 패널 초점(최근 7일): 초점 거절 ×3 · 마지막 10-13 14:08'])
   })
+
+  test('the other windows\' builds go under the version, the newest first, with the store\'s layout while it is newer (1.7.0 D2)', () => {
+    const now = input().now
+    const lines = (over: Partial<DiagInput>) => diagText(input(over)).split('\n').slice(1, 3)
+    expect(lines({ others: [{ v: '1.7.1', at: now - 3 * MINUTE }] })).toEqual(['- 버전: learn-notes 1.7.0 · Claude Code 2.1.296', '- 다른 창: 1.7.1 (3분 전)'])
+    const four = [0, 1, 2, 3].map(i => ({ v: '1.7.0', at: now - (i + 1) * HOUR }))
+    expect(lines({ others: four })[1]).toBe('- 다른 창: 1.7.0 (1시간 전) · 1.7.0 (2시간 전) · 1.7.0 (3시간 전) 외 1개')
+    expect(lines({ others: [] })[1]).toBe('- 다른 창: 없음')
+    expect(lines({ others: [{ v: '1.8.0', at: now - 20_000 }], schema: { stored: 4, mine: 3 } })[1]).toBe(
+      '- 다른 창: 1.8.0 (방금) · 저장소가 새 구조(4, 이 창 3)라 개념 모음과 복습 단계를 고치지 않음',
+    )
+    expect(lines({ schema: { stored: 4, mine: 3 } })[1]).toBe('- 다른 창: 알 수 없음 · 저장소가 새 구조(4, 이 창 3)라 개념 모음과 복습 단계를 고치지 않음')
+    // Unread and nothing to say: no line.
+    expect(lines({})[1]).toMatch(/^- 화면: /)
+  })
 })

@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, EngineInterface, HookFailure, ModelUsage, Register } from 'claude-code'
+import type { ElementTable, EngineInterface, HookFailure, ModelUsage, Register, RenderSurface } from 'claude-code'
 
 import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnDayUsage, LearnLive, LearnNote, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSubmit, LearnView, LearnWithheld } from '../types'
 import {
@@ -162,6 +162,16 @@ import {
   modelCode,
   saveFailText,
   storeFailText,
+  BEHIND_TAIL,
+  STAMP_EVERY_MS,
+  STORE_SCHEMA,
+  cleanStamps,
+  isSchemaAhead,
+  newerBuild,
+  newerText,
+  otherStamps,
+  shareText,
+  withStamp,
 } from './notes'
 
 const PANE = 'learn-notes'
@@ -193,6 +203,7 @@ const quizRun = atom({ plugin: 'learn-notes', key: 'quizRun' } as const, { isMak
 const askRun = atom({ plugin: 'learn-notes', key: 'askRun' } as const, {})
 const activity = atom({ plugin: 'learn-notes', key: 'activity' } as const, {})
 const submitted = atom({ plugin: 'learn-notes', key: 'submitted' } as const, { list: [], lastRequest: null })
+const newerSaid = atom({ plugin: 'learn-notes', key: 'newerSaid' } as const, null)
 
 /** `$.store` keys: notes per project for the next session, the concept index, merges and the last quiz. */
 const HISTORY_KEY = 'history'
@@ -234,6 +245,18 @@ const STEPS_KEY = 'steps'
  * for /learn 진단, and the day the session-start check line last showed. Written at most once a minute.
  */
 const FAULTS_KEY = 'faults'
+/**
+ * Each session's build, by session id: `{ v, at }`, its version and when it last said so (SessionStamp), 8 at most
+ * and a day old at most (cleanStamps), under 1KB. Written at session start and with the notes' history at most every
+ * 10 minutes: a window still running an older build learns a newer one is open (newerBuild), and /learn 진단 names them.
+ */
+const SESSIONS_KEY = 'sessions'
+/**
+ * The store's layout number, a whole number (STORE_SCHEMA, 3 since 1.7.0), only ever raised: a session of an older
+ * build that finds it newer leaves the concept index, its known marks and steps, the merges and the quiz bank alone
+ * (isStoreAhead), so it never writes them back in a layout the newer build no longer reads.
+ */
+const SCHEMA_KEY = 'schema'
 const WELCOME = 'learn-notes가 켜졌습니다 · 파일을 고치는 요청을 하면 노트가 생깁니다 · /learn으로 패널'
 
 type MergeRecord = { concept: LearnConcept; into: string; both: number }
@@ -384,6 +407,13 @@ function enqueue<T>(lane: keyof typeof lanes, work: () => Promise<T>): Promise<T
 }
 /** This build's version, read from its plugin.json at session start (/learn 도움말, /learn 진단); undefined until then, or when unreadable. */
 let myVersion: string | undefined
+/** This session's id, read at session start: the key of its stamp (SESSIONS_KEY); undefined when it cannot be read. */
+let mySessionId: string | undefined
+/** True once the store's layout is newer than this build's (SCHEMA_KEY): the concepts are left alone until a reload (isStoreAhead). */
+let isBehind = false
+/** When this session last wrote its stamp (SESSIONS_KEY), and last read the others': each at most every STAMP_EVERY_MS. */
+let stampedAt = Number.NEGATIVE_INFINITY
+let lookedAt = Number.NEGATIVE_INFINITY
 /**
  * The pane as last drawn, for /learn 진단: where the surface seated it and how wide. Kept in the module, since a
  * render hook may not write state.
@@ -563,6 +593,94 @@ function hookFailed($: EngineInterface, failure: HookFailure, area: FaultArea, e
   if (failure.kind === 're-entry') return
   void fault($, area, `hook:${event}${failure.kind === 'timeout' ? ':timeout' : ''}`, `${event} 훅이 멈췄습니다`)
 }
+
+/**
+ * Writes this session's stamp (SESSIONS_KEY): its build's version, now, over its own from before a reload. Nothing
+ * while the version or the session's id is unknown. Run in the storing lane; a store that refuses it is a fault.
+ */
+async function stampNow($: EngineInterface): Promise<void> {
+  if (myVersion === undefined || mySessionId === undefined) return
+  try {
+    const now = await $.clock.now()
+    // Held before the write: a store that refuses it is not asked again at every save.
+    stampedAt = now
+    await $.store.set(SESSIONS_KEY, withStamp(await $.store.get(SESSIONS_KEY), mySessionId, myVersion, now))
+  } catch (error) {
+    void fault($, 'store', faultCode(error, 'store'), '버전 도장을 남기지 못했습니다')
+  }
+}
+
+/**
+ * At session start, in the storing lane: the store's layout number (SCHEMA_KEY) read, the schema guard turned on
+ * when it is newer than this build's, else raised to this build's. Never lowered, nor written over a value it does
+ * not know.
+ */
+async function keepSchema($: EngineInterface): Promise<void> {
+  try {
+    const raw = await $.store.get(SCHEMA_KEY)
+    if (isSchemaAhead(raw)) isBehind = true
+    else if (raw === undefined || (typeof raw === 'number' && raw < STORE_SCHEMA)) await $.store.set(SCHEMA_KEY, STORE_SCHEMA)
+  } catch (error) {
+    void fault($, 'store', faultCode(error, 'store'), '저장 구조 번호를 남기지 못했습니다')
+  }
+}
+
+/**
+ * The schema guard, asked before the concept index, its known marks and steps, the merges or the quiz bank are
+ * written: true once the store's layout is newer than this build's. Read again each time until then (a newer build
+ * may have started since), its notice said the moment it turns on. A store that cannot be read guards nothing: the
+ * write that follows fails on its own.
+ */
+async function isStoreAhead($: EngineInterface): Promise<boolean> {
+  if (isBehind) return true
+  if (!isSchemaAhead(await $.store.get(SCHEMA_KEY).catch(() => undefined))) return false
+  isBehind = true
+  await sayNewer($)
+  return true
+}
+
+/**
+ * Reads the other sessions' stamps and the store's layout at most every STAMP_EVERY_MS (session start, /learn, a
+ * turn's end), and says what changed (sayNewer). Never fails the caller.
+ */
+async function lookNewer($: EngineInterface): Promise<void> {
+  try {
+    const now = await $.clock.now()
+    if (now - lookedAt < STAMP_EVERY_MS) return
+    lookedAt = now
+    if (!isBehind && isSchemaAhead(await $.store.get(SCHEMA_KEY))) isBehind = true
+    await sayNewer($, now)
+  } catch {
+    // Looked at again in ten minutes.
+  }
+}
+
+/**
+ * Says in an older window, as a dim transcript line (never sent to the model) and a toast, that a newer build was
+ * stamped in another window within STAMP_LIVE_MS, and that the schema guard is on (newerText). Each thing once a
+ * session (newerSaid, which a reload keeps). None in a -p run, nor while this build's version is unknown and the
+ * guard is off. Never fails the caller.
+ */
+async function sayNewer($: EngineInterface, at?: number): Promise<void> {
+  if (!isInteractive) return
+  try {
+    const now = at ?? (await $.clock.now())
+    const stamps = cleanStamps(await $.store.get(SESSIONS_KEY), now)
+    const newer = myVersion === undefined ? undefined : newerBuild(stamps, mySessionId, myVersion, now)
+    const text = newerText(newer, myVersion, isBehind)
+    if (text === undefined) return
+    const key = `${newer ?? ''}|${isBehind ? 'behind' : ''}`
+    if ((await read($, newerSaid)) === key) return
+    await update($, newerSaid, () => key)
+    $.ui.log(text)
+    $.ui.toast(text, { timeoutMs: 10_000 })
+  } catch {
+    // Said the next time it is looked at.
+  }
+}
+
+/** What a command that would change the concept index answers while the schema guard is on. */
+const BEHIND_TEXT = `learn-notes가 다른 창에서 더 새 버전으로 학습 기록을 썼습니다 · ${BEHIND_TAIL} · /reload-plugins로 바꿉니다`
 
 /** A stored note read back by a newer build: the fields it may lack filled in, an unfinished one failed. */
 function fromHistory(raw: unknown, root: string): LearnNote | undefined {
@@ -849,6 +967,8 @@ async function persistNow($: EngineInterface, forget: boolean, extra: readonly L
     )
     await $.store.set(HISTORY_KEY, fitHistory(recent, root))
     faultOk($, 'store')
+    // This session's stamp goes with the notes, at most every ten minutes: a window that writes notes is open.
+    if (now - stampedAt >= STAMP_EVERY_MS) await stampNow($)
     if (fresher.length > 0) {
       await update($, notes, current =>
         current.map(one => {
@@ -918,7 +1038,7 @@ async function storedIndex($: EngineInterface, map: Readonly<Record<string, stri
 /**
  * Writes the concept index: its known marks and steps first, apart
  * (KNOWN_KEY, STEPS_KEY), then the index with each name as it was stored
- * (storedConcepts).
+ * (storedConcepts). Every caller asks the schema guard (isStoreAhead) first.
  */
 async function storeIndex($: EngineInterface, index: Readonly<Record<string, LearnConcept>>): Promise<void> {
   await $.store.set(KNOWN_KEY, knownMarks(index))
@@ -1006,7 +1126,8 @@ async function followRoot($: EngineInterface): Promise<void> {
 
 /**
  * Counts a finished note's concepts into the index (store first, then the
- * pane's mirror); a rewrite counts only what changed. Returns the note's keys.
+ * pane's mirror); a rewrite counts only what changed. Returns the note's keys,
+ * counting nothing while the schema guard is on (isStoreAhead).
  */
 function learnConcepts($: EngineInterface, cfg: Config, note: LearnNote): Promise<string[]> {
   return enqueue('storing', () => learnConceptsNow($, cfg, note))
@@ -1026,6 +1147,8 @@ async function learnConceptsNow($: EngineInterface, cfg: Config, note: LearnNote
   const taught = found.filter(one => !had.includes(one.key))
   const untaught = had.filter(key => !keys.includes(key))
   if (taught.length === 0 && untaught.length === 0) return keys
+  // A newer build's index is left as it is: the note keeps its keys, the counts are that build's to make.
+  if (await isStoreAhead($)) return keys
   try {
     const raw = await $.store.get(CONCEPTS_KEY)
     const index = countConcepts(
@@ -1083,11 +1206,13 @@ type MergeResult = { isDone: true; gone: LearnConcept; kept: LearnConcept; isSpl
  * added less the notes that taught both, the alias kept for every note's old
  * key and for later notes. Naming a concept that was merged away as the target
  * undoes that merge: two concepts merged are split again as they were, less
- * nothing met since; a rename is renamed back.
+ * nothing met since; a rename is renamed back. Refused while the schema guard
+ * is on (isStoreAhead): the merges are a newer build's to keep then.
  */
 function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, intoName: string): Promise<MergeResult> {
   return enqueue('storing', async (): Promise<MergeResult> => {
     try {
+      if (await isStoreAhead($)) return { isDone: false, text: BEHIND_TEXT }
       const map = cleanAliases(await $.store.get(ALIASES_KEY))
       const index = await storedIndex($, map)
       const from = resolveKey(map, conceptKey(fromName))
@@ -1149,11 +1274,12 @@ type KnownResult = { done: string[]; already: string[]; missing: string[] } | { 
 /**
  * /learn 안다 · 모른다: marks the named concepts known (`toKnown`) or takes
  * the mark off, against the store as it is now; a name merged away counts as
- * the concept it went into. No model call.
+ * the concept it went into. No model call. Refused while the schema guard is on.
  */
 function markKnownStored($: EngineInterface, cfg: Config, names: readonly string[], toKnown: boolean): Promise<KnownResult> {
   return enqueue('storing', async (): Promise<KnownResult> => {
     try {
+      if (await isStoreAhead($)) return { error: BEHIND_TEXT }
       const map = cleanAliases(await $.store.get(ALIASES_KEY))
       const index = await storedIndex($, map)
       const at = await $.clock.now()
@@ -1215,10 +1341,11 @@ async function storedActivity($: EngineInterface): Promise<Record<string, LearnD
   return raw === undefined ? activityFromNotes(await allNotes($)) : cleanActivity(raw)
 }
 
-/** Adds a new quiz's questions to the bank /learn anki exports; never fails the caller. */
+/** Adds a new quiz's questions to the bank /learn anki exports, unless the schema guard is on; never fails the caller. */
 function bankQuestions($: EngineInterface, items: readonly LearnQuizItem[], at: number): Promise<void> {
   return enqueue('storing', async () => {
     try {
+      if (await isStoreAhead($)) return
       const bank = addToBank(cleanBank(await $.store.get(BANK_KEY)), items.map(({ key, name, question, answer }) => ({ key, name, question, answer })), at)
       await $.store.set(BANK_KEY, bank)
     } catch (error) {
@@ -1356,7 +1483,8 @@ async function remind($: EngineInterface, cfg: Config): Promise<void> {
 /**
  * Marks concepts after a quiz grade, in the store and the pane's mirror: the
  * marks each had before (in the order of `keys`), or undefined when the store
- * could not be written.
+ * could not be written. While the schema guard is on (isStoreAhead), nothing is
+ * marked: the marks before come back all the same, so the grade stands.
  */
 function markConcepts(
   $: EngineInterface,
@@ -1374,6 +1502,8 @@ function markConcepts(
         const one = conceptAt(prior, key)
         return one ? marksOf(one) : undefined
       })
+      // Graded all the same, its concept's step left as a newer build's index has it.
+      if (await isStoreAhead($)) return before
       const index = mark(prior, resolved, at)
       await storeIndex($, index)
       await update($, concepts, () => index)
@@ -2695,6 +2825,10 @@ export const register: Register = (on, options) => {
     }
     isInteractive = e.isInteractive
     myVersion = await readVersion($)
+    mySessionId = await $.session.id().catch(() => undefined)
+    // The guard first, before anything writes the concepts; then this session's stamp for the other windows.
+    await enqueue('storing', () => keepSchema($))
+    await enqueue('storing', () => stampNow($))
     await loadHistory($)
     await loadTeam($)
     await seedActivity($)
@@ -2702,6 +2836,8 @@ export const register: Register = (on, options) => {
     await remind($, cfg)
     await welcome($)
     await checkAtStart($, cfg)
+    // A newer build open in another window, or a store it wrote in a newer layout: said once a session.
+    await lookNewer($)
     // A quiz request a reload cut off is not coming back; the last quiz is there for the pane to draw.
     if (!isQuizMaking && !isQuizChecking) await update($, quizRun, () => ({ isMaking: false, error: null, checking: null }))
     // A question a reload cut off is not coming back: its field is there again.
@@ -2901,6 +3037,7 @@ export const register: Register = (on, options) => {
     }
     // Concepts fall due as time passes: each turn's end looks again.
     await remind($, cfg)
+    await lookNewer($)
     return next(e)
   })
 
@@ -2926,6 +3063,7 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'learn' }, async ($, e) => {
+    await lookNewer($)
     const words = e.args.trim()
     const said = (words.split(/\s+/)[0] ?? '').toLowerCase()
     const arg = COMMAND_WORDS[said] ?? said
@@ -3114,9 +3252,16 @@ export const register: Register = (on, options) => {
       const files = found.parts.length > 1 ? ` (일지 파일 ${found.parts.length}개)` : ''
       return { text: `${day} 노트 ${index.length}개${files}\n\n${lines.join('\n')}${more}${elsewhere}` }
     }
-    if (arg === 'last') {
-      const last = list.at(-1)
-      return { text: last ? noteAsText(last) : EMPTY_TEXT }
+    // The note picked in the pane (else the last) copied as c copies it; 마지막 · last, its names before 1.7.0, too.
+    if (arg === 'share' || arg === 'last') {
+      const wanted = await read($, selectedId)
+      const note = list.find(one => one.id === wanted) ?? list.at(-1)
+      if (!note) return { text: EMPTY_TEXT }
+      if (note.status !== 'ready') return { text: `이 노트는 아직 복사할 글이 없습니다 · ${noteState(note)}` }
+      const text = await shareOf($, cfg, note)
+      if (await deliver($, text, isAwayOrigin(e.origin))) return { text: SHARE_REPLY }
+      // A chat channel reads the reply alone: the note goes there, as /learn 보고서 does.
+      return { text: `${SHARE_HERE}\n\n${text}` }
     }
     if (arg === 'clear') {
       // Asked once more first: the pane's notes do not come back.
@@ -3151,7 +3296,7 @@ export const register: Register = (on, options) => {
     if (opened.isPlaced && (await isCloudSession($))) {
       // Placed on the cloud computer's own terminal, which nobody sees: say so, and show the note here.
       return {
-        text: `이 세션은 클라우드 컴퓨터에서 돌아, 패널이 지금 보는 화면에 뜨지 않을 수 있습니다. 마지막 노트를 여기에 적습니다 (/learn 마지막으로 언제든 다시 봅니다).\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
+        text: `이 세션은 클라우드 컴퓨터에서 돌아, 패널이 지금 보는 화면에 뜨지 않을 수 있습니다. 마지막 노트를 여기에 적습니다 (/learn으로 언제든 다시 봅니다).\n\n${last ? noteAsText(last) : EMPTY_TEXT}`,
       }
     }
     const root = await $.session.root()
@@ -3518,8 +3663,8 @@ function focusShown($: EngineInterface, current: Quiz): void {
  * Under a written note, what to do with it: a quiz on its concepts (t), the
  * note explained again in plainer words under it, the note kept (e), its code
  * followed step by step on one example (r), a question about it (i, the field
- * below), and last and dim the note written again (w), with the latest
- * questions and their answers.
+ * below), and last and dim the note copied for a mentor (c) and written again
+ * (w), with the latest questions and their answers.
  */
 function noteTools($: EngineInterface, cfg: Config, note: LearnNote, writeLabel: string, ask: LearnAskRun, el: ElementTable) {
   const { Box, Text, Button, Markdown } = el
@@ -3554,6 +3699,7 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, writeLabel:
         {Input && (
           <Button key="ask-type" hotkey="i" plain label="질문하기" onPress={() => void $.ui.focus({ requestId: PANE, key: fieldKey }).catch(() => undefined)} />
         )}
+        <Button key="share" hotkey="c" plain dimColor label="복사" onPress={press => void shareNote($, cfg, note.id, press.surface)} />
         <Button key="write" hotkey="w" plain dimColor label={writeLabel} onPress={() => void writeNote($, cfg, note.id, { isRewrite: note.savedAs !== null })} />
       </Box>
       {(note.asks ?? []).map((one, i, all) => ({ one, key: askedKey(note.id, all, i) })).slice(-2).map(({ one, key }) => (
@@ -4072,6 +4218,44 @@ async function reportCommand($: EngineInterface, cfg: Config, rest: string, isAw
   return [`학습 보고서입니다 · 이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다. 붙이기 전에 한 번 읽어 보세요${file ? ` · ${file}` : ''}`, '', text].join('\n')
 }
 
+/** What c and /learn 공유 say once the note is on the clipboard, and the line over it where it could not be. */
+const SHARE_COPIED = '노트를 복사했습니다 · 요청과 질문은 빼고 비밀값은 가렸습니다 · 붙이기 전에 읽어 보세요'
+const SHARE_REPLY = '노트를 클립보드에 복사했습니다 · 붙이기 전에 한 번 읽어 보세요'
+const SHARE_HERE = '복사할 수 없어 여기에 적습니다 · 길게 눌러 복사하세요'
+
+/**
+ * A written note as c and /learn 공유 copy it (shareText), screened as a journal section is: the concepts it taught
+ * by the names the index has for them now (a merge followed), else as the note wrote them.
+ */
+async function shareOf($: EngineInterface, cfg: Config, note: LearnNote): Promise<string> {
+  const index = await read($, concepts)
+  const map = await read($, aliases)
+  const named = note.concepts.flatMap(key => conceptAt(index, resolveKey(map, key))?.name ?? [])
+  const names = (named.length > 0 ? named : conceptsOf(note.text).map(one => one.name)).filter((name, i, all) => all.indexOf(name) === i)
+  return shareText(await screened($, cfg, note), names)
+}
+
+/**
+ * The pane's c under a written note: the note copied for a mentor (shareOf) on the clipboard of the surface the
+ * press came from, and a toast saying what was left out. Where nothing can be copied (the mobile app, which has no
+ * clipboard to write yet, a cloud session, a copy refused) the same text goes in the transcript as a dim line, never
+ * sent to the model. Nothing is stored.
+ */
+async function shareNote($: EngineInterface, cfg: Config, id: string, surface?: RenderSurface): Promise<void> {
+  try {
+    const note = (await read($, notes)).find(one => one.id === id)
+    if (!note || note.status !== 'ready') return
+    const text = await shareOf($, cfg, note)
+    if (surface !== 'mobile' && (await deliver($, text, false, surface))) {
+      $.ui.toast(SHARE_COPIED, { timeoutMs: 6000 })
+      return
+    }
+    $.ui.log(`${SHARE_HERE}\n\n${text}`)
+  } catch (error) {
+    void fault($, 'copy', faultCode(error), '노트를 복사하지 못했습니다')
+  }
+}
+
 /** /learn 진단's first two lines: where the text went, and what it does not hold. */
 const DIAG_COPIED = '진단 내용을 클립보드에 복사했습니다 · 팀 채널이나 담당자에게 그대로 붙여 주세요'
 const DIAG_HERE = '이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다'
@@ -4105,6 +4289,12 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
   const locked = SETTING_FIELDS.filter(field => rows.some(row => row.key === `learn-notes.${field}` && row.isLocked))
   const stored = cleanFaults(await quiet($.store.get(FAULTS_KEY), undefined), now)
   const list = faultsOkSince(mergeFaults(stored.list, faults, now), okAt)
+  // The other windows' builds, and the store's layout while it is newer than this build's.
+  const others = await $.store.get(SESSIONS_KEY).then(
+    raw => otherStamps(cleanStamps(raw, now), mySessionId),
+    () => undefined,
+  )
+  const layout = await quiet($.store.get(SCHEMA_KEY), undefined)
   // The folder as set now: a share by its name, or one this load's journal writes still find out of reach. A network
   // failure kept from before (a saveDir since changed, a reload since) stays in the faults' list alone.
   const lastSave = faults.filter(one => one.area === 'save').sort((a, b) => a.last - b.last).at(-1)
@@ -4130,6 +4320,8 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
     now,
     ...(version !== undefined ? { version } : {}),
     ...(engine !== undefined ? { engine } : {}),
+    ...(others !== undefined ? { others } : {}),
+    ...(isSchemaAhead(layout) ? { schema: { stored: layout as number, mine: STORE_SCHEMA } } : {}),
     surfaces,
     pane,
     isPaneFocused: mine?.isFocused === true,
@@ -4157,15 +4349,16 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
 }
 
 /**
- * Puts `text` on the clipboard of the screen the command came from, for /learn 보고서 and /learn 진단: true once
- * copied. Nothing is copied for a person away from this session's screens (`isAway`: a phone through Remote
- * Control, a chat channel; the clipboard would be the terminal's, not theirs) or in a cloud session (a computer
- * nobody sees): the caller then gives the text in its reply, as it does when the copy fails (a fault of its own).
+ * Puts `text` on the clipboard of the screen the command came from (or `surface`, the one a press came from), for
+ * /learn 보고서, /learn 진단, /learn 공유 and the pane's c: true once copied. Nothing is copied for a person away from
+ * this session's screens (`isAway`: a phone through Remote Control, a chat channel; the clipboard would be the
+ * terminal's, not theirs) or in a cloud session (a computer nobody sees): the caller then gives the text where it
+ * can be read, as it does when the copy fails (a fault of its own).
  */
-async function deliver($: EngineInterface, text: string, isAway: boolean): Promise<boolean> {
+async function deliver($: EngineInterface, text: string, isAway: boolean, surface?: RenderSurface): Promise<boolean> {
   if (isAway || (await isCloudSession($).catch(() => false))) return false
   try {
-    const copied = await $.ui.copy({ text })
+    const copied = await $.ui.copy({ text, ...(surface !== undefined ? { surface } : {}) })
     if (copied.isCopied) {
       faultOk($, 'copy')
       return true
@@ -4510,7 +4703,7 @@ const HELP = [
   '- `/learn`: 패널 열기 · 패널의 키를 쓰려면 `ctrl+x tab`(또는 패널 클릭), Esc로 대화로 돌아갑니다 (숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다)',
   '- `/learn 복습`: 오늘 복습을 패널 퀴즈로 바로 시작 · 답 칸에 바로 적고 Enter (패널이 없는 화면에서는 대화창에 문제를 냅니다)',
   '- 패널: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작 · `p`·`n` 이전·다음 노트 · `w` 노트 쓰기, 다시 쓰기',
-  '- 노트 아래: `t` 이 노트 퀴즈 · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기',
+  '- 노트 아래: `t` 이 노트 퀴즈 · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기 · `c` 복사(요청·경로를 빼고 멘토에게 묻기)',
   '- 퀴즈(`4`): 답을 적고 Enter로 채점 · 답 칸에서 Tab으로 버튼에 가서 `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기 · `s` 새 문제(풀던 문제가 남았으면 두 번) · `n` 틀린 개념을 배운 노트',
   '- `/learn 퀴즈`: 대화창에서 풀기 · 풀던 퀴즈, 없으면 복습할 개념으로 새 퀴즈 (내 코드의 결과를 맞히거나 바꿔 봅니다) · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트`(`힌트 2`) · `정답`',
   '- `/learn 정리`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
@@ -4518,7 +4711,7 @@ const HELP = [
   '- `/learn 기록`: 연속 학습일 · 정답률 · 복습할 개념 · 배운 개념 · 모델 호출 수',
   '- `/learn 보고서`: 코드 없는 학습 보고서를 클립보드와 파일로 (최근 7일 · `이번주` · `어제`도 됩니다)',
   '- `/learn 찾기 말`: 지난 노트 찾기 · `/learn 일지`: 오늘 노트 목차 (`어제` · `2026-10-03` · `목록`도 됩니다)',
-  '- 가끔: `/learn 마지막` 마지막 노트 · `/learn 합치기 A = B` 개념 합치기 · `/learn 안다 이름` 복습에서 빼기 · `/learn 모른다 이름` 되돌리기 · `/learn 안키` Anki 카드 · `/learn 비우기` 패널 비우기',
+  '- 가끔: `/learn 공유` 고른 노트 복사 · `/learn 합치기 A = B` 개념 합치기 · `/learn 안다 이름` 복습에서 빼기 · `/learn 모른다 이름` 되돌리기 · `/learn 안키` Anki 카드 · `/learn 비우기` 패널 비우기',
 ].join('\n')
 /** The pane's two lines when drawing it failed (the Pane render's .catch). */
 const RENDER_FAILED = '패널을 그리지 못했습니다 · /learn 진단을 복사해 팀에 보내 주세요'
@@ -4540,7 +4733,8 @@ function commandHelp(): string {
 const SHORT_HELP = '자주 쓰는 것: `/learn` 패널 · `/learn 복습` · `/learn 퀴즈` · `/learn 정리` · `/learn 질문 …` · `/learn 기록` · 전체는 `/learn 도움말`'
 /**
  * Korean words for the subcommands, so `/learn 퀴즈` works as `/learn quiz` does. Some are kept
- * out of the help: 날짜 (days), 저장 (save, retired), 개념 and 통계 (the record, as 기록).
+ * out of the help: 날짜 (days), 저장 (save, retired), 개념 and 통계 (the record, as 기록), 마지막 (share,
+ * its name before 1.7.0, as `last` is).
  */
 const COMMAND_WORDS: Record<string, string> = {
   도움말: 'help',
@@ -4561,7 +4755,8 @@ const COMMAND_WORDS: Record<string, string> = {
   검색: 'find',
   일지: 'day',
   날짜: 'days',
-  마지막: 'last',
+  공유: 'share',
+  마지막: 'share',
   합치기: 'merge',
   안다: 'know',
   모른다: 'unknow',
@@ -4583,21 +4778,20 @@ const MERGE_USAGE =
   '쓰는 법: /learn 합치기 합칠 개념 = 남길 개념  (예: /learn 합치기 Destructuring = 구조 분해 할당 · = 대신 => -> → | 도 됩니다 · 거꾸로 하면 되돌립니다)'
 const EMPTY_TEXT = '아직 학습 노트가 없습니다. Claude가 파일을 고친 턴이 끝나면 생깁니다.'
 
+/** Why a note has no text to read yet: being written, failed (with why), or not written by itself (and why). */
+function noteState(note: LearnNote): string {
+  if (note.status === 'writing') return '노트를 쓰는 중입니다'
+  if (note.status === 'failed') return `노트를 쓰지 못했습니다: ${note.text}`
+  if (note.skip === 'format') return '띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기'
+  if (note.skip === 'limit') return '하루 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기'
+  return '자동 노트가 꺼져 있습니다'
+}
+
+/** A note as /learn says it where no pane can show: its time and files (each with its whole path), then its text. */
 function noteAsText(note: LearnNote): string {
   const files = note.changes.map(c => `${c.file} (+${c.added} −${c.removed})`).join(', ')
   const more = note.moreFiles > 0 ? ` 외 ${note.moreFiles}개` : ''
-  const body =
-    note.status === 'ready'
-      ? note.text
-      : note.status === 'writing'
-        ? '(노트를 쓰는 중입니다)'
-        : note.status === 'failed'
-          ? `(노트를 쓰지 못했습니다: ${note.text})`
-          : note.skip === 'format'
-            ? '(띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기)'
-            : note.skip === 'limit'
-              ? '(하루 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기)'
-              : '(자동 노트가 꺼져 있습니다)'
+  const body = note.status === 'ready' ? note.text : `(${noteState(note)})`
   const withheld = (note.withheld ?? []).length > 0 ? `\n\n노트에서 뺀 파일: ${withheldText(note.withheld ?? [])}` : ''
   return `**${stamp(note.at).time} · ${files}${more}**${withheld}\n\n${body}`
 }

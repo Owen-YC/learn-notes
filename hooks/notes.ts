@@ -3934,6 +3934,8 @@ export function sizeText(bytes: number): string {
 
 /** Faults /learn 진단 lists at most: its reply goes into the conversation. */
 export const DIAG_FAULTS = 8
+/** Other sessions /learn 진단 names on its 다른 창 line, the newest first. */
+export const DIAG_OTHERS = 3
 
 /** What /learn 진단 is made of, every piece gathered with no model call; none of it a path, a request, code or a concept. */
 export type DiagInput = {
@@ -3941,6 +3943,10 @@ export type DiagInput = {
   /** This build's version, and Claude Code's. */
   version?: string
   engine?: string
+  /** The other sessions' stamps the store keeps (the last day's, newest first); undefined when it could not be read. */
+  others?: readonly SessionStamp[]
+  /** The store's layout number and this build's, given only while the store's is newer (the schema guard is on). */
+  schema?: { stored: number; mine: number }
   /** The surfaces the session draws on. */
   surfaces: readonly string[]
   /** The pane: closed, open but not placed, placed and not drawn yet, or as last drawn. */
@@ -4033,9 +4039,22 @@ export function diagText(input: DiagInput): string {
       : input.unsaved > 0
         ? `아직 못 쓴 노트 ${input.unsaved}개`
         : '못 쓴 노트 없음'
+  const guard = input.schema ? ` · 저장소가 새 구조(${input.schema.stored}, 이 창 ${input.schema.mine})라 개념 모음과 복습 단계를 고치지 않음` : ''
+  const seen = input.others
+  const windows =
+    seen === undefined
+      ? '알 수 없음'
+      : seen.length === 0
+        ? '없음'
+        : `${seen
+            .slice(0, DIAG_OTHERS)
+            .map(one => `${one.v} (${agoText(one.at, now)})`)
+            .join(' · ')}${seen.length > DIAG_OTHERS ? ` 외 ${seen.length - DIAG_OTHERS}개` : ''}`
+  const others = seen === undefined && guard === '' ? [] : [`- 다른 창: ${windows}${guard}`]
   return [
     `learn-notes 진단 · ${day} ${time}`,
     `- 버전: learn-notes ${input.version ?? '알 수 없음'} · Claude Code ${input.engine ?? '알 수 없음'}`,
+    ...others,
     `- 화면: ${screen.join(' · ')}`,
     `- 설정: ${settings.join(' · ')}`,
     `- 오늘: 노트 ${input.today.notes}개 · 모델 호출 ${input.today.calls}번 · 실패 ${failures}번`,
@@ -4046,4 +4065,174 @@ export function diagText(input: DiagInput): string {
     ...(recent.length > listed.length ? [`  - 그 밖에 ${recent.length - listed.length}건`] : []),
     ...focus,
   ].join('\n')
+}
+
+/** The store's layout as this build writes it: a session of an older build that finds a newer one leaves the concepts alone. */
+export const STORE_SCHEMA = 3
+
+/** True when the store's layout number (`raw`, its schema key) is newer than this build's: the schema guard is on. */
+export function isSchemaAhead(raw: unknown, mine = STORE_SCHEMA): boolean {
+  return typeof raw === 'number' && Number.isInteger(raw) && raw > mine
+}
+
+/** One session's stamp in the store: the version its build runs (`v`), and when it last said so (`at`). */
+export type SessionStamp = { v: string; at: number }
+
+/** Sessions the stamps keep at most, the latest. */
+export const STAMPS_KEPT = 8
+/** How long a stamp is kept after it was last written. */
+export const STAMP_KEPT_MS = 86_400_000
+/** How recent another session's stamp must be for an older build to say a newer one is open. */
+export const STAMP_LIVE_MS = 30 * 60_000
+/** How often a session writes its own stamp again, and reads the others'. */
+export const STAMP_EVERY_MS = 10 * 60_000
+
+/** A version's major, minor and patch as numbers (`1.7.0-beta` as 1, 7, 0); undefined when it is not one. */
+export function versionParts(v: string): [number, number, number] | undefined {
+  const m = v.length <= 40 ? /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})[0-9A-Za-z.+-]*$/.exec(v) : null
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : undefined
+}
+
+/** Above 0 when version `a` is newer than `b` by major, minor and patch, below 0 when older, 0 when the same or either is no version. */
+export function compareVersions(a: string, b: string): number {
+  const x = versionParts(a)
+  const y = versionParts(b)
+  if (!x || !y) return 0
+  for (let i = 0; i < 3; i += 1) if (x[i] !== y[i]) return x[i]! - y[i]!
+  return 0
+}
+
+/** The sessions' stamps as the store holds them, read back: well-formed ones of the last STAMP_KEPT_MS, the newest STAMPS_KEPT. */
+export function cleanStamps(raw: unknown, now: number): Record<string, SessionStamp> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
+  const kept: [string, SessionStamp][] = []
+  for (const [id, one] of Object.entries(raw as Record<string, unknown>)) {
+    if (id === '' || id.length > 200 || typeof one !== 'object' || one === null) continue
+    const { v, at } = one as Record<string, unknown>
+    if (typeof v !== 'string' || versionParts(v) === undefined) continue
+    if (typeof at !== 'number' || !Number.isFinite(at) || Math.abs(now - at) >= STAMP_KEPT_MS) continue
+    kept.push([id, { v, at }])
+  }
+  return Object.fromEntries(kept.sort((a, b) => b[1].at - a[1].at).slice(0, STAMPS_KEPT))
+}
+
+/** The stamps with this session's (`id`) set to version `v` at `now`, written over its own after a reload; STAMPS_KEPT at most. */
+export function withStamp(raw: unknown, id: string, v: string, now: number): Record<string, SessionStamp> {
+  const others = Object.entries(cleanStamps(raw, now)).filter(([other]) => other !== id)
+  return Object.fromEntries([[id, { v, at: now }] as [string, SessionStamp], ...others].slice(0, STAMPS_KEPT))
+}
+
+/** The newest version another session (not `id`) stamped within STAMP_LIVE_MS, when it is newer than this build's (`mine`). */
+export function newerBuild(stamps: Readonly<Record<string, SessionStamp>>, id: string | undefined, mine: string, now: number): string | undefined {
+  let newest: string | undefined
+  for (const [other, one] of Object.entries(stamps)) {
+    if (other === id || now - one.at >= STAMP_LIVE_MS) continue
+    if (compareVersions(one.v, newest ?? mine) > 0) newest = one.v
+  }
+  return newest
+}
+
+/** The other sessions' stamps (not `id`), the newest first: /learn 진단's 다른 창 line. */
+export function otherStamps(stamps: Readonly<Record<string, SessionStamp>>, id: string | undefined): SessionStamp[] {
+  return Object.entries(stamps)
+    .filter(([other]) => other !== id)
+    .map(([, one]) => one)
+    .sort((a, b) => b.at - a.at)
+}
+
+/** How long ago `at` was, as /learn 진단 says it: 방금, 3분 전, 2시간 전, 1일 전. */
+export function agoText(at: number, now: number): string {
+  const minutes = Math.floor(Math.max(0, now - at) / 60_000)
+  if (minutes < 1) return '방금'
+  if (minutes < 60) return `${minutes}분 전`
+  const hours = Math.floor(minutes / 60)
+  return hours < 24 ? `${hours}시간 전` : `${Math.floor(hours / 24)}일 전`
+}
+
+/** What a session whose store is newer than its build (the schema guard) leaves alone until it is loaded again. */
+export const BEHIND_TAIL = '다시 불러올 때까지 이 창은 개념 모음과 복습 단계를 고치지 않습니다(노트와 일지는 그대로)'
+
+/**
+ * The line an older session shows once (a dim transcript line and a toast): a newer build (`newer`) is in use in
+ * another window, this one runs `mine`, and /reload-plugins brings it up to date; with BEHIND_TAIL while the
+ * store is newer than this build (`isBehind`), said even when no newer window stamped lately. Undefined when
+ * there is nothing to say.
+ */
+export function newerText(newer: string | undefined, mine: string | undefined, isBehind: boolean): string | undefined {
+  const tail = isBehind ? ` · ${BEHIND_TAIL}` : ''
+  if (newer !== undefined && mine !== undefined) return `learn-notes 새 버전(${newer})이 다른 창에서 쓰이고 있습니다 · 이 창은 ${mine}입니다 · /reload-plugins로 바꿉니다${tail}`
+  if (!isBehind) return undefined
+  return `learn-notes 새 버전이 다른 창에서 학습 기록을 새 구조로 썼습니다${mine !== undefined ? ` · 이 창은 ${mine}입니다` : ''} · /reload-plugins로 바꿉니다${tail}`
+}
+
+/**
+ * A path that tells where on this computer something lies: under a home folder (`/home/u/…`, `/Users/u/…`,
+ * `C:\Users\u\…`, `~/…`), on a drive (`D:\work\…`) or a network share (`\\server\share\…`); the last
+ * name is caught. A URL, a relative path (`src/a.ts`), a route in code (`/api/users`) or `async/await` is not one.
+ */
+const LOCAL_PATH = /(?<![\w:/\\.~-])(?:~[\\/]|\/(?:home|Users|root)[\\/]|[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/])(?:[^\s\\/`'"()<>*|]+[\\/])*([^\s\\/`'"()<>*|]*)/g
+/** A home folder alone, which a path's last name would name by its owner. */
+const HOME_ONLY = /^(?:~|\/(?:home|Users)[\\/][^\\/]+|\/root|[A-Za-z]:[\\/]Users[\\/][^\\/]+)[\\/]?$/i
+
+/**
+ * `text` with no word of where the project lies on this computer: under `root` (the note's project) a path goes on
+ * from there (`src/a.ts`) and the root itself by its last name; any other local path (LOCAL_PATH) by its last
+ * name alone, a home folder as `~`.
+ */
+export function withoutPaths(text: string, root = ''): string {
+  const base = root.replace(/[\\/]+$/, '')
+  const escaped = base.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&')
+  // The root, then a separator (what follows is inside it) or the end of its last name.
+  const under = new RegExp(`(?<![\\w.~-])${escaped}(?:[\\\\/]|(?![\\w.-]))`, 'g')
+  const inRoot = base.length < 2 ? text : text.replace(under, found => (found.length > base.length ? '' : baseName(base)))
+  return inRoot.replace(LOCAL_PATH, (whole: string, name: string) => (HOME_ONLY.test(whole) ? '~' : name))
+}
+
+/** A note's text as a shared copy holds it: no summary section (the title says it), headings in bold, no code block. */
+function shareBody(text: string): string {
+  const out: string[] = []
+  let fence: string | undefined
+  let isSummary = false
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/\s+$/, '')
+    const opens = FENCE.exec(line.trim())
+    if (fence !== undefined) {
+      // A fence closes on a bare run of its own mark, at least as long; what it held never goes in.
+      if (opens && opens[1]![0] === fence[0] && opens[1]!.length >= fence.length && line.trim().slice(opens[1]!.length).trim() === '') fence = undefined
+      continue
+    }
+    if (opens) {
+      fence = opens[1]!
+      continue
+    }
+    const heading = /^\s*#{1,6}\s*([^\s#].*?)[\s#]*$/.exec(line)
+    if (heading) {
+      const title = heading[1]!.replace(/\*\*/g, '').trim()
+      isSummary = /^(?:\d+[.)]\s*)?한 줄 요약/.test(title)
+      if (!isSummary && title !== '') out.push('', `**${title}**`)
+      continue
+    }
+    if (!isSummary) out.push(line)
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+/**
+ * A written note as `c` and /learn 공유 copy it, for a mentor: its summary as a bold title; its day, how many files
+ * and the concepts it taught (`names`); the note without its summary (headings in bold, no code block); the files
+ * it left out; and an empty `묻고 싶은 것` to fill in. Neither the request, the questions asked under the note, a
+ * diff nor where the project lies goes in (an absolute path keeps its last name alone); the secrets are masked last.
+ */
+export function shareText(note: Pick<LearnNote, 'at' | 'text' | 'changes' | 'moreFiles' | 'withheld' | 'root'>, names: readonly string[]): string {
+  const summary = summaryOf(note.text).replace(/\*\*/g, '').trim()
+  const facts = [stamp(note.at).day.slice(5), `파일 ${note.changes.length + note.moreFiles}개`, ...(names.length > 0 ? [`개념: ${names.join(' · ')}`] : [])]
+  const body = shareBody(note.text)
+  const withheld = note.withheld ?? []
+  const parts = [
+    `**[학습 노트]${summary === '' ? '' : ` ${summary}`}**\n${facts.join(' · ')}`,
+    ...(body !== '' ? [body] : []),
+    ...(withheld.length > 0 ? [`노트에서 뺀 파일: ${withheldText(withheld)}`] : []),
+    '**묻고 싶은 것**: ',
+  ]
+  return redactText(withoutPaths(parts.join('\n\n'), note.root)).text
 }

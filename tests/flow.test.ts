@@ -48,6 +48,12 @@ type World = {
   rootFails: boolean
   /** The settings an administrator locked, as /config lists them (`learn-notes.dailyAutoNotes`). */
   locked: string[]
+  /** The version the plugin's own plugin.json gives; null when it cannot be read. */
+  version: string | null
+  /** This session's id, as `$.session.id()` answers it. */
+  sessionId: string
+  /** The key of each store write that went in, in order. */
+  sets: string[]
   journal: () => { path: string; text: string }[]
   toasts: string[]
   statuses: (string | undefined)[]
@@ -106,6 +112,9 @@ function world(
     rootFails: false,
     failNextWrites: 0,
     locked: [],
+    version: '1.7.0',
+    sessionId: 'session-mine',
+    sets: [],
     journal: () => w.writes.filter(write => !write.path.endsWith('/concepts.md')),
     toasts: [],
     statuses: [],
@@ -132,6 +141,7 @@ function world(
     return { value: w.root }
   })
   on('session.version', () => ({ value: { version: '2.1.296', base: '2.1.296' } }))
+  on('session.id', () => ({ value: w.sessionId }))
   on('session.surfaces', () => ({ value: ['terminal' as const] }))
   on('config.list', () => ({
     value: ['autoNote', 'model', 'dailyAutoNotes', 'level', 'autoSave', 'saveDir'].map(field => ({
@@ -158,6 +168,7 @@ function world(
   on('store.get', (_$, e) => ({ value: w.store.has(e.key) ? JSON.parse(JSON.stringify(w.store.get(e.key))) : undefined }))
   on('store.set', (_$, e) => {
     if (w.storeFails) return { deny: 'store over 4 MiB' }
+    w.sets.push(e.key)
     w.store.set(e.key, JSON.parse(JSON.stringify(e.value)))
     return { value: undefined }
   })
@@ -185,7 +196,7 @@ function world(
   }))
   // The plugin's own manifest, as a release ships it: what /learn 도움말 and /learn 진단 name.
   on('fs.read', (_$, e) => ({
-    value: w.files.get(e.path) ?? (e.path.endsWith('/.claude-plugin/plugin.json') ? JSON.stringify({ name: 'learn-notes', version: '1.7.0' }) : ''),
+    value: w.files.get(e.path) ?? (e.path.endsWith('/.claude-plugin/plugin.json') && w.version !== null ? JSON.stringify({ name: 'learn-notes', version: w.version }) : ''),
   }))
   on('fs.list', (_$, e) => ({
     value: [...w.files.keys()]
@@ -425,9 +436,11 @@ test('a turn that edits files becomes a written, saved note', async ($, on) => {
   expect(w.logs).toEqual(['학습 노트 · let을 const로 바꿔 값이 다시 바뀌지 않게 했다 · /learn으로 보기'])
   expect(w.toasts).toEqual([])
 
-  const last = await learn($, 'last')
-  expect(last.text).toContain('src/a.ts (+1 −1), src/new.ts (+1 −0)')
-  expect(last.text).toContain('let을 const로')
+  // /learn 마지막 (last) copies the note since 1.7.0, as /learn 공유 does: its files counted, not named.
+  expect((await learn($, 'last')).text).toBe('노트를 클립보드에 복사했습니다 · 붙이기 전에 한 번 읽어 보세요')
+  expect(w.copied.at(-1)).toContain('**[학습 노트] let을 const로 바꿔 값이 다시 바뀌지 않게 했다**')
+  expect(w.copied.at(-1)).toMatch(/^\d\d-\d\d · 파일 2개$/m)
+  expect(w.copied.at(-1)).not.toContain('src/new.ts (+1 −0)')
 
   const ui = await pane($)
   expect(await ui.find({ type: 'Text', text: /노트 1\/1/ })).toBeDefined()
@@ -499,7 +512,8 @@ test('a rewrite that fails leaves the written note as it was, in the pane, the s
   expect(w.toasts.at(-1)).toContain('노트를 다시 쓰지 못했습니다: 서버가 붐빕니다')
   expect(w.toasts.at(-1)).toContain('원래 노트는 그대로입니다')
   await ui.unmount()
-  expect((await learn($, 'last')).text).toContain('let을 const로')
+  await learn($, '공유')
+  expect(w.copied.at(-1)).toContain('let을 const로')
   expect((store.get('history') as Record<string, { notes: { status: string }[] }>)['/proj']!.notes[0]).toMatchObject({ status: 'ready' })
   expect(w.journal().length).toBe(before)
 })
@@ -782,12 +796,14 @@ test('/learn opens the pane, prints usage for unknown words and clear empties it
   expect((await learn($, 'what')).text).toContain('전체는 `/learn 도움말`')
   // Korean words work as the subcommands do.
   expect((await learn($, '도움말')).text).toContain('learn-notes 명령')
-  expect((await learn($, '마지막')).text).toContain('let을 const로')
+  // 마지막 (last), its name before 1.7.0, copies the note as /learn 공유 does.
+  expect((await learn($, '마지막')).text).toBe('노트를 클립보드에 복사했습니다 · 붙이기 전에 한 번 읽어 보세요')
+  expect(w.copied.at(-1)).toContain('let을 const로')
 
   // Asked once more first (1.6.0): the bare word only says what would go.
   expect((await learn($, 'clear')).text).toBe('이 프로젝트의 노트 1개를 패널에서 비웁니다(일지 파일과 개념 모음은 그대로). 정말 비우려면 /learn 비우기 확인')
   expect((await learn($, '비우기 아마도')).text).toContain('정말 비우려면')
-  expect((await learn($, 'last')).text).toContain('let을 const로')
+  expect((await learn($, 'last')).text).toContain('클립보드에 복사했습니다')
   expect((await learn($, '비우기 확인')).text).toContain('학습 노트를 비웠습니다')
   expect((await learn($, 'last')).text).toContain('아직 학습 노트가 없습니다')
   expect((await learn($, 'clear')).text).toBe('패널에 비울 노트가 없습니다.')
@@ -1302,8 +1318,11 @@ test('/learn help lists every subcommand, and an unknown one shows it', async ($
   world(on)
   const help = await learn($, 'help')
   // Korean first and short (1.6.0): the commands by their Korean names, the rarely used ones under 가끔.
-  for (const word of ['퀴즈', '정리', '질문', '기록', '보고서', '찾기', '일지', '마지막', '합치기', '안다', '모른다', '안키', '비우기']) expect(help.text).toContain(`/learn ${word}`)
-  expect(help.text).toContain('- 가끔: `/learn 마지막`')
+  for (const word of ['퀴즈', '정리', '질문', '기록', '보고서', '찾기', '일지', '공유', '합치기', '안다', '모른다', '안키', '비우기']) expect(help.text).toContain(`/learn ${word}`)
+  // /learn 마지막 is /learn 공유 since 1.7.0: its old name works, unsaid.
+  expect(help.text).toContain('- 가끔: `/learn 공유`')
+  expect(help.text).not.toContain('/learn 마지막')
+  expect(help.text).toContain('`c` 복사')
   expect(help.text).not.toContain('/learn save')
   expect(help.text).not.toContain('/learn days')
   expect(help.text).not.toContain('/learn stats')
@@ -2154,7 +2173,8 @@ function powershell(on: On, w: World, write: (command: string) => void) {
 }
 
 test('files made and changed with the PowerShell tool become a note (Windows without Git Bash)', async ($, on) => {
-  const w = world(on)
+  // Where no pane can show, /learn writes the note with each file's whole path.
+  const w = world(on, 'ok', null, false)
   powershell(on, w, command => {
     if (command.includes('Set-Content -Path cart.js')) {
       w.files.set(`${DESK}/cart.js`, 'function cartTotal(items) {\r\n  return items.reduce((s, i) => s + i.price * i.quantity, 0)\r\n}\r\n')
@@ -2170,7 +2190,7 @@ test('files made and changed with the PowerShell tool become a note (Windows wit
     } as never),
   )
   await finish(w)
-  const note = (await learn($, 'last')).text
+  const note = (await learn($, '')).text
   expect(note).toContain('/home/u/Desktop/cart-total/cart.js (+3 −0)')
   expect(note).toContain('cart.test.js (+1 −0)')
   expect(w.models[0]).toContain('+  return items.reduce((s, i) => s + i.price * i.quantity, 0)')
@@ -2974,7 +2994,10 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
     expect(w.journal()[0]!.text).not.toContain('abc123secret')
     expect(w.journal()[0]!.text).toContain('**뺀 파일**: .env (비밀값이 들 수 있는 파일)')
     expect(JSON.stringify(w.store.get('history'))).not.toContain('abc123secret')
-    expect((await learn($, 'last')).text).toContain('노트에서 뺀 파일: .env (비밀값이 들 수 있는 파일)')
+    // A copy for a mentor names it too (1.7.0), its content never.
+    expect((await learn($, '공유')).text).toContain('클립보드에 복사했습니다')
+    expect(w.copied.at(-1)).toContain('노트에서 뺀 파일: .env (비밀값이 들 수 있는 파일)')
+    expect(w.copied.at(-1)).not.toContain('abc123secret')
     const ui = await pane($)
     // On a line of its own under the header, which a narrow pane cuts at its end.
     expect(await ui.find({ type: 'Text', text: /파일 1개 · \+1 −1$/ })).toBeDefined()
@@ -3130,10 +3153,11 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
       savedAs: 'off', isPast: false, root: '/proj', updatedAt: NOW - 1000, concepts: [], withheld,
     })
     const good = new Map<string, unknown>([['history', { '/proj': { at: NOW, notes: [stored([{ file: '.env', why: 'secret' }, { file: 'x', why: 'nope' }])] } }]])
-    const w = world(on, 'ok', null, true, good)
+    // Read where no pane can show: /learn writes the note, what it left out with it.
+    const w = world(on, 'ok', null, false, good)
     await start($)
-    expect((await learn($, 'last')).text).toContain('노트에서 뺀 파일: .env (비밀값이 들 수 있는 파일)')
-    expect((await learn($, 'last')).text).not.toContain('nope')
+    expect((await learn($, '')).text).toContain('노트에서 뺀 파일: .env (비밀값이 들 수 있는 파일)')
+    expect((await learn($, '')).text).not.toContain('nope')
     void w
   })
 
@@ -3142,9 +3166,9 @@ describe('1.6.0: secrets masked, secret and generated files left out', () => {
       id: 'n1', turnId: 't', at: NOW - 1000, prompt: '요청', answer: '', changes: [], moreFiles: 0, status: 'off', text: '',
       savedAs: 'off', isPast: false, root: '/proj', updatedAt: NOW - 1000, concepts: [], withheld: '.env',
     }] } }]])
-    world(on, 'ok', null, true, bad)
+    world(on, 'ok', null, false, bad)
     await start($)
-    const last = (await learn($, 'last')).text
+    const last = (await learn($, '')).text
     expect(last).toContain('(자동 노트가 꺼져 있습니다)')
     expect(last).not.toContain('뺀 파일')
     const ui = await pane($)
@@ -3250,15 +3274,22 @@ describe('1.6.0 (교차 검토): what a note or a concept kept before 1.6.0 hold
     expect(w.models[0]).not.toContain('hidden = 1')
   })
 
-  test('/learn 마지막, 기록 and a /learn with no pane reply with its secrets masked, as the record tool does', async ($, on) => {
+  test('/learn 기록 and a /learn with no pane reply with its secrets masked, as the record tool does; /learn 마지막 copies it so', async ($, on) => {
     const concepts = { 'c:상수': { name: '상수', count: 2, firstAt: NOW - 3 * DAY, lastAt: NOW - 3 * DAY, blurb: `바뀌지 않는 값 — \`const key = "${KEY}"\``, files: [] } }
-    world(on, 'ok', null, false, kept([old()], [['concepts', concepts]]))
+    const w = world(on, 'ok', null, false, kept([old()], [['concepts', concepts]]))
     await start($)
-    for (const words of ['마지막', '기록', '']) {
+    for (const words of ['기록', '']) {
       const text = (await learn($, words)).text ?? ''
       expect(text).toContain('const key = "«가림»"')
       expectClean(text)
     }
+    // 마지막 is /learn 공유 since 1.7.0: the copy is screened the same, and holds no request.
+    expect((await learn($, '마지막')).text).toBe('노트를 클립보드에 복사했습니다 · 붙이기 전에 한 번 읽어 보세요')
+    const copied = w.copied.at(-1) ?? ''
+    expect(copied).toContain('const key = "«가림»"')
+    expect(copied).toContain('노트에서 뺀 파일: .env (비밀값이 들 수 있는 파일) · .npmrc (비밀값이 들 수 있는 파일)')
+    expect(copied).not.toContain('이 키로 연결해 줘')
+    expectClean(copied)
   })
 
   test('the record tool names concepts without what they are: a repository\'s team file may have written that, and it crosses projects', async ($, on) => {
@@ -3343,7 +3374,7 @@ describe('1.6.0: cost guardrails', () => {
     await finish(w)
     expect(w.models).toHaveLength(0)
     expect(w.journal()[0]!.text).toContain('_띄어쓰기·줄바꿈만 바뀌어 노트 없이 전후 코드만 남겼다._')
-    expect((await learn($, 'last')).text).toContain('(띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기)')
+    expect((await learn($, 'last')).text).toBe('이 노트는 아직 복사할 글이 없습니다 · 띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기')
     const ui = await pane($)
     expect(await ui.find({ type: 'Text', text: /띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다 · w로 쓰기/ })).toBeDefined()
     await ui.press({ key: 'write' })
@@ -3414,7 +3445,7 @@ describe('1.6.0: cost guardrails', () => {
     expect(w.models).toHaveLength(0)
     // An earlier session showed it today.
     expect(w.toasts.filter(text => text.includes('한도'))).toEqual([])
-    expect((await learn($, 'last')).text).toContain('(하루 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기)')
+    expect((await learn($, 'last')).text).toContain('하루 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기')
   })
 
   test('a session whose day has room promises the note', { options: { dailyAutoNotes: 2 } }, async ($, on) => {
@@ -3449,7 +3480,7 @@ describe('1.6.0: cost guardrails', () => {
     w.release()
     await w.clock.settle()
     expect(w.models).toHaveLength(1)
-    expect((await learn($, 'last')).text).toContain('(하루 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기)')
+    expect((await learn($, 'last')).text).toContain('하루 자동 노트 한도에 닿아 노트를 쓰지 않았습니다 · 패널에서 w로 쓰기')
     expect((await learn($, '기록')).text).toContain('모델 호출: 오늘 1번 (자동 노트 1)')
   })
 
@@ -3480,7 +3511,7 @@ describe('1.6.0: cost guardrails', () => {
     const history = { '/proj': { at: NOW, notes: [stored('n1', NOW - 2000, 'format'), stored('n2', NOW - 1000, 'nope')] } }
     world(on, 'ok', null, true, new Map<string, unknown>([['history', history]]))
     await start($)
-    expect((await learn($, 'last')).text).toContain('(자동 노트가 꺼져 있습니다)')
+    expect((await learn($, 'last')).text).toBe('이 노트는 아직 복사할 글이 없습니다 · 자동 노트가 꺼져 있습니다')
     const ui = await pane($)
     await ui.press({ key: 'prev' })
     expect(await ui.find({ type: 'Text', text: /띄어쓰기·줄바꿈만 바뀌어 노트를 쓰지 않았습니다/ })).toBeDefined()
@@ -4281,7 +4312,8 @@ describe('1.6.0: views on 1 to 4, q for today\'s review, the keys where they are
     // Last in the row under the note, after the views and the note's own tools.
     const keys = (await ui.findAll({ type: 'Button' })).map(one => one.key)
     expect(keys.slice(0, 2)).toEqual(['prev', 'next'])
-    expect(keys.indexOf('write')).toBe(keys.indexOf('trace') + 2)
+    // c (1.7.0) just before it, as dim.
+    expect(keys.slice(keys.indexOf('trace') + 1, keys.indexOf('write') + 1)).toEqual(['ask-type', 'share', 'write'])
     expect(keys.indexOf('write')).toBeGreaterThan(keys.indexOf('view-split'))
     await ui.press({ key: 'write' })
     await w.clock.settle()
@@ -5907,5 +5939,258 @@ describe('1.7.0: /learn 진단, and failures that say their cause', () => {
     w.rootFails = true
     expect((await learn($, '찾기 const')).text).toBe(COMMAND_FAILED)
     expect(await diag($)).toContain('훅 · command.run 훅 멈춤')
+  })
+})
+
+describe('1.7.0: the version stamp, and the schema guard', () => {
+  const MINUTE = 60_000
+  const NOTICE = 'learn-notes 새 버전(1.7.1)이 다른 창에서 쓰이고 있습니다 · 이 창은 1.7.0입니다 · /reload-plugins로 바꿉니다'
+  const TAIL = '다시 불러올 때까지 이 창은 개념 모음과 복습 단계를 고치지 않습니다(노트와 일지는 그대로)'
+  const BEHIND_TEXT = `learn-notes가 다른 창에서 더 새 버전으로 학습 기록을 썼습니다 · ${TAIL} · /reload-plugins로 바꿉니다`
+  const said = (lines: readonly string[]) => lines.filter(line => line.includes('/reload-plugins'))
+  const stamps = (others: Record<string, { v: string; at: number }>, more: [string, unknown][] = []) => new Map<string, unknown>([['sessions', others], ...more])
+
+  test('a window still on an older build says once, in the transcript and a toast, that a newer one is open in another', async ($, on) => {
+    const w = world(on, 'ok', null, true, stamps({ 'session-new': { v: '1.7.1', at: NOW - 3 * MINUTE } }))
+    await start($)
+    expect(said(w.transcript)).toEqual([NOTICE])
+    expect(said(w.toasts)).toEqual([NOTICE])
+    // Its own stamp beside the other's, and the store's layout number.
+    expect(w.store.get('sessions')).toEqual({ 'session-mine': { v: '1.7.0', at: NOW }, 'session-new': { v: '1.7.1', at: NOW - 3 * MINUTE } })
+    expect(w.store.get('schema')).toBe(3)
+    // Ten minutes on, a turn's end and /learn look again: said once a session all the same.
+    await w.clock.advance(11 * MINUTE)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    await learn($, '')
+    expect(said(w.transcript)).toHaveLength(1)
+    expect(said(w.toasts)).toHaveLength(1)
+    // The note's save stamped this window again, ten minutes on.
+    expect((w.store.get('sessions') as Record<string, { at: number }>)['session-mine']!.at).toBeGreaterThanOrEqual(NOW + 11 * MINUTE)
+    // Notes go on as ever, and the diagnosis names the other window.
+    expect(w.journal()).toHaveLength(1)
+    expect((await learn($, '진단')).text).toContain('\n- 다른 창: 1.7.1 (14분 전)\n')
+  })
+
+  test('a window stamps itself at start, then with the notes it saves only once ten minutes have passed', async ($, on) => {
+    const w = world(on)
+    await start($)
+    const stamped = () => w.sets.filter(key => key === 'sessions').length
+    expect(stamped()).toBe(1)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(stamped()).toBe(1)
+    await w.clock.advance(10 * MINUTE)
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    expect(stamped()).toBe(2)
+    const mine = (w.store.get('sessions') as Record<string, { v: string; at: number }>)['session-mine']!
+    expect(mine.v).toBe('1.7.0')
+    expect(mine.at).toBeGreaterThanOrEqual(NOW + 10 * MINUTE)
+  })
+
+  test('the newer window says nothing of an older one, and stamps its own build', async ($, on) => {
+    const w = world(on, 'ok', null, true, stamps({ 'session-old': { v: '1.7.0', at: NOW - MINUTE } }))
+    w.version = '1.7.1'
+    await start($)
+    expect(said(w.transcript)).toEqual([])
+    expect(said(w.toasts)).toEqual([])
+    expect((w.store.get('sessions') as Record<string, unknown>)['session-mine']).toEqual({ v: '1.7.1', at: NOW })
+    expect((await learn($, '진단')).text).toContain('\n- 다른 창: 1.7.0 (1분 전)\n')
+  })
+
+  test('a newer build stamped two hours ago says nothing', async ($, on) => {
+    const w = world(on, 'ok', null, true, stamps({ 'session-new': { v: '1.7.1', at: NOW - 120 * MINUTE } }))
+    await start($)
+    await learn($, '')
+    expect(said(w.transcript)).toEqual([])
+    expect(said(w.toasts)).toEqual([])
+  })
+
+  test('a plugin.json that cannot be read compares nothing and stamps nothing', async ($, on) => {
+    const w = world(on, 'ok', null, true, stamps({ 'session-new': { v: '1.7.1', at: NOW - 3 * MINUTE } }))
+    w.version = null
+    await start($)
+    expect(said(w.transcript)).toEqual([])
+    expect(said(w.toasts)).toEqual([])
+    expect(Object.keys(w.store.get('sessions') as object)).toEqual(['session-new'])
+  })
+
+  test('a store a newer build wrote in a newer layout: the concepts, their marks and steps, the merges and the quiz bank are left alone; notes, the journal and the quiz go on', async ($, on) => {
+    const store = new Map<string, unknown>([['schema', 4], ['concepts', THREE_CONCEPTS]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    // No newer window stamped: said all the same, since the concepts stop changing here.
+    expect(said(w.transcript)).toEqual([`learn-notes 새 버전이 다른 창에서 학습 기록을 새 구조로 썼습니다 · 이 창은 1.7.0입니다 · /reload-plugins로 바꿉니다 · ${TAIL}`])
+    expect(said(w.toasts)).toHaveLength(1)
+    w.answer = CONCEPT_NOTE(['클로저', '새 개념'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const ui = await pane($)
+    await ui.press({ key: 'view-quiz' })
+    w.answer = THREE_QUESTIONS
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    await ui.press({ key: 'quiz-answer' })
+    await ui.press({ key: 'quiz-right' })
+    // Graded all the same: only its concept's step stays as the newer build left it.
+    expect(await ui.find({ type: 'Text', text: /^✓ 맞힘/ })).toBeDefined()
+    await ui.unmount()
+    expect((await learn($, '안다 클로저')).text).toBe(BEHIND_TEXT)
+    expect((await learn($, '합치기 map = 클로저')).text).toBe(BEHIND_TEXT)
+    for (const key of ['concepts', 'known', 'steps', 'quizBank', 'aliases', 'merges', 'schema']) expect(w.sets).not.toContain(key)
+    expect(store.get('concepts')).toEqual(THREE_CONCEPTS)
+    expect(store.get('schema')).toBe(4)
+    expect(w.sets).toEqual(expect.arrayContaining(['history', 'quiz', 'activity']))
+    expect(w.journal()).toHaveLength(1)
+    expect(w.writes.some(write => write.path.endsWith('/concepts.md'))).toBe(false)
+    expect((await learn($, '진단')).text).toContain('\n- 다른 창: 없음 · 저장소가 새 구조(4, 이 창 3)라 개념 모음과 복습 단계를 고치지 않음\n')
+    // Said once, however often the guard held a write back.
+    expect(said(w.transcript)).toHaveLength(1)
+  })
+
+  test('a newer layout written while this window is open turns the guard on at the next concept write, and says so with the newer build', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(store.get('schema')).toBe(3)
+    // A newer build starts in another window.
+    store.set('schema', 4)
+    store.set('sessions', { ...(store.get('sessions') as object), 'session-new': { v: '1.8.0', at: NOW } })
+    w.answer = CONCEPT_NOTE(['클로저'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(store.get('concepts')).toBeUndefined()
+    expect(said(w.transcript)).toEqual([`learn-notes 새 버전(1.8.0)이 다른 창에서 쓰이고 있습니다 · 이 창은 1.7.0입니다 · /reload-plugins로 바꿉니다 · ${TAIL}`])
+    // The note itself is written and kept as ever.
+    expect(w.journal()[0]!.text).toContain('반복문을 바꿨다')
+  })
+})
+
+describe('1.7.0: a note copied for a mentor: c and /learn 공유', () => {
+  const COPIED = '노트를 복사했습니다 · 요청과 질문은 빼고 비밀값은 가렸습니다 · 붙이기 전에 읽어 보세요'
+  const REPLY = '노트를 클립보드에 복사했습니다 · 붙이기 전에 한 번 읽어 보세요'
+  const HERE = '복사할 수 없어 여기에 적습니다 · 길게 눌러 복사하세요'
+  const REQUEST = '/home/u/work/shop/src/a.ts의 b를 상수로 바꿔 줘'
+
+  async function written($: Engine, w: World) {
+    await start($)
+    w.answer = CONCEPT_NOTE(['반복문'])
+    await turn($, () => $.tool.call(EDIT_A), 't1', REQUEST)
+    await finish(w)
+  }
+
+  /** What a copy for a mentor never holds: the request, a question asked under the note, the diff, where the project lies. */
+  function expectShareable(text: string) {
+    expect(text).not.toContain('상수로 바꿔 줘')
+    expect(text).not.toContain('/home/u')
+    expect(text).not.toContain('/proj')
+    expect(text).not.toContain('+const b = 2')
+    expect(text).not.toContain('쉬운 말로 다시 쓴 답')
+  }
+
+  test('c under a written note copies it with no request, question, path or diff, and a toast says what was left out; no model call', async ($, on) => {
+    const w = world(on)
+    await written($, w)
+    const ui = await pane($)
+    // A question asked under the note stays out of the copy.
+    w.answer = '쉬운 말로 다시 쓴 답'
+    await ui.press({ key: 'easier' })
+    await w.clock.settle()
+    const calls = w.models.length
+    const share = await ui.find({ type: 'Button', key: 'share', text: '복사' })
+    expect(share?.props).toMatchObject({ hotkey: 'c', dimColor: true })
+    await ui.press({ key: 'share' })
+    await w.clock.settle()
+    expect(w.toasts.at(-1)).toBe(COPIED)
+    expect(w.copied).toHaveLength(1)
+    const text = w.copied[0]!
+    expect(text.split('\n').slice(0, 2)).toEqual(['**[학습 노트] 반복문을 바꿨다**', `${stamp(NOW).day.slice(5)} · 파일 1개 · 개념: 반복문`])
+    expect(text).toContain('**배울 개념**\n- **반복문**: 반복문에 대한 설명 — `for (const item of items)`')
+    expect(text.endsWith('\n\n**묻고 싶은 것**: ')).toBe(true)
+    expectShareable(text)
+    expect(w.models).toHaveLength(calls)
+    await ui.unmount()
+  })
+
+  test('where nothing can be copied, c leaves the same text in the transcript as a dim line, never sent to the model', async ($, on) => {
+    const w = world(on)
+    await written($, w)
+    w.copyFails = true
+    const ui = await pane($)
+    await ui.press({ key: 'share' })
+    await w.clock.settle()
+    expect(w.copied).toEqual([])
+    expect(w.toasts).not.toContain(COPIED)
+    const line = w.transcript.at(-1) ?? ''
+    expect(line.split('\n').slice(0, 3)).toEqual([HERE, '', '**[학습 노트] 반복문을 바꿨다**'])
+    expectShareable(line)
+    await ui.unmount()
+  })
+
+  test('the mobile app and a cloud session have no clipboard to write: c writes the note in the transcript there', async ($, on) => {
+    const w = world(on, 'ok', null, true, new Map(), { CLAUDE_CODE_REMOTE: 'true' })
+    await written($, w)
+    const ui = await pane($)
+    await ui.press({ key: 'share' })
+    await w.clock.settle()
+    expect(w.copied).toEqual([])
+    expect(w.transcript.at(-1)).toMatch(new RegExp(`^${HERE}\\n\\n\\*\\*\\[학습 노트\\] 반복문을 바꿨다\\*\\*`))
+    await ui.unmount()
+    // /learn 공유 there answers with the note, as /learn 보고서 does.
+    const reply = (await learn($, '공유')).text ?? ''
+    expect(reply.split('\n').slice(0, 3)).toEqual([HERE, '', '**[학습 노트] 반복문을 바꿨다**'])
+    expectShareable(reply)
+    expect(w.copied).toEqual([])
+  })
+
+  test('a press from the mobile app is not copied, and leaves the note in the transcript', async ($, on) => {
+    const w = world(on)
+    await written($, w)
+    const ui = await $.ui.mount({ plugin: 'learn-notes', surface: 'mobile', component: 'Pane', requestId: 'learn-notes', props: PANE_PROPS })
+    await ui.press({ key: 'share' })
+    await w.clock.settle()
+    expect(w.copied).toEqual([])
+    expect(w.transcript.at(-1)?.split('\n')[0]).toBe(HERE)
+    await ui.unmount()
+  })
+
+  test('/learn 공유 copies the note picked in the pane, else the last; 마지막 and last are the same; the reply is one line', async ($, on) => {
+    const w = world(on)
+    await written($, w)
+    w.answer = NOTE_TEXT
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2', '둘째 요청')
+    await finish(w)
+    for (const words of ['공유', 'share', '마지막', 'last']) {
+      expect((await learn($, words)).text).toBe(REPLY)
+      expect(w.copied.at(-1)).toContain('**[학습 노트] let을 const로 바꿔 값이 다시 바뀌지 않게 했다**')
+    }
+    const ui = await pane($)
+    await ui.press({ key: 'prev' })
+    await ui.unmount()
+    expect((await learn($, '공유')).text).toBe(REPLY)
+    expect(w.copied.at(-1)).toContain('**[학습 노트] 반복문을 바꿨다**')
+    expectShareable(w.copied.at(-1) ?? '')
+    expect(w.copied).toHaveLength(5)
+  })
+
+  test('/learn 공유 from Remote Control or a chat channel answers with the note itself; a note with no text yet, or none, says so', async ($, on) => {
+    const w = world(on, 'error')
+    await start($)
+    expect((await learn($, '공유')).text).toBe('아직 학습 노트가 없습니다. Claude가 파일을 고친 턴이 끝나면 생깁니다.')
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect((await learn($, '공유')).text).toBe('이 노트는 아직 복사할 글이 없습니다 · 노트를 쓰지 못했습니다: 서버가 붐빕니다. 잠시 뒤 다시 해 보세요 · w로 다시 쓰기')
+    w.model = 'ok'
+    w.answer = CONCEPT_NOTE(['반복문'])
+    const ui = await pane($)
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    await ui.unmount()
+    for (const origin of [{ kind: 'bridge' as const }, { kind: 'channel' as const, server: 'slack' }]) {
+      const away = await $.command.run({ command: 'learn', args: '공유', origin, presentation: { isFullscreen: true, columns: 160 } })
+      expect(away.text?.split('\n').slice(0, 3)).toEqual([HERE, '', '**[학습 노트] 반복문을 바꿨다**'])
+    }
+    expect(w.copied).toEqual([])
   })
 })
