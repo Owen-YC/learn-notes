@@ -13,10 +13,12 @@ import {
   distinctTerms,
   fitTeamTerms,
   isTeamTerm,
+  isVcsPath,
   jsonBytes,
   parseQuiz,
   parseTeamFile,
   quizPrompt,
+  redactText,
   reportMarkdown,
   reportTeamLine,
   rootTag,
@@ -104,6 +106,22 @@ describe('1.7.0: where a team term\'s code is (D6)', () => {
       expect(termSource(`설명 \`${token}\``)).toBeUndefined()
     }
     for (const code of ['useEffect', 'res.json()', 'a ?? b', 'const x = 1', 'fetch(url)', 'items.map']) expect(termSource(`설명 \`${code}\``)).toBeUndefined()
+  })
+
+  test('nothing in the repository\'s own record (.git, .hg, .svn, any case) is a source, however it is named', () => {
+    for (const token of ['.git/config:1-8', '.GIT/config:1-3', '.Git/hooks/pre-commit.sh', 'sub/.git/config:1-2', '.hg/hgrc:1-4', '.svn/entries:1-2', 'vendor/lib/.git/HEAD:1']) {
+      expect(termSource(`설명 \`${token}\``)).toBeUndefined()
+    }
+    for (const path of ['.git', '.git/config', 'a/.Hg/x.ts', '.SVN']) expect(isVcsPath(path)).toBe(true)
+    // A name that only starts so is no record of the repository's.
+    for (const token of ['.github/workflows/ci.yml', 'src/.gitkeep.txt']) expect(termSource(`\`${token}\``)).toBeDefined()
+    for (const path of ['.github/workflows/ci.yml', '.gitignore', 'src/git/a.ts']) expect(isVcsPath(path)).toBe(false)
+  })
+
+  test('a Basic authorization header\'s credential is masked, as a Bearer token is', () => {
+    expect(redactText('\textraheader = AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hzXzE2QzdlNDJGMjkyYzY5MjVFMjZhOEJGMjQ5').text).not.toContain('eC1hY2Nlc3MtdG9rZW46')
+    expect(redactText('curl -H "Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l" https://x').text).not.toContain('YWxhZGRpbjpvcGVuc2VzYW1l')
+    expect(redactText('a basic understanding of the authorization flow').text).toBe('a basic understanding of the authorization flow')
   })
 
   test('the first token with a folder in it, else the first at all', () => {
@@ -198,6 +216,11 @@ describe('1.7.0: a quiz that asks a team term (D6)', () => {
   test('its question is kept as a team term\'s, where its lines are but not the lines themselves', () => {
     const items = parseQuiz('T1: 왜\nQ1: 문제 하나\nA1: 답 하나\nT2: 예측\nQ2: 문제 둘\nA2: 답 둘', [due, term])
     expect(items[0]!.team).toBeUndefined()
+    expect(items[0]!.teamTag).toBeUndefined()
+    // The repository it was asked in, and the words its grade puts in the concept index, wherever it is graded.
+    const kept = parseQuiz('Q1: 문제 하나\nA1: 답 하나', [{ ...term, teamTag: 'abc12', teamBlurb: '우리 팀의 API 호출 함수입니다' }])
+    expect(kept[0]).toMatchObject({ team: true, teamTag: 'abc12', teamBlurb: '우리 팀의 API 호출 함수입니다' })
+    expect(parseQuiz('Q1: 문제 하나\nA1: 답 하나', [{ ...due, teamTag: 'abc12', teamBlurb: 'x' }])[0]!.teamTag).toBeUndefined()
     expect(items[1]).toMatchObject({ key: 'c:fetcher', name: 'fetcher', team: true, teamCode: { file: 'fetcher.ts', from: 12, to: 30 } })
     expect(JSON.stringify(items[1])).not.toContain('return fetch')
     expect(teamCodeHead(items[1]!.teamCode!)).toBe('팀 코드 (fetcher.ts 12~30줄)')
@@ -218,9 +241,9 @@ describe('1.7.0: what the team terms say (D6)', () => {
     expect(teamNudgeText(12, '/learn 퀴즈')).toBe('이 저장소의 팀 용어 12개로 연습할 수 있습니다 · /learn 퀴즈')
     expect(teamRecordLine(12, 7)).toBe('- 이 저장소 팀 용어: 12개 중 5개 만남 · 아직 7개 (/learn 퀴즈 팀)')
     expect(teamRecordLine(12, 0)).toBe('- 이 저장소 팀 용어: 12개 모두 만남')
-    expect(reportTeamLine(12, ['fetcher', '캐시 키'])).toBe('- 이 저장소 팀 용어: 12개 중 2개 만남 (fetcher · 캐시 키) · 아직 10개')
+    expect(reportTeamLine(12, ['fetcher', '캐시 키'])).toBe('- 이 저장소 팀 용어: 12개 중 2개 만남 (fetcher · 캐시 키) · 아직 10개 (/learn 퀴즈 팀)')
     expect(reportTeamLine(2, ['fetcher', '캐시 `키` | 표'])).toBe('- 이 저장소 팀 용어: 2개 모두 만남 (fetcher · 캐시 키 \\| 표)')
-    expect(reportTeamLine(3, [])).toBe('- 이 저장소 팀 용어: 3개 중 0개 만남 · 아직 3개')
+    expect(reportTeamLine(3, [])).toBe('- 이 저장소 팀 용어: 3개 중 0개 만남 · 아직 3개 (/learn 퀴즈 팀)')
     expect(NO_TEAM_TERMS).toBe('이 저장소에는 팀 용어가 없습니다 · .claude/learn-notes.md의 ## 용어에 적습니다')
     expect(teamAddedText(false)).toBe('팀 용어를 개념 모음에 넣었습니다')
     expect(teamAddedText(true)).toBe('팀 용어를 개념 모음에 넣었습니다 · 다음 퀴즈 맨 앞에 나옵니다')
@@ -229,7 +252,7 @@ describe('1.7.0: what the team terms say (D6)', () => {
   test('the report carries the line under the review, by the team file\'s names, and none without a team file', () => {
     const range: RecapRange = { label: '최근 7일', from: NOW - 7 * DAY, to: NOW + DAY, days: ['2026-10-03'] }
     const report = reportMarkdown({ range, activity: {}, index: {}, level: 'beginner', now: NOW, team: { total: 3, met: ['fetcher'] } })
-    expect(report).toContain('- 지금 복습할 개념 0개\n- 이 저장소 팀 용어: 3개 중 1개 만남 (fetcher) · 아직 2개\n')
+    expect(report).toContain('- 지금 복습할 개념 0개\n- 이 저장소 팀 용어: 3개 중 1개 만남 (fetcher) · 아직 2개 (/learn 퀴즈 팀)\n')
     expect(reportMarkdown({ range, activity: {}, index: {}, level: 'beginner', now: NOW })).not.toContain('팀 용어')
   })
 })

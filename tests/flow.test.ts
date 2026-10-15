@@ -4209,7 +4209,7 @@ describe('1.6.0: quiz kinds, the note that taught a missed concept, and /learn q
     w.answer = THREE_QUESTIONS
     await learn($, 'quiz')
     // 1.7.0 D6 adds 팀 (the team terms alone) at its end.
-    const QUIZ_USAGE_TEXT = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 (힌트 2) · 정답 · 새로 · 맞음 1 · 틀림 2 · 팀 (팀 용어로)'
+    const QUIZ_USAGE_TEXT = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 (힌트 2) · 정답 · 새로 · 맞음 1 · 틀림 2 · 팀 (팀 용어만)'
     // Graded, any of these would be wrong: a model call, a miss and a day's count for words never meant as an answer.
     w.answer = '판정: 틀림\n피드백: 아닙니다.'
     // 시작 · 계속 · 보기 · 풀기 ask for the quiz as /learn 퀴즈 alone does: the one being answered.
@@ -7752,10 +7752,12 @@ describe('1.7.0: what a quiz found wrong, asked again in other code (오답 노�
     expect(slipsOf(store)[conceptKey('구조 분해')]).toMatchObject({ what: '배열을 복사한다고 봄', mine: '복사본이 생겨요', times: 2, at: NOW })
     await ui.unmount()
 
-    // In the conversation: the note is found by its concept's name.
+    // In the conversation: no note taught it when the quiz was made, so none is named (one that did is found by its
+    // name: the D6 review tests).
     w.answer = '판정: 틀림\n피드백: 아닙니다.\n헷갈린 점: 원래 배열을 바꾼다고 봄\n유형: 상태가 바뀌는 때'
     const reply = (await learn($, '퀴즈 3 원래 배열이 바뀝니다')).text
-    expect(reply).toContain('같은 곳을 또 헷갈렸습니다 · 이 개념을 배운 노트: /learn 찾기 map')
+    expect(reply).toContain('\n같은 곳을 또 헷갈렸습니다\n')
+    expect(reply).not.toContain('/learn 찾기')
   })
 
   test('missed again in the pane, where the note that taught it is: n to that note, r there to walk it through', async ($, on) => {
@@ -8471,7 +8473,7 @@ describe('1.7.0: team-term practice from the team file\'s ## 용어 (D6)', () =>
     await start($)
     expect((await learn($, '기록')).text).toContain('\n- 이 저장소 팀 용어: 3개 중 1개 만남 · 아직 2개 (/learn 퀴즈 팀)\n')
     await learn($, '보고서')
-    expect(w.copied.at(-1)).toContain('\n- 이 저장소 팀 용어: 3개 중 1개 만남 (fetcher) · 아직 2개\n')
+    expect(w.copied.at(-1)).toContain('\n- 이 저장소 팀 용어: 3개 중 1개 만남 (fetcher) · 아직 2개 (/learn 퀴즈 팀)\n')
   })
 
   test('while the store\'s layout is newer, a team term is graded but put in nothing, and none is marked', async ($, on) => {
@@ -8492,5 +8494,232 @@ describe('1.7.0: team-term practice from the team file\'s ## 용어 (D6)', () =>
     expect((await learn($, 'quiz 맞음 3')).text).toContain('맞힌 것으로 적었습니다: 3. fetcher.')
     for (const key of ['concepts', 'teamTerms']) expect(w.sets).not.toContain(key)
     expect(store.get('teamTerms')).toBeUndefined()
+  })
+
+  // The review of 1.7.0 (6/8): what the two reviewers found, held here.
+
+  test('the team quiz asked in other words is made, and never graded as the open question\'s answer', async ($, on) => {
+    const store = storeWith({ 'c:클로저': due('클로저') })
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    w.answer = QUESTIONS
+    await learn($, 'quiz')
+    expect((await learn($, 'quiz 도움말')).text).toContain(' · 팀 (팀 용어만)')
+    // The usage's own words, and the ways a learner may say them: the team's quiz each time.
+    for (const said of ['팀 용어로', '팀으로', '팀 용어만', '팀용어', '팀 용어 퀴즈 해 줘', 'team terms']) {
+      w.answer = QUESTIONS
+      expect((await learn($, `quiz ${said}`)).text).toMatch(/^팀 용어 퀴즈 · 3문제\n/)
+    }
+    expect(w.models).toHaveLength(7)
+    // Other words after 팀: no answer either, nothing graded, and the reply says how to answer.
+    w.answer = WRONG
+    expect((await learn($, 'quiz 팀 용어 문제를 내 줘')).text).toMatch(/^명령 낱말/)
+    expect((await learn($, 'quiz team quiz please now')).text).toMatch(/^명령 낱말/)
+    expect(w.models).toHaveLength(7)
+    expect(quizItems(store)[0]!.firstTry).toBeUndefined()
+    expect(quizItems(store)[0]!.result).toBeUndefined()
+    // An answer whose first word only starts with 팀 is graded as ever.
+    w.answer = RIGHT
+    expect((await learn($, 'quiz 팀에서 쓰는 API 호출 함수')).text).toContain('\n1번 ✓')
+    expect(w.models).toHaveLength(8)
+  })
+
+  test('slips asked again fill a quiz as concepts due do: the pane and the toast send the learner to the team\'s own quiz', async ($, on) => {
+    const slipOf = (at: number) => ({ what: '값과 참조를 헷갈림', type: 'reference', question: '지난 문제', mine: '내 답', at, times: 1 })
+    const store = storeWith({ 'c:클로저': due('클로저'), 'c:a': later('a'), 'c:b': later('b') }, [['slips', { 'c:a': slipOf(NOW - 500), 'c:b': slipOf(NOW - 400) }]])
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    expect(w.toasts).toEqual(['이 저장소의 팀 용어 3개로 연습할 수 있습니다 · /learn 퀴즈 팀'])
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-concepts' })
+    expect(await ui.find({ type: 'Text', text: '팀 용어 3개 중 0개 만남 · /learn 퀴즈 팀' })).toBeDefined()
+    await ui.unmount()
+    // As it says: the review alone fills /learn 퀴즈, and /learn 퀴즈 팀 asks the terms.
+    w.answer = QUESTIONS
+    await learn($, 'quiz')
+    expect(w.models[0]).not.toContain('(팀 용어)')
+    await learn($, 'quiz 팀')
+    expect(w.models[1]!.match(/\n\d\. \(팀 용어\)/g)).toHaveLength(3)
+  })
+
+  test('with a quiz still open from before, the toast names the team\'s own quiz, which is made at once', async ($, on) => {
+    const open = { at: NOW - 3600_000, isRevealed: false, items: [{ key: 'c:클로저', name: '클로저', question: '옛 문제 하나', answer: '옛 답' }] }
+    const w = world(on, 'ok', null, true, storeWith({ 'c:클로저': due('클로저') }, [['quiz', open]]))
+    withTeam(w)
+    await start($)
+    expect(w.toasts).toEqual(['이 저장소의 팀 용어 3개로 연습할 수 있습니다 · /learn 퀴즈 팀'])
+    w.answer = QUESTIONS
+    expect((await learn($, 'quiz 팀')).text).toMatch(/^팀 용어 퀴즈 · 3문제\n/)
+    expect(w.models).toHaveLength(1)
+  })
+
+  test('missed again where it was asked again: the conversation names a note only when one taught the concept', async ($, on) => {
+    const slip = { what: '이름을 함수로 헷갈림', type: 'reference', question: '지난 문제', mine: '내 답', at: NOW - 2 * DAY, times: 1 }
+    const seeded = (name: string) => ({ name, count: 1, firstAt: NOW - 2 * DAY, lastAt: NOW - 2 * DAY, blurb: `${name} 설명`, files: [], reviewedAt: NOW - 2 * DAY, missedAt: NOW - 2 * DAY, step: 0 })
+    const asked = (key: string, name: string, more: Record<string, unknown>) => ({ key, name, question: `${name} 문제`, answer: `${name} 답`, isRetry: true, ...more })
+    const store = storeWith({ [conceptKey('캐시 키')]: seeded('캐시 키'), 'c:클로저': seeded('클로저') }, [
+      ['slips', { [conceptKey('캐시 키')]: slip, 'c:클로저': slip }],
+      ['teamTerms', { [conceptKey('캐시 키')]: [rootTag('/proj')] }],
+      ['quiz', { at: NOW - 1000, isRevealed: false, items: [asked(conceptKey('캐시 키'), '캐시 키', { team: true }), asked('c:클로저', '클로저', { noteId: 'note-1' })] }],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    w.answer = '판정: 틀림\n피드백: 아직 아닙니다.\n헷갈린 점: 이름을 함수로 헷갈림\n유형: reference'
+    // A team term no note taught: there is no note to find.
+    const team = (await learn($, 'quiz 1 캐시를 지우는 함수')).text
+    expect(team).toContain('\n같은 곳을 또 헷갈렸습니다\n')
+    expect(team).not.toContain('/learn 찾기')
+    // One a note taught (the quiz found it in one): found by its name.
+    expect((await learn($, 'quiz 2 전역 변수')).text).toContain('\n같은 곳을 또 헷갈렸습니다 · 이 개념을 배운 노트: /learn 찾기 클로저\n')
+  })
+
+  test('a team file of one term offers one question, and a quiz of team terms alone is called so in the pane and the conversation', async ($, on) => {
+    const store = storeWith()
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w, '## 용어\n- **캐시 키**: 요청마다 캐시를 나누는 이름입니다\n')
+    await start($)
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-quiz' })
+    expect(await ui.find({ type: 'Text', text: /^s를 누르면 이 저장소의 팀 용어로 1문제를 냅니다 · / })).toBeDefined()
+    w.answer = ['T1: 왜', 'Q1: 문제 하나', 'A1: 답 하나'].join('\n')
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(quizItems(store)).toHaveLength(1)
+    expect(await ui.find({ type: 'Text', text: /^팀 용어 퀴즈 · / })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^복습 퀴즈/ })).toBeUndefined()
+    await ui.unmount()
+    // Made by /learn 퀴즈 with no concept learned, the same name.
+    expect((await learn($, 'quiz 새로')).text).toMatch(/^팀 용어 퀴즈 · 1문제\n/)
+  })
+
+  test('a quiz of concepts and team terms is still the review quiz', async ($, on) => {
+    const w = world(on, 'ok', null, true, storeWith({ 'c:클로저': due('클로저') }))
+    withTeam(w)
+    await start($)
+    w.answer = QUESTIONS
+    expect((await learn($, 'quiz')).text).toMatch(/^복습 퀴즈 · 3문제\n/)
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-quiz' })
+    expect(await ui.find({ type: 'Text', text: /^복습 퀴즈 · / })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a team term merged into another concept keeps its · 팀 용어 at once', async ($, on) => {
+    const store = storeWith({ 'c:fetcher': later('fetcher'), 'c:api함수': later('API 함수') }, [['teamTerms', { 'c:fetcher': [rootTag('/proj')] }]])
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    expect((await learn($, 'merge fetcher = API 함수')).text).toContain('합쳤습니다')
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-concepts' })
+    expect(await ui.find({ type: 'Text', text: /^API 함수 ×\d+ · .* · 팀 용어$/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a team question graded in another repository\'s session goes in with the team\'s words, a term of the repository it was asked in', async ($, on) => {
+    const store = storeWith()
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    w.answer = QUESTIONS
+    expect((await learn($, 'quiz')).text).toContain('1. (팀 용어 · 팀 코드 fetcher.ts 4~8줄) 문제 하나')
+    // A first try wrong and asked back: it waits for its try again.
+    w.answer = ['판정: 틀림', '피드백: 아직 아닙니다.', '되묻기: fetch는 어디서 불릴까요?'].join('\n')
+    expect((await learn($, 'quiz 1 감싼 함수')).text).toContain('한 번 더')
+    expect(conceptsOf(store)['c:fetcher']).toBeUndefined()
+    // The next day, a session in another repository (no team file there) grades it at its start, as Claude did.
+    await w.clock.advance(DAY)
+    w.root = '/other'
+    await start($)
+    expect(conceptsOf(store)['c:fetcher']).toMatchObject({ name: 'fetcher', count: 1, blurb: '우리 팀의 API 호출 함수입니다', missedAt: NOW })
+    expect(store.get('teamTerms')).toEqual({ 'c:fetcher': [rootTag('/proj')] })
+    // Back in the repository it was asked in, its next quiz asks it by the team's code.
+    w.root = '/proj'
+    await start($)
+    w.answer = QUESTIONS
+    await learn($, 'quiz 새로')
+    expect(w.models.at(-1)).toContain('\n1. (팀 용어) fetcher — 우리 팀의 API 호출 함수입니다\n   팀 코드 (fetcher.ts 4~8줄):')
+  })
+
+  test('a link inside the repository is judged by where it leads, a folder is never read, and nothing under .git is', async ($, on) => {
+    const w = world(on, 'ok', null, true, storeWith())
+    withTeam(
+      w,
+      [
+        '## 용어',
+        '- **배포 키**: 배포 설정 · `docs/deploy.txt:1-3`',
+        '- **막힌 별칭**: 막힌 파일로 가는 링크 · `src/alias.ts:1-2`',
+        '- **안내 폴더**: 폴더 · `docs/guide:1-2`',
+        '',
+      ].join('\n'),
+    )
+    // A file under another name that leads to a secret one, and one that leads to a file the permission rules refuse.
+    w.files.set('/proj/docs/deploy.txt', '[default]\naws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY\n')
+    w.links.set('/proj/docs/deploy.txt', '/proj/.aws/credentials')
+    w.files.set('/proj/src/alias.ts', 'const 막힌별칭 = 1\n')
+    w.links.set('/proj/src/alias.ts', '/proj/src/denied.ts')
+    on('tool.check', { tool: 'Read' }, (_$, e) => ({ decision: String((e.input as { file_path?: string }).file_path).endsWith('denied.ts') ? 'deny' : 'allow' }))
+    // A path some file lies under is a folder, whatever a read of it would give.
+    w.files.set('/proj/docs/guide', '폴더를 읽은 줄\n둘째 줄\n')
+    w.files.set('/proj/docs/guide/a.md', '# 안내\n')
+    await start($)
+    w.answer = QUESTIONS
+    await learn($, 'quiz 팀')
+    const prompt = w.models[0]!
+    expect(prompt).toContain('(팀 용어) 배포 키 — 배포 설정')
+    expect(prompt).not.toMatch(/팀 (?:코드|노트) \(/)
+    expect(prompt).not.toContain('wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY')
+    expect(prompt).not.toContain('막힌별칭')
+    expect(prompt).not.toContain('폴더를 읽은 줄')
+
+    // The repository's own record (.git), named or reached by a link: its config may hold a credential.
+    const CONFIG = '[remote "origin"]\n\turl = https://github.com/acme/app.git\n[http "https://github.com/"]\n\textraheader = AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hzXzE2QzdlNDJGMjkyYzY5MjVFMjZhOEJGMjQ5\n'
+    w.files.set(TEAM_PATH, ['## 용어', '- **원격 저장소**: 우리 원격 설정 · `.git/config:1-4`', '- **원격 별칭**: 링크 · `docs/remote.cfg:1-4`', '- **훅**: 훅 · `.Git/hooks/pre-commit.sh:1-2`', ''].join('\n'))
+    w.mtimes.set(TEAM_PATH, 1000)
+    w.files.set('/proj/.git/config', CONFIG)
+    w.files.set('/proj/docs/remote.cfg', CONFIG)
+    w.links.set('/proj/docs/remote.cfg', '/proj/.git/config')
+    w.files.set('/proj/.Git/hooks/pre-commit.sh', 'echo 훅\n')
+    w.answer = QUESTIONS
+    await learn($, 'quiz 팀')
+    expect(w.models[1]).toContain('(팀 용어) 원격 저장소 — 우리 원격 설정')
+    expect(w.models[1]).not.toMatch(/팀 (?:코드|노트) \(/)
+    expect(w.models[1]).not.toContain('eC1hY2Nlc3MtdG9rZW46')
+    expect(w.models[1]).not.toContain('acme/app.git')
+  })
+
+  test('no toast, and no repository marked, in a session with no one at its terminal', async ($, on) => {
+    const store = storeWith()
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    expect(w.toasts.filter(toast => toast.includes('팀 용어'))).toEqual([])
+    expect(store.get('teamNudged')).toBeUndefined()
+  })
+
+  test('no toast, and no repository marked, in a cloud session', async ($, on) => {
+    const store = storeWith()
+    const w = world(on, 'ok', null, true, store, { CLAUDE_CODE_REMOTE: 'true' })
+    withTeam(w)
+    await start($)
+    expect(w.toasts.filter(toast => toast.includes('팀 용어'))).toEqual([])
+    expect(store.get('teamNudged')).toBeUndefined()
+  })
+
+  test('a team term met already, graded in the team\'s quiz, keeps its count and its own words', async ($, on) => {
+    const store = storeWith({ 'c:fetcher': { ...later('fetcher'), blurb: '내가 배운 fetcher' } })
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    w.answer = QUESTIONS
+    await learn($, 'quiz 팀')
+    expect(quizItems(store).map(item => item.name)).toEqual(['캐시 키', '페이지네이션 커서', 'fetcher'])
+    w.answer = RIGHT
+    expect((await learn($, 'quiz 3 감싼 함수')).text).toContain('3번 ✓')
+    expect(conceptsOf(store)['c:fetcher']).toMatchObject({ name: 'fetcher', count: 2, blurb: '내가 배운 fetcher', reviewedAt: NOW })
+    expect(store.get('teamTerms')).toEqual({ 'c:fetcher': [rootTag('/proj')] })
   })
 })

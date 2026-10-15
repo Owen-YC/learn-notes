@@ -1002,6 +1002,8 @@ const SECRET_RULES: readonly { re: RegExp; keep?: (secret: string, before: strin
   // A JWT's first part ends at a `-eyJ`, where the next one would start, so near misses are not read again from each.
   { re: /()(\beyJ(?:[A-Za-z0-9_]|-(?!eyJ)){10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})()/g },
   { re: /(\bBearer\s+)([A-Za-z0-9._~+/-]{20,}=*)()/g },
+  // A Basic authorization header's credential (a git config's http.extraheader, a curl -H).
+  { re: /(\bauthorization\s*[:=]\s*["']?basic\s+)([A-Za-z0-9+/]{12,}={0,2})()/gi },
   // The password in a connection string: postgres://user:password@host, or redis://:password@host with no user.
   { re: /(\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:/@'"`]*:)([^\s@/'"`]+)(@)/gi, keep: secret => PLACEHOLDER.test(secret) },
   // A quoted literal given to a name that says password, secret, token or key: `password: "…"`, `api_key = '…'`.
@@ -2254,13 +2256,22 @@ export type TermSource = { path: string; from?: number; to?: number; token: stri
 const SOURCE_EXTENSION = /\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kts?|swift|c|cc|cpp|h|hpp|cs|php|vue|svelte|astro|css|scss|sass|less|html?|mdx?|json|ya?ml|toml|sql|sh|bash|ps1|graphql|gql|prisma|proto|txt|ini|cfg|conf|xml|dart|scala|lua|exs?|clj|r)$/i
 
 /**
+ * True for a path with a part that is a version control system's own folder (`.git`, `.hg`, `.svn`, any case): its
+ * config may hold a credential (an `http.extraheader`), and no team term is asked from it (1.7.0 D6).
+ */
+export function isVcsPath(path: string): boolean {
+  return path.split(/[\\/]/).some(part => /^\.(?:git|hg|svn)$/i.test(part))
+}
+
+/**
  * A path as a term's explanation may name one: relative to the repository's top, in its own words only. No absolute
- * path, `~`, drive letter, network or URL path, and no `.` or `..` part, so it can only lead inside the repository.
+ * path, `~`, drive letter, network or URL path, and no `.` or `..` part, so it can only lead inside the repository;
+ * nothing in the repository's own record (isVcsPath).
  */
 function isRepoPath(path: string): boolean {
   if (path === '' || path.length > 200 || /\s/.test(path) || /^[/~]/.test(path) || /^[A-Za-z]:/.test(path) || path.includes('://')) return false
   if (!/^[\p{L}\p{N}._@+\-/[\]()]+$/u.test(path)) return false
-  return path.split('/').every(part => part !== '' && part !== '.' && part !== '..')
+  return path.split('/').every(part => part !== '' && part !== '.' && part !== '..') && !isVcsPath(path)
 }
 
 /**
@@ -2438,6 +2449,11 @@ const TEAM_TAGS_KEPT = 5
 export const TEAM_NUDGED_KEPT = 50
 /** A repository's tag as rootTag makes it. */
 const ROOT_TAG = /^[0-9a-z]{1,12}$/
+
+/** True for a repository's tag as rootTag makes it, read back from the store. */
+export function isRootTag(tag: unknown): tag is string {
+  return typeof tag === 'string' && ROOT_TAG.test(tag)
+}
 
 /** The store's `teamTerms` read back: concept keys (a merge followed, two that came to one key joined), each with its repositories' tags. */
 export function cleanTeamTerms(raw: unknown, aliases: Readonly<Record<string, string>>): Record<string, string[]> {
@@ -3360,14 +3376,14 @@ export type ReportInput = {
 }
 
 /**
- * The report's line on this repository's team terms (1.7.0 D6): how many met, by the team file's names (REPORT_NEW at
- * most), and how many are left; no command, as the report is for others to read.
+ * The report's line on this repository's team terms (1.7.0 D6): /learn 기록's line (teamRecordLine) with the ones met
+ * by the team file's names (REPORT_NEW at most), and the quiz of the ones left while any is.
  */
 export function reportTeamLine(total: number, met: readonly string[]): string {
   const names = met.slice(0, REPORT_NEW).map(name => cell(name.replace(/`/g, '')))
   const listed = names.length > 0 ? ` (${names.join(' · ')}${met.length > names.length ? ` 외 ${met.length - names.length}개` : ''})` : ''
   const left = total - met.length
-  return `- 이 저장소 팀 용어: ${left <= 0 ? `${total}개 모두 만남` : `${total}개 중 ${met.length}개 만남`}${listed}${left > 0 ? ` · 아직 ${left}개` : ''}`
+  return `- 이 저장소 팀 용어: ${left <= 0 ? `${total}개 모두 만남` : `${total}개 중 ${met.length}개 만남`}${listed}${left > 0 ? ` · 아직 ${left}개 (/learn 퀴즈 팀)` : ''}`
 }
 
 /** Names a report lists at most: the new concepts, and the ones a quiz found missed. */
@@ -3451,6 +3467,9 @@ export type QuizPick = RankedConcept & {
   slip?: Pick<LearnSlip, 'what' | 'question' | 'mine'>
   team?: true
   teamCode?: TeamCode
+  /** A team term's repository (rootTag) and the words its first grade puts in the concept index (TERM_SEED_TEXT). */
+  teamTag?: string
+  teamBlurb?: string
   isTeamMarked?: true
 }
 
@@ -4182,6 +4201,8 @@ function quizItems(parts: Map<string, string[]>, picks: readonly QuizPick[]): Le
         ...(one.team && one.teamCode
           ? { teamCode: { file: one.teamCode.file, from: one.teamCode.from, to: one.teamCode.to, ...(one.teamCode.isDoc ? { isDoc: true as const } : {}) } }
           : {}),
+        ...(one.team && one.teamTag !== undefined ? { teamTag: one.teamTag } : {}),
+        ...(one.team && one.teamBlurb !== undefined ? { teamBlurb: one.teamBlurb } : {}),
       })
     }
   })

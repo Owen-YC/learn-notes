@@ -210,6 +210,13 @@ export type LearnQuizItem = {
   team?: true
   /** Where the team's lines it was asked from are (1.7.0): the file's name and the lines, `isDoc` for a team doc (팀 노트). */
   teamCode?: { file: string; from: number; to: number; isDoc?: true }
+  /**
+   * A team term's repository (1.7.0): the tag of the one the quiz was made in, which its grade marks it a team term of
+   * wherever the grade comes (a quiz is every window's); and the words that grade puts in the concept index (160
+   * characters at most, its path taken out and its secrets masked).
+   */
+  teamTag?: string
+  teamBlurb?: string
 }
 
 /**

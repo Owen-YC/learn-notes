@@ -389,10 +389,11 @@ describe('1.7.0: asked again in other code (다시 도전, D5)', () => {
 /**
  * The store's whole worst case, tracked here as each release adds keys (a new key joins the fixture below): every key
  * at its caps with every text in Hangul (three bytes a character, the main audience's language), and 40 merges. As of
- * 1.7.0 (6/8) it comes to 3,666,825 bytes: past the plan's 3.5MB budget by 1.6's keys alone (history 2MB, quizBank
- * 0.81MB, concepts 0.43MB, which this release does not cut); 1.7.0's own keys (slips, faults, sessions, schema,
- * quotaToast, and D6's teamTerms and teamNudged) take about 0.18MB of it. The store refuses every write past 4 MiB
- * (4,194,304 bytes) in all: about 0.53MB is left, and STORE_WORST holds the line so no key grows into it unseen.
+ * 1.7.0 (6/8, a quiz question's team fields in) it comes to 3,669,687 bytes: past the plan's 3.5MB budget by 1.6's
+ * keys alone (history 2MB, quizBank 0.81MB, concepts 0.43MB, which this release does not cut); 1.7.0's own keys
+ * (slips, faults, sessions, schema, quotaToast, and D6's teamTerms and teamNudged) take about 0.18MB of it. The store
+ * refuses every write past 4 MiB (4,194,304 bytes) in all: about 0.52MB is left, and STORE_WORST holds the line so no
+ * key grows into it unseen.
  */
 const STORE_LIMIT = 4 * 1024 * 1024
 const STORE_WORST = 3_670_000
@@ -465,6 +466,11 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
       slip: hangul(80),
       slipType: 'reference',
       slipBefore: { what: hangul(80), type: 'reference', question: mixed(240), mine: mixed(160), at: NOW, times: 99, fixedAt: NOW },
+      // A team term (1.7.0 D6): where its lines are, its repository, and the words its grade puts in the concept index.
+      team: true,
+      teamCode: { file: hangul(120), from: 999_999, to: 999_999, isDoc: true },
+      teamTag: 'z'.repeat(12),
+      teamBlurb: mixed(160),
     }
     let activity = {}
     let usage = {}
