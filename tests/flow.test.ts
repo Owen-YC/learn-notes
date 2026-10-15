@@ -1381,7 +1381,14 @@ test('/learn help lists every subcommand, and an unknown one shows it', async ($
   // The practice's example answer, after one try (1.7.0 D8), and o and x where the answer was seen first (D4).
   expect(help.text).toContain('`t` 직접 해 보기(한 번 고친 뒤 `a` 예시 답)')
   expect(help.text).toContain("(모르면 `모르겠어요`)")
-  expect(help.text).toContain('정답을 먼저 봤으면 `o`·`x`로 채점')
+  // The quiz's a as the pane has it since 1.7.0 (D4): no answer before one try where a field is drawn, and a then grades
+  // the try as first judged; o and x only for an answer seen before any grade, never a seen first and graded by hand.
+  const quizLine = lines.find(line => line.startsWith('- 퀴즈(`4`): ')) ?? ''
+  expect(quizLine).toContain('`i` 답 적기 · `a` 정답(한 번 적은 뒤 · 첫 판정대로 매김)')
+  expect(quizLine).not.toMatch(/`a` 정답 ·/)
+  expect(quizLine).toMatch(/ · 정답을 채점 전에 봤으면\(입력칸이 없는 화면 · 채점 실패 · `\/learn 퀴즈 정답`\) `o`·`x`로 채점$/)
+  // The journal's list of days (날짜, days) by the word its reply names, 목록, as 1.6.1's help had it.
+  expect(lines.find(line => line.startsWith('- 가끔: '))).toContain(' · `/learn 일지` 오늘 노트 목차(`어제` · `목록`도) · ')
   // Gone from 1.7.0: the note's own quiz on t.
   expect(help.text).not.toContain('이 노트 퀴즈')
   expect(help.text).not.toContain('/learn save')
@@ -9317,9 +9324,44 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
   test('1.7.0: every key the pane draws, at each step of a note, its practice and a quiz, is named in the help', async ($, on) => {
     const store = new Map<string, unknown>()
     const { w, ui, id } = await practiced($, on, store)
+    // Each button by its key, with the help line and the words there that name it: one letter is another thing in another
+    // place (a the example answer under the note and the answer in a quiz; i a question and the answer field; n the next
+    // note and the note that taught a concept missed). A button not listed here fails the test until the help names it.
+    const PANEL = '- 패널: '
+    const NOTE = '- 노트 아래: '
+    const QUIZ = '- 퀴즈(`4`): '
+    const NAMED: Record<string, readonly [string, string]> = {
+      'view-note': [PANEL, '`1` 노트'],
+      'view-split': [PANEL, '`2` 전/후'],
+      'view-concepts': [PANEL, '`3` 개념 모음'],
+      'view-quiz': [PANEL, '`4` 퀴즈'],
+      prev: [PANEL, '`p`·`n` 이전·다음 노트'],
+      next: [PANEL, '`p`·`n` 이전·다음 노트'],
+      review: [PANEL, '`q` 오늘 복습 바로 시작'],
+      write: [PANEL, '`w` 노트 쓰기, 다시 쓰기'],
+      'note-drill': [NOTE, '`t` 직접 해 보기'],
+      'note-drill-answer': [NOTE, '`a` 예시 답'],
+      easier: [NOTE, '`e` 더 쉽게'],
+      trace: [NOTE, '`r` 예시로 따라가기'],
+      'ask-type': [NOTE, '`i` 질문하기'],
+      share: [NOTE, '`c` 복사'],
+      'quiz-new': [QUIZ, '`s` 새 문제'],
+      'quiz-hint': [QUIZ, '`h` 힌트'],
+      'quiz-type': [QUIZ, '`i` 답 적기'],
+      'quiz-answer': [QUIZ, '`a` 정답'],
+      'quiz-flip': [QUIZ, '`f` 채점 바꾸기'],
+      'quiz-note': [QUIZ, '`n` 틀린 개념을 배운 노트'],
+      'quiz-right': [QUIZ, '`o`·`x`로 채점'],
+      'quiz-wrong': [QUIZ, '`o`·`x`로 채점'],
+    }
     const keys = new Set<string>()
+    const drawn = new Map<string, string>()
     const collect = async () => {
-      for (const one of await ui.findAll({ type: 'Button' })) if (one.props.hotkey !== undefined) keys.add(String(one.props.hotkey))
+      for (const one of await ui.findAll({ type: 'Button' })) {
+        if (one.props.hotkey === undefined) continue
+        keys.add(String(one.props.hotkey))
+        drawn.set(String(one.key), String(one.props.hotkey))
+      }
     }
     // The note: its views, its steps, and the row under it (t, e, r, i, c, w).
     await collect()
@@ -9335,12 +9377,17 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     w.answer = ['Q1: 문제 하나', 'H1: 바깥을 떠올려 보세요', 'A1: 답 하나'].join('\n')
     await ui.press({ key: 'quiz-new' })
     await w.clock.settle()
+    // As the help says it: no answer before one try where the field is drawn.
+    expect(await ui.find({ type: 'Button', key: 'quiz-answer' })).toBeUndefined()
     await collect()
     w.answer = ['판정: 틀림', '피드백: 그 값은 아닙니다.', '되묻기: 이름이 비면 무엇이 찍힐까요?'].join('\n')
     await ui.input({ key: mineKey(store, 0), text: '안녕하세요, 님!' })
     await w.clock.settle()
     await collect()
+    // a after the try: graded at once as first judged, with no o or x.
     await ui.press({ key: 'quiz-answer' })
+    expect((store.get('quiz') as { items: { result?: string }[] }).items[0]!.result).toBe('wrong')
+    expect(await ui.find({ type: 'Button', key: 'quiz-right' })).toBeUndefined()
     expect(await ui.find({ type: 'Button', key: 'quiz-note' })).toBeDefined()
     await collect()
     // A new quiz whose answer was seen first (/learn 퀴즈 정답): o and x.
@@ -9356,5 +9403,12 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect([...keys].sort()).toEqual(['1', '2', '3', '4', 'a', 'c', 'e', 'f', 'h', 'i', 'n', 'o', 'p', 'q', 'r', 's', 't', 'w', 'x'])
     const help = (await learn($, '도움말')).text ?? ''
     for (const key of keys) expect(help).toContain(`\`${key}\``)
+    // Each button on its own line of the help, by its own words, its hotkey among them.
+    const lines = help.split('\n')
+    for (const [button, hotkey] of drawn) {
+      const [head, words] = NAMED[button] ?? ['(not in the help)', button]
+      expect(words).toContain(`\`${hotkey}\``)
+      expect(lines.find(line => line.startsWith(head)) ?? `${head} (no such line)`).toContain(words)
+    }
   })
 })
