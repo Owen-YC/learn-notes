@@ -8,10 +8,10 @@ describe('1.7.0: a question asked back, and one try again (D4)', () => {
   test('a grade reads each labelled line on its own: the feedback ends where the question asked back begins', () => {
     const reply = ['판정: 거의', '피드백: 적은 대로라면 i가 3일 때도 찍혀야 합니다.', '되묻기: i가 3이 되면 `i < 3`은 참일까요?'].join('\n')
     expect(parseCheck(reply)).toEqual({ verdict: 'partial', feedback: '적은 대로라면 i가 3일 때도 찍혀야 합니다.', nudge: 'i가 3이 되면 `i < 3`은 참일까요?' })
-    // Bold labels, a feedback on two lines, and the lines a later grade adds (헷갈린 점 · 유형) end it too.
+    // Bold labels, a feedback on two lines, and the lines 1.7.0's slips add (헷갈린 점 · 유형, D5) end it too.
     const more = ['**판정:** 틀림', '**피드백:** 첫 줄입니다.', '둘째 줄입니다.', '**되묻기:** 마지막 값은 무엇일까요?', '헷갈린 점: 끝 조건', '유형: 경계값'].join('\n')
-    expect(parseCheck(more)).toEqual({ verdict: 'wrong', feedback: '첫 줄입니다.\n둘째 줄입니다.', nudge: '마지막 값은 무엇일까요?' })
-    expect(parseCheck(['판정: 틀림', '피드백: 아쉬워요.', '헷갈린 점: 끝 조건'].join('\n'))).toEqual({ verdict: 'wrong', feedback: '아쉬워요.' })
+    expect(parseCheck(more)).toEqual({ verdict: 'wrong', feedback: '첫 줄입니다.\n둘째 줄입니다.', nudge: '마지막 값은 무엇일까요?', slip: '끝 조건', slipType: 'other' })
+    expect(parseCheck(['판정: 틀림', '피드백: 아쉬워요.', '헷갈린 점: 끝 조건'].join('\n'))).toEqual({ verdict: 'wrong', feedback: '아쉬워요.', slip: '끝 조건', slipType: 'other' })
     // As a JSON object too.
     expect(parseCheck('{"verdict": "wrong", "feedback": "아닙니다", "nudge": "i가 3이면요?"}')).toEqual({ verdict: 'wrong', feedback: '아닙니다', nudge: 'i가 3이면요?' })
   })
@@ -49,7 +49,8 @@ describe('1.7.0: a question asked back, and one try again (D4)', () => {
     expect(first).toContain('학습자의 답대로라면 무엇이 되는지(값이나 동작)를 먼저 짚고, 맞은 점 하나를 인정한다')
     expect(first).toContain('되묻기는 판정이 거의나 틀림일 때만 쓰는 질문 한 문장이다')
     expect(first).toContain('답·고칠 코드·개념 이름은 말하지 않는다')
-    expect(first).toMatch(/피드백: \(한두 문장\)\n되묻기: \(거의·틀림일 때만 질문 한 문장\. 맞음이면 이 줄을 쓰지 않는다\)$/)
+    // The slip's two lines follow it since 1.7.0's D5 (see slips.test.ts).
+    expect(first).toMatch(/피드백: \(한두 문장\)\n되묻기: \(거의·틀림일 때만 질문 한 문장\. 맞음이면 이 줄을 쓰지 않는다\)\n헷갈린 점: /)
     expect(first).not.toContain('## 학습자의 첫 답과 받은 되묻기')
 
     const again = checkPrompt(ITEM, '0 1 2', 'beginner', { mine: '0 1 2 3', verdict: 'partial', feedback: '적은 대로라면 i가 3일 때도 찍혀야 합니다.', nudge: 'i가 3이 되면 i < 3은 참일까요?' })

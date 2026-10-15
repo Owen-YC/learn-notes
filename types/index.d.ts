@@ -188,6 +188,20 @@ export type LearnQuizItem = {
    * question is graded, so a right second try keeps its concept's step (recalled with help).
    */
   firstTry?: LearnQuizFirstTry
+  /**
+   * True for a question asked again about a concept whose slip (LearnSlip) was still open when the quiz was made
+   * (1.7.0, 다시 도전): asked in other code, its slip never in the question. Absent when the question gave the slip
+   * away: then a right answer does not mend it.
+   */
+  isRetry?: true
+  /** The wrong idea Claude read in the typed answer this grade went by (1.7.0), and its kind; absent when none was named. */
+  slip?: string
+  slipType?: LearnSlipType
+  /**
+   * The concept's slip as it was before this grade changed it (null for none), so turning the grade the other way
+   * (f) starts from there; absent when the grade left it as it was.
+   */
+  slipBefore?: LearnSlip | null
 }
 
 /**
@@ -195,7 +209,31 @@ export type LearnQuizItem = {
  * wrong) and its feedback, and the question asked back (되묻기) for one try again; or, for an answer that only said
  * "모르겠어요" (isBlankAnswer), the question's hint in the nudge's place, with no grade asked for (`feedback` empty).
  */
-export type LearnQuizFirstTry = { mine: string; verdict: 'partial' | 'wrong'; feedback: string; nudge: string; at: number }
+export type LearnQuizFirstTry = {
+  mine: string
+  verdict: 'partial' | 'wrong'
+  feedback: string
+  nudge: string
+  at: number
+  /** The wrong idea Claude read in this answer, and its kind (1.7.0); absent when it named none, or for "모르겠어요". */
+  slip?: string
+  slipType?: LearnSlipType
+}
+
+/**
+ * A slip's kind (1.7.0): one of the nine a grade names (유형: 실행 순서·비동기, 값과 참조, 변수 범위, 자료형·형 변환,
+ * 경계와 조건, 없는 값, 반환과 출력, 상태가 바뀌는 때, 기타), or `blank` for an answer with nothing to read one from
+ * ("모르겠어요", two characters or fewer). Kept, not shown yet.
+ */
+export type LearnSlipType = 'order' | 'reference' | 'scope' | 'coercion' | 'boundary' | 'nullish' | 'output' | 'state' | 'other' | 'blank'
+
+/**
+ * What a learner got wrong about one concept in a quiz (1.7.0, the store's `slips`, by concept key): the wrong idea
+ * their typed answer showed (`what`, one short sentence; '' for `blank`), its kind, the question and their answer
+ * (cut short, secrets masked), when it was last missed and how many times, and when a later quiz showed it mended,
+ * or the concept was marked known (`fixedAt`). The next quiz on an open one asks it again in other code (다시 도전).
+ */
+export type LearnSlip = { what: string; type: LearnSlipType; question: string; mine: string; at: number; times: number; fixedAt?: number }
 
 /** One day's learning: notes written, and quiz answers the learner graded right and wrong. */
 export type LearnDayActivity = { notes: number; right: number; wrong: number }
@@ -261,6 +299,8 @@ declare module 'claude-code' {
        * said the store was newer. Only ever raised; kept here, so a reload of an old window does not say it again.
        */
       newerSaid: { newest: string | null; isBehind: boolean } | null
+      /** The slips by concept key (see LearnSlip), mirrored from the plugin's store for drawing. */
+      slips: Record<string, LearnSlip>
     }
   }
 }

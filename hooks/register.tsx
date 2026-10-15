@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementConstructor, ElementTable, EngineInterface, HookFailure, InputProps, ModelUsage, Register, RenderSurface } from 'claude-code'
 
-import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnDayUsage, LearnLive, LearnNote, LearnQuizFirstTry, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSubmit, LearnView, LearnWithheld } from '../types'
+import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnDayUsage, LearnLive, LearnNote, LearnQuizFirstTry, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSlip, LearnSubmit, LearnView, LearnWithheld } from '../types'
 import {
   HISTORY_PER_PROJECT,
   HISTORY_PROJECTS,
@@ -22,6 +22,19 @@ import {
   checkPrompt,
   parseCheck,
   isBlankAnswer,
+  SLIP_TEXT,
+  slipTypeOf,
+  cleanSlips,
+  cutCells,
+  fitSlips,
+  nextSlip,
+  openSlip,
+  slipAt,
+  slipChange,
+  slipNotice,
+  slipRecordOf,
+  type SlipChange,
+  type SlipNotice,
   keptNudge,
   secondVerdict,
   activityFromNotes,
@@ -222,6 +235,7 @@ const askRun = atom({ plugin: 'learn-notes', key: 'askRun' } as const, {})
 const activity = atom({ plugin: 'learn-notes', key: 'activity' } as const, {})
 const submitted = atom({ plugin: 'learn-notes', key: 'submitted' } as const, { list: [], lastRequest: null })
 const newerSaid = atom({ plugin: 'learn-notes', key: 'newerSaid' } as const, null)
+const slips = atom({ plugin: 'learn-notes', key: 'slips' } as const, {})
 
 /** `$.store` keys: notes per project for the next session, the concept index, merges and the last quiz. */
 const HISTORY_KEY = 'history'
@@ -280,6 +294,15 @@ const SESSIONS_KEY = 'sessions'
  * (isStoreAhead), so it never writes them back in a layout the newer build no longer reads.
  */
 const SCHEMA_KEY = 'schema'
+/**
+ * What the learner got wrong in quizzes (1.7.0), by concept key (LearnSlip: the slip a typed answer showed, its kind,
+ * the question and answer cut short and masked, when and how often, and when mended): SLIPS_KEPT at most and
+ * SLIPS_MAX_BYTES of JSON (fitSlips), a mended one let go 60 days on (cleanSlips). Apart from the concept index, so a
+ * 1.6 session that writes the index leaves it; read through the merges, and written after reading the store's again
+ * (several sessions write it), never while the schema guard is on. Not in the journal, concepts.md, Anki, the report
+ * or the learning record tool.
+ */
+const SLIPS_KEY = 'slips'
 const WELCOME = 'learn-notes가 켜졌습니다 · 파일을 고치는 요청을 하면 노트가 생깁니다 · /learn으로 패널'
 
 type MergeRecord = { concept: LearnConcept; into: string; both: number }
@@ -1149,6 +1172,9 @@ async function loadHistory($: EngineInterface): Promise<void> {
     if (Object.keys(index).length > 0 && Object.keys(await read($, concepts)).length === 0) {
       await update($, concepts, () => index)
     }
+    // The store's slips, every window's: the mirror is only ever written with what the store took.
+    const kept = cleanSlips(await $.store.get(SLIPS_KEY), merged, await $.clock.now())
+    if (JSON.stringify(kept) !== JSON.stringify(await read($, slips))) await update($, slips, () => kept)
     const root = await $.session.root()
     const isEmpty = (await read($, notes)).length === 0
     if ((await read($, paneRoot)) === null || isEmpty) await update($, paneRoot, () => root)
@@ -1333,6 +1359,7 @@ function markKnownStored($: EngineInterface, cfg: Config, names: readonly string
       const at = await $.clock.now()
       const next: Record<string, LearnConcept> = { ...index }
       const result = { done: [] as string[], already: [] as string[], missing: [] as string[] }
+      const doneKeys: string[] = []
       const seen = new Set<string>()
       for (const name of names) {
         const key = resolveKey(map, conceptKey(name))
@@ -1352,9 +1379,12 @@ function markKnownStored($: EngineInterface, cfg: Config, names: readonly string
         else delete marked.knownAt
         next[key] = marked
         result.done.push(one.name)
+        doneKeys.push(key)
       }
       if (result.done.length > 0) {
         await storeIndex($, next)
+        // Known now: a slip still open on it is mended with it (1.7.0), and never asked again.
+        if (toKnown) await changeSlipsNow($, doneKeys, before => nextSlip(before, { kind: 'mended' }, at))
         await update($, concepts, () => next)
         await remind($, cfg)
         if (cfg.isAutoSave) await saveConcepts($, cfg, next)
@@ -1579,6 +1609,56 @@ function markConcepts(
   })
 }
 
+/**
+ * Changes the slip of each concept in `keys` (a key merged away counts as the one it went into) against the store
+ * as it is now, read again first: another session may have written it since. Nothing while the schema guard is on.
+ * Each concept's slip from before, null for none, by the key given, for the ones it changed; undefined when nothing
+ * changed or the store could not be written. Run in the storing lane: call it from work already queued there.
+ */
+async function changeSlipsNow(
+  $: EngineInterface,
+  keys: readonly string[],
+  change: (before: LearnSlip | undefined, key: string) => LearnSlip | undefined,
+): Promise<Map<string, LearnSlip | null> | undefined> {
+  try {
+    if (await isStoreAhead($)) return undefined
+    const map = cleanAliases(await $.store.get(ALIASES_KEY))
+    const now = await $.clock.now()
+    const all: Record<string, LearnSlip> = cleanSlips(await $.store.get(SLIPS_KEY), map, now)
+    const changed = new Map<string, LearnSlip | null>()
+    for (const key of keys) {
+      const at = resolveKey(map, key)
+      const before = slipAt(all, at)
+      const after = change(before, key)
+      if (JSON.stringify(after) === JSON.stringify(before)) continue
+      changed.set(key, before ?? null)
+      if (after === undefined) delete all[at]
+      else all[at] = after
+    }
+    if (changed.size === 0) return undefined
+    const next = fitSlips(all)
+    await $.store.set(SLIPS_KEY, next)
+    await update($, slips, () => next)
+    return changed
+  } catch (error) {
+    void fault($, 'store', faultCode(error, 'store'), '헷갈린 점을 남기지 못했습니다')
+    return undefined
+  }
+}
+
+/**
+ * A grade's change to its concept's slip (slipChange), after any store write still running; `from` the slip to go
+ * from in the store's place (a grade turned the other way starts from where its first grade found it). The slip from
+ * before, null for none, when it changed.
+ */
+function recordSlip($: EngineInterface, key: string, change: SlipChange, at: number, from?: LearnSlip | null): Promise<LearnSlip | null | undefined> {
+  if (change.kind === 'none' && from === undefined) return Promise.resolve(undefined)
+  return enqueue('storing', async () => {
+    const changed = await changeSlipsNow($, [key], before => nextSlip(from === undefined ? before : (from ?? undefined), change, at))
+    return changed?.get(key)
+  })
+}
+
 /** Every note the journal holds for these days in this project, part by part. */
 async function journalEntriesFor($: EngineInterface, cfg: Config, days: readonly string[]): Promise<RecapEntry[]> {
   const wanted = new Set(days)
@@ -1610,9 +1690,15 @@ function marksFrom(raw: unknown): LearnQuizMarks | undefined {
 /** A question's first try read back from the store (LearnQuizItem.firstTry); undefined when it is not one. */
 function firstTryOf(raw: unknown): LearnQuizFirstTry | undefined {
   if (!isRecord(raw)) return undefined
-  const { mine, verdict, feedback, nudge, at } = raw
+  const { mine, verdict, feedback, nudge, at, slip } = raw
   if (typeof mine !== 'string' || (verdict !== 'partial' && verdict !== 'wrong') || typeof nudge !== 'string' || nudge === '' || typeof at !== 'number') return undefined
-  return { mine, verdict, feedback: typeof feedback === 'string' ? feedback : '', nudge, at }
+  return { mine, verdict, feedback: typeof feedback === 'string' ? feedback : '', nudge, at, ...slipOfItem(slip, raw.slipType) }
+}
+
+/** A question's (or its first try's) slip and kind read back from the store: none unless it has words. */
+function slipOfItem(slip: unknown, type: unknown): Pick<LearnQuizItem, 'slip' | 'slipType'> {
+  if (typeof slip !== 'string' || slip.trim() === '') return {}
+  return { slip: cut(slip, SLIP_TEXT), slipType: slipTypeOf(type) }
 }
 
 /** One quiz question read back from the store; undefined when it is not one. */
@@ -1639,6 +1725,9 @@ function quizItemOf(one: unknown): LearnQuizItem | undefined {
     ...(kind === 'predict' || kind === 'why' || kind === 'modify' ? { kind } : {}),
     ...(typeof noteId === 'string' && noteId !== '' ? { noteId } : {}),
     ...(firstTry ? { firstTry } : {}),
+    ...(one.isRetry === true ? { isRetry: true as const } : {}),
+    ...slipOfItem(one.slip, one.slipType),
+    ...(one.slipBefore === null ? { slipBefore: null } : slipRecordOf(one.slipBefore) ? { slipBefore: slipRecordOf(one.slipBefore)! } : {}),
   }
 }
 
@@ -1746,9 +1835,17 @@ function nudgeLabel(first: LearnQuizFirstTry): string {
   return isBlankAnswer(first.mine) ? '힌트' : '되묻기'
 }
 
-/** A first try as a grade gives it: its answer, Claude's grade (partly right or wrong) and feedback; "모르겠어요" with a word in the feedback's place. */
-function firstGrade(first: LearnQuizFirstTry): Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback'> {
-  return { mine: first.mine, verdict: first.verdict, feedback: first.feedback !== '' ? first.feedback : BLANK_FEEDBACK }
+/**
+ * A first try as a grade gives it: its answer, Claude's grade (partly right or wrong) and feedback, and the slip it
+ * showed; "모르겠어요" with a word in the feedback's place.
+ */
+function firstGrade(first: LearnQuizFirstTry): Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback' | 'slip' | 'slipType'> {
+  return {
+    mine: first.mine,
+    verdict: first.verdict,
+    feedback: first.feedback !== '' ? first.feedback : BLANK_FEEDBACK,
+    ...(first.slip !== undefined ? { slip: first.slip, slipType: first.slipType ?? 'other' } : {}),
+  }
 }
 
 /**
@@ -1930,7 +2027,8 @@ const QUIZ_CANDIDATES = 6
  * concepts due first, taken from different notes where it can (a wrong one
  * always), or `only` this note's (t in the pane: a note quiz that asks to
  * predict and to modify, about that note's code), never one marked known,
- * each asked about the code the learner made with it where a note still holds it.
+ * each asked about the code the learner made with it where a note still holds it,
+ * and one whose slip is still open asked again in other code (1.7.0, 다시 도전).
  */
 async function makeQuiz(
   $: EngineInterface,
@@ -1956,7 +2054,12 @@ async function makeQuiz(
   // A review quiz goes over more than one note where it can (three concepts from one note make one lesson
   // again), the concepts due before any other.
   const found = await withCode($, cfg, chosen, map, only?.id)
-  const picks = only ? found : spreadPicks(found, 3, one => isDue(one, now))
+  // A concept whose slip is still open is asked again (다시 도전): told its last question, answer and slip.
+  const open = await storedSlips($, map, now)
+  const picks = (only ? found : spreadPicks(found, 3, one => isDue(one, now))).map(one => {
+    const slip = openSlip(open, one.key)
+    return slip ? { ...one, slip: { what: slip.what, question: slip.question, mine: slip.mine } } : one
+  })
   const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level, only ? 'note' : 'review'), maxTokens: 1400 })
   if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
   const items = parseQuiz(asked.text, picks)
@@ -2065,7 +2168,7 @@ async function applyGrade(
   current: Quiz,
   i: number,
   result: 'right' | 'wrong',
-  extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback' | 'isLearnerGraded'>,
+  extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback' | 'isLearnerGraded' | 'slip' | 'slipType'>,
   how: { at?: number; isFirstDropped?: boolean } = {},
 ): Promise<'kept' | 'busy' | 'moved' | 'failed'> {
   const mark = `${current.at}:${i}`
@@ -2090,13 +2193,18 @@ async function applyGrade(
     // The learner's own word is fully right or fully wrong, never "partly", whatever Claude's verdict was.
     const before = await markConcepts($, cfg, markFor(result, extra.isLearnerGraded === true ? undefined : extra.verdict, isHelped), [item.key], now)
     if (!before) return 'failed'
+    // Its slip (1.7.0): what a miss showed, kept for the next quiz to ask again; one asked again mended by a right answer.
+    const isGraduated = conceptAt(await read($, concepts), resolveKey(await read($, aliases), item.key))?.knownAt === now
+    const slipBefore = await recordSlip($, item.key, slipChange({ ...graded(item), result }, { isHelped, isGraduated }), now)
     // Read again: the quiz may have moved on while the concepts were written.
     const latest = (await lastQuiz($)) ?? fresh
     if (latest.at !== current.at) return 'kept'
     const prior = before[0]
     await keepQuiz($, {
       ...latest,
-      items: latest.items.map((one, j) => (j === i ? { ...graded(one), isShown: true, result, gradedAt: now, ...(prior ? { before: prior } : {}) } : one)),
+      items: latest.items.map((one, j) =>
+        j === i ? { ...graded(one), isShown: true, result, gradedAt: now, ...(prior ? { before: prior } : {}), ...(slipBefore !== undefined ? { slipBefore } : {}) } : one,
+      ),
     })
     // Graded (from the conversation too): an answer a failed grade left in its field is not sent again.
     await update($, quizRun, run => ({ ...run, error: null, ...(isDraftOf(run, current.at, i) ? { draft: null } : {}) }))
@@ -2132,9 +2240,15 @@ async function regradeQuiz($: EngineInterface, cfg: Config, current: Quiz, i: nu
     const before = item.before && recallMarks(item.before, await stepsFrom($))
     const mark: Mark = (index, keys) => regrade(index, keys[0]!, before, at, result === 'right' ? right : markWrong)
     if (!(await markConcepts($, cfg, mark, [item.key], at))) return 'failed'
+    // Its slip as if graded this way then: from the slip before the first grade, turned right as if right at once.
+    const turned: LearnQuizItem = { ...item, result, isLearnerGraded: true }
+    const isGraduated = conceptAt(await read($, concepts), resolveKey(await read($, aliases), item.key))?.knownAt === at
+    const change = slipChange(turned, { isHelped: isHelpedGrade(item), isGraduated, isTurned: true })
+    const slipBefore = await recordSlip($, item.key, change, at, item.slipBefore)
     const latest = (await lastQuiz($)) ?? fresh
     if (latest.at === current.at) {
-      await keepQuiz($, { ...latest, items: latest.items.map((one, j) => (j === i ? { ...one, result, isLearnerGraded: true } : one)) })
+      const kept = item.slipBefore !== undefined ? {} : slipBefore !== undefined ? { slipBefore } : {}
+      await keepQuiz($, { ...latest, items: latest.items.map((one, j) => (j === i ? { ...one, result, isLearnerGraded: true, ...kept } : one)) })
     }
     // Partly right was counted wrong already: only a right one moves between the counts.
     if (item.result !== result) await recordActivity($, stamp(at).day, result === 'right' ? { right: 1, wrong: -1 } : { right: -1, wrong: 1 })
@@ -2192,22 +2306,46 @@ async function gradeTyped(
     }
     return keptGrade($, cfg, current, i, 'wrong', { mine: said, verdict: 'wrong', feedback: BLANK_FEEDBACK })
   }
-  const asked = await askModel($, cfg, 'grade', { system: CHECK_SYSTEM, prompt: checkPrompt(item, mine, cfg.level, first), maxTokens: 480, timeoutMs: 60_000 })
+  // The concept's slip still open (1.7.0): the grade is told it, to name it in the feedback once it is mended.
+  const past = await pastSlip($, item.key)
+  const prompt = checkPrompt(item, mine, cfg.level, first, past ? { what: past.what } : undefined)
+  const asked = await askModel($, cfg, 'grade', { system: CHECK_SYSTEM, prompt, maxTokens: 480, timeoutMs: 60_000 })
   if ('error' in asked) return { error: `채점하지 못했습니다: ${asked.error}` }
   const graded = parseCheck(asked.text)
   if (!graded) {
     void fault($, 'grade', 'unreadable', '채점 결과를 읽지 못했습니다')
     return { error: '채점 결과를 읽지 못했습니다. 다시 보내 보세요.' }
   }
+  // The slip this answer showed, asked for on its first grade only (after "모르겠어요" too: no answer came before).
+  const slip = (first === undefined || isBlankAnswer(first.mine)) && graded.slip !== undefined ? { slip: graded.slip, slipType: graded.slipType ?? ('other' as const) } : {}
   // Short of right the first time, with a question asked back that does not give the answer away: one try again.
   const nudge = first === undefined && graded.verdict !== 'right' ? keptNudge(graded.nudge, item.answer) : undefined
   if (nudge !== undefined && graded.verdict !== 'right') {
-    return keepFirstTry($, current, i, { mine: said, verdict: graded.verdict, feedback: graded.feedback, nudge, at: await $.clock.now() })
+    return keepFirstTry($, current, i, { mine: said, verdict: graded.verdict, feedback: graded.feedback, nudge, at: await $.clock.now(), ...slip })
   }
   // Almost right is not right yet: counted wrong, its concept a step back (after a try again, only when both tries were).
   // After "모르겠어요" there was no first answer to grade: the one after the hint is graded as it is, as one after h.
   const verdict = first && !isBlankAnswer(first.mine) ? secondVerdict(first.verdict, graded.verdict) : graded.verdict
-  return keptGrade($, cfg, current, i, verdict === 'right' ? 'right' : 'wrong', { mine: said, verdict, feedback: graded.feedback })
+  return keptGrade($, cfg, current, i, verdict === 'right' ? 'right' : 'wrong', { mine: said, verdict, feedback: graded.feedback, ...slip })
+}
+
+/** The slips as the store has them now (merges followed), else as the pane's mirror last had them. */
+async function storedSlips($: EngineInterface, map: Readonly<Record<string, string>>, now: number): Promise<Record<string, LearnSlip>> {
+  try {
+    return cleanSlips(await $.store.get(SLIPS_KEY), map, now)
+  } catch {
+    return read($, slips)
+  }
+}
+
+/** The slip still open for the concept under `key` (merges followed), as the store has it; none when the store cannot be read. */
+async function pastSlip($: EngineInterface, key: string): Promise<LearnSlip | undefined> {
+  try {
+    const map = await read($, aliases)
+    return openSlip(cleanSlips(await $.store.get(SLIPS_KEY), map, await $.clock.now()), resolveKey(map, key))
+  } catch {
+    return undefined
+  }
 }
 
 /** applyGrade for a typed answer: the question as graded, or why there is no grade. */
@@ -2217,7 +2355,7 @@ async function keptGrade(
   current: Quiz,
   i: number,
   result: 'right' | 'wrong',
-  extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback'>,
+  extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback' | 'slip' | 'slipType'>,
 ): Promise<{ item: LearnQuizItem } | { error: string }> {
   const kept = await applyGrade($, cfg, current, i, result, extra)
   if (kept === 'failed') return { error: GRADE_NOT_KEPT }
@@ -3051,6 +3189,21 @@ function quizItemState(current: Quiz, item: LearnQuizItem, isChecking: boolean):
   return isAnswerShown(current, item) ? '정답 봄 · ' : ''
 }
 
+/** What stands before a question asked again over a slip still open (1.7.0) in the conversation; its slip is not said before an answer. */
+function retryMark(item: LearnQuizItem): string {
+  return item.isRetry ? '(다시 도전) ' : ''
+}
+
+/**
+ * A graded question's line about its concept's slip (slipNotice) as the conversation says it: where the pane
+ * offers n for the note that taught it, the note is found by its name.
+ */
+async function slipLineText($: EngineInterface, item: LearnQuizItem): Promise<string | undefined> {
+  const notice: SlipNotice | undefined = slipNotice(item, slipAt(await read($, slips), resolveKey(await read($, aliases), item.key)), isHelpedGrade(item))
+  if (!notice) return undefined
+  return notice.kind === 'again' ? `${notice.text} · 이 개념을 배운 노트: /learn 찾기 ${item.name}` : notice.text
+}
+
 /** How a try again is sent in the conversation, and the answer asked for instead. */
 function againText(n: number): string {
   return `한 번 더: /learn 퀴즈 ${n} 새 답 · 정답: /learn 퀴즈 정답 ${n}`
@@ -3071,7 +3224,7 @@ function nextText(current: Quiz, i: number, withHint = false): string {
  * first and the question asked back (or, after "모르겠어요", the hint), seen again where no pane shows them.
  */
 function listedQuestion(current: Quiz, item: LearnQuizItem, isChecking: boolean): string {
-  const head = `${quizItemState(current, item, isChecking)}${item.question}`
+  const head = `${quizItemState(current, item, isChecking)}${retryMark(item)}${item.question}`
   const first = item.firstTry
   if (first === undefined || item.result !== undefined || isChecking) return head
   const mine = isBlankAnswer(first.mine) ? [] : [`내 답: ${cut(first.mine.replace(/\s+/g, ' '), 80)}`]
@@ -3145,9 +3298,11 @@ async function typedAnswer($: EngineInterface, cfg: Config, current: Quiz, n: nu
           : ''
     const done = graded.item
     const graduated = graduatedIn([done], index, await read($, aliases))
+    const slipLine = await slipLineText($, done)
     return [
       ...(lead ? [lead, ''] : []),
       `${n}번 ${resultMark(done)}${helpText(done)} · ${VERDICT_TEXT[done.verdict ?? 'wrong']} ${done.feedback ?? ''}`.trim(),
+      ...(slipLine ? [slipLine] : []),
       '',
       '정답',
       done.answer,
@@ -3194,7 +3349,9 @@ async function answerText($: EngineInterface, cfg: Config, current: Quiz, said: 
     ...(next !== -1 ? [nextText(after, next)] : []),
   ]
   const mark = shown.result !== undefined ? ` · ${resultMark(shown)}` : ''
-  return `${n}번 정답\n\n${item.answer}\n(개념: ${item.name}${mark})${steps.length > 0 ? `\n\n${steps.join(' · ')}` : ''}`
+  // A first try graded so: what it showed wrong is kept for the next quiz, as after any grade.
+  const slipLine = shown.result !== undefined && item.result === undefined ? await slipLineText($, shown) : undefined
+  return `${n}번 정답\n\n${item.answer}\n(개념: ${item.name}${mark})${slipLine ? `\n${slipLine}` : ''}${steps.length > 0 ? `\n\n${steps.join(' · ')}` : ''}`
 }
 
 /**
@@ -3374,7 +3531,7 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
   return [
     `복습 퀴즈 · ${made.items.length}문제`,
     '',
-    made.items.map((item, i) => listItem(i + 1, item.question)).join('\n\n'),
+    made.items.map((item, i) => listItem(i + 1, `${retryMark(item)}${item.question}`)).join('\n\n'),
     '',
     '먼저 스스로 답해 보세요.',
     '- 답을 적어 채점받기: /learn 퀴즈 1 내 답 (번호 없이 적으면 1번부터)',
@@ -3801,7 +3958,9 @@ export const register: Register = (on, options) => {
       if (chosen.length === 0) return { text: `${range.label}의 노트가 이 프로젝트에 없습니다.` }
       const isPartial = written.length === 0 && kept.length >= HISTORY_PER_PROJECT && Math.min(...kept.map(note => note.at)) > range.from
       const lastDay = chosen.map(entry => entry.day).sort().at(-1)!
-      const asked = await askModel($, cfg, 'recap', { system: RECAP_SYSTEM, prompt: recapPrompt(range, chosen, index, map, cfg.level, isPartial), maxTokens: 1200 })
+      // What the range's quizzes found the learner got wrong (1.7.0): its 헷갈리기 쉬운 것 says those, not a guess.
+      const slipped = await storedSlips($, map, now)
+      const asked = await askModel($, cfg, 'recap', { system: RECAP_SYSTEM, prompt: recapPrompt(range, chosen, index, map, cfg.level, isPartial, slipped), maxTokens: 1200 })
       if ('error' in asked) return { text: `정리를 쓰지 못했습니다: ${asked.error}` }
       const text = cut(asked.text, 6000)
       const path = cfg.isAutoSave ? await saveRecap($, cfg, root, range, text, now, lastDay) : undefined
@@ -3948,6 +4107,8 @@ export const register: Register = (on, options) => {
     const review = { ...today, graduated: graduatedIn(current?.items ?? [], index, map), done: reviewDoneText(today, days, now) }
     const run = await read($, quizRun)
     const asks = await read($, askRun)
+    const slipRecord = await read($, slips)
+    const slipOf = (key: string) => slipAt(slipRecord, resolveKey(map, key))
 
     const at = shownAt(list, wanted)
     const note = list[at]
@@ -4014,7 +4175,7 @@ export const register: Register = (on, options) => {
           {hasConcepts && keysHint}
           {hasConcepts && shown !== 'note' ? (
             <Box marginTop={1} flexDirection="column">
-              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, review, list, isTerminalFocus, el, e.surface) : conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el)}
+              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, review, list, isTerminalFocus, el, e.surface, slipOf) : conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el, slipRecord)}
             </Box>
           ) : (
             welcome
@@ -4036,9 +4197,9 @@ export const register: Register = (on, options) => {
 
     const body =
       shown === 'quiz' ? (
-        quizView($, cfg, current, run, hasConcepts, now, review, list, isTerminalFocus, el, e.surface)
+        quizView($, cfg, current, run, hasConcepts, now, review, list, isTerminalFocus, el, e.surface, slipOf)
       ) : shown === 'concepts' ? (
-        conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el)
+        conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el, slipRecord)
       ) : shown === 'note' ? (
         <Box flexDirection="column">
           {noteBody(note, isBusy, offText(note, cfg, now), el)}
@@ -4653,7 +4814,7 @@ async function recordText($: EngineInterface, cfg: Config, isForTool = false): P
   const queue = due.slice(0, 5)
   const review =
     due.length > 0
-      ? `- 복습할 개념 ${due.length}개: ${queue.map(one => (isMissed(one) ? `${one.name} (퀴즈 틀림)` : one.name)).join(', ')}${due.length > queue.length ? ' …' : ''} · ${todayText(today)} · ${reviewWay(today.left)}`
+      ? `- 복습할 개념 ${due.length}개: ${queue.map(one => (isMissed(one) ? `${one.name} (퀴즈 틀림 ${dayWhen(one.missedAt ?? now, now)})` : one.name)).join(', ')}${due.length > queue.length ? ' …' : ''} · ${todayText(today)} · ${reviewWay(today.left)}`
       : '- 복습할 개념: 지금은 없습니다'
   // Today first, as the run of days counts back.
   const week = [...stats.days].reverse().map(({ weekday, one }) => `${weekday} ${one.notes}`)
@@ -5055,6 +5216,9 @@ function knownLine(index: Readonly<Record<string, LearnConcept>>): string | unde
   return `아는 개념 ${known.length}개 · ${names}${known.length > KNOWN_SHOWN ? ` 외 ${known.length - KNOWN_SHOWN}개` : ''}`
 }
 
+/** Cells a row of the concepts to review takes with its slip, cut at its end past them. */
+const DUE_SLIP_CELLS = 56
+
 /**
  * Every concept the notes have taught: one head line of how many and this
  * week's progress, the ones worth a second look (q while today's review has
@@ -5071,6 +5235,7 @@ function conceptsView(
   stats: LearnStats,
   left: number,
   el: ElementTable,
+  slipRecord: Readonly<Record<string, LearnSlip>> = {},
 ) {
   const { Box, Text, Markdown, Button } = el
   const total = Object.keys(index).length
@@ -5127,12 +5292,18 @@ function conceptsView(
             복습할 개념 {due.length}개{' '}
             <Text dimColor>· 틀린 것 먼저, 잊을 때쯤 다시 나옵니다 · {left > 0 ? 'q로 복습' : '오늘 몫은 마쳤습니다 · 4로 퀴즈'}</Text>
           </Text>
-          {queue.map(one => (
-            <Text key={`due-${one.key}`} dimColor wrap="truncate-end">
-              {'  '}
-              {one.name} · {isMissed(one) ? `퀴즈 틀림 ${when(one.missedAt ?? now, now)}` : dueText(one, now)}
-            </Text>
-          ))}
+          {queue.map(one => {
+            // What the learner got wrong on it, where a quiz found a slip still open (1.7.0); its date is in /learn 기록.
+            const slip = openSlip(slipRecord, one.key)
+            return (
+              <Text key={`due-${one.key}`} dimColor wrap="truncate-end">
+                {'  '}
+                {slip && slip.what !== ''
+                  ? cutCells(`${one.name} · 헷갈린 점: ${slip.what}`, DUE_SLIP_CELLS)
+                  : `${one.name} · ${isMissed(one) ? `퀴즈 틀림 ${when(one.missedAt ?? now, now)}` : dueText(one, now)}`}
+              </Text>
+            )
+          })}
           {due.length > queue.length && <Text dimColor>{'  '}그 밖에 {due.length - queue.length}개</Text>}
         </Box>
       )}
@@ -5178,6 +5349,7 @@ function quizView(
   isFocused: boolean,
   el: ElementTable,
   surface: RenderSurface,
+  slipOf: (key: string) => LearnSlip | undefined = () => undefined,
 ) {
   const { Box, Text, Markdown, Button } = el
   // The mobile app draws no text field yet: there the answer is shown and graded by hand.
@@ -5244,6 +5416,8 @@ function quizView(
           const wrongFrom = item.result === 'wrong' ? item.noteId : undefined
           const taught = wrongFrom !== undefined && list.some(note => note.id === wrongFrom) ? wrongFrom : undefined
           const isElsewhere = wrongFrom !== undefined && taught === undefined
+          // What the grade did with its concept's slip (1.7.0), dim under the feedback; green once one asked again is mended.
+          const notice = slipNotice(item, slipOf(item.key), isHelpedGrade(item))
           return (
             <Box key={`quiz-${i}`} flexDirection="column" marginTop={1}>
               <Text wrap="truncate-end">
@@ -5255,6 +5429,11 @@ function quizView(
                 </Text>
               </Text>
               <Markdown text={`**${VERDICT_TEXT[item.verdict ?? 'wrong']}** ${item.feedback ?? ''}${isTurned(item) ? ` _(내가 ${item.result === 'right' ? '맞힘' : '틀림'}으로 바꿈)_` : ''}`} />
+              {notice && (
+                <Text color={notice.kind === 'fixed' ? 'green' : undefined} dimColor={notice.kind !== 'fixed'} wrap="wrap">
+                  {notice.kind === 'again' && taught ? `${notice.text} · n: 이 개념을 배운 노트 · 거기서 r로 따라가기` : notice.text}
+                </Text>
+              )}
               {item.mine !== undefined && (
                 <Text dimColor wrap="wrap">
                   내 답: {item.mine}
@@ -5290,6 +5469,7 @@ function quizView(
           <Box key={`quiz-${i}`} flexDirection="column" marginTop={1}>
             <Text bold>
               문제 {i + 1}/{items.length}
+              {item.isRetry ? ' · 다시 도전' : ''}
               {item.kind !== undefined ? ` · ${KIND_LABEL[item.kind]}` : ''}
             </Text>
             <Markdown text={item.question} />

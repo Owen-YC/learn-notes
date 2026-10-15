@@ -11,6 +11,8 @@ import type {
   LearnQuizFirstTry,
   LearnQuizItem,
   LearnQuizMarks,
+  LearnSlip,
+  LearnSlipType,
   LearnSubmit,
   LearnWithheld,
 } from '../types'
@@ -2965,7 +2967,30 @@ export const RECAP_SYSTEM = [
   BOLD,
 ].join(' ')
 
-/** The one user message the model reads for a recap. */
+/**
+ * The slips the quizzes of the range found (1.7.0), the oldest first: each with its concept's name, for a concept
+ * the index still holds and the learner has not marked known. A slip with no words (`blank`) says nothing to recap.
+ */
+export function recapSlips(
+  slips: Readonly<Record<string, LearnSlip>>,
+  index: Readonly<Record<string, LearnConcept>>,
+  aliases: Readonly<Record<string, string>>,
+  range: Pick<RecapRange, 'from' | 'to'>,
+): { name: string; what: string }[] {
+  return Object.entries(slips)
+    .flatMap(([key, slip]) => {
+      const one = conceptAt(index, resolveKey(aliases, key))
+      return one && !isKnown(one) && slip.what !== '' && slip.at >= range.from && slip.at < range.to ? [{ name: one.name, what: slip.what, at: slip.at }] : []
+    })
+    .sort((a, b) => a.at - b.at)
+    .slice(0, RECAP_MISSED)
+    .map(({ name, what }) => ({ name, what }))
+}
+
+/**
+ * The one user message the model reads for a recap. The slips the range's quizzes found (recapSlips) are what its
+ * 헷갈리기 쉬운 것 says, in the learner's own mistakes; only with none does it go by the misses, or the notes.
+ */
 export function recapPrompt(
   range: RecapRange,
   entries: readonly RecapEntry[],
@@ -2973,6 +2998,7 @@ export function recapPrompt(
   aliases: Readonly<Record<string, string>>,
   level: Level,
   isPartial = false,
+  slips: Readonly<Record<string, LearnSlip>> = {},
 ): string {
   const lines = [...entries]
     .sort((a, b) => (`${a.day} ${a.time}` < `${b.day} ${b.time}` ? -1 : `${a.day} ${a.time}` > `${b.day} ${b.time}` ? 1 : 0))
@@ -2982,6 +3008,10 @@ export function recapPrompt(
     })
   const again = recapAgain(entries, index, aliases, range.from)
   const missed = recapMissed(index, range)
+  const slipped = recapSlips(slips, index, aliases, range)
+  const slipOfName = (name: string) => slipped.find(one => one.name === name)
+  // Right since (mended, or right after a question asked back): no miss to list them under.
+  const mended = slipped.filter(one => !missed.some(other => other.name === one.name))
   return [
     LEVEL_TEXT[level],
     '',
@@ -2994,15 +3024,25 @@ export function recapPrompt(
     '',
     ...(again.length > 0 ? ['## 이 기간에 다시 만난 개념 (예전에 배운 것)', again.map(one => `${one.name} ×${one.count}`).join(', '), ''] : []),
     ...(missed.length > 0
-      ? ['## 이 기간에 퀴즈에서 틀린 개념 (아직 다시 맞히지 못한 것)', missed.map(one => one.name).join(', '), '헷갈리기 쉬운 것은 이 목록부터 쓴다.', '']
+      ? [
+          '## 이 기간에 퀴즈에서 틀린 개념 (아직 다시 맞히지 못한 것)',
+          missed.map(one => (slipOfName(one.name) ? `${one.name} (헷갈린 점: ${slipOfName(one.name)!.what})` : one.name)).join(', '),
+          ...(slipped.length === 0 ? ['헷갈리기 쉬운 것은 이 목록부터 쓴다.'] : []),
+          '',
+        ]
       : []),
+    ...(mended.length > 0 ? ['## 이 기간에 퀴즈에서 헷갈렸다가 그 뒤 맞힌 개념', mended.map(one => `${one.name} (헷갈린 점: ${one.what})`).join(', '), ''] : []),
     '아래 네 제목을 이 순서 그대로 쓰고, 다 합쳐 300단어를 넘기지 마라.',
     '### 한 일',
     '(무엇을 만들고 고쳤는지 2~4줄)',
     '### 핵심 개념',
     '(이 기간에 가장 중요했던 개념 3개 이내, 각각 한 줄)',
     '### 헷갈리기 쉬운 것',
-    missed.length > 0 ? '(위의 퀴즈에서 틀린 개념부터 1~2개: 무엇을 헷갈리기 쉬운지 한 줄씩)' : '(노트로 보아 놓치기 쉬운 점 1~2개)',
+    slipped.length > 0
+      ? '(위에 적힌 학습자의 헷갈린 점만 1~2개, "개념: 헷갈린 점" 꼴로 한 줄씩. 노트만 보고 짐작한 것은 쓰지 않는다)'
+      : missed.length > 0
+        ? '(위의 퀴즈에서 틀린 개념부터 1~2개: 무엇을 헷갈리기 쉬운지 한 줄씩)'
+        : '(노트로 보아 놓치기 쉬운 점 1~2개)',
     '### 다음에 해 볼 것',
     '(직접 손으로 해 보면 좋은 것 1~2개)',
   ].join('\n')
@@ -3094,9 +3134,10 @@ export function reportMarkdown({ range, activity, index, level, now, usage = {},
 
 /**
  * A concept picked for a quiz, with the code a note met it in when there is one (the quiz asks about the
- * learner's own code), and that note's id when a note still holds the concept.
+ * learner's own code), that note's id when a note still holds the concept, and its slip while one is open (1.7.0:
+ * asked again in other code).
  */
-export type QuizPick = RankedConcept & { code?: { file: string; text: string }; noteId?: string }
+export type QuizPick = RankedConcept & { code?: { file: string; text: string }; noteId?: string; slip?: Pick<LearnSlip, 'what' | 'question' | 'mine'> }
 
 /** What a quiz question asks: the output or value of some code, why a line is there, or how to change it. */
 export type QuizKind = NonNullable<LearnQuizItem['kind']>
@@ -3179,10 +3220,12 @@ export const QUIZ_SYSTEM = [
  * The one user message the model reads for a quiz: each concept with what the notes said about it, and the
  * learner's code it was met in. A review quiz mixes the kinds of question (predict, why, modify); a note's own
  * quiz (`mode` 'note', right after reading the note) asks only to predict and to modify, never the definition
- * the note just gave.
+ * the note just gave. A concept with an open slip (1.7.0) carries its last question, the learner's answer and the
+ * slip, to be asked again in other code that shows the same slip, never naming it.
  */
-export function quizPrompt(picks: readonly (LearnConcept & { code?: QuizPick['code'] })[], level: Level, mode: 'review' | 'note' = 'review'): string {
+export function quizPrompt(picks: readonly (LearnConcept & { code?: QuizPick['code']; slip?: QuizPick['slip'] })[], level: Level, mode: 'review' | 'note' = 'review'): string {
   const hasCode = picks.some(one => one.code !== undefined)
+  const hasSlip = picks.some(one => one.slip !== undefined)
   const kinds = mode === 'note' ? '예측 · 바꿔 보기' : '예측 · 왜 · 바꿔 보기'
   return [
     LEVEL_TEXT[level],
@@ -3190,13 +3233,15 @@ export function quizPrompt(picks: readonly (LearnConcept & { code?: QuizPick['co
     '## 개념',
     ...picks.flatMap((one, i) => {
       const head = `${i + 1}. ${one.name} — ${one.blurb || '(설명 없음)'}`
-      if (!one.code) return [head]
+      const last = one.slip ? [`   ${slipAskedLine(one.slip)}`] : []
+      if (!one.code) return [head, ...last]
       const fence = fenceFor(one.code.text)
-      return [head, `   학습자가 만든 코드 (${one.code.file}):`, fence, one.code.text, fence]
+      return [head, ...last, `   학습자가 만든 코드 (${one.code.file}):`, fence, one.code.text, fence]
     }),
     '',
     `개념마다 문제 하나씩, 위 순서대로 ${picks.length}개를 낸다. 문제에 개념 이름을 그대로 쓰지 말고, 코드나 상황을 보여 주고 묻는다.`,
     ...(hasCode ? ['학습자가 만든 코드가 붙은 개념은 그 코드를 그대로, 또는 조금 바꿔 보여 주고 묻는다. 자기 코드로 다시 떠올리게 하는 것이 목적이다.'] : []),
+    ...(hasSlip ? ['"지난번" 줄이 붙은 개념은 같은 헷갈림이 드러나는 다른 코드나 값으로 묻는다. 지난 문제를 되풀이하지 않는다. 헷갈린 점을 문제나 힌트에 쓰지 않는다.'] : []),
     '문제 유형: 예측은 코드를 보여 주고 출력이나 값을 맞히게 한다. 바꿔 보기는 바라는 동작을 말하고 어느 줄을 어떻게 바꿀지 묻는다. 왜는 어떤 줄을 빼거나 바꾸면 어떻게 되는지, 왜 그렇게 썼는지 묻는다.',
     ...(mode === 'note'
       ? ['이 노트를 방금 읽은 학습자에게 내는 문제다. 예측과 바꿔 보기만 낸다. 노트의 정의를 그대로 되묻지 않는다. 코드가 없는 개념은 짧은 예시 코드를 보여 주고 묻는다. 예측은 코드만으로 출력이나 값이 하나로 정해질 때만 낸다.']
@@ -3233,14 +3278,18 @@ const KIND_CHECK: Readonly<Record<QuizKind, string>> = {
 /**
  * The one user message the model reads to grade a typed answer; a question's kind adds how that kind is graded.
  * A first try graded short of right asks for one question back (되묻기) to try again with; the try again (`first`
- * given) carries that first try and what it was asked, and asks for none: it is the last.
+ * given) carries that first try and what it was asked, and asks for none: it is the last. The first grade of an
+ * answer (a try again after "모르겠어요" among them) asks, short of right, for the slip the answer shows and its kind
+ * (1.7.0); `past`, the concept's slip still open, is said so the feedback can name it once it is mended.
  */
 export function checkPrompt(
   item: Pick<LearnQuizItem, 'name' | 'question' | 'answer' | 'kind'>,
   mine: string,
   level: Level,
   first?: Pick<LearnQuizFirstTry, 'mine' | 'verdict' | 'feedback' | 'nudge'>,
+  past?: Pick<LearnSlip, 'what'>,
 ): string {
+  const asksSlip = first === undefined || isBlankAnswer(first.mine)
   return [
     LEVEL_TEXT[level],
     '',
@@ -3250,6 +3299,7 @@ export function checkPrompt(
     item.question,
     '## 모범 답',
     item.answer,
+    ...(past ? ['## 이 학습자가 지난번에 헷갈린 점', past.what !== '' ? cut(past.what, SLIP_TEXT) : '(지난번에는 답을 떠올리지 못했다)'] : []),
     ...(first ? ['## 학습자의 첫 답과 받은 되묻기', ...firstTryLines(first)] : []),
     '## 학습자의 답',
     cut(mine, 1500),
@@ -3257,13 +3307,21 @@ export function checkPrompt(
     '판정은 셋 중 하나다. 맞음: 핵심을 맞게 이해했다. 거의: 방향은 맞지만 중요한 부분이 빠졌거나 일부가 틀렸다. 틀림: 틀렸거나 관계없는 답이다("모르겠다"도 틀림).',
     ...(item.kind ? [KIND_CHECK[item.kind]] : []),
     '피드백은 한두 문장이다. 학습자의 답대로라면 무엇이 되는지(값이나 동작)를 먼저 짚고, 맞은 점 하나를 인정한다. 모범 답을 그대로 옮기지 않는다.',
+    ...(past ? ['이번 답이 지난번에 헷갈린 점을 바로잡았으면 피드백에서 한 마디로 짚는다.'] : []),
     first
       ? '마지막 시도다. 되묻기는 쓰지 않는다.'
       : '되묻기는 판정이 거의나 틀림일 때만 쓰는 질문 한 문장이다. 학습자가 자기 답의 어디가 어긋났는지 스스로 알아차리게 묻는다. 답·고칠 코드·개념 이름은 말하지 않는다.',
+    ...(asksSlip
+      ? [
+          '헷갈린 점은 판정이 거의나 틀림일 때만 쓴다. 학습자의 답에 드러난 잘못된 생각을 "~라고 봄"처럼 40자 안팎 한 문장으로 쓴다. 답에서 근거를 찾을 수 없으면 없음이라고 쓴다.',
+          `유형은 그 헷갈린 점의 갈래다. ${SLIP_TYPE_WORDS.join(', ')} 중 하나를 그대로 쓴다.`,
+        ]
+      : []),
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
     '판정: (맞음 · 거의 · 틀림 중 하나)',
     '피드백: (한두 문장)',
     ...(first ? [] : ['되묻기: (거의·틀림일 때만 질문 한 문장. 맞음이면 이 줄을 쓰지 않는다)']),
+    ...(asksSlip ? ['헷갈린 점: (거의·틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)', '유형: (거의·틀림일 때만 위 갈래 중 하나)'] : []),
   ].join('\n')
 }
 
@@ -3303,29 +3361,45 @@ function checkParts(text: string): Map<string, string> {
   return new Map([...parts].map(([label, lines]) => [label, lines.join('\n').trim()]))
 }
 
+/** A labelled line the reply left empty or said had nothing: "없음", "해당 없음", a dash, "none". */
+const NONE_SAID = /^[(（]?\s*(?:없음|없습니다|해당\s*없음|none|n\/a|-+)\s*[)）]?[.。]?$/i
+
 /** A question asked back as the reply wrote it, or undefined for none (an empty line, "없음", a dash). */
 function nudgeOf(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined
   const text = raw.replace(/\n{2,}/g, '\n').trim()
-  if (text === '' || /^[(（]?\s*(?:없음|없습니다|해당\s*없음|none|n\/a|-+)\s*[)）]?[.。]?$/i.test(text)) return undefined
+  if (text === '' || NONE_SAID.test(text)) return undefined
   return closeFence(cut(text, 300))
 }
 
+/** A slip as the reply wrote it (헷갈린 점), on one line and cut short; undefined for none (an empty line, "없음", a dash). */
+function slipOf(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const text = raw.replace(/\s+/g, ' ').trim()
+  if (text === '' || NONE_SAID.test(text)) return undefined
+  return cut(text, SLIP_TEXT)
+}
+
+/** A grade as parseCheck reads it: the verdict and feedback, and short of right the question asked back and the slip with its kind. */
+export type CheckReply = { verdict: 'right' | 'partial' | 'wrong'; feedback: string; nudge?: string; slip?: string; slipType?: Exclude<LearnSlipType, 'blank'> }
+
 /**
  * The grade read back from the model's reply (the labelled lines asked for, or a JSON object), or undefined when it
- * is not one. `nudge` is the question asked back (되묻기), for a grade short of right only; a reply with no such
+ * is not one. `nudge` is the question asked back (되묻기), and `slip` the wrong idea the answer showed (헷갈린 점) with
+ * its kind (유형, 기타 when it names none of the nine), each for a grade short of right only; a reply with no such
  * line grades as before 1.7.0.
  */
-export function parseCheck(text: string): { verdict: 'right' | 'partial' | 'wrong'; feedback: string; nudge?: string } | undefined {
+export function parseCheck(text: string): CheckReply | undefined {
   const words: Record<string, 'right' | 'partial' | 'wrong'> = {
     맞음: 'right', 정답: 'right', right: 'right', correct: 'right',
     거의: 'partial', 부분: 'partial', 부분정답: 'partial', partial: 'partial',
     틀림: 'wrong', 오답: 'wrong', wrong: 'wrong', incorrect: 'wrong',
   }
-  const graded = (verdict: 'right' | 'partial' | 'wrong', feedback: string, nudge: string | undefined) => ({
+  const graded = (verdict: 'right' | 'partial' | 'wrong', feedback: string, nudge: string | undefined, slip: string | undefined, type: unknown): CheckReply => ({
     verdict,
     feedback: cut(feedback.replace(/\n{2,}/g, '\n'), 600),
     ...(verdict !== 'right' && nudge !== undefined ? { nudge } : {}),
+    ...(verdict !== 'right' && slip !== undefined ? { slip, slipType: slipTypeOf(type) } : {}),
   })
   const json = /\{[\s\S]*\}/.exec(text)?.[0]
   if (json) {
@@ -3334,7 +3408,9 @@ export function parseCheck(text: string): { verdict: 'right' | 'partial' | 'wron
       if (typeof raw === 'object' && raw !== null) {
         const r = raw as Record<string, unknown>
         const verdict = typeof r.verdict === 'string' ? words[r.verdict.trim().toLowerCase()] : undefined
-        if (verdict) return graded(verdict, String(r.feedback ?? '').trim(), nudgeOf(r.nudge ?? r['되묻기']))
+        if (verdict) {
+          return graded(verdict, String(r.feedback ?? '').trim(), nudgeOf(r.nudge ?? r['되묻기']), slipOf(r.slip ?? r['헷갈린 점'] ?? r['헷갈린점']), r.slipType ?? r.type ?? r['유형'])
+        }
       }
     } catch {
       // Not JSON after all: the lines below.
@@ -3344,7 +3420,7 @@ export function parseCheck(text: string): { verdict: 'right' | 'partial' | 'wron
   const verdictWord = /^([^\s*·,.(]+)/.exec(parts.get('판정') ?? '')?.[1]?.toLowerCase()
   const verdict = verdictWord === undefined ? undefined : words[verdictWord]
   if (!verdict) return undefined
-  return graded(verdict, parts.get('피드백') ?? '', nudgeOf(parts.get('되묻기')))
+  return graded(verdict, parts.get('피드백') ?? '', nudgeOf(parts.get('되묻기')), slipOf(parts.get('헷갈린점')), parts.get('유형'))
 }
 
 /**
@@ -3377,6 +3453,245 @@ export function keptNudge(nudge: string | undefined, answer: string): string | u
 export function secondVerdict(first: LearnQuizFirstTry['verdict'], second: 'right' | 'partial' | 'wrong'): 'right' | 'partial' | 'wrong' {
   if (second === 'right') return 'right'
   return first === 'partial' && second === 'partial' ? 'partial' : 'wrong'
+}
+
+/** Characters a slip's words keep (헷갈린 점, about 40 asked for), and the question and the answer a slip keeps (LearnSlip). */
+export const SLIP_TEXT = 80
+const SLIP_QUESTION = 240
+const SLIP_MINE = 160
+/** Slips the store keeps at most, and the bytes of JSON they take at most (SLIPS_KEY), the mended let go first. */
+export const SLIPS_KEPT = 300
+export const SLIPS_MAX_BYTES = 150_000
+/** Days a mended slip is kept after it was mended: past them it is let go. */
+const SLIP_MENDED_DAYS = 60
+
+/** The nine kinds a grade names a slip by (유형), each as the grade is asked to write it; kept, not shown in 1.7.0. */
+export const SLIP_TYPE_LABEL: Readonly<Record<Exclude<LearnSlipType, 'blank'>, string>> = {
+  order: '실행 순서·비동기',
+  reference: '값과 참조',
+  scope: '변수 범위',
+  coercion: '자료형·형 변환',
+  boundary: '경계와 조건',
+  nullish: '없는 값',
+  output: '반환과 출력',
+  state: '상태가 바뀌는 때',
+  other: '기타',
+}
+const SLIP_TYPE_WORDS = Object.values(SLIP_TYPE_LABEL)
+
+/**
+ * A slip's kind as the reply named it (유형): one of the nine, matched on its words with spaces and dots aside (a
+ * part of one, 비동기 or 형 변환, will do), or its code; anything else is 기타.
+ */
+export function slipTypeOf(raw: unknown): Exclude<LearnSlipType, 'blank'> {
+  if (typeof raw !== 'string') return 'other'
+  const plain = (text: string) => text.replace(/[\s·・.,/()（）*`'"]/g, '').toLowerCase()
+  const said = plain(raw)
+  if (said === '') return 'other'
+  const kinds = Object.entries(SLIP_TYPE_LABEL) as [Exclude<LearnSlipType, 'blank'>, string][]
+  const hit = kinds.find(
+    ([code, label]) => code === said || plain(label) === said || said.startsWith(plain(label)) || label.split('·').some(part => plain(part) === said),
+  )
+  return hit?.[0] ?? 'other'
+}
+
+/** True for an answer with nothing to read a slip from: "모르겠어요" and the like (isBlankAnswer), or two characters or fewer, spaces aside. */
+export function isForgotten(text: string): boolean {
+  return isBlankAnswer(text) || [...text.replace(/\s+/g, '')].length <= 2
+}
+
+/** An open slip as a quiz is told it: the question it was found in, the learner's answer and the slip, on one line of 400 characters at most. */
+function slipAskedLine(slip: Pick<LearnSlip, 'what' | 'question' | 'mine'>): string {
+  const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
+  const tail = `학습자 답 '${cut(flat(slip.mine), 100)}' · ${slip.what !== '' ? `헷갈린 점: ${cut(slip.what, SLIP_TEXT)}` : '답을 떠올리지 못했다'}`
+  return `지난번 문제 '${cut(flat(slip.question), Math.max(40, 400 - tail.length - 12))}' · ${tail}`
+}
+
+/**
+ * True when a question holds a slip's words whole (spaces and punctuation aside): asked so, it tells the learner the
+ * very slip it means to find, and is no question asked again (isRetry).
+ */
+export function isSlipSaid(question: string, what: string): boolean {
+  const plain = (text: string) => squash(text).replace(/[.,!?。·`'"“”‘’()（）~…]/g, '').toLowerCase()
+  const said = plain(what)
+  return said.length >= 4 && plain(question).includes(said)
+}
+
+/** What a graded answer showed wrong: the slip's words ('' for `blank`), its kind and the answer it was read from. */
+export type SlipFound = { what: string; type: LearnSlipType; mine: string }
+
+/**
+ * The slip a graded typed answer showed: the first try's when the question was asked back over one (a try again is
+ * graded with none asked for), else the answer's own; `blank` for an answer with nothing to read one from
+ * (isForgotten), whatever Claude named. None for a grade with no typed answer (the learner's own, after the answer).
+ */
+export function slipFrom(item: Pick<LearnQuizItem, 'mine' | 'slip' | 'slipType' | 'firstTry'>): SlipFound | undefined {
+  if (item.mine === undefined) return undefined
+  const first = item.firstTry
+  const source = first !== undefined && !isBlankAnswer(first.mine) ? first : { mine: item.mine, slip: item.slip, slipType: item.slipType }
+  if (isForgotten(source.mine)) return { what: '', type: 'blank', mine: source.mine }
+  return source.slip !== undefined && source.slip !== '' ? { what: source.slip, type: source.slipType ?? 'other', mine: source.mine } : undefined
+}
+
+/** How a grade changes its concept's slip (nextSlip): a miss to keep, a right answer that may mend one, a mark of known that does, or nothing. */
+export type SlipChange =
+  | ({ kind: 'missed'; question: string } & SlipFound)
+  | { kind: 'right'; isRetry: boolean; isHelped: boolean; isGraduated: boolean }
+  | { kind: 'mended' }
+  | { kind: 'none' }
+
+/**
+ * How a grade changes its concept's slip. Wrong or partly right keeps what the answer showed (slipFrom); right after a
+ * question asked back keeps the first try's too (mended then, asked again another day), unless the learner turned the
+ * grade right themselves (`isTurned`, f: as if right at once, the slip it kept gone with it). Right otherwise may
+ * mend an open one (nextSlip).
+ */
+export function slipChange(item: LearnQuizItem, how: { isHelped: boolean; isGraduated: boolean; isTurned?: boolean }): SlipChange {
+  const found = slipFrom(item)
+  if (item.result === 'wrong') return found ? { kind: 'missed', question: item.question, ...found } : { kind: 'none' }
+  const isAskedBack = item.firstTry !== undefined && !isBlankAnswer(item.firstTry.mine)
+  if (!how.isTurned && isAskedBack && found && found.type !== 'blank') return { kind: 'missed', question: item.question, ...found }
+  return { kind: 'right', isRetry: item.isRetry === true, isHelped: how.isHelped, isGraduated: how.isGraduated }
+}
+
+/**
+ * A concept's slip after a grade at `at` (slipChange). A miss of the kind it had counts once more on it (the latest
+ * question and answer kept, mended no more); one of another kind takes its place. Right on a question asked again
+ * (isRetry) on another day than the miss, with no hint and no question asked back, mends it, as graduating does, and
+ * /learn 안다 (`mended`). What it keeps is masked first (redactText) and cut short.
+ */
+export function nextSlip(before: LearnSlip | undefined, change: SlipChange, at: number): LearnSlip | undefined {
+  if (change.kind === 'none') return before
+  if (change.kind === 'missed') {
+    const masked = (text: string, max: number) => cut(redactText(text).text.replace(/\s+/g, ' '), max)
+    const kept = { question: masked(change.question, SLIP_QUESTION), mine: masked(change.mine, SLIP_MINE), at }
+    if (before && before.type === change.type) {
+      const again: LearnSlip = { ...before, ...kept, times: before.times + 1 }
+      delete again.fixedAt
+      return again
+    }
+    return { what: masked(change.what, SLIP_TEXT), type: change.type, ...kept, times: 1 }
+  }
+  if (!before || before.fixedAt !== undefined) return before
+  const isMended =
+    change.kind === 'mended' || change.isGraduated || (change.isRetry && !change.isHelped && stamp(at).day !== stamp(before.at).day)
+  return isMended ? { ...before, fixedAt: at } : before
+}
+
+/** The slip under `key`, only if the record itself holds it (never an inherited property). */
+export function slipAt(slips: Readonly<Record<string, LearnSlip>>, key: string): LearnSlip | undefined {
+  return Object.prototype.hasOwnProperty.call(slips, key) ? slips[key] : undefined
+}
+
+/** The slip under `key` while it is open (not mended), if there is one. */
+export function openSlip(slips: Readonly<Record<string, LearnSlip>>, key: string): LearnSlip | undefined {
+  const one = slipAt(slips, key)
+  return one && one.fixedAt === undefined ? one : undefined
+}
+
+const SLIP_TYPES: readonly string[] = [...Object.keys(SLIP_TYPE_LABEL), 'blank']
+
+/** One slip read back from the store, or from a quiz question's slipBefore; undefined when it is not one. */
+export function slipRecordOf(raw: unknown): LearnSlip | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const r = raw as Record<string, unknown>
+  if (typeof r.what !== 'string' || typeof r.type !== 'string' || !SLIP_TYPES.includes(r.type) || typeof r.at !== 'number' || !Number.isFinite(r.at)) return undefined
+  return {
+    what: cut(r.what, SLIP_TEXT),
+    type: r.type as LearnSlipType,
+    question: typeof r.question === 'string' ? cut(r.question, SLIP_QUESTION) : '',
+    mine: typeof r.mine === 'string' ? cut(r.mine, SLIP_MINE) : '',
+    at: r.at,
+    times: typeof r.times === 'number' && Number.isFinite(r.times) && r.times >= 1 ? Math.floor(r.times) : 1,
+    ...(typeof r.fixedAt === 'number' && Number.isFinite(r.fixedAt) ? { fixedAt: r.fixedAt } : {}),
+  }
+}
+
+/**
+ * The slips read back from the store (by concept key): bad entries dropped, each under the key its concept counts
+ * under now (merges followed; of two, the one missed last), a mended one let go SLIP_MENDED_DAYS after it was
+ * mended, then cut to fit (fitSlips).
+ */
+export function cleanSlips(raw: unknown, aliases: Readonly<Record<string, string>>, now: number): Record<string, LearnSlip> {
+  const out: Record<string, LearnSlip> = {}
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return out
+  for (const [stored, value] of Object.entries(raw as Record<string, unknown>)) {
+    const one = slipRecordOf(value)
+    if (!one || !stored.startsWith('c:')) continue
+    if (one.fixedAt !== undefined && now - one.fixedAt > SLIP_MENDED_DAYS * DAY) continue
+    const key = resolveKey(aliases, stored)
+    const prior = slipAt(out, key)
+    if (!prior || one.at > prior.at) out[key] = one
+  }
+  return fitSlips(out)
+}
+
+/**
+ * Slips cut to SLIPS_KEPT of them and SLIPS_MAX_BYTES of JSON: the mended go first, the longest mended first; then
+ * the open ones missed longest ago.
+ */
+export function fitSlips(slips: Readonly<Record<string, LearnSlip>>): Record<string, LearnSlip> {
+  const order = Object.entries(slips).sort(([, a], [, b]) => {
+    if ((a.fixedAt === undefined) !== (b.fixedAt === undefined)) return a.fixedAt !== undefined ? -1 : 1
+    return a.fixedAt !== undefined && b.fixedAt !== undefined ? a.fixedAt - b.fixedAt : a.at - b.at
+  })
+  let kept = order.slice(Math.max(0, order.length - SLIPS_KEPT))
+  // Each entry's share of the whole ("key":{…},), so the oldest are let go without measuring it all again each time.
+  const sizes = kept.map(([key, one]) => jsonBytes(key) + jsonBytes(one) + 2)
+  let bytes = sizes.reduce((sum, n) => sum + n, 1)
+  let from = 0
+  while (from < kept.length && bytes > SLIPS_MAX_BYTES) bytes -= sizes[from++]!
+  kept = kept.slice(from)
+  while (kept.length > 0 && jsonBytes(Object.fromEntries(kept)) > SLIPS_MAX_BYTES) kept = kept.slice(1)
+  return Object.fromEntries(kept)
+}
+
+/** What a graded question's line under its feedback says of its concept's slip (slipNotice): the kind, and its words. */
+export type SlipNotice = { kind: 'slip' | 'blank' | 'mended' | 'again' | 'fixed' | 'soon'; text: string }
+
+/** Said of a question asked again and missed again; the pane and the conversation each add where to look next. */
+export const SLIP_AGAIN = '같은 곳을 또 헷갈렸습니다'
+
+/**
+ * The line a graded question shows under its feedback about its concept's slip (`record`, as the store has it now):
+ * the slip this grade kept and that the next quiz asks it again, an answer with nothing in it, a slip mended right
+ * after a question asked back, a question asked again missed again, mended on another day, or right again the same
+ * day (only with no hint and no question asked back, `isHelped` false). Nothing when the grade kept none (the
+ * schema guard on, a store that refused it).
+ */
+export function slipNotice(item: Pick<LearnQuizItem, 'result' | 'gradedAt' | 'isRetry'>, record: LearnSlip | undefined, isHelped: boolean): SlipNotice | undefined {
+  const at = item.gradedAt
+  if (item.result === undefined || at === undefined) return undefined
+  const open = record !== undefined && record.fixedAt === undefined ? record : undefined
+  const isNow = open !== undefined && open.at === at
+  if (item.result === 'wrong') {
+    // Missed again where it was asked again: the same slip once more, unless this answer showed another in its place.
+    if (item.isRetry && open && !(isNow && open.times === 1)) return { kind: 'again', text: SLIP_AGAIN }
+    if (!isNow) return undefined
+    return open.type === 'blank'
+      ? { kind: 'blank', text: '떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다' }
+      : { kind: 'slip', text: `헷갈린 점: ${open.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` }
+  }
+  if (item.isRetry && record?.fixedAt === at) return { kind: 'fixed', text: '✓ 지난번 헷갈린 점을 바로잡았습니다' }
+  if (isNow) return { kind: 'mended', text: '헷갈린 점을 바로 고쳤습니다 · 다른 날 다른 코드로 한 번 더 확인합니다' }
+  if (item.isRetry && open && !isHelped && stamp(open.at).day === stamp(at).day) return { kind: 'soon', text: '바로 다시 맞혔습니다 · 다음 복습에서 한 번 더 확인합니다' }
+  return undefined
+}
+
+/** Cells a text takes on a terminal row: two for a wide character (Hangul, CJK, full-width forms), else one. */
+export function cellWidth(text: string): number {
+  return [...text].reduce((sum, ch) => sum + (/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/u.test(ch) ? 2 : 1), 0)
+}
+
+/** `text` cut to `max` cells, … in the last one when it is longer. */
+export function cutCells(text: string, max: number): string {
+  if (cellWidth(text) <= max) return text
+  let out = ''
+  for (const ch of text) {
+    if (cellWidth(`${out}${ch}…`) > max) break
+    out += ch
+  }
+  return `${out}…`
 }
 
 /** True when two journal requests are one note's: the same words, one perhaps cut short or written on one line by an older build. */
@@ -3462,8 +3777,19 @@ function quizItems(parts: Map<string, string[]>, picks: readonly QuizPick[]): Le
     // A hint that is the answer itself helps no one.
     const isHelpful = hint !== '' && squash(hint) !== squash(answer)
     const kind = kindOf(parts.get(`T${i + 1}`))
+    // Asked again over an open slip, unless the question says the slip itself: then it is a question as any other.
+    const isRetry = one.slip !== undefined && !isSlipSaid(question, one.slip.what)
     if (question && answer) {
-      items.push({ key: one.key, name: one.name, question, ...(isHelpful ? { hint } : {}), answer, ...(kind ? { kind } : {}), ...(one.noteId ? { noteId: one.noteId } : {}) })
+      items.push({
+        key: one.key,
+        name: one.name,
+        question,
+        ...(isHelpful ? { hint } : {}),
+        answer,
+        ...(kind ? { kind } : {}),
+        ...(one.noteId ? { noteId: one.noteId } : {}),
+        ...(isRetry ? { isRetry: true as const } : {}),
+      })
     }
   })
   return items
