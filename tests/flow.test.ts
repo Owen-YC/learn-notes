@@ -600,7 +600,11 @@ test('with autoNote off no model is called, the diff is saved and w writes the n
   await ui.unmount()
 })
 
-test('with autoSave off no file is written, and /learn save only says how to keep one (1.6.0)', { options: { autoSave: false } }, async ($, on) => {
+/** /learn save (저장), retired in 1.6.0, as 1.7.0 answers it: a note is saved by itself, and the few most used. */
+const SAVE_REPLY =
+  '노트는 저절로 저장됩니다.\n\n자주 쓰는 것: `/learn` 패널 · `/learn 복습` · `/learn 퀴즈` · `/learn 정리` · `/learn 질문 …` · `/learn 기록` · 전체는 `/learn 도움말`'
+
+test('with autoSave off no file is written, and /learn save says a note is saved by itself (1.6.0, 1.7.0)', { options: { autoSave: false } }, async ($, on) => {
   const w = world(on)
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
@@ -614,19 +618,23 @@ test('with autoSave off no file is written, and /learn save only says how to kee
   expect(w.models).toHaveLength(2)
   expect(w.writes).toHaveLength(0)
 
+  // Its own reply went in 1.7.0: the old name answers with the few most used, as it does with autoSave on.
   const reply = (await learn($, 'save')).text
-  expect(reply).toContain('노트는 저절로 저장됩니다')
-  expect(reply).toContain('learn-notes.autoSave(노트를 마크다운 파일로 자동 저장)를 켜세요')
+  expect(reply).toBe(SAVE_REPLY)
   expect(w.writes).toHaveLength(0)
   expect((await learn($, '저장')).text).toBe(reply)
 })
 
-test('/learn save with autoSave on says notes are saved by themselves (1.6.0)', async ($, on) => {
+test('/learn save with autoSave on is no unknown word: it says notes are saved by themselves, with the few most used (1.6.0, 1.7.0)', async ($, on) => {
   const w = world(on)
   await turn($, () => $.tool.call(EDIT_A))
   await finish(w)
-  expect((await learn($, 'save')).text).toBe('노트는 저절로 저장됩니다: /home/u/.claude/learning-notes. 파일에 쓰지 못한 노트는 다음 노트를 저장할 때 함께 저장됩니다.')
+  const written = w.writes.length
+  expect((await learn($, 'save')).text).toBe(SAVE_REPLY)
+  expect((await learn($, '저장')).text).toBe(SAVE_REPLY)
+  // Nothing written again: the note went into the journal at its turn's end.
   expect(w.journal()).toHaveLength(1)
+  expect(w.writes).toHaveLength(written)
 })
 
 test('a saveDir under ~ lands in the home folder', { options: { saveDir: '~/notes' } }, async ($, on) => {
@@ -1357,12 +1365,27 @@ test('/learn help lists every subcommand, and an unknown one shows it', async ($
   world(on)
   const help = await learn($, 'help')
   // Korean first and short (1.6.0): the commands by their Korean names, the rarely used ones under 가끔.
-  for (const word of ['퀴즈', '정리', '질문', '기록', '보고서', '찾기', '일지', '공유', '합치기', '안다', '모른다', '안키', '비우기']) expect(help.text).toContain(`/learn ${word}`)
+  for (const word of ['복습', '퀴즈', '정리', '질문', '기록', '보고서', '공유', '퀴즈 팀', '찾기', '일지', '합치기', '안다', '모른다', '안키', '비우기', '진단']) {
+    expect(help.text).toContain(`\`/learn ${word}`)
+  }
+  // 1.7.0: 찾기 and 일지 (the record tool answers the same in the chat) went down to 가끔, with 진단 at its end; in their
+  // place the copy for a mentor (/learn 공유 and c) and the team terms' quiz, as /learn 퀴즈 says it (팀 용어만).
+  const lines = (help.text ?? '').split('\n')
+  expect(lines.find(line => line.startsWith('- 가끔: '))).toMatch(/^- 가끔: `\/learn 찾기 말` 노트 찾기 · `\/learn 일지` .* · `\/learn 진단` 막히면 담당자에게$/)
+  expect(lines).toContain('- `/learn 공유`: 고른 노트를 요청·경로 없이 복사해 멘토에게 묻기(`c`와 같음) · `/learn 퀴즈 팀`: 이 저장소의 팀 용어만으로 퀴즈')
+  // As many lines as 1.6.1's help (the title, a blank line and twelve), the chat line aside.
+  expect(lines.filter(line => !line.startsWith('대화창에 그냥 물어봐도 됩니다'))).toHaveLength(14)
   // /learn 마지막 is /learn 공유 since 1.7.0: its old name works, unsaid.
-  expect(help.text).toContain('- 가끔: `/learn 공유`')
   expect(help.text).not.toContain('/learn 마지막')
   expect(help.text).toContain('`c` 복사')
+  // The practice's example answer, after one try (1.7.0 D8), and o and x where the answer was seen first (D4).
+  expect(help.text).toContain('`t` 직접 해 보기(한 번 고친 뒤 `a` 예시 답)')
+  expect(help.text).toContain("(모르면 `모르겠어요`)")
+  expect(help.text).toContain('정답을 먼저 봤으면 `o`·`x`로 채점')
+  // Gone from 1.7.0: the note's own quiz on t.
+  expect(help.text).not.toContain('이 노트 퀴즈')
   expect(help.text).not.toContain('/learn save')
+  expect(help.text).not.toContain('/learn 저장')
   expect(help.text).not.toContain('/learn days')
   expect(help.text).not.toContain('/learn stats')
   expect(help.text).not.toContain('/learn concepts')
@@ -5248,7 +5271,7 @@ describe('1.6.0: what the cross-review found no test held', () => {
     const w = world(on)
     await start($)
     expect(w.commands).toEqual([
-      { name: 'learn', description: '학습 노트 패널을 엽니다 · /learn 도움말로 명령 목록', argumentHint: '[복습|퀴즈|정리|질문|기록|보고서|찾기|일지|도움말]' },
+      { name: 'learn', description: '학습 노트 패널을 엽니다 · /learn 도움말로 명령 목록', argumentHint: '[복습|퀴즈|정리|질문|기록|보고서|공유|진단|도움말]' },
     ])
     for (const word of (w.commands[0]!.argumentHint ?? '').slice(1, -1).split('|')) {
       expect((await learn($, word)).text).not.toContain('모르는 하위 명령')
@@ -9289,5 +9312,49 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     await w.clock.settle()
     expect(store.get('activity')).toMatchObject({ '2026-10-03': { right: 0, wrong: 1, drills: 1 } })
     await later.unmount()
+  })
+
+  test('1.7.0: every key the pane draws, at each step of a note, its practice and a quiz, is named in the help', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    const keys = new Set<string>()
+    const collect = async () => {
+      for (const one of await ui.findAll({ type: 'Button' })) if (one.props.hotkey !== undefined) keys.add(String(one.props.hotkey))
+    }
+    // The note: its views, its steps, and the row under it (t, e, r, i, c, w).
+    await collect()
+    // Its practice tried once: a for the example answer.
+    await ui.press({ key: 'note-drill' })
+    w.answer = WRONG
+    await ui.input({ key: `drill-${id}`, text: 'return `안녕하세요, ${name}님!!`' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Button', key: 'note-drill-answer' })).toBeDefined()
+    await collect()
+    // A quiz: s, its hint and its field's i; a first try short of right (a, f); graded, back to the note (n).
+    await ui.press({ key: 'view-quiz' })
+    w.answer = ['Q1: 문제 하나', 'H1: 바깥을 떠올려 보세요', 'A1: 답 하나'].join('\n')
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    await collect()
+    w.answer = ['판정: 틀림', '피드백: 그 값은 아닙니다.', '되묻기: 이름이 비면 무엇이 찍힐까요?'].join('\n')
+    await ui.input({ key: mineKey(store, 0), text: '안녕하세요, 님!' })
+    await w.clock.settle()
+    await collect()
+    await ui.press({ key: 'quiz-answer' })
+    expect(await ui.find({ type: 'Button', key: 'quiz-note' })).toBeDefined()
+    await collect()
+    // A new quiz whose answer was seen first (/learn 퀴즈 정답): o and x.
+    w.answer = ['Q1: 문제 둘', 'A1: 답 둘'].join('\n')
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    await seeAnswer($)
+    await collect()
+    // Back on the note, the concept missed is due: q.
+    await ui.press({ key: 'view-note' })
+    await collect()
+    await ui.unmount()
+    expect([...keys].sort()).toEqual(['1', '2', '3', '4', 'a', 'c', 'e', 'f', 'h', 'i', 'n', 'o', 'p', 'q', 'r', 's', 't', 'w', 'x'])
+    const help = (await learn($, '도움말')).text ?? ''
+    for (const key of keys) expect(help).toContain(`\`${key}\``)
   })
 })

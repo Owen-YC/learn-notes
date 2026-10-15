@@ -306,15 +306,27 @@ const slips = atom({ plugin: 'learn-notes', key: 'slips' } as const, {})
 const teamTerms = atom({ plugin: 'learn-notes', key: 'teamTerms' } as const, {})
 const drillRun = atom({ plugin: 'learn-notes', key: 'drillRun' } as const, { open: null, checking: null, notice: null })
 
-/** `$.store` keys: notes per project for the next session, the concept index, merges and the last quiz. */
+/**
+ * `$.store` keys: notes per project for the next session (HISTORY_PER_PROJECT a project, HISTORY_MAX_BYTES in all;
+ * since 1.7.0 a note may hold its practice's result, LearnDrill, 1KB at most), the concept index, merges and the last quiz.
+ */
 const HISTORY_KEY = 'history'
 const CONCEPTS_KEY = 'concepts'
 const ALIASES_KEY = 'aliases'
-/** The last /learn quiz, so its answers are there in the next session too. */
+/**
+ * The last /learn quiz, so its answers are there in the next session too. Since 1.7.0 a question may hold its first
+ * try short of right (firstTry: the answer, feedback and question asked back, written cut to 1500, 600 and 300
+ * characters), the slip it asks again (isRetry, slip, slipBefore) and, for a team term, its repository's tag, the
+ * words its grade puts in the index (TERM_SEED_TEXT) and the lines it was asked from (teamCode: a path and a range,
+ * never the code).
+ */
 const QUIZ_KEY = 'quiz'
 /** What each merge folded away, so merging back splits the two again: merged-away key → its record. */
 const MERGES_KEY = 'merges'
-/** Each day's notes and graded answers, for the run of days and the week's progress. */
+/**
+ * Each day's notes and graded answers, for the run of days and the week's progress; since 1.7.0 also the practices
+ * (t) graded that day (`drills`), counted with its answers but not in today's review share.
+ */
 const ACTIVITY_KEY = 'activity'
 /** Every question a quiz asked (the newest 300), for /learn anki. */
 const BANK_KEY = 'quizBank'
@@ -4189,7 +4201,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'learn',
       description: '학습 노트 패널을 엽니다 · /learn 도움말로 명령 목록',
-      argumentHint: '[복습|퀴즈|정리|질문|기록|보고서|찾기|일지|도움말]',
+      argumentHint: '[복습|퀴즈|정리|질문|기록|보고서|공유|진단|도움말]',
       immediate: true,
     })
     // An engine without tools for plugins, or one that refuses this one, leaves /learn as it was.
@@ -4685,14 +4697,8 @@ export const register: Register = (on, options) => {
       await persist($, true)
       return { text: '이 프로젝트의 학습 노트를 비웠습니다. 다음 세션에도 다시 나오지 않습니다. 일지 파일과 배운 개념 모음은 그대로입니다.' }
     }
-    // Retired in 1.6.0: a note is saved by itself, and one the journal refused goes in with the next that works.
-    if (arg === 'save') {
-      return {
-        text: cfg.isAutoSave
-          ? `노트는 저절로 저장됩니다: ${await journalDir($, cfg)}. 파일에 쓰지 못한 노트는 다음 노트를 저장할 때 함께 저장됩니다.`
-          : SAVE_OFF,
-      }
-    }
+    // Retired in 1.6.0 (a note is saved by itself), with no reply of its own since 1.7.0: the old name still answers, with the few most used.
+    if (arg === 'save') return { text: `${SAVE_RETIRED}\n\n${SHORT_HELP}` }
     if (arg !== '') return { text: `모르는 하위 명령입니다: '${said}'.\n\n${SHORT_HELP}` }
     await update($, autoOpened, () => true)
     // The keys stay in the prompt: what is typed next is a request, never one of the pane's keys (w · e · r call the model).
@@ -5786,7 +5792,6 @@ async function reportCommand($: EngineInterface, cfg: Config, rest: string, isAw
     range,
     activity: await storedActivity($),
     index,
-    level: cfg.level,
     now,
     usage: cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)),
     since: await stepsFrom($),
@@ -6433,21 +6438,25 @@ function taughtBy(list: readonly LearnNote[], map: Readonly<Record<string, strin
   return list.filter(note => note.concepts.some(one => resolveKey(map, one) === key)).slice(-3)
 }
 
+/**
+ * /learn 도움말 (commandHelp): as many lines as 1.6.1's. Every command and every key of the pane is named; the rare
+ * commands share the 가끔 line, and the names kept out of it are listed at COMMAND_WORDS.
+ */
 const HELP = [
   'learn-notes 명령',
   '',
   '- `/learn`: 패널 열기 · 패널의 키를 쓰려면 `ctrl+x tab`(또는 패널 클릭), Esc로 대화로 돌아갑니다 (숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다)',
   '- `/learn 복습`: 오늘 복습을 패널 퀴즈로 바로 시작 · 답 칸에 바로 적고 Enter (패널이 없는 화면에서는 대화창에 문제를 냅니다)',
   '- 패널: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작 · `p`·`n` 이전·다음 노트 · `w` 노트 쓰기, 다시 쓰기',
-  '- 노트 아래: `t` 직접 해 보기 · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기 · `c` 복사(요청·경로를 빼고 멘토에게 묻기)',
-  '- 퀴즈(`4`): 답을 적고 Enter로 채점 · 틀리면 되묻기를 보고 한 번 더 (모르면 `모르겠어요`) · 답 칸에서 Tab으로 버튼에 가서 `h` 힌트 · `a` 정답 · `o`·`x` 정답을 본 뒤 맞힘·틀림 · `f` 채점 바꾸기 · `s` 새 문제(풀던 문제가 남았으면 두 번) · `n` 틀린 개념을 배운 노트',
-  '- `/learn 퀴즈`: 대화창에서 풀기 · 풀던 퀴즈, 없으면 복습할 개념으로 새 퀴즈 (내 코드의 결과를 맞히거나 바꿔 봅니다) · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트`(`힌트 2`) · `정답`',
+  '- 노트 아래: `t` 직접 해 보기(한 번 고친 뒤 `a` 예시 답) · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기 · `c` 복사',
+  '- 퀴즈(`4`): 답을 적고 Enter로 채점 · 틀리면 되묻기를 보고 한 번 더 (모르면 `모르겠어요`) · Tab으로 버튼에 가서 `h` 힌트 · `a` 정답 · `i` 답 적기 · `f` 채점 바꾸기 · `s` 새 문제(남은 문제가 있으면 두 번) · `n` 틀린 개념을 배운 노트 · 정답을 먼저 봤으면 `o`·`x`로 채점',
+  '- `/learn 퀴즈`: 대화창에서 풀기 · 풀던 퀴즈, 없으면 복습할 개념으로 새 퀴즈 · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트`(`힌트 2`) · `정답`',
   '- `/learn 정리`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
   '- `/learn 질문 …`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기',
   '- `/learn 기록`: 연속 학습일 · 정답률 · 복습할 개념 · 배운 개념 · 모델 호출 수',
   '- `/learn 보고서`: 코드 없는 학습 보고서를 클립보드와 파일로 (최근 7일 · `이번주` · `어제`도 됩니다)',
-  '- `/learn 찾기 말`: 지난 노트 찾기 · `/learn 일지`: 오늘 노트 목차 (`어제` · `2026-10-03` · `목록`도 됩니다)',
-  '- 가끔: `/learn 공유` 고른 노트 복사 · `/learn 합치기 A = B` 개념 합치기 · `/learn 안다 이름` 복습에서 빼기 · `/learn 모른다 이름` 되돌리기 · `/learn 안키` Anki 카드 · `/learn 비우기` 패널 비우기',
+  '- `/learn 공유`: 고른 노트를 요청·경로 없이 복사해 멘토에게 묻기(`c`와 같음) · `/learn 퀴즈 팀`: 이 저장소의 팀 용어만으로 퀴즈',
+  '- 가끔: `/learn 찾기 말` 노트 찾기 · `/learn 일지` 오늘 노트 목차 · `/learn 합치기 A = B` 개념 합치기 · `/learn 안다 이름` 복습에서 빼기 · `/learn 모른다 이름` 되돌리기 · `/learn 안키` Anki 카드 · `/learn 비우기` 패널 비우기 · `/learn 진단` 막히면 담당자에게',
 ].join('\n')
 /** The pane's two lines when drawing it failed (the Pane render's .catch). */
 const RENDER_FAILED = '패널을 그리지 못했습니다 · /learn 진단을 복사해 팀에 보내 주세요'
@@ -6468,9 +6477,10 @@ function commandHelp(): string {
 /** What an unknown subcommand gets: the few most used, and where the rest are. */
 const SHORT_HELP = '자주 쓰는 것: `/learn` 패널 · `/learn 복습` · `/learn 퀴즈` · `/learn 정리` · `/learn 질문 …` · `/learn 기록` · 전체는 `/learn 도움말`'
 /**
- * Korean words for the subcommands, so `/learn 퀴즈` works as `/learn quiz` does. Some are kept
- * out of the help: 날짜 (days), 저장 (save, retired), 개념 and 통계 (the record, as 기록), 마지막 (share,
- * its name before 1.7.0, as `last` is).
+ * Korean words for the subcommands, so `/learn 퀴즈` works as `/learn quiz` does. The help names one word each; kept
+ * out of it are the other words for the same (도움, 문제, 요약, 보고, 묻기, 검색), 날짜 (days, as 일지 목록), 개념
+ * and 통계 (the record, as 기록), 마지막 (share, its name before 1.7.0, as `last` is) and 저장 (save, retired in
+ * 1.6.0: it answers with the few most used, SHORT_HELP).
  */
 const COMMAND_WORDS: Record<string, string> = {
   도움말: 'help',
@@ -6501,8 +6511,8 @@ const COMMAND_WORDS: Record<string, string> = {
   안키: 'anki',
   진단: 'doctor',
 }
-/** What /learn save answers with autoSave off, now that a note is saved by itself. */
-const SAVE_OFF = '노트는 저절로 저장됩니다. 파일로 남기려면 /config에서 learn-notes.autoSave(노트를 마크다운 파일로 자동 저장)를 켜세요.'
+/** What /learn save (저장), retired in 1.6.0, says above SHORT_HELP. */
+const SAVE_RETIRED = '노트는 저절로 저장됩니다.'
 /** Lines /learn day prints at most: the reply goes into the conversation the model reads. */
 const DAY_LINES = 40
 const QUIZ_USAGE = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 (힌트 2) · 정답 · 새로 · 맞음 1 · 틀림 2 · 팀 (팀 용어만)'

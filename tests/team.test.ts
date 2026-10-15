@@ -251,9 +251,9 @@ describe('1.7.0: what the team terms say (D6)', () => {
 
   test('the report carries the line under the review, by the team file\'s names, and none without a team file', () => {
     const range: RecapRange = { label: '최근 7일', from: NOW - 7 * DAY, to: NOW + DAY, days: ['2026-10-03'] }
-    const report = reportMarkdown({ range, activity: {}, index: {}, level: 'beginner', now: NOW, team: { total: 3, met: ['fetcher'] } })
+    const report = reportMarkdown({ range, activity: {}, index: {}, now: NOW, team: { total: 3, met: ['fetcher'] } })
     expect(report).toContain('- 지금 복습할 개념 0개\n- 이 저장소 팀 용어: 3개 중 1개 만남 (fetcher) · 아직 2개 (/learn 퀴즈 팀)\n')
-    expect(reportMarkdown({ range, activity: {}, index: {}, level: 'beginner', now: NOW })).not.toContain('팀 용어')
+    expect(reportMarkdown({ range, activity: {}, index: {}, now: NOW })).not.toContain('팀 용어')
   })
 })
 

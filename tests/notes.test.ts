@@ -2531,7 +2531,7 @@ describe('1.6.0: the learning report and the recap\'s missed concepts', () => {
   }
 
   test('the report counts the days, notes, concepts and quiz answers of its range, by name only', () => {
-    const md = reportMarkdown({ range, activity, index, level: 'beginner', now, usage: { [stamp(now).day]: { calls: 4, auto: 2, input: 12_000, output: 900 } } })
+    const md = reportMarkdown({ range, activity, index, now, usage: { [stamp(now).day]: { calls: 4, auto: 2, input: 12_000, output: 900 } } })
     expect(md.split('\n')[0]).toBe(`# 학습 보고 · ${range.days[0]} ~ ${range.days[6]} (최근 7일)`)
     expect(md).toContain('모든 프로젝트를 합친 기록입니다. 코드 · 요청 문장 · 파일 이름은 들어 있지 않습니다.')
     expect(md).toContain('- 학습한 날 3일 · 지금 연속 2일째')
@@ -2543,8 +2543,9 @@ describe('1.6.0: the learning report and the recap\'s missed concepts', () => {
     expect(md).toContain('- 다시 볼 개념(퀴즈에서 틀림): 클로저')
     // Every concept due now, as the review counts them: the missed one, one met yesterday, one met long ago.
     expect(md).toContain('- 지금 복습할 개념 3개')
-    expect(md).toContain('- 설명 수준 beginner')
-    expect(md).toContain('- 학습 노트의 모델 호출 4번 (자동 노트 2) · 입력 약 1.2만 · 출력 900 토큰')
+    // The level setting is no record of learning (1.7.0): /learn 진단 names the settings. The model calls stay.
+    expect(md).not.toContain('설명 수준')
+    expect(md).toContain('- 지금 복습할 개념 3개\n- 학습 노트의 모델 호출 4번 (자동 노트 2) · 입력 약 1.2만 · 출력 900 토큰')
     expect(md).toContain('## 이번 기간에 배운 것을 내 말로 한 줄')
     // No explanation, no file, no code.
     for (const leak of ['const b', 'src/a.ts', 'src/b.ts', '바깥 변수를', '`']) expect(md).not.toContain(leak)
@@ -2556,7 +2557,7 @@ describe('1.6.0: the learning report and the recap\'s missed concepts', () => {
     for (let i = 0; i < 6; i++) {
       crowded[`c:틀림${i}`] = { name: `틀림${i}`, count: 2, firstAt: now - 40 * DAY, lastAt: now - 40 * DAY, blurb: '', files: [], missedAt: now - DAY + i, reviewedAt: now - DAY + i, step: 0 }
     }
-    const md = reportMarkdown({ range, activity, index: crowded, level: 'beginner', now })
+    const md = reportMarkdown({ range, activity, index: crowded, now })
     // The most recently met first, the oldest miss first.
     const fresh = Array.from({ length: 15 }, (_, i) => `새${15 - i}`).join(' · ')
     expect(md).toContain(`- 새로 배운 개념 16개: ${fresh} 외 1개\n`)
@@ -2567,7 +2568,7 @@ describe('1.6.0: the learning report and the recap\'s missed concepts', () => {
   test('a report with no quiz says so, and a name cannot open code or break a line', () => {
     const quiet = { [stamp(now).day]: { notes: 1, right: 0, wrong: 0 } }
     const named = { 'c:x': { name: '`useEffect`\n훅', count: 1, firstAt: now, lastAt: now, blurb: '', files: [] } }
-    const md = reportMarkdown({ range: recapRange('오늘', now)!, activity: quiet, index: named, level: 'advanced', now })
+    const md = reportMarkdown({ range: recapRange('오늘', now)!, activity: quiet, index: named, now })
     expect(md.split('\n')[0]).toBe(`# 학습 보고 · ${stamp(now).day} (오늘)`)
     expect(md).toContain('- 퀴즈: 아직 채점한 문제가 없습니다')
     expect(md).toContain('- 새로 배운 개념 1개: useEffect 훅')
@@ -2575,12 +2576,12 @@ describe('1.6.0: the learning report and the recap\'s missed concepts', () => {
     // A note with no call counted on its day: before the usage record began (1.6.0).
     expect(md).toContain('- 학습 노트의 모델 호출: 이 기간은 기록이 없습니다(1.6.0부터 셉니다)')
     expect(md).not.toContain('다시 볼 개념')
-    expect(reportMarkdown({ range: recapRange('2026-10-01', now)!, activity: {}, index: {}, level: 'beginner', now }).split('\n')[0]).toBe('# 학습 보고 · 2026-10-01')
+    expect(reportMarkdown({ range: recapRange('2026-10-01', now)!, activity: {}, index: {}, now }).split('\n')[0]).toBe('# 학습 보고 · 2026-10-01')
   })
 
   test('a missed concept marked known since (/learn 안다) is not one to look at again, in the report or the recap', () => {
     const known = { ...index, 'c:closure': { ...index['c:closure']!, knownAt: now - 60_000 } }
-    const md = reportMarkdown({ range, activity, index: known, level: 'beginner', now })
+    const md = reportMarkdown({ range, activity, index: known, now })
     expect(md).not.toContain('다시 볼 개념')
     expect(md).toContain('- 졸업한 개념(아는 개념으로 옮김) 1개')
     expect(recapMissed(known, range)).toEqual([])
@@ -2686,12 +2687,12 @@ describe('1.6.0 after 1.5: the store cap, Anki fronts and days with no call reco
     const old = { [stamp(now - 2 * DAY).day]: { notes: 4, right: 0, wrong: 0 }, [stamp(now - DAY).day]: { notes: 1, right: 0, wrong: 0 } }
     const usage = { [stamp(now).day]: { calls: 2, auto: 1, input: 900, output: 50 } }
     const activity = { ...old, [stamp(now).day]: { notes: 1, right: 0, wrong: 0 } }
-    expect(reportMarkdown({ range, activity: old, index: {}, level: 'beginner', now })).toContain('- 학습 노트의 모델 호출: 이 기간은 기록이 없습니다(1.6.0부터 셉니다)')
-    expect(reportMarkdown({ range, activity, index: {}, level: 'beginner', now, usage })).toContain(
+    expect(reportMarkdown({ range, activity: old, index: {}, now })).toContain('- 학습 노트의 모델 호출: 이 기간은 기록이 없습니다(1.6.0부터 셉니다)')
+    expect(reportMarkdown({ range, activity, index: {}, now, usage })).toContain(
       '- 학습 노트의 모델 호출 2번 (자동 노트 1) · 입력 900 · 출력 50 토큰 · 노트를 쓴 날 중 2일은 1.6.0 전이라 호출 기록이 없습니다',
     )
     // A day with no note had no call to count: nothing to say.
-    expect(reportMarkdown({ range, activity: {}, index: {}, level: 'beginner', now })).toContain('- 학습 노트의 모델 호출: 없습니다')
+    expect(reportMarkdown({ range, activity: {}, index: {}, now })).toContain('- 학습 노트의 모델 호출: 없습니다')
     expect(usageLine({}, now, old)).toBe('학습 노트의 모델 호출: 최근 7일은 기록이 없습니다(1.6.0부터 셉니다)')
     expect(usageLine(usage, now, activity)).toBe('학습 노트의 모델 호출: 오늘 2번 (자동 노트 1) · 최근 7일 2번 · 입력 900 · 출력 50 토큰 · 노트를 쓴 날 중 2일은 1.6.0 전이라 호출 기록이 없습니다')
     expect(usageLine({}, now, {})).toBe('학습 노트의 모델 호출: 최근 7일 동안 없습니다')
@@ -2707,10 +2708,10 @@ describe('1.6.0 after 1.5: the store cap, Anki fronts and days with no call reco
     expect(uncountedDays(range.days, activity, usage, since)).toBe(1)
     expect(uncountedDays(range.days, activity, usage)).toBe(2)
     expect(usageLine(usage, now, activity, since)).toBe('학습 노트의 모델 호출: 오늘 1번 · 최근 7일 1번 · 입력 1 · 출력 1 토큰 · 노트를 쓴 날 중 1일은 1.6.0 전이라 호출 기록이 없습니다')
-    expect(reportMarkdown({ range, activity, index: {}, level: 'beginner', now, usage, since })).toContain('노트를 쓴 날 중 1일은 1.6.0 전이라')
+    expect(reportMarkdown({ range, activity, index: {}, now, usage, since })).toContain('노트를 쓴 날 중 1일은 1.6.0 전이라')
     // Every day with notes is 1.6.0's: nothing to say of them.
     expect(usageLine(usage, now, activity, now - 2 * DAY)).toBe('학습 노트의 모델 호출: 오늘 1번 · 최근 7일 1번 · 입력 1 · 출력 1 토큰')
-    expect(reportMarkdown({ range, activity, index: {}, level: 'beginner', now, usage, since: now - 2 * DAY })).not.toContain('호출 기록이 없습니다')
+    expect(reportMarkdown({ range, activity, index: {}, now, usage, since: now - 2 * DAY })).not.toContain('호출 기록이 없습니다')
   })
 })
 

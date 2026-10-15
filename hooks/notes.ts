@@ -3826,12 +3826,14 @@ export function recapSection(range: RecapRange, text: string, at: number, day: s
   return [`## ${day} 정리 · ${range.label} (${stamp(at).time})`, '', text, '', '---', ''].join('\n')
 }
 
-/** What /learn 보고서 reads: its days, every project's record and concepts, the level setting and the model calls. */
+/**
+ * What /learn 보고서 reads: its days, every project's record and concepts, and the model calls. The level setting is
+ * no record of learning and stays out (1.7.0); /learn 진단 names the settings.
+ */
 export type ReportInput = {
   range: RecapRange
   activity: Readonly<Record<string, LearnDayActivity>>
   index: Readonly<Record<string, LearnConcept>>
-  level: Level
   now: number
   usage?: Readonly<Record<string, LearnDayUsage>>
   /** When this store first had a 1.6.0 session, which began the usage record (see uncountedDays). */
@@ -3865,7 +3867,7 @@ const REPORT_MISSED = 5
  * Concepts go by name only (a blurb may quote code), with no request and no
  * file name; every project's record together, as the store keeps it.
  */
-export function reportMarkdown({ range, activity, index, level, now, usage = {}, since, team }: ReportInput): string {
+export function reportMarkdown({ range, activity, index, now, usage = {}, since, team }: ReportInput): string {
   const has = (record: object, day: string) => Object.prototype.hasOwnProperty.call(record, day)
   const days = range.days.map(day => (has(activity, day) ? activity[day]! : { notes: 0, right: 0, wrong: 0 }))
   const total = days.reduce((sum, one) => ({ notes: sum.notes + one.notes, right: sum.right + one.right, wrong: sum.wrong + one.wrong }), { notes: 0, right: 0, wrong: 0 })
@@ -3908,7 +3910,6 @@ export function reportMarkdown({ range, activity, index, level, now, usage = {},
     ...(graduated.length > 0 ? [`- 졸업한 개념(아는 개념으로 옮김) ${graduated.length}개`] : []),
     `- 지금 복습할 개념 ${dueConcepts(index, now).length}개`,
     ...(team && team.total > 0 ? [reportTeamLine(team.total, team.met)] : []),
-    `- 설명 수준 ${level}`,
     calls.calls > 0
       ? `- 학습 노트의 모델 호출 ${calls.calls}번${calls.auto > 0 ? ` (자동 노트 ${calls.auto})` : ''} · 입력 ${tokenText(calls.input)} · 출력 ${tokenText(calls.output)} 토큰${uncounted > 0 ? ` · ${uncountedText(uncounted)}` : ''}`
       : uncounted > 0
