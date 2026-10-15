@@ -49,6 +49,33 @@ import {
   teamText,
   TEAM_FILE,
   type TeamFile,
+  type TeamTerm,
+  type TeamCode,
+  type TeamWay,
+  NO_TEAM_TERMS,
+  TEAM_NUDGED_KEPT,
+  cleanNudged,
+  cleanTeamTerms,
+  isTeamTerm,
+  isTermDoc,
+  teamAddedText,
+  teamCodeHead,
+  teamCodeLabel,
+  teamLeftText,
+  teamNudgeText,
+  teamPracticeText,
+  teamMetText,
+  teamRecordLine,
+  termBlurb,
+  termKey,
+  distinctTerms,
+  termLines,
+  termSource,
+  unmetTerms,
+  withTeamTerm,
+  rootTag,
+  redactLines,
+  isConfigFile,
   addToBank,
   ankiText,
   cleanBank,
@@ -237,6 +264,7 @@ const activity = atom({ plugin: 'learn-notes', key: 'activity' } as const, {})
 const submitted = atom({ plugin: 'learn-notes', key: 'submitted' } as const, { list: [], lastRequest: null })
 const newerSaid = atom({ plugin: 'learn-notes', key: 'newerSaid' } as const, null)
 const slips = atom({ plugin: 'learn-notes', key: 'slips' } as const, {})
+const teamTerms = atom({ plugin: 'learn-notes', key: 'teamTerms' } as const, {})
 
 /** `$.store` keys: notes per project for the next session, the concept index, merges and the last quiz. */
 const HISTORY_KEY = 'history'
@@ -304,6 +332,19 @@ const SCHEMA_KEY = 'schema'
  * or the learning record tool.
  */
 const SLIPS_KEY = 'slips'
+/**
+ * The concepts that came in as a repository's team terms (1.7.0 D6), by concept key: the repositories' tags (rootTag,
+ * 5 at most), whose quizzes ask the term by the team's code. TEAM_TERMS_KEPT keys and TEAM_TERMS_MAX_BYTES (24KB) of
+ * JSON at most, the first written going first (fitTeamTerms). Apart from the concept index, so its shape stays 1.6's;
+ * read through the merges, written after reading the store's again when a team term's grade puts it in the index,
+ * never while the schema guard is on.
+ */
+const TEAM_TERMS_KEY = 'teamTerms'
+/**
+ * The repositories (rootTag) whose team-term toast showed (1.7.0 D6): once per repository, TEAM_NUDGED_KEPT (50) at
+ * most, the latest last (cleanNudged). Written as the toast shows.
+ */
+const TEAM_NUDGED_KEY = 'teamNudged'
 const WELCOME = 'learn-notes가 켜졌습니다 · 파일을 고치는 요청을 하면 노트가 생깁니다 · /learn으로 패널'
 
 type MergeRecord = { concept: LearnConcept; into: string; both: number }
@@ -455,6 +496,8 @@ const resuming = new Set<string>()
 let quotaHeld: QuotaKind | undefined
 /** The project's team file as last read (TEAM_FILE), with its stamp: read again only once that changes. */
 let team: { path: string; mtimeMs: number; size: number; parsed: TeamFile } | null = null
+/** True once this load's session start showed the welcome toast: the team-term toast then waits for another session (1.7.0 D6). */
+let isWelcomedNow = false
 /**
  * Work that must not interleave runs one after another in its lane: journal
  * saves (each reads a journal and writes it whole) and store writes (each
@@ -1132,7 +1175,10 @@ async function welcome($: EngineInterface): Promise<void> {
     const hasAny = (raw: unknown) => isRecord(raw) && Object.keys(raw).length > 0
     const isNew = !hasAny(await $.store.get(HISTORY_KEY)) && !hasAny(await $.store.get(CONCEPTS_KEY))
     await $.store.set(WELCOMED_KEY, true)
-    if (isNew) $.ui.toast(WELCOME, { timeoutMs: 8000 })
+    if (isNew) {
+      $.ui.toast(WELCOME, { timeoutMs: 8000 })
+      isWelcomedNow = true
+    }
   } catch (error) {
     void fault($, 'store', faultCode(error, 'store'), '첫 세션 안내를 남기지 못했습니다')
   }
@@ -1176,6 +1222,9 @@ async function loadHistory($: EngineInterface): Promise<void> {
     // The store's slips, every window's: the mirror is only ever written with what the store took.
     const kept = cleanSlips(await $.store.get(SLIPS_KEY), merged, await $.clock.now())
     if (JSON.stringify(kept) !== JSON.stringify(await read($, slips))) await update($, slips, () => kept)
+    // The concepts that came in as team terms (1.7.0 D6), the same way.
+    const marks = cleanTeamTerms(await $.store.get(TEAM_TERMS_KEY), merged)
+    if (JSON.stringify(marks) !== JSON.stringify(await read($, teamTerms))) await update($, teamTerms, () => marks)
     const root = await $.session.root()
     const isEmpty = (await read($, notes)).length === 0
     if ((await read($, paneRoot)) === null || isEmpty) await update($, paneRoot, () => root)
@@ -1577,7 +1626,10 @@ async function remind($: EngineInterface, cfg: Config): Promise<void> {
  * Marks concepts after a quiz grade, in the store and the pane's mirror: the
  * marks each had before (in the order of `keys`), or undefined when the store
  * could not be written. While the schema guard is on (isStoreAhead), nothing is
- * marked: the marks before come back all the same, so the grade stands.
+ * marked: the marks before come back all the same, so the grade stands. `seed`
+ * (1.7.0 D6), a team term's name and words: the first key's concept, when the
+ * index does not hold it, goes in first as a note's concept does (met once,
+ * now), then is marked; its marks before are none (undefined).
  */
 function markConcepts(
   $: EngineInterface,
@@ -1585,6 +1637,7 @@ function markConcepts(
   mark: Mark,
   keys: readonly string[],
   at: number,
+  seed?: { name: string; blurb: string },
 ): Promise<(LearnQuizMarks | undefined)[] | undefined> {
   return enqueue('storing', async () => {
     try {
@@ -1597,7 +1650,10 @@ function markConcepts(
       })
       // Graded all the same, its concept's step left as a newer build's index has it.
       if (await isStoreAhead($)) return before
-      const index = mark(prior, resolved, at)
+      // Never with a count of 0: a 1.6 session's index drops such a concept (cleanConcepts).
+      const first = resolved[0]
+      const base = seed && first !== undefined && !conceptAt(prior, first) ? countConcepts(prior, [{ key: first, name: seed.name, blurb: seed.blurb, files: [] }], [], at, []) : prior
+      const index = mark(base, resolved, at)
       await storeIndex($, index)
       await update($, concepts, () => index)
       await remind($, cfg)
@@ -1729,7 +1785,17 @@ function quizItemOf(one: unknown): LearnQuizItem | undefined {
     ...(one.isRetry === true ? { isRetry: true as const } : {}),
     ...slipOfItem(one.slip, one.slipType),
     ...(one.slipBefore === null ? { slipBefore: null } : slipRecordOf(one.slipBefore) ? { slipBefore: slipRecordOf(one.slipBefore)! } : {}),
+    ...(one.team === true ? { team: true as const } : {}),
+    ...teamCodeOf(one.teamCode),
   }
+}
+
+/** Where a team term's question was asked from, read back off a stored quiz question (1.7.0 D6); none unless it is one. */
+function teamCodeOf(raw: unknown): Pick<LearnQuizItem, 'teamCode'> {
+  if (!isRecord(raw) || typeof raw.file !== 'string' || raw.file === '') return {}
+  const { from, to } = raw
+  if (typeof from !== 'number' || typeof to !== 'number' || !Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from) return {}
+  return { teamCode: { file: cut(raw.file, 120), from, to, ...(raw.isDoc === true ? { isDoc: true as const } : {}) } }
 }
 
 /** This session's last quiz, else the one a past session left in the store. */
@@ -1893,6 +1959,19 @@ function isPartly(item: LearnQuizItem): boolean {
   return item.result === 'wrong' && item.verdict === 'partial' && item.isLearnerGraded !== true
 }
 
+/** True for a question graded wrong, not partly right: its concept comes first in the next quiz. */
+function isFullMiss(item: LearnQuizItem): boolean {
+  return item.result === 'wrong' && !isPartly(item)
+}
+
+/**
+ * True for a team term (1.7.0 D6) whose grade put it in the concept index: graded with no marks from before (its
+ * concept was not there), and there now. None while the schema guard kept the grade from the index.
+ */
+function isTeamAdded(item: LearnQuizItem, index: Readonly<Record<string, LearnConcept>>, map: Readonly<Record<string, string>>): boolean {
+  return item.team === true && item.result !== undefined && item.before === undefined && conceptAt(index, resolveKey(map, item.key)) !== undefined
+}
+
 /** True for a typed answer whose grade the learner set otherwise than Claude's verdict. */
 function isTurned(item: LearnQuizItem): boolean {
   if (item.verdict === undefined || item.result === undefined || item.isLearnerGraded !== true) return false
@@ -2023,6 +2102,27 @@ async function withCode(
 /** Concepts a review quiz looks through: twice the questions it asks, so it can take them from different notes. */
 const QUIZ_CANDIDATES = 6
 
+/** What /learn 퀴즈 팀 answers when every team term of the repository is a concept marked known. */
+const TEAM_ALL_KNOWN = '이 저장소의 팀 용어는 모두 아는 개념이라 퀴즈에 낼 것이 없습니다. 되돌리려면 /learn 모른다 개념 이름.'
+
+/**
+ * The team terms met already (1.7.0 D6) a team quiz goes on to once none is left to meet: the concepts the terms
+ * came to, none marked known, the ones due first (as dueConcepts ranks them), then the ones due soonest.
+ */
+function metTeamConcepts(
+  terms: readonly TeamTerm[],
+  index: Readonly<Record<string, LearnConcept>>,
+  map: Readonly<Record<string, string>>,
+  now: number,
+): RankedConcept[] {
+  const keys = new Set(terms.map(term => termKey(term, map)))
+  const due = dueConcepts(index, now).filter(one => keys.has(one.key))
+  const rest = rankConcepts(index)
+    .filter(one => keys.has(one.key) && !isKnown(one) && !due.some(other => other.key === one.key))
+    .sort((a, b) => dueAt(a) - dueAt(b))
+  return [...due, ...rest]
+}
+
 /**
  * Asks the model for a new quiz and keeps it; or says why there is none. The
  * concepts due first, taken from different notes where it can (a wrong one
@@ -2030,12 +2130,19 @@ const QUIZ_CANDIDATES = 6
  * predict and to modify, about that note's code), never one marked known,
  * each asked about the code the learner made with it where a note still holds it,
  * and one whose slip is still open asked again in other code (1.7.0, 다시 도전).
+ * In a repository whose team file has terms (1.7.0 D6), the places the concepts
+ * due leave free go to the terms not met yet, in the file's order, each asked by
+ * the team's words and the lines its words name (readTermCode); a concept marked
+ * a team term of this repository is asked by those lines too. `mode` 'team'
+ * (/learn 퀴즈 팀) asks the team terms alone: the ones not met first, then the
+ * ones met, due first.
  */
 async function makeQuiz(
   $: EngineInterface,
   cfg: Config,
   now: number,
   only?: Pick<LearnNote, 'id' | 'concepts'>,
+  mode: 'review' | 'team' = 'review',
 ): Promise<{ items: LearnQuizItem[]; at: number } | { error: string }> {
   const index = await read($, concepts)
   const map = await read($, aliases)
@@ -2046,25 +2153,60 @@ async function makeQuiz(
       const one = conceptAt(index, key)
       return one ? [{ ...one, key }] : []
     })
+  const isTeamQuiz = !only && mode === 'team'
+  // This repository's team terms (1.7.0 D6), the team file read again if it changed: a note's own quiz asks none.
+  const file = only ? undefined : await teamOf($, '')
+  const terms = file?.practice ?? []
   // A concept whose slip is still open is asked again (다시 도전): told its last question, answer and slip. One whose
   // slip no quiz has gone over since its grade kept it is in the next review quiz whether due or not, as the line
   // under that grade said (slipsToAsk: 거의 marks no miss, so its review may be days off).
   const open = await storedSlips($, map, now)
-  const asking = new Set(only ? [] : slipsToAsk(index, open, now))
+  const asking = new Set(only || isTeamQuiz ? [] : slipsToAsk(index, open, now))
   // A concept the learner knows is asked about in no quiz, a note's own neither.
-  const chosen = only ? taught.filter(one => !isKnown(one)).slice(0, 3) : quizPick(index, now, QUIZ_CANDIDATES, [...asking])
-  if (chosen.length === 0) {
+  const chosen = only
+    ? taught.filter(one => !isKnown(one)).slice(0, 3)
+    : isTeamQuiz
+      ? metTeamConcepts(terms, index, map, now).slice(0, QUIZ_CANDIDATES)
+      : quizPick(index, now, QUIZ_CANDIDATES, [...asking])
+  // The places the concepts due leave free (all three in a team quiz) go to the team terms not met yet, in the file's order.
+  const dueCount = chosen.filter(one => asking.has(one.key) || isDue(one, now)).length
+  const free = only ? 0 : isTeamQuiz ? 3 : 3 - Math.min(3, dueCount)
+  const fresh: QuizPick[] = unmetTerms(terms, index, map)
+    .slice(0, free)
+    .map(term => ({ key: termKey(term, map), name: term.name, count: 0, firstAt: now, lastAt: now, blurb: termBlurb(term.blurb, TERM_ASK_TEXT), files: [], team: true as const }))
+  if (chosen.length === 0 && fresh.length === 0) {
     if (only) return { error: taught.length > 0 ? '이 노트의 개념은 모두 아는 개념이라 퀴즈를 낼 수 없습니다. 되돌리려면 /learn 모른다 개념 이름.' : '이 노트에는 배울 개념이 없어 퀴즈를 낼 수 없습니다.' }
+    if (isTeamQuiz) return { error: terms.length > 0 ? TEAM_ALL_KNOWN : NO_TEAM_TERMS }
     return { error: Object.keys(index).length > 0 ? ALL_KNOWN_TEXT : NO_CONCEPTS_FOR_QUIZ }
   }
   // A review quiz goes over more than one note where it can (three concepts from one note make one lesson
-  // again), the slips to ask again and the concepts due before any other.
+  // again), the slips to ask again and the concepts due before any other, then the team terms not met yet.
   const found = await withCode($, cfg, chosen, map, only?.id)
-  const isAsking = (one: QuizPick) => asking.has(one.key)
-  const picks = (only ? found : spreadPicks(found, 3, one => isAsking(one) || isDue(one, now), isAsking)).map(one => {
-    const slip = openSlip(open, one.key)
-    return slip ? { ...one, slip: { what: slip.what, question: slip.question, mine: slip.mine } } : one
+  // A concept that came in as a team term: of this repository (any of its terms, in a team quiz) asked as one, by the
+  // team's words; of another, its words are the team's all the same.
+  const marks = only ? {} : await storedTeamTerms($, map)
+  const root = await $.session.root()
+  const termOf = new Map<string, TeamTerm>()
+  for (const term of terms) if (!termOf.has(termKey(term, map))) termOf.set(termKey(term, map), term)
+  const marked: QuizPick[] = found.map(one => {
+    const term = termOf.get(one.key)
+    if (term && (isTeamQuiz || isTeamTerm(marks, one.key, rootTag(root)))) return { ...one, team: true as const, blurb: termBlurb(term.blurb, TERM_ASK_TEXT) }
+    return isTeamTerm(marks, one.key) ? { ...one, isTeamMarked: true as const } : one
   })
+  const isFresh = new Set(fresh.map(one => one.key))
+  const isAsking = (one: QuizPick) => asking.has(one.key)
+  const isFirst = (one: QuizPick) => isTeamQuiz || isAsking(one) || isDue(one, now) || isFresh.has(one.key)
+  // In the quiz's order: the concepts due, then the team terms not met, then the rest (a team quiz: the terms not met first).
+  const candidates = isTeamQuiz ? [...fresh, ...marked] : [...marked.filter(isFirst), ...fresh, ...marked.filter(one => !isFirst(one))]
+  const spread = only ? marked : spreadPicks(candidates, 3, isFirst, isAsking)
+  // Each team term asked by the lines its words name (three files read at most), over the learner's code; then its slip.
+  const picks: QuizPick[] = []
+  for (const one of spread) {
+    const term = one.team ? termOf.get(one.key) : undefined
+    const teamCode = term && file ? await readTermCode($, cfg, file, term) : undefined
+    const slip = openSlip(open, one.key)
+    picks.push({ ...one, ...(teamCode ? { teamCode } : {}), ...(slip ? { slip: { what: slip.what, question: slip.question, mine: slip.mine } } : {}) })
+  }
   const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level, only ? 'note' : 'review'), maxTokens: 1400 })
   if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
   const items = parseQuiz(asked.text, picks)
@@ -2195,9 +2337,13 @@ async function applyGrade(
     }
     // Right after its hint or a try again, or graded by the learner once its answer showed: recalled with help, so its step stays.
     const isHelped = isHelpedGrade(graded(item))
+    // A team term not met yet goes in the concept index with its grade (1.7.0 D6).
+    const seed = item.team ? await teamSeed($, item) : undefined
     // The learner's own word is fully right or fully wrong, never "partly", whatever Claude's verdict was.
-    const before = await markConcepts($, cfg, markFor(result, extra.isLearnerGraded === true ? undefined : extra.verdict, isHelped), [item.key], now)
+    const before = await markConcepts($, cfg, markFor(result, extra.isLearnerGraded === true ? undefined : extra.verdict, isHelped), [item.key], now, seed)
     if (!before) return 'failed'
+    // A team term graded is one of this repository's from now on: its quizzes here ask it by the team's code.
+    if (item.team && conceptAt(await read($, concepts), resolveKey(await read($, aliases), item.key))) await markTeamTerm($, item.key)
     // Its slip (1.7.0): what a miss showed, kept for the next quiz to ask again; one asked again mended by a right answer.
     const isGraduated = conceptAt(await read($, concepts), resolveKey(await read($, aliases), item.key))?.knownAt === now
     const slipBefore = await recordSlip($, item.key, slipChange({ ...graded(item), result }, { isHelped, isGraduated }), now)
@@ -3130,6 +3276,126 @@ async function teamHere($: EngineInterface): Promise<TeamFile | undefined> {
   return root && team?.path === teamPath(root) ? team.parsed : undefined
 }
 
+/** Bytes past which a team term's file is not read (1.7.0 D6): a question shows QUIZ_CODE_BUDGET characters of it at most. */
+const TERM_READ_MAX = 200_000
+/** Characters of a team term's words a quiz asks it by; what the concept index keeps of them once it is met. */
+const TERM_ASK_TEXT = 300
+const TERM_SEED_TEXT = 160
+
+/**
+ * The lines of the repository file a team term's words name (termSource), as a quiz carries them (1.7.0 D6): read
+ * only when the file, every link followed, lies inside the repository, is a file of TERM_READ_MAX bytes at most,
+ * neither excludePaths nor the team file's `## 빼기` leave it out (nor where a link leads), it is no secret, lock or
+ * generated file, and the permission rules let it be read; then cut (termLines) and its secrets masked. Undefined
+ * when any of that fails or the lines hold nothing to ask from: the term is asked from its words alone. Never rejects.
+ */
+async function readTermCode($: EngineInterface, cfg: Config, file: TeamFile, term: TeamTerm): Promise<TeamCode | undefined> {
+  const source = termSource(term.blurb)
+  if (!source) return undefined
+  try {
+    const root = await $.session.root()
+    if (!root) return undefined
+    const top = (await $.fs.stat(root, { resolve: true })).realPath
+    const path = `${root.replace(/[\\/]+$/, '')}/${source.path}`
+    if (top === undefined || !(await $.fs.exists(path))) return undefined
+    const stat = await $.fs.stat(path, { resolve: true })
+    const real = stat.realPath
+    if (real === undefined || !isUnder(real, top) || stat.kind !== 'file' || stat.size > TERM_READ_MAX) return undefined
+    const patterns = [...cfg.excludePaths, ...file.exclude]
+    // A link inside the repository is judged by where it leads too: a `.env` under another name stays out.
+    const inner = real.replace(/\\/g, '/').slice(top.replace(/\\/g, '/').replace(/\/+$/, '').length + 1)
+    if (withheldOf(source.path, path, patterns) !== undefined || withheldOf(inner, real, patterns) !== undefined) return undefined
+    if ((await isReadDenied($, path)) || (real !== path && (await isReadDenied($, real)))) return undefined
+    const text = String(await $.fs.read(path))
+    // Not text: nothing a question could quote.
+    if (text.includes('\u0000')) return undefined
+    const isDoc = isTermDoc(source.path)
+    const lines = termLines(text, term.name, source, isDoc)
+    if (!lines) return undefined
+    const masked = redactLines(lines.text.split('\n'), isConfigFile(source.path)).lines.join('\n')
+    return { file: baseName(source.path), from: lines.from, to: lines.to, text: masked, ...(isDoc ? { isDoc: true as const } : {}) }
+  } catch (error) {
+    void fault($, 'team', faultCode(error), '팀 용어의 코드를 읽지 못했습니다')
+    return undefined
+  }
+}
+
+/** The concepts that came in as team terms, as the store has them now (merges followed), else as the pane's mirror has them. */
+async function storedTeamTerms($: EngineInterface, map: Readonly<Record<string, string>>): Promise<Record<string, string[]>> {
+  try {
+    return cleanTeamTerms(await $.store.get(TEAM_TERMS_KEY), map)
+  } catch {
+    return read($, teamTerms)
+  }
+}
+
+/**
+ * Marks the concept under `key` a team term of this repository (1.7.0 D6), in the store and the pane's mirror, after
+ * any store write still running: its quizzes here then ask it by the team's code, and its line says `· 팀 용어`.
+ * Nothing while the schema guard is on, or once it is marked so; never fails the caller.
+ */
+function markTeamTerm($: EngineInterface, key: string): Promise<void> {
+  return enqueue('storing', async () => {
+    try {
+      if (await isStoreAhead($)) return
+      const root = await $.session.root()
+      if (!root) return
+      const map = cleanAliases(await $.store.get(ALIASES_KEY))
+      const at = resolveKey(map, key)
+      const stored = cleanTeamTerms(await $.store.get(TEAM_TERMS_KEY), map)
+      const next = isTeamTerm(stored, at, rootTag(root)) ? stored : withTeamTerm(stored, at, rootTag(root))
+      if (next !== stored) await $.store.set(TEAM_TERMS_KEY, next)
+      if (JSON.stringify(next) !== JSON.stringify(await read($, teamTerms))) await update($, teamTerms, () => next)
+    } catch (error) {
+      void fault($, 'store', faultCode(error, 'store'), '팀 용어 표시를 남기지 못했습니다')
+    }
+  })
+}
+
+/** What a team term's first grade puts in the concept index (1.7.0 D6): its name, and the team's words without the path, short and masked. */
+async function teamSeed($: EngineInterface, item: LearnQuizItem): Promise<{ name: string; blurb: string }> {
+  const map = await read($, aliases)
+  const term = (await teamHere($))?.practice.find(one => termKey(one, map) === resolveKey(map, item.key))
+  return { name: item.name, blurb: term ? termBlurb(term.blurb, TERM_SEED_TEXT) : '' }
+}
+
+/** This repository's team terms not met yet (1.7.0 D6), the team file read again if it changed. */
+async function teamTermsLeft($: EngineInterface): Promise<number> {
+  const file = await teamOf($, '')
+  return file ? unmetTerms(file.practice, await read($, concepts), await read($, aliases)).length : 0
+}
+
+/** Where the pane sends the learner to practise this repository's team terms: s in the quiz view, unless the review alone fills a quiz. */
+function teamWay(index: Readonly<Record<string, LearnConcept>>, now: number): TeamWay {
+  return dueConcepts(index, now).length >= 3 ? '/learn 퀴즈 팀' : '4에서 s'
+}
+
+/**
+ * Once per repository (1.7.0 D6), at an interactive session's start: a toast that its team file's terms not met yet
+ * can be practised, and where. None in the session the welcome toast showed in (nor is the repository marked then,
+ * so the next session says it), in a cloud session, or with every term met. Marked first, as the welcome is: a store
+ * that takes no writes never shows it again and again. Never fails the start.
+ */
+async function nudgeTeam($: EngineInterface): Promise<void> {
+  if (!isInteractive || isWelcomedNow || (await isCloudSession($))) return
+  try {
+    const file = await teamHere($)
+    const index = await read($, concepts)
+    const unmet = file ? unmetTerms(file.practice, index, await read($, aliases)).length : 0
+    const root = await $.session.root()
+    if (unmet === 0 || !root) return
+    const tag = rootTag(root)
+    const nudged = cleanNudged(await $.store.get(TEAM_NUDGED_KEY))
+    if (nudged.includes(tag)) return
+    await $.store.set(TEAM_NUDGED_KEY, [...nudged, tag].slice(-TEAM_NUDGED_KEPT))
+    // Three concepts due fill a quiz by themselves: then the team's own quiz is where the terms are.
+    const way = teamWay(index, await $.clock.now()) === '4에서 s' ? '/learn 퀴즈' : '/learn 퀴즈 팀'
+    $.ui.toast(teamNudgeText(unmet, way), { timeoutMs: 8000 })
+  } catch (error) {
+    void fault($, 'store', faultCode(error, 'store'), '팀 용어 안내를 남기지 못했습니다')
+  }
+}
+
 /**
  * Folds one tool's change into the running turn; a file that may hold secrets,
  * a lock or generated file, one excludePaths or the team file's `## 빼기`
@@ -3201,6 +3467,12 @@ function retryMark(item: LearnQuizItem): string {
   return item.isRetry ? '(다시 도전) ' : ''
 }
 
+/** What stands before a team term's question in the conversation (1.7.0 D6): that it is one, and where its lines are. */
+function teamMark(item: LearnQuizItem): string {
+  if (!item.team) return ''
+  return item.teamCode ? `(팀 용어 · ${item.teamCode.isDoc ? '팀 노트' : '팀 코드'} ${teamCodeLabel(item.teamCode)}) ` : '(팀 용어) '
+}
+
 /**
  * A graded question's line about its concept's slip (slipNotice) as the conversation says it: where the pane
  * offers n for the note that taught it, the note is found by its name.
@@ -3209,6 +3481,15 @@ async function slipLineText($: EngineInterface, item: LearnQuizItem): Promise<st
   const notice: SlipNotice | undefined = slipNotice(item, slipAt(await read($, slips), resolveKey(await read($, aliases), item.key)), isHelpedGrade(item))
   if (!notice) return undefined
   return notice.kind === 'again' ? `${notice.text} · 이 개념을 배운 노트: /learn 찾기 ${item.name}` : notice.text
+}
+
+/**
+ * A graded team term's line (1.7.0 D6) as the conversation says it, when its grade put it in the concept index: a
+ * miss's place in the next quiz unless a line above says it already (`isSaid`).
+ */
+async function teamLineText($: EngineInterface, item: LearnQuizItem, isSaid: boolean): Promise<string | undefined> {
+  if (!isTeamAdded(item, await read($, concepts), await read($, aliases))) return undefined
+  return teamAddedText(isFullMiss(item) && !isSaid)
 }
 
 /** How a try again is sent in the conversation, and the answer asked for instead. */
@@ -3231,7 +3512,7 @@ function nextText(current: Quiz, i: number, withHint = false): string {
  * first and the question asked back (or, after "모르겠어요", the hint), seen again where no pane shows them.
  */
 function listedQuestion(current: Quiz, item: LearnQuizItem, isChecking: boolean): string {
-  const head = `${quizItemState(current, item, isChecking)}${retryMark(item)}${item.question}`
+  const head = `${quizItemState(current, item, isChecking)}${retryMark(item)}${teamMark(item)}${item.question}`
   const first = item.firstTry
   if (first === undefined || item.result !== undefined || isChecking) return head
   const mine = isBlankAnswer(first.mine) ? [] : [`내 답: ${cut(first.mine.replace(/\s+/g, ' '), 80)}`]
@@ -3306,9 +3587,11 @@ async function typedAnswer($: EngineInterface, cfg: Config, current: Quiz, n: nu
     const done = graded.item
     const graduated = graduatedIn([done], index, await read($, aliases))
     const slipLine = await slipLineText($, done)
+    const teamLine = await teamLineText($, done, slipLine !== undefined)
     return [
       ...(lead ? [lead, ''] : []),
       `${n}번 ${resultMark(done)}${helpText(done)} · ${VERDICT_TEXT[done.verdict ?? 'wrong']} ${done.feedback ?? ''}`.trim(),
+      ...(teamLine ? [teamLine] : []),
       ...(slipLine ? [slipLine] : []),
       '',
       '정답',
@@ -3357,8 +3640,11 @@ async function answerText($: EngineInterface, cfg: Config, current: Quiz, said: 
   ]
   const mark = shown.result !== undefined ? ` · ${resultMark(shown)}` : ''
   // A first try graded so: what it showed wrong is kept for the next quiz, as after any grade.
-  const slipLine = shown.result !== undefined && item.result === undefined ? await slipLineText($, shown) : undefined
-  return `${n}번 정답\n\n${item.answer}\n(개념: ${item.name}${mark})${slipLine ? `\n${slipLine}` : ''}${steps.length > 0 ? `\n\n${steps.join(' · ')}` : ''}`
+  const isGradedNow = shown.result !== undefined && item.result === undefined
+  const slipLine = isGradedNow ? await slipLineText($, shown) : undefined
+  const teamLine = isGradedNow ? await teamLineText($, shown, slipLine !== undefined) : undefined
+  const below = [teamLine, slipLine].filter(line => line !== undefined).map(line => `\n${line}`).join('')
+  return `${n}번 정답\n\n${item.answer}\n(개념: ${item.name}${mark})${below}${steps.length > 0 ? `\n\n${steps.join(' · ')}` : ''}`
 }
 
 /**
@@ -3377,6 +3663,8 @@ const QUIZ_NEW = /^(?:새로|새|new)(?:\s*(?:문제|퀴즈|quiz|questions?))?(?
 const QUIZ_LIST = /^(?:문제|questions?|다음|다음\s*문제|목록|next|list)$/i
 /** How /learn quiz is used asked for, the replies' own "내 답" and "새 답" placeholders among it: nothing to grade. */
 const QUIZ_HELP = /^(?:help|도움말|도움|쓰는\s*법|사용법|usage|[내새]\s*답|\?)$/i
+/** A quiz of this repository's team terms alone asked for (1.7.0 D6): 팀, 팀 용어, 팀 퀴즈, team. */
+const QUIZ_TEAM = /^(?:팀|team)(?:\s*(?:용어|퀴즈|문제|terms?|quiz))?$/i
 
 /**
  * /learn quiz and what may follow it: the quiz being answered (a new one when
@@ -3403,6 +3691,14 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
   const rest = showWord !== undefined ? '' : flipped ? `${flipped[2]} ${flipped[1]}` : said
   const isNew = QUIZ_NEW.test(rest)
   if (QUIZ_HELP.test(rest)) return QUIZ_USAGE
+  // The team terms alone (1.7.0 D6): a new quiz of them, as 새로 makes one, the ones not met first.
+  if (QUIZ_TEAM.test(rest)) {
+    const file = await teamOf($, '')
+    if (!file || file.practice.length === 0) return NO_TEAM_TERMS
+    if (isQuizMaking) return '패널에서 문제를 만들고 있습니다. 잠시 뒤 /learn 퀴즈로 보세요.'
+    if (isQuizChecking) return CHECKING_TEXT
+    return freshQuiz($, cfg, now, 'team')
+  }
   // 보기 after it as the pane's a says it: 정답 보기, 정답 2 보기.
   const answer = /^(정답|답|answer|answers)\s*(?:(\d+)\s*번?)?(?:\s*보기)?$/i.exec(rest)
   if (answer) {
@@ -3479,9 +3775,10 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
     // What each grade did with its concept's slip (1.7.0), as the pane says it under the feedback: a first try graded
     // so keeps what it showed wrong, for the next quiz to ask again.
     const graded = ((await lastQuiz($))?.items ?? []).flatMap((item, i) => (changedAt.includes(i) ? [{ item, n: i + 1 }] : []))
-    const slipLines = (await Promise.all(graded.map(async ({ item, n }) => ({ n, line: await slipLineText($, item) })))).flatMap(({ n, line }) =>
-      line === undefined ? [] : [graded.length > 1 ? `${n}번: ${line}` : line],
-    )
+    // A team term a grade put in the concept index says so (1.7.0 D6): a miss's place is said by the reply already.
+    const slipLines = (
+      await Promise.all(graded.map(async ({ item, n }) => ({ n, lines: [await teamLineText($, item, true), await slipLineText($, item)] })))
+    ).flatMap(({ n, lines }) => lines.flatMap(line => (line === undefined ? [] : [graded.length > 1 ? `${n}번: ${line}` : line])))
     const slipped = slipLines.length > 0 ? `\n${slipLines.join('\n')}` : ''
     if (result === 'wrong') return `틀린 것으로 적었습니다: ${changed.join(' · ')}. 복습할 개념 맨 앞에 올라 다음 퀴즈에 먼저 나옵니다.${slipped}`
     // Graded after the answer showed: recalled with help, so the interval stays (a typed answer turned right moves on).
@@ -3536,19 +3833,24 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
     const open = firstOpen(current)
     return showWord !== undefined && open !== -1 ? `${listed}\n\n답으로 적은 말이면 번호를 붙여 보내 주세요: /learn 퀴즈 ${open + 1} ${showWord}` : listed
   }
-  if (isQuizChecking) return '답을 채점하고 있습니다. 채점이 끝난 뒤 새 문제를 받으세요.'
+  if (isQuizChecking) return CHECKING_TEXT
+  return freshQuiz($, cfg, now)
+}
+
+/** A new quiz made in the conversation (`mode` 'team': of the team terms alone), listed with how to answer it; or why there is none. */
+async function freshQuiz($: EngineInterface, cfg: Config, now: number, mode: 'review' | 'team' = 'review'): Promise<string> {
   isQuizMaking = true
   let made
   try {
-    made = await makeQuiz($, cfg, now)
+    made = await makeQuiz($, cfg, now, undefined, mode)
   } finally {
     isQuizMaking = false
   }
   if ('error' in made) return made.error
   return [
-    `복습 퀴즈 · ${made.items.length}문제`,
+    `${mode === 'team' ? '팀 용어 퀴즈' : '복습 퀴즈'} · ${made.items.length}문제`,
     '',
-    made.items.map((item, i) => listItem(i + 1, `${retryMark(item)}${item.question}`)).join('\n\n'),
+    made.items.map((item, i) => listItem(i + 1, `${retryMark(item)}${teamMark(item)}${item.question}`)).join('\n\n'),
     '',
     '먼저 스스로 답해 보세요.',
     '- 답을 적어 채점받기: /learn 퀴즈 1 내 답 (번호 없이 적으면 1번부터)',
@@ -3593,6 +3895,8 @@ export const register: Register = (on, options) => {
     void journalLeft($, cfg)
     await remind($, cfg)
     await welcome($)
+    // A repository whose team file has terms to practise says so once (1.7.0 D6), never in the welcome's session.
+    await nudgeTeam($)
     await checkAtStart($, cfg)
     // A newer build open in another window, or a store it wrote in a newer layout: said once a session.
     await lookNewer($)
@@ -3876,7 +4180,9 @@ export const register: Register = (on, options) => {
       // 시작 · 계속 · 해 줘 after it ask for the same review: never an answer to grade.
       const ask = QUIZ_SHOW.test(rest) || REVIEW_PLEASE.test(rest) ? '' : rest
       const index = await read($, concepts)
-      if (ask !== '' || Object.keys(index).length === 0) return { text: await quizCommand($, cfg, ask) }
+      // With no concept yet, team terms not met (1.7.0 D6) are nothing due: no quiz of them is made unasked, as below.
+      const isTeamOnly = Object.keys(index).length === 0 && (await teamTermsLeft($)) > 0
+      if (ask !== '' || (Object.keys(index).length === 0 && !isTeamOnly)) return { text: await quizCommand($, cfg, ask) }
       // Asked from Remote Control or a chat channel, the pane is on a screen nobody there sees: the quiz comes in the reply.
       const isAway = isAwayOrigin(e.origin) || (await isCloudSession($))
       const now = await $.clock.now()
@@ -4067,7 +4373,7 @@ export const register: Register = (on, options) => {
     await update($, autoOpened, () => true)
     // The keys stay in the prompt: what is typed next is a request, never one of the pane's keys (w · e · r call the model).
     // ctrl+x tab or a click hands them to the pane; /learn 복습 opens it holding them.
-    const hasKeys = list.length > 0 || Object.keys(await read($, concepts)).length > 0
+    const hasKeys = list.length > 0 || Object.keys(await read($, concepts)).length > 0 || (await teamTermsLeft($)) > 0
     const opened = await $.ui.open({ id: PANE, title: TITLE })
     const last = list.at(-1)
     if (opened.isPlaced && (await isCloudSession($))) {
@@ -4126,6 +4432,14 @@ export const register: Register = (on, options) => {
     const asks = await read($, askRun)
     const slipRecord = await read($, slips)
     const slipOf = (key: string) => slipAt(slipRecord, resolveKey(map, key))
+    // This repository's team terms (1.7.0 D6), as last read: the ones not met yet make a quiz with no concept learned.
+    const teamFile = await teamHere($)
+    const termsHere = distinctTerms(teamFile?.practice ?? [], map)
+    const unmet = unmetTerms(termsHere, index, map)
+    const team: TeamProgress | undefined = termsHere.length > 0 ? { total: termsHere.length, unmet, way: teamWay(index, now) } : undefined
+    const marks = await read($, teamTerms)
+    const canQuiz = hasConcepts || unmet.length > 0
+    const isAdded = (item: LearnQuizItem) => isTeamAdded(item, index, map)
 
     const at = shownAt(list, wanted)
     const note = list[at]
@@ -4160,10 +4474,11 @@ export const register: Register = (on, options) => {
 
     if (!note) {
       // The team file read for this project, if any: its notes will follow its rules and terms.
-      const rules = await teamHere($)
-      // No note in this project yet: concepts learned elsewhere, and a quiz on them, are still one key away.
+      const rules = teamFile
+      // No note in this project yet: concepts learned elsewhere, and a quiz on them, are still one key away; so are the
+      // team's terms (1.7.0 D6), its rules read said only when it has none to practise (or nothing was read at all).
       const welcome = (
-        <Box flexDirection="column" marginTop={hasConcepts ? 1 : 0}>
+        <Box flexDirection="column" marginTop={canQuiz ? 1 : 0}>
           <Text bold>아직 학습 노트가 없습니다</Text>
           <Text wrap="wrap">
             Claude에게 파일을 만들거나 고쳐 달라고 요청해 보세요. 턴이 끝나면 무엇이 왜 바뀌었고 무엇을 배울 수 있는지 노트로 정리해
@@ -4179,7 +4494,7 @@ export const register: Register = (on, options) => {
           )}
           {rules && (
             <Text dimColor wrap="wrap">
-              {teamText(rules)}
+              {team ? teamPracticeText(team.total, team.unmet.length, team.way) : teamText(rules)}
             </Text>
           )}
         </Box>
@@ -4188,11 +4503,13 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           {systemHint}
           {liveBlock}
-          {hasConcepts && strip}
-          {hasConcepts && keysHint}
-          {hasConcepts && shown !== 'note' ? (
+          {canQuiz && strip}
+          {canQuiz && keysHint}
+          {canQuiz && shown !== 'note' ? (
             <Box marginTop={1} flexDirection="column">
-              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, review, list, isTerminalFocus, el, e.surface, slipOf) : conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el, slipRecord)}
+              {shown === 'quiz'
+                ? quizView($, cfg, current, run, canQuiz, now, review, list, isTerminalFocus, el, e.surface, slipOf, !hasConcepts, isAdded)
+                : conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el, slipRecord, team, marks)}
             </Box>
           ) : (
             welcome
@@ -4214,9 +4531,9 @@ export const register: Register = (on, options) => {
 
     const body =
       shown === 'quiz' ? (
-        quizView($, cfg, current, run, hasConcepts, now, review, list, isTerminalFocus, el, e.surface, slipOf)
+        quizView($, cfg, current, run, canQuiz, now, review, list, isTerminalFocus, el, e.surface, slipOf, !hasConcepts, isAdded)
       ) : shown === 'concepts' ? (
-        conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el, slipRecord)
+        conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el, slipRecord, team, marks)
       ) : shown === 'note' ? (
         <Box flexDirection="column">
           {noteBody(note, isBusy, offText(note, cfg, now), el)}
@@ -4835,6 +5152,9 @@ async function recordText($: EngineInterface, cfg: Config, isForTool = false): P
       : '- 복습할 개념: 지금은 없습니다'
   // Today first, as the run of days counts back.
   const week = [...stats.days].reverse().map(({ weekday, one }) => `${weekday} ${one.notes}`)
+  // This repository's team terms (1.7.0 D6): met of all, and the quiz of the ones left.
+  const terms = distinctTerms((await teamOf($, ''))?.practice ?? [], await read($, aliases))
+  const teamLine = terms.length > 0 ? [teamRecordLine(terms.length, unmetTerms(terms, index, await read($, aliases)).length)] : []
   const total = Object.keys(index).length
   const ranked = rankConcepts(index).filter(one => !isKnown(one))
   const known = knownLine(index)
@@ -4856,6 +5176,7 @@ async function recordText($: EngineInterface, cfg: Config, isForTool = false): P
     `- 최근 30일 퀴즈 정답률: ${graded > 0 ? `${Math.round((stats.month.right / graded) * 100)}% (${stats.month.right}/${graded})` : '아직 채점한 문제가 없습니다'}`,
     review,
     `- 최근 7일 노트: ${week.join(' · ')}`,
+    ...teamLine,
     '',
     ...learned,
     '',
@@ -5008,14 +5329,20 @@ async function reportCommand($: EngineInterface, cfg: Config, rest: string, isAw
   const now = await $.clock.now()
   const range = recapRange(rest === '' ? '최근 7일' : rest, now)
   if (!range) return REPORT_USAGE
+  const map = await currentAliases($)
+  const index = await storedIndex($, map)
+  // This repository's team terms (1.7.0 D6), the ones met by the team file's names: the same in every teammate's report.
+  const terms = distinctTerms((await teamOf($, ''))?.practice ?? [], map)
+  const unmet = new Set(unmetTerms(terms, index, map))
   const text = reportMarkdown({
     range,
     activity: await storedActivity($),
-    index: await storedIndex($, await currentAliases($)),
+    index,
     level: cfg.level,
     now,
     usage: cleanUsage(await $.store.get(USAGE_KEY).catch(() => undefined)),
     since: await stepsFrom($),
+    ...(terms.length > 0 ? { team: { total: terms.length, met: terms.filter(term => !unmet.has(term)).map(term => term.name) } } : {}),
   })
   let path: string | undefined
   if (cfg.isAutoSave) {
@@ -5236,11 +5563,16 @@ function knownLine(index: Readonly<Record<string, LearnConcept>>): string | unde
 /** Cells a row of the concepts to review takes with its slip, cut at its end past them. */
 const DUE_SLIP_CELLS = 56
 
+/** This repository's team terms as the pane shows them (1.7.0 D6): how many, the ones not met yet, and where to practise them. */
+type TeamProgress = { total: number; unmet: readonly TeamTerm[]; way: TeamWay }
+
 /**
  * Every concept the notes have taught: one head line of how many and this
- * week's progress, the ones worth a second look (q while today's review has
- * questions `left`), then all of them but the ones known, the most met first,
- * each with the notes in the pane that taught it; the known ones folded into a line.
+ * week's progress, this repository's team terms met of all (`team`, 1.7.0 D6),
+ * the ones worth a second look (q while today's review has questions `left`),
+ * then all of them but the ones known, the most met first, each with the notes
+ * in the pane that taught it (`· 팀 용어` on one that came in as a team term,
+ * `marks`); the known ones folded into a line.
  */
 function conceptsView(
   $: EngineInterface,
@@ -5253,11 +5585,34 @@ function conceptsView(
   left: number,
   el: ElementTable,
   slipRecord: Readonly<Record<string, LearnSlip>> = {},
+  team?: TeamProgress,
+  marks: Readonly<Record<string, readonly string[]>> = {},
 ) {
   const { Box, Text, Markdown, Button } = el
   const total = Object.keys(index).length
+  // How far the team terms are, under the head line: met of all and where to practise, the first few still to meet dim under it.
+  const teamLines = team && (
+    <Box flexDirection="column">
+      <Text wrap="truncate-end" dimColor={team.unmet.length === 0}>
+        {teamMetText(team.total, team.unmet.length)}
+        {team.unmet.length > 0 && <Text dimColor> · {team.way}</Text>}
+      </Text>
+      {team.unmet.length > 0 && (
+        <Text dimColor wrap="truncate-end">
+          {teamLeftText(team.unmet)}
+        </Text>
+      )}
+    </Box>
+  )
   if (total === 0) {
-    return <Text dimColor>아직 모인 개념이 없습니다. 노트가 쓰이면 "배울 개념"이 여기에 쌓입니다.</Text>
+    return (
+      <Box flexDirection="column">
+        {teamLines}
+        <Box marginTop={teamLines ? 1 : 0}>
+          <Text dimColor>아직 모인 개념이 없습니다. 노트가 쓰이면 "배울 개념"이 여기에 쌓입니다.</Text>
+        </Box>
+      </Box>
+    )
   }
   const ranked = rankConcepts(index).filter(one => !isKnown(one))
   const known = knownLine(index)
@@ -5277,6 +5632,7 @@ function conceptsView(
             {' '}
             ×{one.count} · {reviewText(one, now)} · 최근 {dayWhen(one.lastAt, now)}
             {one.reviewedAt !== undefined ? ` · 퀴즈 ${dayWhen(one.reviewedAt, now)}` : ''}
+            {isTeamTerm(marks, one.key) ? ' · 팀 용어' : ''}
           </Text>
         </Text>
         {one.blurb !== '' && <Markdown text={one.blurb} dimColor />}
@@ -5303,6 +5659,7 @@ function conceptsView(
         <Text bold>배운 개념 {total}개</Text>
         <Text dimColor> · {[`최근 7일 새로 ${fresh}`, ...progressParts(stats)].join(' · ')}</Text>
       </Text>
+      {teamLines}
       {queue.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Text color="yellow" wrap="wrap">
@@ -5367,6 +5724,8 @@ function quizView(
   el: ElementTable,
   surface: RenderSurface,
   slipOf: (key: string) => LearnSlip | undefined = () => undefined,
+  isTeamOnly = false,
+  isAdded: (item: LearnQuizItem) => boolean = () => false,
 ) {
   const { Box, Text, Markdown, Button } = el
   // The mobile app draws no text field yet: there the answer is shown and graded by hand.
@@ -5407,7 +5766,7 @@ function quizView(
       {!hasConcepts && <Text dimColor>{NO_CONCEPTS_FOR_QUIZ}</Text>}
       {hasConcepts && items.length === 0 && !run.isMaking && (
         <Text dimColor wrap="wrap">
-          s를 누르면 복습할 개념으로 내 코드에서 3문제를 냅니다 · 먼저 떠올려 적어 보세요. 틀린 답을 바로잡을 때 더 오래 남습니다
+          {isTeamOnly ? 's를 누르면 이 저장소의 팀 용어로 3문제를 냅니다' : 's를 누르면 복습할 개념으로 내 코드에서 3문제를 냅니다'} · 먼저 떠올려 적어 보세요. 틀린 답을 바로잡을 때 더 오래 남습니다
           {Input ? " · 모르면 '모르겠어요'라고 적고 Enter" : ''}
         </Text>
       )}
@@ -5437,6 +5796,8 @@ function quizView(
           const isElsewhere = item.result === 'wrong' && item.noteId !== undefined && taught === undefined
           // What the grade did with its concept's slip (1.7.0), dim under the feedback; green once one asked again is mended.
           const notice = slipNotice(item, slipOf(item.key), isHelpedGrade(item))
+          // A team term this grade put in the concept index (1.7.0 D6); a miss's place in the next quiz unless the notice says it.
+          const added = isAdded(item) ? teamAddedText(isFullMiss(item) && !notice) : undefined
           return (
             <Box key={`quiz-${i}`} flexDirection="column" marginTop={1}>
               <Text wrap="truncate-end">
@@ -5448,6 +5809,11 @@ function quizView(
                 </Text>
               </Text>
               <Markdown text={`**${VERDICT_TEXT[item.verdict ?? 'wrong']}** ${item.feedback ?? ''}${isTurned(item) ? ` _(내가 ${item.result === 'right' ? '맞힘' : '틀림'}으로 바꿈)_` : ''}`} />
+              {added && (
+                <Text dimColor wrap="wrap">
+                  {added}
+                </Text>
+              )}
               {notice && (
                 <Text color={notice.kind === 'fixed' ? 'green' : undefined} dimColor={notice.kind !== 'fixed'} wrap="wrap">
                   {notice.kind === 'again' && taught ? `${notice.text} · n: 이 개념을 배운 노트 · 거기서 r로 따라가기` : notice.text}
@@ -5489,8 +5855,14 @@ function quizView(
             <Text bold>
               문제 {i + 1}/{items.length}
               {item.isRetry ? ' · 다시 도전' : ''}
+              {item.team ? ' · 팀 용어' : ''}
               {item.kind !== undefined ? ` · ${KIND_LABEL[item.kind]}` : ''}
             </Text>
+            {item.teamCode && (
+              <Text dimColor wrap="truncate-end">
+                {teamCodeHead(item.teamCode)}
+              </Text>
+            )}
             <Markdown text={item.question} />
             {item.hint !== undefined && item.isHinted === true && first?.nudge !== item.hint && (
               <Box flexDirection="column">
@@ -5684,7 +6056,7 @@ const COMMAND_WORDS: Record<string, string> = {
 const SAVE_OFF = '노트는 저절로 저장됩니다. 파일로 남기려면 /config에서 learn-notes.autoSave(노트를 마크다운 파일로 자동 저장)를 켜세요.'
 /** Lines /learn day prints at most: the reply goes into the conversation the model reads. */
 const DAY_LINES = 40
-const QUIZ_USAGE = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 (힌트 2) · 정답 · 새로 · 맞음 1 · 틀림 2'
+const QUIZ_USAGE = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 (힌트 2) · 정답 · 새로 · 맞음 1 · 틀림 2 · 팀 (팀 용어로)'
 const ASK_USAGE = '쓰는 법: /learn 질문 물을 말 (예: /learn 질문 왜 let 대신 const를 썼어?) · 패널에서 고른 노트(없으면 마지막 노트)에 대해 답합니다'
 const NO_QUIZ = '아직 낸 퀴즈가 없습니다. /learn 퀴즈로 먼저 문제를 받으세요.'
 const KNOW_USAGE =

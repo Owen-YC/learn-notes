@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { conceptKey, journalPath, stamp } from '../hooks/notes'
+import { conceptKey, journalPath, rootTag, stamp } from '../hooks/notes'
 
 const NOW = Date.UTC(2026, 9, 3, 1)
 const NOTES_DIR = '/home/u/.claude/learning-notes'
@@ -3675,12 +3675,13 @@ describe('1.6.0: the team file', () => {
     expect(w.models[2]).toContain('- 바뀌지 않는 값은 const로 선언한다')
   })
 
-  test('the pane\'s first screen says the team file was read', async ($, on) => {
+  test('the pane\'s first screen offers the team file\'s terms to practise (1.7.0 D6: in place of saying it was read)', async ($, on) => {
     const w = world(on)
     w.files.set(TEAM_PATH, TEAM)
     await start($)
     const ui = await pane($)
-    expect(await ui.find({ type: 'Text', text: '이 저장소의 팀 규칙 파일을 읽었습니다 (규칙 1 · 용어 1 · 빼기 1)' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '팀 용어 1개로 연습할 수 있습니다 · 4에서 s' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /팀 규칙 파일을 읽었습니다/ })).toBeUndefined()
     await ui.unmount()
   })
 })
@@ -4207,7 +4208,8 @@ describe('1.6.0: quiz kinds, the note that taught a missed concept, and /learn q
     await start($)
     w.answer = THREE_QUESTIONS
     await learn($, 'quiz')
-    const QUIZ_USAGE_TEXT = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 (힌트 2) · 정답 · 새로 · 맞음 1 · 틀림 2'
+    // 1.7.0 D6 adds 팀 (the team terms alone) at its end.
+    const QUIZ_USAGE_TEXT = '쓰는 법: /learn 퀴즈 (풀던 문제 · 없으면 새 문제) · /learn 퀴즈 내 답 (또는 2 내 답) · 힌트 (힌트 2) · 정답 · 새로 · 맞음 1 · 틀림 2 · 팀 (팀 용어로)'
     // Graded, any of these would be wrong: a model call, a miss and a day's count for words never meant as an answer.
     w.answer = '판정: 틀림\n피드백: 아닙니다.'
     // 시작 · 계속 · 보기 · 풀기 ask for the quiz as /learn 퀴즈 alone does: the one being answered.
@@ -6115,7 +6117,7 @@ describe('1.7.0: the version stamp, and the schema guard', () => {
     await ui.unmount()
     expect((await learn($, '안다 클로저')).text).toBe(BEHIND_TEXT)
     expect((await learn($, '합치기 map = 클로저')).text).toBe(BEHIND_TEXT)
-    for (const key of ['concepts', 'known', 'steps', 'quizBank', 'aliases', 'merges', 'schema', 'slips']) expect(w.sets).not.toContain(key)
+    for (const key of ['concepts', 'known', 'steps', 'quizBank', 'aliases', 'merges', 'schema', 'slips', 'teamTerms']) expect(w.sets).not.toContain(key)
     expect(store.get('concepts')).toEqual(THREE_CONCEPTS)
     expect(store.get('schema')).toBe(4)
     expect(w.sets).toEqual(expect.arrayContaining(['history', 'quiz', 'activity']))
@@ -8100,5 +8102,395 @@ describe('1.7.0: what a quiz found wrong, asked again in other code (오답 노�
     expect((store.get('concepts') as Record<string, { knownAt?: number }>)['c:클로저']!.knownAt).toBe(NOW)
     expect(slipsOf(store)['c:클로저']!.fixedAt).toBe(NOW)
     await ui.unmount()
+  })
+})
+
+describe('1.7.0: team-term practice from the team file\'s ## 용어 (D6)', () => {
+  const DAY = 86_400_000
+  const TEAM_PATH = '/proj/.claude/learn-notes.md'
+  const FETCHER_PATH = '/proj/src/lib/fetcher.ts'
+  const FETCHER = [
+    'import { base } from "./base"',
+    '',
+    '/** 팀의 API 호출 */',
+    'export async function fetcher(url: string) {',
+    '  const res = await fetch(base + url)',
+    '  if (!res.ok) throw new Error(String(res.status))',
+    '  return res.json()',
+    '}',
+    '',
+  ].join('\n')
+  const TERMS = [
+    '## 규칙',
+    '- API 호출은 fetcher로 감쌉니다',
+    '## 용어',
+    '- **fetcher**: 우리 팀의 API 호출 함수입니다 · `src/lib/fetcher.ts:4-8`',
+    '- **캐시 키**: 요청마다 캐시를 나누는 이름입니다',
+    '- **페이지네이션 커서**: 다음 쪽을 가리키는 값입니다 · `src/api/list.ts`',
+    '',
+  ].join('\n')
+  const QUESTIONS = ['T1: 왜', 'Q1: 문제 하나', 'A1: 답 하나', 'T2: 예측', 'Q2: 문제 둘', 'A2: 답 둘', 'T3: 왜', 'Q3: 문제 셋', 'A3: 답 셋'].join('\n')
+  const RIGHT = '판정: 맞음\n피드백: 정확합니다.'
+  const WRONG = '판정: 틀림\n피드백: 아직 아닙니다.'
+  /** A concept due today: met once five days ago, never quizzed. */
+  const due = (name: string) => ({ name, count: 1, firstAt: NOW - 5 * DAY, lastAt: NOW - 5 * DAY, blurb: `${name} 설명`, files: [] })
+  /** A concept not due for days yet. */
+  const later = (name: string) => ({ name, count: 2, firstAt: NOW - 1000, lastAt: NOW - 1000, blurb: `${name} 설명`, files: [] })
+  const conceptsOf = (store: Map<string, unknown>) => (store.get('concepts') ?? {}) as Record<string, { name: string; count: number; blurb: string; files: string[]; reviewedAt?: number; missedAt?: number; step?: number }>
+  const quizItems = (store: Map<string, unknown>) => (store.get('quiz') as { items: Record<string, unknown>[] }).items
+
+  /** A store an earlier version used (no welcome toast), with these concepts. */
+  function storeWith(concepts: Record<string, unknown> = {}, more: [string, unknown][] = []): Map<string, unknown> {
+    return new Map<string, unknown>([['welcomed', true], ['concepts', concepts], ...more])
+  }
+  function withTeam(w: World, terms = TERMS) {
+    w.files.set(TEAM_PATH, terms)
+    w.files.set(FETCHER_PATH, FETCHER)
+  }
+  async function answer(ui: Awaited<ReturnType<typeof pane>>, w: World, key: string, text: string, reply: string) {
+    w.answer = reply
+    await ui.input({ key, text })
+    await w.clock.settle()
+  }
+
+  test('a pane with no note and no concept offers the team terms: the views, one line for them, and how far in the concepts view', async ($, on) => {
+    const w = world(on, 'ok', null, true, storeWith())
+    withTeam(w)
+    await start($)
+    const ui = await pane($)
+    // The line that the team file was read gives way to the practice it offers (the cut); the views are a key away.
+    const line = await ui.find({ type: 'Text', text: '팀 용어 3개로 연습할 수 있습니다 · 4에서 s' })
+    expect(line?.props.dimColor).toBe(true)
+    expect(await ui.find({ type: 'Text', text: /팀 규칙 파일을 읽었습니다/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'view-quiz' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /3으로 보기/ })).toBeUndefined()
+    await ui.press({ key: 'view-concepts' })
+    expect(await ui.find({ type: 'Text', text: '팀 용어 3개 중 0개 만남 · 4에서 s' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '아직: fetcher · 캐시 키 외 1개' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /아직 모인 개념이 없습니다/ })).toBeDefined()
+    await ui.press({ key: 'view-quiz' })
+    expect(await ui.find({ type: 'Text', text: /^s를 누르면 이 저장소의 팀 용어로 3문제를 냅니다 · 먼저 떠올려 적어 보세요/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: '퀴즈 시작' })).toBeDefined()
+    await ui.unmount()
+    // /learn opens a pane with keys to use.
+    expect((await learn($, '')).text).toContain('패널의 키를 쓰려면 ctrl+x tab')
+  })
+
+  test('a team file with rules only, or one read as nothing, says what it said before', async ($, on) => {
+    const w = world(on, 'ok', null, true, storeWith())
+    w.files.set(TEAM_PATH, '## 규칙\n- 바뀌지 않는 값은 const로 선언한다\n## 빼기\n- legacy/**\n')
+    await start($)
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: '이 저장소의 팀 규칙 파일을 읽었습니다 (규칙 1 · 용어 0 · 빼기 1)' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'view-quiz' })).toBeUndefined()
+    await ui.unmount()
+    expect((await learn($, 'quiz 팀')).text).toBe('이 저장소에는 팀 용어가 없습니다 · .claude/learn-notes.md의 ## 용어에 적습니다')
+    expect(w.models).toHaveLength(0)
+    expect(w.toasts.some(toast => toast.includes('팀 용어'))).toBe(false)
+  })
+
+  test('the toast comes once per repository, never in the welcome\'s session, never with every term met', async ($, on) => {
+    const store = storeWith()
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    expect(w.toasts).toEqual(['이 저장소의 팀 용어 3개로 연습할 수 있습니다 · /learn 퀴즈'])
+    expect(store.get('teamNudged')).toEqual([rootTag('/proj')])
+  })
+
+  test('a repository whose toast showed before says nothing', async ($, on) => {
+    const w = world(on, 'ok', null, true, storeWith({}, [['teamNudged', [rootTag('/proj')]]]))
+    withTeam(w)
+    await start($)
+    expect(w.toasts).toEqual([])
+  })
+
+  test('a new install\'s first session gets the welcome alone, and keeps the team toast for the next', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    expect(w.toasts).toHaveLength(1)
+    expect(w.toasts[0]).toContain('learn-notes가 켜졌습니다')
+    expect(store.get('teamNudged')).toBeUndefined()
+  })
+
+  test('with three concepts due, the toast names the team\'s own quiz; with every term met, there is none', async ($, on) => {
+    const w = world(on, 'ok', null, true, storeWith({ 'c:a': due('a'), 'c:b': due('b'), 'c:c': due('c') }))
+    withTeam(w)
+    await start($)
+    expect(w.toasts).toEqual(['이 저장소의 팀 용어 3개로 연습할 수 있습니다 · /learn 퀴즈 팀'])
+  })
+
+  test('every term met: no toast', async ($, on) => {
+    const met = { [conceptKey('fetcher')]: later('fetcher'), [conceptKey('캐시 키')]: later('캐시 키'), [conceptKey('페이지네이션 커서')]: later('페이지네이션 커서') }
+    const store = storeWith(met)
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    expect(w.toasts).toEqual([])
+    expect(store.get('teamNudged')).toBeUndefined()
+  })
+
+  test('the places the concepts due leave free go to the terms not met, in the file\'s order, asked by the team\'s code; a grade puts each in the concepts', async ($, on) => {
+    const store = storeWith({ 'c:클로저': due('클로저'), 'c:구조분해': later('구조 분해') })
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    w.answer = QUESTIONS
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-quiz' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    // One call, as ever: the one concept due, then two team terms in the file's order (not the concept due later).
+    expect(w.models).toHaveLength(1)
+    const prompt = w.models[0]!
+    expect(prompt).toContain('\n1. 클로저 — 클로저 설명\n')
+    expect(prompt).toContain('\n2. (팀 용어) fetcher — 우리 팀의 API 호출 함수입니다\n   팀 코드 (fetcher.ts 4~8줄):\n```\nexport async function fetcher(url: string) {\n')
+    expect(prompt).toContain('  return res.json()\n}\n```\n3. (팀 용어) 캐시 키 — 요청마다 캐시를 나누는 이름입니다\n\n')
+    expect(prompt).toContain('"(팀 용어)"가 붙은 개념은 이 저장소의 팀이 정한 용어다.')
+    expect(prompt).not.toContain('구조 분해')
+    expect(prompt).not.toContain('페이지네이션')
+    // The path itself stays out of the words: the head names the file.
+    expect(prompt).not.toContain('src/lib/fetcher.ts')
+    expect(quizItems(store)[1]).toMatchObject({ key: 'c:fetcher', name: 'fetcher', team: true, teamCode: { file: 'fetcher.ts', from: 4, to: 8 } })
+    expect(quizItems(store)[2]).toMatchObject({ name: '캐시 키', team: true })
+    expect(quizItems(store)[2]!.teamCode).toBeUndefined()
+    // Nothing is in the concepts until a grade puts it there.
+    expect(conceptsOf(store)['c:fetcher']).toBeUndefined()
+
+    await answer(ui, w, mineKey(store, 0), '바깥 변수를 기억해서', RIGHT)
+    expect(await ui.find({ type: 'Text', text: '문제 2/3 · 팀 용어 · 예측' })).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: '팀 코드 (fetcher.ts 4~8줄)' }))?.props.dimColor).toBe(true)
+    // A concept's own question says neither.
+    expect(await ui.find({ type: 'Text', text: /팀 용어를 개념 모음에 넣었습니다/ })).toBeUndefined()
+
+    await answer(ui, w, mineKey(store, 1), 'res.json()의 값을 돌려줍니다', RIGHT)
+    expect(await ui.find({ type: 'Text', text: '팀 용어를 개념 모음에 넣었습니다' })).toBeDefined()
+    expect(conceptsOf(store)['c:fetcher']).toMatchObject({ name: 'fetcher', count: 1, blurb: '우리 팀의 API 호출 함수입니다', files: [], reviewedAt: NOW })
+    expect(conceptsOf(store)['c:fetcher']!.missedAt).toBeUndefined()
+    expect(store.get('teamTerms')).toEqual({ 'c:fetcher': [rootTag('/proj')] })
+
+    await answer(ui, w, mineKey(store, 2), '캐시를 지우는 함수 이름이요', WRONG)
+    expect(await ui.find({ type: 'Text', text: '팀 용어를 개념 모음에 넣었습니다 · 다음 퀴즈 맨 앞에 나옵니다' })).toBeDefined()
+    expect(conceptsOf(store)[conceptKey('캐시 키')]).toMatchObject({ name: '캐시 키', count: 1, missedAt: NOW, step: 0 })
+    expect(Object.keys(store.get('teamTerms') as object)).toEqual(['c:fetcher', conceptKey('캐시 키')])
+    // Kept in concepts.md as any concept is.
+    expect(w.writes.filter(one => one.path.endsWith('/concepts.md')).at(-1)!.text).toContain('캐시 키')
+
+    // The concepts view: how far, the one left, and each one that came in as a team term.
+    await ui.press({ key: 'view-concepts' })
+    expect(await ui.find({ type: 'Text', text: '팀 용어 3개 중 2개 만남 · 4에서 s' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '아직: 페이지네이션 커서' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^fetcher ×1 · .* · 팀 용어$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^클로저 ×1 .*팀 용어/ })).toBeUndefined()
+
+    // The next quiz: the term missed first (asked as a team term), then the one left, its file not there (its words alone).
+    await ui.press({ key: 'view-quiz' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(5)
+    expect(w.models[4]).toContain('\n1. (팀 용어) 캐시 키 — 요청마다 캐시를 나누는 이름입니다\n')
+    expect(w.models[4]).toContain('\n2. (팀 용어) 페이지네이션 커서 — 다음 쪽을 가리키는 값입니다\n')
+    expect(w.models[4]).not.toContain('팀 코드 (list.ts')
+    await ui.unmount()
+  })
+
+  test('a team term graded in the conversation says so too; f turns it as any grade', async ($, on) => {
+    const store = storeWith()
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    w.answer = QUESTIONS
+    const made = (await learn($, 'quiz')).text
+    // No concept yet: the team terms fill all three places, each marked, the first with where its lines are.
+    expect(made).toContain('1. (팀 용어 · 팀 코드 fetcher.ts 4~8줄) 문제 하나')
+    expect(made).toContain('2. (팀 용어) 문제 둘')
+    w.answer = WRONG
+    const graded = (await learn($, 'quiz 1 fetch를 감싼 함수')).text
+    expect(graded).toContain('1번 ✗ 틀림 · 아쉽지만 틀렸습니다. 아직 아닙니다.\n팀 용어를 개념 모음에 넣었습니다 · 다음 퀴즈 맨 앞에 나옵니다\n')
+    expect(conceptsOf(store)['c:fetcher']).toMatchObject({ count: 1, missedAt: NOW })
+    // Turned right, as any grade: its miss is gone, the term stays in the concepts.
+    const turned = (await learn($, 'quiz 맞음 1')).text
+    expect(turned).toContain('맞힌 것으로 적었습니다: 1. fetcher.')
+    expect(turned).toContain('\n팀 용어를 개념 모음에 넣었습니다')
+    expect(conceptsOf(store)['c:fetcher']!.missedAt).toBeUndefined()
+    expect(conceptsOf(store)['c:fetcher']!.count).toBe(1)
+    // Seen and graded by the learner, a team term goes in the same way.
+    await learn($, 'quiz 정답 2')
+    expect((await learn($, 'quiz 맞음 2')).text).toContain('\n팀 용어를 개념 모음에 넣었습니다')
+    expect(conceptsOf(store)[conceptKey('캐시 키')]).toMatchObject({ count: 1, reviewedAt: NOW })
+  })
+
+  test('/learn 퀴즈 팀 asks the team terms alone: the ones not met first, then the ones met, due first', async ($, on) => {
+    const store = storeWith({ 'c:클로저': due('클로저'), 'c:a': due('a'), 'c:b': due('b'), [conceptKey('캐시 키')]: due('캐시 키'), 'c:fetcher': later('fetcher') })
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    w.answer = QUESTIONS
+    // Three concepts due fill a review quiz: none of the team terms gets in.
+    await learn($, 'quiz')
+    expect(w.models[0]).not.toContain('(팀 용어)')
+    const made = (await learn($, 'quiz 팀')).text
+    expect(made).toMatch(/^팀 용어 퀴즈 · 3문제\n/)
+    const prompt = w.models[1]!
+    expect(prompt).toContain('\n1. (팀 용어) 페이지네이션 커서 — ')
+    expect(prompt).toContain('\n2. (팀 용어) 캐시 키 — 요청마다 캐시를 나누는 이름입니다\n')
+    // One met and not due fills the last place, asked by the team's code as a team term of this repository.
+    expect(prompt).toContain('\n3. (팀 용어) fetcher — 우리 팀의 API 호출 함수입니다\n   팀 코드 (fetcher.ts 4~8줄):')
+    expect(prompt).not.toContain('클로저')
+    expect(quizItems(store).every(item => item.team === true)).toBe(true)
+    // Its other words ask for it too.
+    w.answer = QUESTIONS
+    expect((await learn($, 'quiz 팀 용어')).text).toMatch(/^팀 용어 퀴즈/)
+  })
+
+  test('/learn 퀴즈 팀 with every term known asks nothing, and says how to take one back', async ($, on) => {
+    const known = (name: string) => ({ ...later(name), knownAt: NOW - DAY })
+    const w = world(on, 'ok', null, true, storeWith({ 'c:fetcher': known('fetcher'), [conceptKey('캐시 키')]: known('캐시 키'), [conceptKey('페이지네이션 커서')]: known('페이지네이션 커서') }))
+    withTeam(w)
+    await start($)
+    expect((await learn($, 'quiz 팀')).text).toBe('이 저장소의 팀 용어는 모두 아는 개념이라 퀴즈에 낼 것이 없습니다. 되돌리려면 /learn 모른다 개념 이름.')
+    expect(w.models).toHaveLength(0)
+  })
+
+  test('/learn 복습 with no concept makes no quiz of the team terms unasked; /learn 퀴즈 does', async ($, on) => {
+    const w = world(on, 'ok', null, true, storeWith())
+    withTeam(w)
+    await start($)
+    const review = (await learn($, '복습')).text
+    expect(review).toContain('지금 복습할 개념이 없습니다')
+    expect(w.models).toHaveLength(0)
+    w.answer = QUESTIONS
+    await learn($, 'quiz')
+    expect(w.models).toHaveLength(1)
+    expect(w.models[0]!.match(/\n\d\. \(팀 용어\)/g)).toHaveLength(3)
+  })
+
+  test('a term\'s file is read only inside the repository, when nothing leaves it out; else the term is asked by its words', async ($, on) => {
+    const w = world(on, 'ok', null, true, storeWith())
+    withTeam(
+      w,
+      [
+        '## 용어',
+        '- **바깥**: 저장소 밖 · `../outside/a.ts:1-3`',
+        '- **링크**: 밖으로 가는 링크 · `src/link.ts`',
+        '- **자격 증명**: 비밀 파일 · `config/credentials.json`',
+        '## 빼기',
+        '- legacy/**',
+      ].join('\n'),
+    )
+    w.files.set('/proj/src/link.ts', 'export const 링크 = 1\n')
+    w.links.set('/proj/src/link.ts', '/home/u/private/link.ts')
+    w.files.set('/proj/config/credentials.json', '{ "링크": "x", "자격 증명": "y" }\n')
+    // The permission rules refuse one file (asked below).
+    on('tool.check', { tool: 'Read' }, (_$, e) => ({ decision: String((e.input as { file_path?: string }).file_path).endsWith('denied.ts') ? 'deny' : 'allow' }))
+    await start($)
+    w.answer = QUESTIONS
+    await learn($, 'quiz 팀')
+    expect(w.models[0]).toContain('(팀 용어) 바깥 — 저장소 밖 · `../outside/a.ts:1-3`')
+    expect(w.models[0]).not.toContain('팀 코드 (')
+    expect(w.models[0]).not.toContain('export const 링크')
+    expect(w.models[0]).not.toContain('"y"')
+
+    // Left out by the team file's ## 빼기, too big, refused by the permission rules, or not text: the words alone.
+    w.files.set(
+      TEAM_PATH,
+      ['## 용어', '- **옛 코드**: 옛 방식 · `legacy/old.ts`', '- **큰 파일**: 큰 것 · `src/big.ts`', '- **막힌 파일**: 막힘 · `src/denied.ts`', '## 빼기', '- legacy/**'].join('\n'),
+    )
+    w.mtimes.set(TEAM_PATH, 1000)
+    w.files.set('/proj/legacy/old.ts', 'const 옛코드 = 1\n')
+    w.files.set('/proj/src/big.ts', `// 큰 파일\n${'x'.repeat(250_000)}`)
+    w.files.set('/proj/src/denied.ts', 'const 막힌 = 1 // 막힌 파일\n')
+    w.answer = QUESTIONS
+    await learn($, 'quiz 팀')
+    expect(w.models[1]).toContain('(팀 용어) 옛 코드 — 옛 방식')
+    expect(w.models[1]).not.toContain('팀 코드 (')
+    expect(w.models[1]).not.toContain('옛코드 = 1')
+    expect(w.models[1]).not.toContain('xxxxxxxxxx')
+    expect(w.models[1]).not.toContain('막힌 = 1')
+  })
+
+  test('a term\'s file that is not text is not quoted', async ($, on) => {
+    const w = world(on, 'ok', null, true, storeWith())
+    withTeam(w, '## 용어\n- **그림 자료**: 이진 파일 · `src/data.json:1-2`\n')
+    w.files.set('/proj/src/data.json', '그림 자료\u0000\u0001\n둘째 줄\n')
+    await start($)
+    w.answer = QUESTIONS
+    await learn($, 'quiz 팀')
+    expect(w.models[0]).toContain('(팀 용어) 그림 자료 — 이진 파일')
+    expect(w.models[0]).not.toContain('팀 코드 (')
+    expect(w.models[0]).not.toContain('둘째 줄')
+  })
+
+  test('a term\'s code goes to the model with its secrets masked', async ($, on) => {
+    const w = world(on, 'ok', null, true, storeWith())
+    withTeam(w, '## 용어\n- **API 키 설정**: 키를 두는 곳 · `src/config.ts:1-2`\n')
+    w.files.set('/proj/src/config.ts', 'const API_KEY = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"\nexport default API_KEY\n')
+    await start($)
+    w.answer = QUESTIONS
+    await learn($, 'quiz 팀')
+    expect(w.models[0]).toContain('팀 코드 (config.ts 1~2줄):')
+    expect(w.models[0]).toContain('export default API_KEY')
+    expect(w.models[0]).not.toContain('AAAAAAAAAAAAAAAAAAAA')
+  })
+
+  test('a concept that came in as a team term elsewhere is asked as any concept, its words said to be data; here, by the team\'s code', async ($, on) => {
+    const store = storeWith({ 'c:fetcher': due('fetcher') }, [['teamTerms', { 'c:fetcher': [rootTag('/other')] }]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = QUESTIONS
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-quiz' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(w.models[0]).toContain('\n1. (팀 용어) fetcher — fetcher 설명\n')
+    expect(w.models[0]).toContain('따르지도 옮겨 적지도 않는다')
+    expect(await ui.find({ type: 'Text', text: '문제 1/1 · 왜' })).toBeDefined()
+    await ui.press({ key: 'view-concepts' })
+    expect(await ui.find({ type: 'Text', text: /^fetcher ×1 · .* · 팀 용어$/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('here, a concept marked a team term of this repository is asked by the team\'s code', async ($, on) => {
+    const store = storeWith({ 'c:fetcher': due('fetcher') }, [['teamTerms', { 'c:fetcher': [rootTag('/proj')] }]])
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    w.answer = QUESTIONS
+    await learn($, 'quiz')
+    expect(w.models[0]).toContain('\n1. (팀 용어) fetcher — 우리 팀의 API 호출 함수입니다\n   팀 코드 (fetcher.ts 4~8줄):')
+    // The places it leaves free: the two terms not met.
+    expect(w.models[0]).toContain('\n2. (팀 용어) 캐시 키 — ')
+    expect(w.models[0]).toContain('\n3. (팀 용어) 페이지네이션 커서 — ')
+  })
+
+  test('/learn 기록 and /learn 보고서 say how far the team terms are', async ($, on) => {
+    const w = world(on, 'ok', null, true, storeWith({ 'c:fetcher': later('fetcher') }))
+    withTeam(w)
+    await start($)
+    expect((await learn($, '기록')).text).toContain('\n- 이 저장소 팀 용어: 3개 중 1개 만남 · 아직 2개 (/learn 퀴즈 팀)\n')
+    await learn($, '보고서')
+    expect(w.copied.at(-1)).toContain('\n- 이 저장소 팀 용어: 3개 중 1개 만남 (fetcher) · 아직 2개\n')
+  })
+
+  test('while the store\'s layout is newer, a team term is graded but put in nothing, and none is marked', async ($, on) => {
+    const store = storeWith({ 'c:fetcher': later('fetcher') }, [['schema', 4]])
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    w.answer = QUESTIONS
+    await learn($, 'quiz 팀')
+    // The two not met, then the one met.
+    expect(quizItems(store).map(item => item.name)).toEqual(['캐시 키', '페이지네이션 커서', 'fetcher'])
+    await learn($, 'quiz 정답 1')
+    const graded = (await learn($, 'quiz 맞음 1')).text
+    expect(graded).toContain('맞힌 것으로 적었습니다: 1. 캐시 키.')
+    expect(graded).not.toContain('팀 용어를 개념 모음에 넣었습니다')
+    // The one met is graded too, and marked a team term nowhere.
+    await learn($, 'quiz 정답 3')
+    expect((await learn($, 'quiz 맞음 3')).text).toContain('맞힌 것으로 적었습니다: 3. fetcher.')
+    for (const key of ['concepts', 'teamTerms']) expect(w.sets).not.toContain(key)
+    expect(store.get('teamTerms')).toBeUndefined()
   })
 })

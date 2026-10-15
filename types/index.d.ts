@@ -202,6 +202,14 @@ export type LearnQuizItem = {
    * (f) starts from there; absent when the grade left it as it was.
    */
   slipBefore?: LearnSlip | null
+  /**
+   * True for a team term of the repository the quiz was made in (1.7.0): one of its team file's `## 용어`, asked by
+   * the team's words and code. Graded, it goes in the concept index if it is not there yet (its `before` then absent),
+   * and is marked a team term (the store's `teamTerms`).
+   */
+  team?: true
+  /** Where the team's lines it was asked from are (1.7.0): the file's name and the lines, `isDoc` for a team doc (팀 노트). */
+  teamCode?: { file: string; from: number; to: number; isDoc?: true }
 }
 
 /**
@@ -303,6 +311,11 @@ declare module 'claude-code' {
       newerSaid: { newest: string | null; isBehind: boolean } | null
       /** The slips by concept key (see LearnSlip), mirrored from the plugin's store for drawing. */
       slips: Record<string, LearnSlip>
+      /**
+       * The concepts that came in as a repository's team terms (1.7.0), by concept key, each with the repositories'
+       * tags (rootTag), mirrored from the plugin's store for drawing (`· 팀 용어` on the concept's line).
+       */
+      teamTerms: Record<string, string[]>
     }
   }
 }

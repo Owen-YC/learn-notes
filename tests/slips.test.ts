@@ -12,6 +12,9 @@ import {
   SLIPS_KEPT,
   SLIPS_MAX_BYTES,
   STAMPS_KEPT,
+  TEAM_NUDGED_KEPT,
+  TEAM_TERMS_KEPT,
+  TEAM_TERMS_MAX_BYTES,
   addActivity,
   addFault,
   addToBank,
@@ -35,6 +38,7 @@ import {
   quizPick,
   quizPrompt,
   recapPrompt,
+  rootTag,
   recapSlips,
   slipChange,
   slipFrom,
@@ -47,6 +51,7 @@ import {
   stepMarks,
   storedConcepts,
   withStamp,
+  withTeamTerm,
   type QuizPick,
   type RecapRange,
 } from '../hooks/notes'
@@ -384,16 +389,16 @@ describe('1.7.0: asked again in other code (다시 도전, D5)', () => {
 /**
  * The store's whole worst case, tracked here as each release adds keys (a new key joins the fixture below): every key
  * at its caps with every text in Hangul (three bytes a character, the main audience's language), and 40 merges. As of
- * 1.7.0 (5/8) it comes to 3,642,573 bytes: past the plan's 3.5MB budget by 1.6's keys alone (history 2MB, quizBank
+ * 1.7.0 (6/8) it comes to 3,666,825 bytes: past the plan's 3.5MB budget by 1.6's keys alone (history 2MB, quizBank
  * 0.81MB, concepts 0.43MB, which this release does not cut); 1.7.0's own keys (slips, faults, sessions, schema,
- * quotaToast) take about 0.15MB of it. The store refuses every write past 4 MiB (4,194,304 bytes) in all: about 0.55MB
- * is left, and STORE_WORST holds the line so no key grows into it unseen.
+ * quotaToast, and D6's teamTerms and teamNudged) take about 0.18MB of it. The store refuses every write past 4 MiB
+ * (4,194,304 bytes) in all: about 0.53MB is left, and STORE_WORST holds the line so no key grows into it unseen.
  */
 const STORE_LIMIT = 4 * 1024 * 1024
-const STORE_WORST = 3_650_000
+const STORE_WORST = 3_670_000
 
 describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5, the storage budget test brought forward)', () => {
-  test('notes 12 projects × 30, concepts 400, questions 300, slips 300, merges 40: every key at its caps, every text Hangul', { timeoutMs: 30_000 }, () => {
+  test('notes 12 projects × 30, concepts 400, questions 300, slips 300, team terms 150, merges 40: every key at its caps, every text Hangul', { timeoutMs: 30_000 }, () => {
     // Every text in Hangul, three bytes a character: code with Korean in it is the worst any key holds.
     const hangul = (n: number, seed = 0) => Array.from({ length: n }, (_, i) => String.fromCharCode(0xac00 + ((i + seed) % 400))).join('')
     const mixed = hangul
@@ -474,6 +479,10 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
     for (let i = 0; i < STAMPS_KEPT + 4; i += 1) sessions = withStamp(sessions, `session-${'s'.repeat(30)}-${i}`, '1.7.0', NOW + i)
     const slips: Record<string, LearnSlip> = {}
     for (let i = 0; i < SLIPS_KEPT; i += 1) slips[`c:${hangul(36, i)}${i}`] = { what: hangul(80, i), type: 'reference', question: mixed(240, i), mine: mixed(160, i), at: NOW + i, times: 99 }
+    // Team terms (1.7.0 D6): a name of 40 characters at most, each marked in five repositories; as many repositories toasted.
+    let teamTerms: Record<string, string[]> = {}
+    for (let i = 0; i < TEAM_TERMS_KEPT + 20; i += 1) for (let r = 0; r < 5; r += 1) teamTerms = withTeamTerm(teamTerms, conceptKey(`${hangul(36, i)}${String(i).padStart(4, '0')}`), rootTag(`/proj${r}`))
+    const teamNudged = Array.from({ length: TEAM_NUDGED_KEPT }, (_, i) => rootTag(`/proj${i}`))
 
     // Merges are the learner's own (/learn 합치기), one by one, so no cap: 40 is a lot of them.
     const merged = Array.from({ length: 40 }, (_, i) => `c:${hangul(36, 1000 + i)}${i}`)
@@ -495,6 +504,8 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
       faults: fitFaults({ list: faults, noticeDay: '2026-10-03' }),
       sessions,
       slips: cleanSlips(slips, {}, NOW + DAY),
+      teamTerms,
+      teamNudged,
       schema: 3,
       stepsFrom: NOW,
       welcomed: true,
@@ -504,9 +515,11 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
     const sizes = Object.fromEntries(Object.entries(store).map(([key, value]) => [key, key === 'history' ? HISTORY_MAX_BYTES : jsonBytes(value)]))
     const total = Object.values(sizes).reduce((sum, n) => sum + n, 0)
     expect(sizes.slips!).toBeLessThanOrEqual(SLIPS_MAX_BYTES)
+    expect(sizes.teamTerms!).toBeLessThanOrEqual(TEAM_TERMS_MAX_BYTES)
+    expect(sizes.teamNudged!).toBeLessThanOrEqual(500)
     // 1.7.0's own keys, within what they were planned to take.
-    const added = ['slips', 'faults', 'sessions', 'schema', 'quotaToast'].reduce((sum, key) => sum + sizes[key]!, 0)
-    expect(added).toBeLessThanOrEqual(160_000)
+    const added = ['slips', 'faults', 'sessions', 'schema', 'quotaToast', 'teamTerms', 'teamNudged'].reduce((sum, key) => sum + sizes[key]!, 0)
+    expect(added).toBeLessThanOrEqual(190_000)
     // The whole: no key may grow unseen past this, and the store's limit stays well clear.
     expect(total).toBeLessThanOrEqual(STORE_WORST)
     expect(STORE_LIMIT - total).toBeGreaterThanOrEqual(500_000)

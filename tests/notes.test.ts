@@ -2159,7 +2159,7 @@ describe('1.6.0: the team file', () => {
 
   test('a file with no such heading reads as empty, and the pane says what to write', () => {
     const team = parseTeamFile('- API 호출은 fetcher로 감쌉니다\n- **정산**: 하루 매출 마감\n')
-    expect(team).toEqual({ rules: [], terms: [], exclude: [], isCut: false })
+    expect(team).toEqual({ rules: [], terms: [], exclude: [], isCut: false, practice: [] })
     expect(teamSection(team)).toEqual([])
     expect(teamText(team)).toContain('읽은 것이 없습니다 · 제목을 ## 규칙 · ## 용어 · ## 빼기로 씁니다')
     expect(teamText(parseTeamFile(FILE))).toBe('이 저장소의 팀 규칙 파일을 읽었습니다 (규칙 3 · 용어 3 · 빼기 6)')
