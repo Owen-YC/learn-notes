@@ -3175,29 +3175,58 @@ export function codeFor(change: Pick<LearnChange, 'diff'>, blurb: string): strin
   return kept.length > 0 ? kept.join('\n') : undefined
 }
 
-/** Concepts for a quiz, none marked known: the ones due for a second look first, then the ones due soonest; at most `size`. */
-export function quizPick(index: Readonly<Record<string, LearnConcept>>, now: number, size = 3): RankedConcept[] {
-  const due = reviewQueue(index, now, size)
-  const rest = rankConcepts(index)
-    .filter(one => !isKnown(one) && !due.some(other => other.key === one.key))
-    .sort((a, b) => dueAt(a) - dueAt(b))
-  return [...due, ...rest].slice(0, size)
+/**
+ * Concepts for a quiz, none marked known: the ones `first` names (slips to ask again, slipsToAsk), then the ones due
+ * for a second look, then the ones due soonest; at most `size`.
+ */
+export function quizPick(index: Readonly<Record<string, LearnConcept>>, now: number, size = 3, first: readonly string[] = []): RankedConcept[] {
+  const ranked = rankConcepts(index)
+  const asked = first.flatMap(key => ranked.filter(one => one.key === key && !isKnown(one)))
+  const isAsked = (one: RankedConcept) => asked.some(other => other.key === one.key)
+  const due = dueConcepts(index, now)
+    .filter(one => !isAsked(one))
+    .slice(0, size)
+  const rest = ranked.filter(one => !isKnown(one) && !isAsked(one) && !due.some(other => other.key === one.key)).sort((a, b) => dueAt(a) - dueAt(b))
+  return [...asked, ...due, ...rest].slice(0, size)
+}
+
+/**
+ * The concepts whose slip the next quiz asks again (다시 도전) whether due or not, the slip kept longest ago first:
+ * each one's slip still open, the concept not marked known, and no quiz has gone over it since the grade that kept
+ * the slip (one asked again and right the same day waits for its review). One its grade still counted right, after
+ * the question asked back (isRight: 헷갈린 점을 바로 고쳤습니다), waits for another day.
+ */
+export function slipsToAsk(index: Readonly<Record<string, LearnConcept>>, slips: Readonly<Record<string, LearnSlip>>, now: number): string[] {
+  return Object.entries(slips)
+    .filter(([key, slip]) => {
+      const one = conceptAt(index, key)
+      if (!one || isKnown(one) || slip.fixedAt !== undefined || (one.reviewedAt ?? 0) > slip.at) return false
+      return slip.isRight !== true || stamp(slip.at).day !== stamp(now).day
+    })
+    .sort(([, a], [, b]) => a.at - b.at)
+    .map(([key]) => key)
 }
 
 /**
  * Up to `size` of `candidates`, in their order, from as many notes as there are: a concept that shares its
  * note with one already taken waits, and fills the quiz only when the other notes run out. A concept answered
- * wrong is always taken. The ones `isFirst` (due for review) are spread and taken before any other: a concept
- * due waits for no concept that is not, since answering one early moves its review on not at all.
+ * wrong is always taken, and one `isAlways` (a slip to ask again). The ones `isFirst` (due for review) are spread
+ * and taken before any other: a concept due waits for no concept that is not, since answering one early moves its
+ * review on not at all.
  */
-export function spreadPicks<T extends QuizPick>(candidates: readonly T[], size = 3, isFirst: (one: T) => boolean = () => true): T[] {
+export function spreadPicks<T extends QuizPick>(
+  candidates: readonly T[],
+  size = 3,
+  isFirst: (one: T) => boolean = () => true,
+  isAlways: (one: T) => boolean = () => false,
+): T[] {
   const taken: T[] = []
   const spread = (group: readonly T[]) => {
     const waiting: T[] = []
     for (const one of group) {
       if (taken.length >= size) break
       const isSameNote = one.noteId !== undefined && taken.some(other => other.noteId === one.noteId)
-      if (isSameNote && !isMissed(one)) waiting.push(one)
+      if (isSameNote && !isMissed(one) && !isAlways(one)) waiting.push(one)
       else taken.push(one)
     }
     taken.push(...waiting.slice(0, Math.max(0, size - taken.length)))
@@ -3280,14 +3309,15 @@ const KIND_CHECK: Readonly<Record<QuizKind, string>> = {
  * A first try graded short of right asks for one question back (되묻기) to try again with; the try again (`first`
  * given) carries that first try and what it was asked, and asks for none: it is the last. The first grade of an
  * answer (a try again after "모르겠어요" among them) asks, short of right, for the slip the answer shows and its kind
- * (1.7.0); `past`, the concept's slip still open, is said so the feedback can name it once it is mended.
+ * (1.7.0); `past`, the concept's slip still open on a question asked again, is said so the feedback can name it once
+ * it is mended.
  */
 export function checkPrompt(
   item: Pick<LearnQuizItem, 'name' | 'question' | 'answer' | 'kind'>,
   mine: string,
   level: Level,
   first?: Pick<LearnQuizFirstTry, 'mine' | 'verdict' | 'feedback' | 'nudge'>,
-  past?: Pick<LearnSlip, 'what'>,
+  past?: Pick<LearnSlip, 'what' | 'mine'>,
 ): string {
   const asksSlip = first === undefined || isBlankAnswer(first.mine)
   return [
@@ -3299,7 +3329,7 @@ export function checkPrompt(
     item.question,
     '## 모범 답',
     item.answer,
-    ...(past ? ['## 이 학습자가 지난번에 헷갈린 점', past.what !== '' ? cut(past.what, SLIP_TEXT) : '(지난번에는 답을 떠올리지 못했다)'] : []),
+    ...(past ? ['## 이 학습자가 지난번에 헷갈린 점', past.what !== '' ? cut(past.what, SLIP_TEXT) : isNothingSaid(past.mine) ? '(지난번에는 답을 떠올리지 못했다)' : '(지난번 답이 짧아 헷갈린 점을 알 수 없다)'] : []),
     ...(first ? ['## 학습자의 첫 답과 받은 되묻기', ...firstTryLines(first)] : []),
     '## 학습자의 답',
     cut(mine, 1500),
@@ -3500,10 +3530,23 @@ export function isForgotten(text: string): boolean {
   return isBlankAnswer(text) || [...text.replace(/\s+/g, '')].length <= 2
 }
 
+/**
+ * True for an answer that said nothing: empty, or "모르겠어요" and the like (isBlankAnswer). A `blank` slip from any
+ * other answer was a real one too short to read a slip from ("10", "[]"), not one the learner could not recall.
+ */
+export function isNothingSaid(mine: string): boolean {
+  return mine.trim() === '' || isBlankAnswer(mine)
+}
+
+/** What a slip with no words (`blank`) tells a model of the answer it came from: none recalled, or one too short to read. */
+function blankSlipText(mine: string): string {
+  return isNothingSaid(mine) ? '답을 떠올리지 못했다' : '답이 짧아 헷갈린 점을 알 수 없다'
+}
+
 /** An open slip as a quiz is told it: the question it was found in, the learner's answer and the slip, on one line of 400 characters at most. */
 function slipAskedLine(slip: Pick<LearnSlip, 'what' | 'question' | 'mine'>): string {
   const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
-  const tail = `학습자 답 '${cut(flat(slip.mine), 100)}' · ${slip.what !== '' ? `헷갈린 점: ${cut(slip.what, SLIP_TEXT)}` : '답을 떠올리지 못했다'}`
+  const tail = `학습자 답 '${cut(flat(slip.mine), 100)}' · ${slip.what !== '' ? `헷갈린 점: ${cut(slip.what, SLIP_TEXT)}` : blankSlipText(slip.mine)}`
   return `지난번 문제 '${cut(flat(slip.question), Math.max(40, 400 - tail.length - 12))}' · ${tail}`
 }
 
@@ -3533,9 +3576,12 @@ export function slipFrom(item: Pick<LearnQuizItem, 'mine' | 'slip' | 'slipType' 
   return source.slip !== undefined && source.slip !== '' ? { what: source.slip, type: source.slipType ?? 'other', mine: source.mine } : undefined
 }
 
-/** How a grade changes its concept's slip (nextSlip): a miss to keep, a right answer that may mend one, a mark of known that does, or nothing. */
+/**
+ * How a grade changes its concept's slip (nextSlip): a miss to keep (`isRight` when the grade still counted right, after
+ * the question asked back), a right answer that may mend one, a mark of known that does, or nothing.
+ */
 export type SlipChange =
-  | ({ kind: 'missed'; question: string } & SlipFound)
+  | ({ kind: 'missed'; question: string; isRight?: boolean } & SlipFound)
   | { kind: 'right'; isRetry: boolean; isHelped: boolean; isGraduated: boolean }
   | { kind: 'mended' }
   | { kind: 'none' }
@@ -3550,27 +3596,36 @@ export function slipChange(item: LearnQuizItem, how: { isHelped: boolean; isGrad
   const found = slipFrom(item)
   if (item.result === 'wrong') return found ? { kind: 'missed', question: item.question, ...found } : { kind: 'none' }
   const isAskedBack = item.firstTry !== undefined && !isBlankAnswer(item.firstTry.mine)
-  if (!how.isTurned && isAskedBack && found && found.type !== 'blank') return { kind: 'missed', question: item.question, ...found }
+  if (!how.isTurned && isAskedBack && found && found.type !== 'blank') return { kind: 'missed', question: item.question, ...found, isRight: true }
   return { kind: 'right', isRetry: item.isRetry === true, isHelped: how.isHelped, isGraduated: how.isGraduated }
 }
 
 /**
  * A concept's slip after a grade at `at` (slipChange). A miss of the kind it had counts once more on it (the latest
- * question and answer kept, mended no more); one of another kind takes its place. Right on a question asked again
- * (isRetry) on another day than the miss, with no hint and no question asked back, mends it, as graduating does, and
- * /learn 안다 (`mended`). What it keeps is masked first (redactText) and cut short.
+ * question and answer kept, mended no more); one of another kind takes its place. A miss with nothing to read a slip
+ * from (`blank`) where a slip with words is still open counts on that one instead, its words and the question and
+ * answer that showed them kept: not recalling it says nothing new of what was got wrong. Right on a question asked
+ * again (isRetry) on another day than the miss, with no hint and no question asked back, mends it, as graduating does,
+ * and /learn 안다 (`mended`). What it keeps is masked first (redactText) and cut short.
  */
 export function nextSlip(before: LearnSlip | undefined, change: SlipChange, at: number): LearnSlip | undefined {
   if (change.kind === 'none') return before
   if (change.kind === 'missed') {
     const masked = (text: string, max: number) => cut(redactText(text).text.replace(/\s+/g, ' '), max)
     const kept = { question: masked(change.question, SLIP_QUESTION), mine: masked(change.mine, SLIP_MINE), at }
-    if (before && before.type === change.type) {
-      const again: LearnSlip = { ...before, ...kept, times: before.times + 1 }
-      delete again.fixedAt
+    const right = change.isRight === true ? { isRight: true as const } : {}
+    if (before && change.type === 'blank' && before.type !== 'blank' && before.fixedAt === undefined) {
+      const again: LearnSlip = { ...before, at, times: before.times + 1 }
+      delete again.isRight
       return again
     }
-    return { what: masked(change.what, SLIP_TEXT), type: change.type, ...kept, times: 1 }
+    if (before && before.type === change.type) {
+      const again: LearnSlip = { ...before, ...kept, times: before.times + 1, ...right }
+      delete again.fixedAt
+      if (change.isRight !== true) delete again.isRight
+      return again
+    }
+    return { what: masked(change.what, SLIP_TEXT), type: change.type, ...kept, times: 1, ...right }
   }
   if (!before || before.fixedAt !== undefined) return before
   const isMended =
@@ -3604,6 +3659,7 @@ export function slipRecordOf(raw: unknown): LearnSlip | undefined {
     at: r.at,
     times: typeof r.times === 'number' && Number.isFinite(r.times) && r.times >= 1 ? Math.floor(r.times) : 1,
     ...(typeof r.fixedAt === 'number' && Number.isFinite(r.fixedAt) ? { fixedAt: r.fixedAt } : {}),
+    ...(r.isRight === true ? { isRight: true as const } : {}),
   }
 }
 
@@ -3654,12 +3710,16 @@ export const SLIP_AGAIN = '같은 곳을 또 헷갈렸습니다'
 
 /**
  * The line a graded question shows under its feedback about its concept's slip (`record`, as the store has it now):
- * the slip this grade kept and that the next quiz asks it again, an answer with nothing in it, a slip mended right
- * after a question asked back, a question asked again missed again, mended on another day, or right again the same
- * day (only with no hint and no question asked back, `isHelped` false). Nothing when the grade kept none (the
- * schema guard on, a store that refused it).
+ * the slip this grade kept and that the next quiz asks it again, an answer with nothing in it (by what it was: none
+ * recalled, or a real one too short to read a slip from), a slip mended right after a question asked back, a question
+ * asked again missed again, mended on another day, or right again the same day (only with no hint and no question
+ * asked back, `isHelped` false). Nothing when the grade kept none (the schema guard on, a store that refused it).
  */
-export function slipNotice(item: Pick<LearnQuizItem, 'result' | 'gradedAt' | 'isRetry'>, record: LearnSlip | undefined, isHelped: boolean): SlipNotice | undefined {
+export function slipNotice(
+  item: Pick<LearnQuizItem, 'result' | 'gradedAt' | 'isRetry' | 'mine' | 'slip' | 'slipType' | 'firstTry'>,
+  record: LearnSlip | undefined,
+  isHelped: boolean,
+): SlipNotice | undefined {
   const at = item.gradedAt
   if (item.result === undefined || at === undefined) return undefined
   const open = record !== undefined && record.fixedAt === undefined ? record : undefined
@@ -3668,9 +3728,14 @@ export function slipNotice(item: Pick<LearnQuizItem, 'result' | 'gradedAt' | 'is
     // Missed again where it was asked again: the same slip once more, unless this answer showed another in its place.
     if (item.isRetry && open && !(isNow && open.times === 1)) return { kind: 'again', text: SLIP_AGAIN }
     if (!isNow) return undefined
-    return open.type === 'blank'
-      ? { kind: 'blank', text: '떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다' }
-      : { kind: 'slip', text: `헷갈린 점: ${open.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` }
+    // An answer with nothing to read a slip from is said as such, though a slip with words stays open (nextSlip).
+    const found = slipFrom(item)
+    if (open.type === 'blank' || found?.type === 'blank') {
+      return isNothingSaid(found?.mine ?? open.mine)
+        ? { kind: 'blank', text: '떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다' }
+        : { kind: 'blank', text: '답이 짧아 헷갈린 점은 적지 않았습니다 · 다음 퀴즈에서 다시 풉니다' }
+    }
+    return { kind: 'slip', text: `헷갈린 점: ${open.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` }
   }
   if (item.isRetry && record?.fixedAt === at) return { kind: 'fixed', text: '✓ 지난번 헷갈린 점을 바로잡았습니다' }
   if (isNow) return { kind: 'mended', text: '헷갈린 점을 바로 고쳤습니다 · 다른 날 다른 코드로 한 번 더 확인합니다' }

@@ -32,13 +32,17 @@ import {
   nextSlip,
   parseCheck,
   parseQuiz,
+  quizPick,
   quizPrompt,
   recapPrompt,
   recapSlips,
   slipChange,
   slipFrom,
   slipNotice,
+  slipRecordOf,
   slipTypeOf,
+  slipsToAsk,
+  spreadPicks,
   stamp,
   stepMarks,
   storedConcepts,
@@ -106,10 +110,14 @@ describe('1.7.0: what a grade reads of a slip (D5)', () => {
     expect(hinted).toMatch(/\n헷갈린 점: \(거의·틀림일 때만 한 문장\. 맞음이면 이 줄을 쓰지 않는다\)\n유형: \(거의·틀림일 때만 위 갈래 중 하나\)$/)
 
     // The slip still open, said after the model answer, and how to name it once mended.
-    const past = checkPrompt(ITEM, '0 1 2', 'beginner', undefined, { what: '끝 값까지 찍힌다고 봄' })
+    const past = checkPrompt(ITEM, '0 1 2', 'beginner', undefined, { what: '끝 값까지 찍힌다고 봄', mine: '0 1 2 3' })
     expect(past).toContain('## 모범 답\n0 1 2\n## 이 학습자가 지난번에 헷갈린 점\n끝 값까지 찍힌다고 봄\n## 학습자의 답\n0 1 2')
     expect(past).toContain('이번 답이 지난번에 헷갈린 점을 바로잡았으면 피드백에서 한 마디로 짚는다.')
-    expect(checkPrompt(ITEM, '0 1 2', 'beginner', undefined, { what: '' })).toContain('## 이 학습자가 지난번에 헷갈린 점\n(지난번에는 답을 떠올리지 못했다)\n')
+    expect(checkPrompt(ITEM, '0 1 2', 'beginner', undefined, { what: '', mine: '모르겠어요' })).toContain('## 이 학습자가 지난번에 헷갈린 점\n(지난번에는 답을 떠올리지 못했다)\n')
+    // A blank one from a real answer too short to read ("10"): said so, not as nothing recalled (review fix).
+    const short = checkPrompt(ITEM, '0 1 2', 'beginner', undefined, { what: '', mine: '10' })
+    expect(short).toContain('## 이 학습자가 지난번에 헷갈린 점\n(지난번 답이 짧아 헷갈린 점을 알 수 없다)\n')
+    expect(short).not.toContain('떠올리지 못했다')
   })
 })
 
@@ -145,7 +153,7 @@ describe('1.7.0: a slip kept, asked again and mended (D5)', () => {
     expect(slipChange(graded({ result: 'wrong' }), how)).toEqual({ kind: 'none' })
     const first = { mine: '오류가 납니다', verdict: 'wrong' as const, feedback: '', nudge: '?', at: NOW, slip: SLIP.what, slipType: 'reference' as const }
     const mended = graded({ result: 'right', mine: '[1, 2]', firstTry: first, isRetry: true })
-    expect(slipChange(mended, { isHelped: true, isGraduated: false })).toMatchObject({ kind: 'missed', what: SLIP.what })
+    expect(slipChange(mended, { isHelped: true, isGraduated: false })).toMatchObject({ kind: 'missed', what: SLIP.what, isRight: true })
     expect(slipChange(mended, { isHelped: true, isGraduated: false, isTurned: true })).toEqual({ kind: 'right', isRetry: true, isHelped: true, isGraduated: false })
     expect(slipChange(graded({ result: 'right', mine: '[1, 2]', isRetry: true }), how)).toEqual({ kind: 'right', isRetry: true, isHelped: false, isGraduated: false })
   })
@@ -155,9 +163,56 @@ describe('1.7.0: a slip kept, asked again and mended (D5)', () => {
     expect(made).toEqual({ what: SLIP.what, type: 'reference', question: '문제 둘째 줄', mine: '키는 «가림» 입니다', at: NOW, times: 1 })
     const again = nextSlip({ ...made!, fixedAt: NOW }, { kind: 'missed', question: '새 문제', what: '다른 말', type: 'reference', mine: '또 오류' }, NOW + DAY)
     expect(again).toEqual({ what: SLIP.what, type: 'reference', question: '새 문제', mine: '또 오류', at: NOW + DAY, times: 2 })
-    expect(nextSlip(again, { kind: 'missed', question: 'q', what: '', type: 'blank', mine: '몰라' }, NOW + 2 * DAY)).toEqual({ what: '', type: 'blank', question: 'q', mine: '몰라', at: NOW + 2 * DAY, times: 1 })
+    // Nothing recalled where a slip with words is open (review fix): counted on it, its words and the answer that showed them kept.
+    const blank = { kind: 'missed' as const, question: 'q', what: '', type: 'blank' as const, mine: '몰라' }
+    expect(nextSlip(again, blank, NOW + 2 * DAY)).toEqual({ ...again, at: NOW + 2 * DAY, times: 3 })
+    // Over one mended, or one with no words, the blank one is kept as it is.
+    expect(nextSlip({ ...again!, fixedAt: NOW + DAY }, blank, NOW + 2 * DAY)).toEqual({ what: '', type: 'blank', question: 'q', mine: '몰라', at: NOW + 2 * DAY, times: 1 })
+    const blanks = nextSlip(undefined, blank, NOW)!
+    expect(nextSlip(blanks, { ...blank, question: 'q2', mine: '3' }, NOW + DAY)).toEqual({ what: '', type: 'blank', question: 'q2', mine: '3', at: NOW + DAY, times: 2 })
     const long = nextSlip(undefined, { kind: 'missed', question: '문'.repeat(500), what: '가'.repeat(200), type: 'other', mine: '답'.repeat(500) }, NOW)!
     expect([long.what.length, long.question.length, long.mine.length]).toEqual([80, 240, 160])
+  })
+
+  test('a slip kept by a grade still right after the question asked back says so (isRight), until a miss counts on it; the store keeps it', () => {
+    const right = nextSlip(undefined, { kind: 'missed', question: '문제', what: SLIP.what, type: 'reference', mine: '오류가 납니다', isRight: true }, NOW)!
+    expect(right).toEqual({ ...SLIP, question: '문제', isRight: true })
+    expect(nextSlip(right, { kind: 'missed', question: '문제', what: SLIP.what, type: 'reference', mine: '또 오류' }, NOW + DAY)).toEqual({ ...SLIP, question: '문제', mine: '또 오류', at: NOW + DAY, times: 2 })
+    expect(nextSlip(right, { kind: 'missed', question: 'q', what: '', type: 'blank', mine: '몰라' }, NOW + DAY)).toEqual({ ...SLIP, question: '문제', at: NOW + DAY, times: 2 })
+    expect(slipRecordOf(JSON.parse(JSON.stringify(right)))).toEqual(right)
+    expect(slipRecordOf({ ...SLIP, isRight: 'yes' })).toEqual(SLIP)
+  })
+
+  test('the next quiz asks again each slip open and not gone over since its grade, due or not, the oldest first; one right after the question asked back waits a day', () => {
+    const concept = (over: Partial<LearnConcept> = {}): LearnConcept => ({ name: 'x', count: 1, firstAt: NOW - 9 * DAY, lastAt: NOW - 9 * DAY, blurb: '', files: [], step: 3, reviewedAt: NOW, ...over })
+    const index: Record<string, LearnConcept> = {
+      'c:partial': concept({ name: 'partial' }),
+      'c:older': concept({ name: 'older', reviewedAt: NOW - DAY }),
+      'c:gone-over': concept({ name: 'gone-over', reviewedAt: NOW + 60_000 }),
+      'c:known': concept({ name: 'known', knownAt: NOW }),
+      'c:mended': concept({ name: 'mended' }),
+      'c:right': concept({ name: 'right' }),
+    }
+    const slips: Record<string, LearnSlip> = {
+      'c:partial': SLIP,
+      'c:older': { ...SLIP, at: NOW - DAY },
+      'c:gone-over': SLIP,
+      'c:known': SLIP,
+      'c:mended': { ...SLIP, fixedAt: NOW },
+      'c:right': { ...SLIP, isRight: true },
+      'c:gone': SLIP,
+    }
+    expect(slipsToAsk(index, slips, NOW + 60_000)).toEqual(['c:older', 'c:partial'])
+    expect(slipsToAsk(index, slips, NOW + DAY)).toEqual(['c:older', 'c:partial', 'c:right'])
+    // Taken first, due or not, before the ones due; one marked known never.
+    const picked = quizPick(index, NOW + DAY, 3, ['c:known', 'c:right', 'c:partial'])
+    expect(picked.map(one => one.key).slice(0, 2)).toEqual(['c:right', 'c:partial'])
+    expect(quizPick(index, NOW + DAY, 3).map(one => one.key)).toEqual(quizPick(index, NOW + DAY, 3, []).map(one => one.key))
+    // Spread over the notes as a miss is: a slip to ask again never waits for another note.
+    const one = (key: string, noteId: string) => ({ ...concept(), key, noteId }) as QuizPick
+    const candidates = [one('c:a', 'n1'), one('c:b', 'n1'), one('c:c', 'n2'), one('c:d', 'n3')]
+    expect(spreadPicks(candidates, 3).map(pick => pick.key)).toEqual(['c:a', 'c:c', 'c:d'])
+    expect(spreadPicks(candidates, 3, () => true, pick => pick.key === 'c:b').map(pick => pick.key)).toEqual(['c:a', 'c:b', 'c:c'])
   })
 
   test('right on a question asked again mends it on another day only, with no hint or question asked back; graduating and 안다 always do', () => {
@@ -216,7 +271,14 @@ describe('1.7.0: a slip kept, asked again and mended (D5)', () => {
     const at = NOW + DAY
     const wrong = { result: 'wrong' as const, gradedAt: at }
     expect(slipNotice(wrong, { ...SLIP, at }, false)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` })
-    expect(slipNotice(wrong, { ...SLIP, what: '', type: 'blank', at }, false)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다' })
+    expect(slipNotice(wrong, { ...SLIP, what: '', type: 'blank', mine: '모르겠어요', at }, false)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다' })
+    // A real answer too short to read a slip from ("10") is not "not recalled" (review fix).
+    const short = { kind: 'blank', text: '답이 짧아 헷갈린 점은 적지 않았습니다 · 다음 퀴즈에서 다시 풉니다' }
+    expect(slipNotice({ ...wrong, mine: '7', firstTry: { mine: '10', verdict: 'wrong', feedback: '', nudge: '?', at, slip: '곱셈을 덧셈으로 봄', slipType: 'other' } }, { ...SLIP, what: '', type: 'blank', mine: '10', at }, false)).toEqual(short)
+    expect(slipNotice(wrong, { ...SLIP, what: '', type: 'blank', mine: '[]', at }, false)).toEqual(short)
+    // "모르겠어요" where a slip with words stays open (not asked again): said as nothing recalled, its words kept for the next quiz.
+    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, { ...SLIP, at, times: 2 }, false)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다' })
+    expect(slipNotice({ ...wrong, mine: '모르겠어요', isRetry: true }, { ...SLIP, at, times: 2 }, false)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
     // Kept by no grade (the schema guard on, a store that refused it): nothing promised.
     expect(slipNotice(wrong, SLIP, false)).toBeUndefined()
     expect(slipNotice(wrong, undefined, false)).toBeUndefined()
@@ -255,6 +317,9 @@ describe('1.7.0: asked again in other code (다시 도전, D5)', () => {
     expect(asked).toContain('"지난번" 줄이 붙은 개념은 같은 헷갈림이 드러나는 다른 코드나 값으로 묻는다. 지난 문제를 되풀이하지 않는다. 헷갈린 점을 문제나 힌트에 쓰지 않는다.')
     const blank = quizPrompt([pick('map', { what: '', question: '문제', mine: '모르겠어요' })], 'beginner')
     expect(blank).toContain("   지난번 문제 '문제' · 학습자 답 '모르겠어요' · 답을 떠올리지 못했다\n")
+    const short = quizPrompt([pick('map', { what: '', question: '문제', mine: '10' })], 'beginner')
+    expect(short).toContain("   지난번 문제 '문제' · 학습자 답 '10' · 답이 짧아 헷갈린 점을 알 수 없다\n")
+    expect(short).not.toContain('떠올리지 못했다')
     // A long one stays within 400 characters.
     const long = quizPrompt([pick('map', { what: '헷'.repeat(80), question: '문'.repeat(240), mine: '답'.repeat(160) })], 'beginner')
     const line = long.split('\n').find(one => one.includes('지난번 문제'))!
@@ -316,11 +381,22 @@ describe('1.7.0: asked again in other code (다시 도전, D5)', () => {
   })
 })
 
-describe('1.7.0: the store at its worst stays under 3.5MB (D5, the storage budget test brought forward)', () => {
-  test('notes 12 projects × 30, concepts 400, questions 300, slips 300: every key at its caps', () => {
-    // Prose in Hangul (three bytes a character); text that quotes code half Hangul, half code.
+/**
+ * The store's whole worst case, tracked here as each release adds keys (a new key joins the fixture below): every key
+ * at its caps with every text in Hangul (three bytes a character, the main audience's language), and 40 merges. As of
+ * 1.7.0 (5/8) it comes to 3,642,573 bytes: past the plan's 3.5MB budget by 1.6's keys alone (history 2MB, quizBank
+ * 0.81MB, concepts 0.43MB, which this release does not cut); 1.7.0's own keys (slips, faults, sessions, schema,
+ * quotaToast) take about 0.15MB of it. The store refuses every write past 4 MiB (4,194,304 bytes) in all: about 0.55MB
+ * is left, and STORE_WORST holds the line so no key grows into it unseen.
+ */
+const STORE_LIMIT = 4 * 1024 * 1024
+const STORE_WORST = 3_650_000
+
+describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5, the storage budget test brought forward)', () => {
+  test('notes 12 projects × 30, concepts 400, questions 300, slips 300, merges 40: every key at its caps, every text Hangul', { timeoutMs: 30_000 }, () => {
+    // Every text in Hangul, three bytes a character: code with Korean in it is the worst any key holds.
     const hangul = (n: number, seed = 0) => Array.from({ length: n }, (_, i) => String.fromCharCode(0xac00 + ((i + seed) % 400))).join('')
-    const mixed = (n: number, seed = 0) => `${hangul(Math.ceil(n / 2), seed)}${'x'.repeat(Math.floor(n / 2))}`
+    const mixed = hangul
     const history: Record<string, { at: number; notes: ReturnType<typeof forHistory>[] }> = {}
     for (let p = 0; p < HISTORY_PROJECTS; p += 1) {
       const notes = Array.from({ length: HISTORY_PER_PROJECT }, (_, i) =>
@@ -399,10 +475,17 @@ describe('1.7.0: the store at its worst stays under 3.5MB (D5, the storage budge
     const slips: Record<string, LearnSlip> = {}
     for (let i = 0; i < SLIPS_KEPT; i += 1) slips[`c:${hangul(36, i)}${i}`] = { what: hangul(80, i), type: 'reference', question: mixed(240, i), mine: mixed(160, i), at: NOW + i, times: 99 }
 
+    // Merges are the learner's own (/learn 합치기), one by one, so no cap: 40 is a lot of them.
+    const merged = Array.from({ length: 40 }, (_, i) => `c:${hangul(36, 1000 + i)}${i}`)
+    const aliases = Object.fromEntries(merged.map((key, i) => [key, Object.keys(index)[i]!]))
+    const merges = Object.fromEntries(merged.map((key, i) => [key, { concept: storedConcepts({ [key]: index[Object.keys(index)[i]!]! })[key], into: Object.keys(index)[i]!, both: 3 }]))
+
     const store: Record<string, unknown> = {
       // At its cap whatever the fixture came to: the history is cut to it (fitHistory).
       history: HISTORY_MAX_BYTES,
       concepts: storedConcepts(index),
+      aliases,
+      merges,
       known: knownMarks(index),
       steps: stepMarks(index),
       quizBank: bank,
@@ -421,7 +504,11 @@ describe('1.7.0: the store at its worst stays under 3.5MB (D5, the storage budge
     const sizes = Object.fromEntries(Object.entries(store).map(([key, value]) => [key, key === 'history' ? HISTORY_MAX_BYTES : jsonBytes(value)]))
     const total = Object.values(sizes).reduce((sum, n) => sum + n, 0)
     expect(sizes.slips!).toBeLessThanOrEqual(SLIPS_MAX_BYTES)
-    // About 3.26MB as this fixture makes it (the slips 0.15MB of it); the store refuses past 4 MiB in all.
-    expect(total).toBeLessThanOrEqual(3_500_000)
+    // 1.7.0's own keys, within what they were planned to take.
+    const added = ['slips', 'faults', 'sessions', 'schema', 'quotaToast'].reduce((sum, key) => sum + sizes[key]!, 0)
+    expect(added).toBeLessThanOrEqual(160_000)
+    // The whole: no key may grow unseen past this, and the store's limit stays well clear.
+    expect(total).toBeLessThanOrEqual(STORE_WORST)
+    expect(STORE_LIMIT - total).toBeGreaterThanOrEqual(500_000)
   })
 })

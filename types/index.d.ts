@@ -232,8 +232,10 @@ export type LearnSlipType = 'order' | 'reference' | 'scope' | 'coercion' | 'boun
  * their typed answer showed (`what`, one short sentence; '' for `blank`), its kind, the question and their answer
  * (cut short, secrets masked), when it was last missed and how many times, and when a later quiz showed it mended,
  * or the concept was marked known (`fixedAt`). The next quiz on an open one asks it again in other code (다시 도전).
+ * `isRight` marks one the grade that kept it still counted right, on the try again after the question asked back
+ * (헷갈린 점을 바로 고쳤습니다): that one is asked again on another day, by no quiz the same day.
  */
-export type LearnSlip = { what: string; type: LearnSlipType; question: string; mine: string; at: number; times: number; fixedAt?: number }
+export type LearnSlip = { what: string; type: LearnSlipType; question: string; mine: string; at: number; times: number; fixedAt?: number; isRight?: true }
 
 /** One day's learning: notes written, and quiz answers the learner graded right and wrong. */
 export type LearnDayActivity = { notes: number; right: number; wrong: number }

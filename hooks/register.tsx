@@ -29,6 +29,7 @@ import {
   fitSlips,
   nextSlip,
   openSlip,
+  slipsToAsk,
   slipAt,
   slipChange,
   slipNotice,
@@ -2045,18 +2046,22 @@ async function makeQuiz(
       const one = conceptAt(index, key)
       return one ? [{ ...one, key }] : []
     })
+  // A concept whose slip is still open is asked again (다시 도전): told its last question, answer and slip. One whose
+  // slip no quiz has gone over since its grade kept it is in the next review quiz whether due or not, as the line
+  // under that grade said (slipsToAsk: 거의 marks no miss, so its review may be days off).
+  const open = await storedSlips($, map, now)
+  const asking = new Set(only ? [] : slipsToAsk(index, open, now))
   // A concept the learner knows is asked about in no quiz, a note's own neither.
-  const chosen = only ? taught.filter(one => !isKnown(one)).slice(0, 3) : quizPick(index, now, QUIZ_CANDIDATES)
+  const chosen = only ? taught.filter(one => !isKnown(one)).slice(0, 3) : quizPick(index, now, QUIZ_CANDIDATES, [...asking])
   if (chosen.length === 0) {
     if (only) return { error: taught.length > 0 ? '이 노트의 개념은 모두 아는 개념이라 퀴즈를 낼 수 없습니다. 되돌리려면 /learn 모른다 개념 이름.' : '이 노트에는 배울 개념이 없어 퀴즈를 낼 수 없습니다.' }
     return { error: Object.keys(index).length > 0 ? ALL_KNOWN_TEXT : NO_CONCEPTS_FOR_QUIZ }
   }
   // A review quiz goes over more than one note where it can (three concepts from one note make one lesson
-  // again), the concepts due before any other.
+  // again), the slips to ask again and the concepts due before any other.
   const found = await withCode($, cfg, chosen, map, only?.id)
-  // A concept whose slip is still open is asked again (다시 도전): told its last question, answer and slip.
-  const open = await storedSlips($, map, now)
-  const picks = (only ? found : spreadPicks(found, 3, one => isDue(one, now))).map(one => {
+  const isAsking = (one: QuizPick) => asking.has(one.key)
+  const picks = (only ? found : spreadPicks(found, 3, one => isAsking(one) || isDue(one, now), isAsking)).map(one => {
     const slip = openSlip(open, one.key)
     return slip ? { ...one, slip: { what: slip.what, question: slip.question, mine: slip.mine } } : one
   })
@@ -2306,9 +2311,11 @@ async function gradeTyped(
     }
     return keptGrade($, cfg, current, i, 'wrong', { mine: said, verdict: 'wrong', feedback: BLANK_FEEDBACK })
   }
-  // The concept's slip still open (1.7.0): the grade is told it, to name it in the feedback once it is mended.
-  const past = await pastSlip($, item.key)
-  const prompt = checkPrompt(item, mine, cfg.level, first, past ? { what: past.what } : undefined)
+  // The concept's slip still open (1.7.0), on a question asked again (다시 도전): the grade is told it, to name it in
+  // the feedback once it is mended. Only there can a right answer mend it (nextSlip): elsewhere (the question said
+  // the slip, or the slip was kept after the quiz was made) the feedback would name a mend no line follows.
+  const past = item.isRetry ? await pastSlip($, item.key) : undefined
+  const prompt = checkPrompt(item, mine, cfg.level, first, past ? { what: past.what, mine: past.mine } : undefined)
   const asked = await askModel($, cfg, 'grade', { system: CHECK_SYSTEM, prompt, maxTokens: 480, timeoutMs: 60_000 })
   if ('error' in asked) return { error: `채점하지 못했습니다: ${asked.error}` }
   const graded = parseCheck(asked.text)
@@ -3469,7 +3476,14 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
       }
     }
     if (changed.length === 0) return `이미 ${word}으로 적혀 있습니다.`
-    if (result === 'wrong') return `틀린 것으로 적었습니다: ${changed.join(' · ')}. 복습할 개념 맨 앞에 올라 다음 퀴즈에 먼저 나옵니다.`
+    // What each grade did with its concept's slip (1.7.0), as the pane says it under the feedback: a first try graded
+    // so keeps what it showed wrong, for the next quiz to ask again.
+    const graded = ((await lastQuiz($))?.items ?? []).flatMap((item, i) => (changedAt.includes(i) ? [{ item, n: i + 1 }] : []))
+    const slipLines = (await Promise.all(graded.map(async ({ item, n }) => ({ n, line: await slipLineText($, item) })))).flatMap(({ n, line }) =>
+      line === undefined ? [] : [graded.length > 1 ? `${n}번: ${line}` : line],
+    )
+    const slipped = slipLines.length > 0 ? `\n${slipLines.join('\n')}` : ''
+    if (result === 'wrong') return `틀린 것으로 적었습니다: ${changed.join(' · ')}. 복습할 개념 맨 앞에 올라 다음 퀴즈에 먼저 나옵니다.${slipped}`
     // Graded after the answer showed: recalled with help, so the interval stays (a typed answer turned right moves on).
     const spacing =
       helped === changed.length
@@ -3477,9 +3491,12 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
         : helped === 0
           ? '다음 복습까지 간격이 늘어납니다.'
           : '직접 맞힌 문제는 간격이 늘고, 정답을 보고 맞힌 문제는 그대로입니다.'
-    const items = ((await lastQuiz($))?.items ?? []).filter((_, i) => changedAt.includes(i))
-    const graduated = graduatedIn(items, await read($, concepts), await read($, aliases))
-    return `맞힌 것으로 적었습니다: ${changed.join(' · ')}. ${spacing}${graduated.length > 0 ? `\n\n${graduatedText(graduated)}` : ''}`
+    const graduated = graduatedIn(
+      graded.map(({ item }) => item),
+      await read($, concepts),
+      await read($, aliases),
+    )
+    return `맞힌 것으로 적었습니다: ${changed.join(' · ')}. ${spacing}${slipped}${graduated.length > 0 ? `\n\n${graduatedText(graduated)}` : ''}`
   }
   const typed = /^(\d+)\s*번?\s*[.):]?\s+([\s\S]+)$/.exec(rest)
   if (typed) {
@@ -5363,6 +5380,9 @@ function quizView(
   const lastAt = graded.length === 0 ? -1 : items.indexOf(graded.reduce((a, b) => ((b.gradedAt ?? 0) >= (a.gradedAt ?? 0) ? b : a)))
   const opened = lastAt !== -1 && items[lastAt]?.verdict !== undefined && items[at]?.firstTry === undefined ? lastAt : -1
   const fieldKey = (i: number) => quizFieldKey(current?.at ?? 0, i)
+  // The note that taught a concept answered wrong, where this pane has it: n there, once Tab has left the next field.
+  const taughtOf = (item: LearnQuizItem) => (item.result === 'wrong' && item.noteId !== undefined && list.some(note => note.id === item.noteId) ? item.noteId : undefined)
+  const isTaughtOpen = opened !== -1 && taughtOf(items[opened]!) !== undefined
   return (
     <Box flexDirection="column">
       <Text bold wrap="truncate-end">
@@ -5413,9 +5433,8 @@ function quizView(
             )
           }
           // Answered wrong (or partly right): back to the note that taught it, where r walks its code through.
-          const wrongFrom = item.result === 'wrong' ? item.noteId : undefined
-          const taught = wrongFrom !== undefined && list.some(note => note.id === wrongFrom) ? wrongFrom : undefined
-          const isElsewhere = wrongFrom !== undefined && taught === undefined
+          const taught = taughtOf(item)
+          const isElsewhere = item.result === 'wrong' && item.noteId !== undefined && taught === undefined
           // What the grade did with its concept's slip (1.7.0), dim under the feedback; green once one asked again is mended.
           const notice = slipNotice(item, slipOf(item.key), isHelpedGrade(item))
           return (
@@ -5553,7 +5572,14 @@ function quizView(
                 {/* While the field holds the keys every letter is typed into it: how to reach the buttons. */}
                 {Input && isFocused && (
                   <Text dimColor wrap="wrap">
-                    답 칸에서 Enter: 채점 · 모르면 '모르겠어요' · Tab: 버튼으로 ({[...(item.hint !== undefined && item.isHinted !== true ? ['h 힌트'] : []), ...(isUngraded ? ['a 정답'] : []), '1~4 보기'].join(' · ')})
+                    답 칸에서 Enter: 채점 · 모르면 '모르겠어요' · Tab: 버튼으로 (
+                    {[
+                      ...(item.hint !== undefined && item.isHinted !== true ? ['h 힌트'] : []),
+                      ...(isUngraded ? ['a 정답'] : []),
+                      ...(isTaughtOpen ? ['n 배운 노트'] : []),
+                      '1~4 보기',
+                    ].join(' · ')}
+                    )
                   </Text>
                 )}
               </Box>
