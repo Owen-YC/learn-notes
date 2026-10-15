@@ -162,4 +162,19 @@ describe('1.7.0: a note copied for a mentor (c, /learn 공유)', () => {
     expect(text).not.toContain('/opt/keys')
     expect(text).not.toContain('vault')
   })
+
+  test('(1.7.0 D8) a note\'s practice goes in as what to try and how to tell, never the line to change nor its example answer', () => {
+    const practice = [
+      '### 직접 해 보기',
+      '- 할 일: 토큰이 없으면 다시 받게 바꿔 보세요',
+      '- 고칠 줄: `return retry(res)`',
+      '- 확인: `fetchUser()` → 사용자 정보',
+      '- 예시 답: `return res.ok ? res : retry(res)`',
+    ].join('\n')
+    const text = shareText(note({ text: TEXT.replace(/### 직접 확인해 볼 것[\s\S]*$/, practice) }), [])
+    expect(text).toContain('**직접 해 보기**\n- 할 일: 토큰이 없으면 다시 받게 바꿔 보세요\n- 확인: `fetchUser()` → 사용자 정보\n\n노트에서 뺀 파일')
+    expect(text).not.toContain('고칠 줄')
+    expect(text).not.toContain('예시 답')
+    expect(text).not.toContain('res.ok ? res')
+  })
 })

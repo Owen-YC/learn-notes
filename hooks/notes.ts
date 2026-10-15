@@ -7,6 +7,7 @@ import type {
   LearnConcept,
   LearnDayActivity,
   LearnDayUsage,
+  LearnDrill,
   LearnNote,
   LearnQuizFirstTry,
   LearnQuizItem,
@@ -1483,6 +1484,23 @@ function diffBlocks(note: Pick<LearnNote, 'changes' | 'moreFiles' | 'withheld'>,
   ]
 }
 
+/** Characters the line a note's practice changes may have at most, its indent aside: one a field shows whole. */
+export const DRILL_LINE_MAX = 40
+
+/**
+ * How a note's last section (`### 직접 해 보기`, 1.7.0) is asked for: four labelled lines the pane reads (drillOf), a
+ * practice of the first concept the note teaches on one line of the changed code, with no word of which line or how.
+ * The line to change and the example answer are kept out of what the learner reads until they tried (hideDrillAnswer).
+ */
+const DRILL_ASK = [
+  '(학습자가 바뀐 뒤 코드의 한 줄을 직접 고쳐 보는 연습이다. 정확히 아래 네 줄만 쓴다)',
+  '- 할 일: 배울 개념의 첫째를 써서 코드가 다르게 동작하게 하는 일 한 문장. 어느 줄을 어떻게 고칠지는 말하지 않는다',
+  `- 고칠 줄: 위 diff에서 바뀐 뒤 코드의 한 줄을 글자 그대로 백틱으로 (${DRILL_LINE_MAX}자 이하. 그 한 줄만 고쳐서 할 일을 이룰 수 있는 줄)`,
+  '- 확인: `호출이나 입력` → 고친 뒤의 결과 (위의 예와 겹치지 않게)',
+  '- 예시 답: 고친 그 줄 전체를 백틱으로',
+  '(그런 한 줄이 없는 변경(설정, 스타일, 문서 등)이면 "- 할 일: 없음" 한 줄만 쓴다)',
+]
+
 /**
  * The one user message the model reads for a note. `known`: the concepts
  * met before (see knownNames; a plain list is all `rest`), the ones the learner
@@ -1542,8 +1560,8 @@ export function notePrompt(
     ...(hasRules ? ['(팀 규칙과 직접 닿으면 이 절 끝에 "팀 규칙: …" 또는 "팀 규칙과 다를 수 있음: …" 한 줄을 더한다)'] : []),
     '### 배울 개념',
     '(1~3개. "- **개념 이름**: 설명 — 그 개념이 쓰인 코드 한 줄을 백틱으로 인용". 개념 이름은 짧은 용어만 쓰고 쉬운 말 풀이는 이름 뒤 설명에 쓴다. 줄 번호는 쓰지 마라)',
-    '### 직접 확인해 볼 것',
-    '(실행하거나 바꿔 보며 확인할 수 있는 것 1~2개. 위의 예와 겹치지 않게)',
+    '### 직접 해 보기',
+    ...DRILL_ASK,
   ].join('\n')
 }
 
@@ -1608,7 +1626,8 @@ export function askPrompt(
     note.prompt === '' ? '(요청 문장 없음)' : cut(note.prompt, 1000),
     '',
     '## 학습 노트',
-    note.status === 'ready' ? cut(note.text, 4000) : '(노트가 아직 없다. 코드 전후만 보고 답한다)',
+    // Its practice's line and example answer left out (1.7.0): e's plainer words would show them under the note.
+    note.status === 'ready' ? cut(hideDrillAnswer(note.text), 4000) : '(노트가 아직 없다. 코드 전후만 보고 답한다)',
     '',
     '## 바뀐 코드',
     ...diffBlocks(note, PROMPT_DIFF_BUDGET),
@@ -1629,6 +1648,399 @@ export function askSection(note: Pick<LearnNote, 'at' | 'prompt'>, question: str
     '---',
     '',
   ].join('\n')
+}
+
+/**
+ * A note's practice (1.7.0, `### 직접 해 보기`), as drillOf reads it: what to make the code do (할 일), how to tell it
+ * works (확인, '' when the note gave none), the line to change as the changed code has it (`line`, its indent apart
+ * in `indent`: the field holds the rest, so a language whose indent means something keeps it), the example answer
+ * (예시 답), and where the line is: its file as the note shows it and its path, its number on the new side counted
+ * from its hunk's start, and the lines just above and below it in that hunk (undefined at its edge).
+ */
+export type Drill = {
+  task: string
+  check: string
+  line: string
+  indent: string
+  example: string
+  file: string
+  path: string
+  n: number
+  above?: string
+  below?: string
+}
+
+/** A practice section's heading: `### 직접 해 보기`, bold or numbered too. 1.6's `직접 확인해 볼 것` is none. */
+const DRILL_HEADING = /^(?:#{1,6}\s*|\*\*\s*)(?:\d+[.)]\s*)?[^\p{L}\p{N}]*직접\s*해\s*보기/u
+/** One of a practice's four labelled lines (할 일 · 고칠 줄 · 확인 · 예시 답), bold or not, on a bullet or not. */
+const DRILL_LABEL = /^\s*(?:[-*+•]\s+)?(?:\*\*)?\s*(할\s*일|고칠\s*줄|확인|예시\s*답)\s*(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*)$/
+/** The labels whose lines give the practice away, hidden wherever the note is read but the journal (hideDrillAnswer). */
+const DRILL_ANSWER_LABELS: readonly string[] = ['고칠줄', '예시답']
+/** A bold line alone (`**참고**`): it ends a section, as a heading does. */
+const BOLD_LINE = /^\*\*[^*]+\*\*[:：]?$/
+
+/** Where a note's practice section is among its lines: its heading's index, and the index past its last line. */
+function drillSpan(lines: readonly string[]): { start: number; end: number } | undefined {
+  const start = lines.findIndex(line => DRILL_HEADING.test(line.trim()))
+  if (start === -1) return undefined
+  const after = lines.slice(start + 1).findIndex(line => {
+    const trimmed = line.trim()
+    return ANY_HEADING.test(trimmed) || (BOLD_LINE.test(trimmed) && !DRILL_LABEL.test(trimmed))
+  })
+  return { start, end: after === -1 ? lines.length : start + 1 + after }
+}
+
+/** The practice's labelled lines by label (spaces taken out: 할일 · 고칠줄 · 확인 · 예시답), the first of each; a label alone takes the next line. */
+function drillParts(lines: readonly string[]): Map<string, string> {
+  const parts = new Map<string, string>()
+  for (const [i, line] of lines.entries()) {
+    const m = DRILL_LABEL.exec(line)
+    if (!m) continue
+    const label = m[1]!.replace(/\s+/g, '')
+    if (parts.has(label)) continue
+    let value = m[2]!.replace(/\*\*$/, '').trim()
+    if (value === '') {
+      // The code on the next line, alone or the first in a fence.
+      const next = lines.slice(i + 1).find(one => one.trim() !== '' && !FENCE.test(one.trim()))
+      if (next !== undefined && !DRILL_LABEL.test(next)) value = next.trim().replace(/^[-*+•]\s+/, '')
+    }
+    parts.set(label, value)
+  }
+  return parts
+}
+
+/** The code a labelled line quotes: inside `` `` `` (a backtick in it) or `` ` ``; else the words as they are when no backtick is there. */
+function quotedCode(value: string): string | undefined {
+  const m = /``\s?(.+?)\s?``|`([^`]+)`/.exec(value)
+  if (m) return m[1] ?? m[2]!
+  return value.includes('`') || value === '' ? undefined : value
+}
+
+/** A line as the practice finds it in the diff: no spaces, no `;` or `,` at its end. */
+function lineKey(text: string): string {
+  return squash(text).replace(/[;,]+$/, '')
+}
+
+/**
+ * Where a practice's line is in the changed code: the change and hunk it is in, its number on the new side and its
+ * text there, and the new side's lines around it in that hunk. An added line first, then one left as it was.
+ */
+function drillSpot(
+  quote: string,
+  changes: readonly Pick<LearnChange, 'file' | 'path' | 'diff'>[],
+): { change: number; hunk: number; n: number; text: string; above?: string; below?: string } | undefined {
+  const want = lineKey(quote)
+  if (want === '') return undefined
+  for (const mark of ['+', ' ']) {
+    for (const [c, change] of changes.entries()) {
+      for (const [k, h] of parseDiff(change.diff).entries()) {
+        const side: { text: string; mark: string; n: number }[] = []
+        let n = h.newStart
+        for (const raw of h.lines) {
+          if (raw.startsWith('-') || raw.startsWith('\\')) continue
+          side.push({ text: raw.slice(1), mark: raw.startsWith('+') ? '+' : ' ', n: n++ })
+        }
+        const at = side.findIndex(one => one.mark === mark && lineKey(one.text) === want)
+        if (at === -1) continue
+        return { change: c, hunk: k, n: side[at]!.n, text: side[at]!.text, above: side[at - 1]?.text, below: side[at + 1]?.text }
+      }
+    }
+  }
+  return undefined
+}
+
+/**
+ * A note's practice (1.7.0, `### 직접 해 보기`: 할 일 · 고칠 줄 · 확인 · 예시 답), its line found in the note's changed
+ * code; undefined for none: a note before 1.7.0, `할 일: 없음` (a change with no line to change: a setting, a style, a
+ * document), no line or example quoted, a line longer than DRILL_LINE_MAX, or one the changed code does not hold (a
+ * secret masked in it too). The line is the code's own, its indent apart.
+ */
+export function drillOf(text: string, changes: readonly Pick<LearnChange, 'file' | 'path' | 'diff'>[]): Drill | undefined {
+  const lines = text.split('\n')
+  const span = drillSpan(lines)
+  if (!span) return undefined
+  const parts = drillParts(lines.slice(span.start + 1, span.end))
+  const task = (parts.get('할일') ?? '').trim()
+  if (task === '' || NONE_SAID.test(task)) return undefined
+  const quote = quotedCode(parts.get('고칠줄') ?? '')?.trim()
+  const example = quotedCode(parts.get('예시답') ?? '')?.trim()
+  if (quote === undefined || example === undefined || quote === '' || example === '' || [...quote].length > DRILL_LINE_MAX) return undefined
+  const spot = drillSpot(quote, changes)
+  if (!spot || spot.text.includes(REDACTED)) return undefined
+  const change = changes[spot.change]!
+  const indent = /^\s*/.exec(spot.text)![0]
+  return {
+    task,
+    check: (parts.get('확인') ?? '').trim(),
+    line: spot.text.slice(indent.length).trimEnd(),
+    indent,
+    example,
+    file: change.file,
+    path: change.path,
+    n: spot.n,
+    ...(spot.above !== undefined ? { above: spot.above } : {}),
+    ...(spot.below !== undefined ? { below: spot.below } : {}),
+  }
+}
+
+/**
+ * Which change and hunk a written note's practice line is in (drillOf), for forHistory to keep that hunk; undefined
+ * when the note has no practice.
+ */
+export function drillHunk(note: Pick<LearnNote, 'status' | 'text' | 'changes'>): { change: number; hunk: number } | undefined {
+  if (note.status !== 'ready') return undefined
+  const lines = note.text.split('\n')
+  const span = drillSpan(lines)
+  if (!span) return undefined
+  const quote = quotedCode(drillParts(lines.slice(span.start + 1, span.end)).get('고칠줄') ?? '')
+  const spot = quote === undefined ? undefined : drillSpot(quote, note.changes)
+  return spot ? { change: spot.change, hunk: spot.hunk } : undefined
+}
+
+/**
+ * A note's text as the learner reads it outside the journal (1.7.0): its practice with no line to change and no
+ * example answer (both shown in the pane once tried), its heading naming `file` when given; a practice that says
+ * there is none (`할 일: 없음`) left out whole. A note with no practice comes back as it is.
+ */
+export function hideDrillAnswer(text: string, file?: string): string {
+  const lines = text.split('\n')
+  const span = drillSpan(lines)
+  if (!span) return text
+  const section = lines.slice(span.start + 1, span.end)
+  const task = drillParts(section).get('할일')
+  if (task !== undefined && (task.trim() === '' || NONE_SAID.test(task.trim()))) {
+    return [...lines.slice(0, span.start), ...lines.slice(span.end)].join('\n').replace(/\n+$/, '')
+  }
+  const kept: string[] = []
+  let isHidden = false
+  let fence: string | undefined
+  for (const raw of section) {
+    const line = raw.trim()
+    if (fence !== undefined) {
+      if (line.startsWith(fence)) fence = undefined
+      if (!isHidden) kept.push(raw)
+      continue
+    }
+    const label = DRILL_LABEL.exec(raw)
+    if (label) {
+      isHidden = DRILL_ANSWER_LABELS.includes(label[1]!.replace(/\s+/g, ''))
+      if (!isHidden) kept.push(raw)
+      continue
+    }
+    const opens = FENCE.exec(line)
+    if (opens) fence = opens[1]!
+    // A hidden line's code runs on below it (indented, a fence, a quote alone); a blank line or other words end it.
+    if (isHidden && line !== '' && (opens !== null || /^\s/.test(raw) || line.startsWith('`'))) continue
+    isHidden = false
+    kept.push(raw)
+  }
+  const head = lines[span.start]!.trimEnd()
+  const heading = file === undefined || file === '' ? head : /\*\*$/.test(head) ? head.replace(/\*\*$/, ` · ${file}**`) : `${head} · ${file}`
+  return [...lines.slice(0, span.start), heading, ...kept, ...lines.slice(span.end)].join('\n')
+}
+
+/**
+ * A line of code as a practice compares it: its spaces run together, and none beside a sign (`a+b` is `a + b`); no
+ * `;` at its end; a string's quotes made one kind (a template's backticks kept), what is inside a string as written
+ * but a template's `${…}`, compared as code.
+ */
+export function normalizeCode(text: string): string {
+  const s = text.trim()
+  const isWord = (ch: string | undefined) => ch !== undefined && /[\p{L}\p{N}_$]/u.test(ch)
+  let out = ''
+  let i = 0
+  while (i < s.length) {
+    const ch = s[i]!
+    if (ch === '`') {
+      let j = i + 1
+      let body = ''
+      while (j < s.length && s[j] !== '`') {
+        if (s[j] === '\\') {
+          body += s.slice(j, j + 2)
+          j += 2
+        } else if (s[j] === '$' && s[j + 1] === '{') {
+          // The expression to its own closing brace, compared as code.
+          let depth = 1
+          let k = j + 2
+          for (; k < s.length; k += 1) {
+            if (s[k] === '{') depth += 1
+            else if (s[k] === '}' && --depth === 0) break
+          }
+          body += `\${${normalizeCode(s.slice(j + 2, k))}}`
+          j = k + 1
+        } else {
+          body += s[j]
+          j += 1
+        }
+      }
+      out += `\`${body}${j < s.length ? '`' : ''}`
+      i = j + 1
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      let j = i + 1
+      while (j < s.length && s[j] !== ch) j += s[j] === '\\' ? 2 : 1
+      out += `"${s.slice(i + 1, Math.min(j, s.length))}${j < s.length ? '"' : ''}`
+      i = j + 1
+      continue
+    }
+    if (/\s/.test(ch)) {
+      let j = i
+      while (j < s.length && /\s/.test(s[j]!)) j += 1
+      if (isWord(out.at(-1)) && isWord(s[j])) out += ' '
+      i = j
+      continue
+    }
+    out += ch
+    i += 1
+  }
+  return out.replace(/;+$/, '')
+}
+
+/** True when two lines are the same code as a practice compares them (normalizeCode). */
+export function sameCode(a: string, b: string): boolean {
+  return normalizeCode(a) === normalizeCode(b)
+}
+
+/** Hangul jamo standing alone: what English keys type in a Korean input mode (`return` comes out as `ㄱㄷ셔구`). */
+const LONE_JAMO = /[ᄀ-ᇿㄱ-ㆎ]/u
+
+/**
+ * True for a line typed in a Korean input mode: a jamo standing alone that the line it changes did not hold, or
+ * Hangul and no Latin letter at all where that line had some. Said with no model call (DRILL_KOREAN).
+ */
+export function isKoreanTyped(mine: string, line: string): boolean {
+  if ([...mine].some(ch => LONE_JAMO.test(ch) && !line.includes(ch))) return true
+  return /[A-Za-z]/.test(line) && !/[A-Za-z]/.test(mine) && /[가-힣]/.test(mine)
+}
+
+/** `code` as markdown inline code, longer ticks around it when it holds one. */
+export function inlineCode(code: string): string {
+  const ticks = '`'.repeat(Math.max(0, ...(code.match(/`+/g) ?? []).map(run => run.length)) + 1)
+  return ticks.length > 1 ? `${ticks} ${code} ${ticks}` : `\`${code}\``
+}
+
+/**
+ * A practice as Claude is asked to check it (1.7.0, checkPrompt's question, kind `modify`): what to make the code do,
+ * how to tell, the line the learner changes, and the lines around it.
+ */
+export function drillQuestion(drill: Drill): string {
+  const around = [...(drill.above !== undefined ? [drill.above] : []), `${drill.indent}${drill.line}`, ...(drill.below !== undefined ? [drill.below] : [])]
+  const fence = fenceFor(around.join('\n'))
+  return [
+    `할 일: ${drill.task}`,
+    ...(drill.check !== '' ? [`확인: ${drill.check}`] : []),
+    `학습자가 고칠 줄 (${baseName(drill.file)} ${drill.n}행): ${inlineCode(drill.line)}`,
+    '그 둘레 코드 (학습자는 고칠 줄 하나만 바꾼다):',
+    fence,
+    ...around,
+    fence,
+  ].join('\n')
+}
+
+/** What a practice's empty Enter, its unchanged line, and a line typed in a Korean input mode are told (no model call). */
+export const DRILL_EMPTY = "줄이 비었습니다 · 고친 줄을 적고 Enter · 모르겠으면 '모르겠어요'"
+export const DRILL_UNCHANGED = '아직 바꾼 곳이 없습니다 · 줄을 고친 뒤 Enter'
+export const DRILL_KOREAN = '코드는 영문 상태에서 적습니다'
+/** The line over a practice's field: it is practice, and the project's file stays as it is. */
+export const DRILL_HEAD = '✎ 연습입니다 · 파일은 바뀌지 않습니다'
+/** The hint after "모르겠어요" in a practice, which has none of its own: a try again with no model call. */
+export const DRILL_HINT = '할 일과 확인을 다시 읽고, 이 줄에서 바꿀 곳 한 군데를 찾아보세요'
+
+/** What stands over a practice's line waiting for its try again: how far the first try got, or after "모르겠어요" the hint. */
+export function drillTryHead(first: Pick<LearnQuizFirstTry, 'mine' | 'verdict'>): string {
+  if (isBlankAnswer(first.mine)) return '힌트를 보고 한 번 더 고쳐 보세요'
+  return first.verdict === 'partial' ? '△ 아직입니다 · 방향은 맞습니다' : '✗ 아직입니다 · 한 번 더 고쳐 보세요'
+}
+
+/** A practice's last grade as the pane and the journal say it: done (after a question asked back), partly or not, and the example seen. */
+export function drillVerdictText(state: Pick<LearnDrill, 'verdict' | 'isRetried' | 'isAnswerSeen'>): string {
+  const head = state.verdict === 'right' ? `✓ 해냈습니다${state.isRetried ? ' · 되짚어 맞힘' : ''}` : state.verdict === 'partial' ? '△ 거의 맞음' : '✗ 틀림'
+  return `${head}${state.isAnswerSeen ? ' · 예시 답 봄' : ''}`
+}
+
+/** A practice's last grade as a journal section, as a question is kept (askSection): the note, what to do, the line and its grade. */
+export function drillSection(note: Pick<LearnNote, 'at' | 'prompt'>, drill: Pick<Drill, 'task'>, state: LearnDrill, at: number): string {
+  const feedback = (state.feedback ?? '').replace(/\s+/g, ' ').trim()
+  return [
+    `## ${stamp(at).day} 직접 해 보기 (${stamp(at).time})`,
+    '',
+    `**노트**: ${stamp(note.at).day} ${stamp(note.at).time} · ${note.prompt === '' ? '(요청 없음)' : cut(note.prompt.replace(/\s+/g, ' '), 120)}`,
+    '',
+    `**할 일**: ${drill.task}`,
+    '',
+    `**내 줄**: ${state.mine === undefined || state.mine === '' ? '(없음)' : inlineCode(state.mine)}`,
+    '',
+    `**판정**: ${drillVerdictText(state)}${feedback !== '' ? ` — ${feedback}` : ''}`,
+    '',
+    '---',
+    '',
+  ].join('\n')
+}
+
+/** Bytes of JSON a practice's state keeps at most on its note (LearnNote.drill), and the characters of its line and words. */
+export const DRILL_MAX_BYTES = 1024
+const DRILL_MINE = 160
+const DRILL_WORDS = 300
+
+/**
+ * A practice's state cut to keep on its note: its line and the first try's to DRILL_MINE characters, Claude's words
+ * to DRILL_WORDS, then shorter until the whole is DRILL_MAX_BYTES of JSON at most. Its line's secrets masked.
+ */
+export function fitDrill(state: LearnDrill): LearnDrill {
+  const line = (text: string) => cut(redactText(text).text.trim(), DRILL_MINE)
+  const shorten = (one: LearnDrill, max: number): LearnDrill => ({
+    ...one,
+    ...(one.feedback !== undefined ? { feedback: cut(one.feedback, max) } : {}),
+    ...(one.firstTry ? { firstTry: { ...one.firstTry, feedback: cut(one.firstTry.feedback, max), nudge: cut(one.firstTry.nudge, max) } } : {}),
+  })
+  let next = shorten(
+    {
+      ...state,
+      ...(state.mine !== undefined ? { mine: line(state.mine) } : {}),
+      ...(state.firstTry ? { firstTry: { ...state.firstTry, mine: line(state.firstTry.mine), ...(state.firstTry.slip !== undefined ? { slip: cut(state.firstTry.slip, SLIP_TEXT) } : {}) } } : {}),
+    },
+    DRILL_WORDS,
+  )
+  for (let max = DRILL_WORDS; jsonBytes(next) > DRILL_MAX_BYTES && max > 20; ) {
+    max = Math.floor(max * 0.7)
+    next = shorten(next, max)
+  }
+  return next
+}
+
+/** A practice's state read back off a stored note (LearnNote.drill); undefined when it is not one. */
+export function drillStateOf(raw: unknown): LearnDrill | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const r = raw as Record<string, unknown>
+  if (typeof r.at !== 'number' || !Number.isFinite(r.at)) return undefined
+  const verdict = r.verdict === 'right' || r.verdict === 'partial' || r.verdict === 'wrong' ? r.verdict : undefined
+  const f = typeof r.firstTry === 'object' && r.firstTry !== null ? (r.firstTry as Record<string, unknown>) : undefined
+  const first: LearnQuizFirstTry | undefined =
+    f && typeof f.mine === 'string' && (f.verdict === 'partial' || f.verdict === 'wrong') && typeof f.nudge === 'string' && f.nudge !== '' && typeof f.at === 'number'
+      ? {
+          mine: f.mine,
+          verdict: f.verdict,
+          feedback: typeof f.feedback === 'string' ? f.feedback : '',
+          nudge: f.nudge,
+          at: f.at,
+          ...(typeof f.slip === 'string' && f.slip.trim() !== '' ? { slip: f.slip, slipType: slipTypeOf(f.slipType) } : {}),
+        }
+      : undefined
+  return fitDrill({
+    at: r.at,
+    ...(typeof r.mine === 'string' ? { mine: r.mine } : {}),
+    ...(verdict ? { verdict } : {}),
+    ...(typeof r.feedback === 'string' ? { feedback: r.feedback } : {}),
+    ...(first && !verdict ? { firstTry: first } : {}),
+    ...(r.isRetried === true && verdict === 'right' ? { isRetried: true as const } : {}),
+    ...(r.isAnswerSeen === true ? { isAnswerSeen: true as const } : {}),
+  })
+}
+
+/** True once a practice is over: graded, or its example shown. Its field is drawn no more. */
+export function isDrillOver(state: LearnDrill | undefined): boolean {
+  return state !== undefined && (state.verdict !== undefined || state.isAnswerSeen === true)
 }
 
 export function kindText(kind: LearnChange['kind']): string {
@@ -2800,7 +3212,8 @@ export const DAILY_REVIEW = 10
 
 /**
  * Today's review: every concept due (`due`), and how many of them are left for
- * today (`left`), DAILY_REVIEW less the answers graded today.
+ * today (`left`), DAILY_REVIEW less the answers graded today (a note's
+ * practice, 1.7.0, not among them: it is no review).
  */
 export function todayReview(
   index: Readonly<Record<string, LearnConcept>>,
@@ -2810,7 +3223,7 @@ export function todayReview(
   const due = dueConcepts(index, now).length
   const day = stamp(now).day
   const today = Object.prototype.hasOwnProperty.call(activity, day) ? activity[day] : undefined
-  const graded = today ? today.right + today.wrong : 0
+  const graded = today ? Math.max(0, today.right + today.wrong - (today.drills ?? 0)) : 0
   return { due, left: Math.max(0, Math.min(due, DAILY_REVIEW - graded)) }
 }
 
@@ -2844,7 +3257,8 @@ export function lastSeen(one: LearnConcept): number {
 
 /**
  * A note as the store keeps it for later sessions: request, answer and
- * questions cut down, and its text and diffs too unless `isWhole`. One the
+ * questions cut down, and its text and diffs too unless `isWhole` (the hunks up
+ * to its practice's line kept whole, 1.7.0). One the
  * journal is still to get (isUnsaved) keeps the text and diffs whole, the
  * parts its journal section holds, so a later session's try writes it from
  * this copy; fitHistory cuts such a copy first when the store has no room.
@@ -2857,12 +3271,17 @@ export function forHistory(note: LearnNote, isWhole = note.isUnsaved === true): 
     ...(note.asks ? { asks: note.asks.slice(-ASKS_KEPT).map(one => ({ ...one, question: cut(one.question, 400), answer: closeTicks(closeFence(cut(one.answer, 1500))) })) } : {}),
   }
   if (isWhole) return kept
+  // The hunk its practice's line is in (1.7.0), kept with the ones before it: a later session's t finds the line there.
+  const practice = drillHunk(note)
   return {
     ...kept,
     text: note.status === 'ready' ? closeTicks(cut(note.text, HISTORY_TEXT_BUDGET)) : note.text,
-    changes: note.changes.map(change => {
+    changes: note.changes.map((change, i) => {
       if (change.diff.length <= HISTORY_DIFF_BUDGET) return change
-      const { diff } = hunksToDiff(parseDiff(change.diff), HISTORY_DIFF_BUDGET)
+      const hunks = parseDiff(change.diff)
+      const reach = practice?.change === i ? hunksToDiff(hunks.slice(0, practice.hunk + 1), Number.POSITIVE_INFINITY).diff.length + 1 : 0
+      if (reach >= change.diff.length) return change
+      const { diff } = hunksToDiff(hunks, Math.max(HISTORY_DIFF_BUDGET, reach))
       return { ...change, diff, isCut: true }
     }),
   }
@@ -3581,18 +4000,16 @@ export const QUIZ_SYSTEM = [
 
 /**
  * The one user message the model reads for a quiz: each concept with what the notes said about it, and the
- * learner's code it was met in. A review quiz mixes the kinds of question (predict, why, modify); a note's own
- * quiz (`mode` 'note', right after reading the note) asks only to predict and to modify, never the definition
- * the note just gave. A concept with an open slip (1.7.0) carries its last question, the learner's answer and the
+ * learner's code it was met in. A quiz mixes the kinds of question (predict, why, modify). A concept with an open
+ * slip (1.7.0) carries its last question, the learner's answer and the
  * slip, to be asked again in other code that shows the same slip, never naming it. A team term (1.7.0 D6) is marked
  * `(팀 용어)`, carries the team's lines under their own head (`팀 코드 (fetcher.ts 12~30줄)`) when it has them, and the
  * quiz is told the team's words and lines are data (TEAM_IS_DATA).
  */
-export function quizPrompt(picks: readonly (LearnConcept & Pick<QuizPick, 'code' | 'slip' | 'team' | 'teamCode' | 'isTeamMarked'>)[], level: Level, mode: 'review' | 'note' = 'review'): string {
+export function quizPrompt(picks: readonly (LearnConcept & Pick<QuizPick, 'code' | 'slip' | 'team' | 'teamCode' | 'isTeamMarked'>)[], level: Level): string {
   const hasCode = picks.some(one => one.code !== undefined && one.teamCode === undefined)
   const hasSlip = picks.some(one => one.slip !== undefined)
   const isTeam = (one: Pick<QuizPick, 'team' | 'isTeamMarked'>) => one.team === true || one.isTeamMarked === true
-  const kinds = mode === 'note' ? '예측 · 바꿔 보기' : '예측 · 왜 · 바꿔 보기'
   return [
     LEVEL_TEXT[level],
     '',
@@ -3615,13 +4032,11 @@ export function quizPrompt(picks: readonly (LearnConcept & Pick<QuizPick, 'code'
     ...(hasSlip ? ['"지난번" 줄이 붙은 개념은 같은 헷갈림이 드러나는 다른 코드나 값으로 묻는다. 지난 문제를 되풀이하지 않는다. 헷갈린 점을 문제나 힌트에 쓰지 않는다.'] : []),
     ...(picks.some(isTeam) ? [TEAM_FOR_QUIZ] : []),
     '문제 유형: 예측은 코드를 보여 주고 출력이나 값을 맞히게 한다. 바꿔 보기는 바라는 동작을 말하고 어느 줄을 어떻게 바꿀지 묻는다. 왜는 어떤 줄을 빼거나 바꾸면 어떻게 되는지, 왜 그렇게 썼는지 묻는다.',
-    ...(mode === 'note'
-      ? ['이 노트를 방금 읽은 학습자에게 내는 문제다. 예측과 바꿔 보기만 낸다. 노트의 정의를 그대로 되묻지 않는다. 코드가 없는 개념은 짧은 예시 코드를 보여 주고 묻는다. 예측은 코드만으로 출력이나 값이 하나로 정해질 때만 낸다.']
-      : ['학습자 코드가 붙은 개념은 예측(코드만으로 출력이나 값이 하나로 정해질 때만) 또는 바꿔 보기로, 코드가 없는 개념은 왜로 낸다. 한 퀴즈 안에서는 되도록 서로 다른 유형으로 낸다.']),
+    '학습자 코드가 붙은 개념은 예측(코드만으로 출력이나 값이 하나로 정해질 때만) 또는 바꿔 보기로, 코드가 없는 개념은 왜로 낸다. 한 퀴즈 안에서는 되도록 서로 다른 유형으로 낸다.',
     '답은 예측이면 출력이나 값을, 바꿔 보기면 바꾼 코드와 그 까닭을, 왜면 무엇이 달라지는지를 쓴다.',
     '힌트는 막힌 학습자가 답을 떠올리게 돕는 실마리 한 문장이다. 답이나 개념 이름을 그대로 말하지 않는다.',
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
-    `T1: (${kinds} 중 하나)`,
+    'T1: (예측 · 왜 · 바꿔 보기 중 하나)',
     'Q1: (문제 한두 문장)',
     'H1: (힌트 한 문장)',
     'A1: (답 한두 문장)',
@@ -4358,19 +4773,22 @@ export function cleanActivity(raw: unknown): Record<string, LearnDayActivity> {
   for (const [day, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!isDay(day) || typeof value !== 'object' || value === null) continue
     const one = value as Partial<LearnDayActivity>
-    record[day] = { notes: count(one.notes), right: count(one.right), wrong: count(one.wrong) }
+    const right = count(one.right)
+    const wrong = count(one.wrong)
+    // A note's practices (1.7.0) are among the answers counted, never more of them.
+    const drills = Math.min(count(one.drills), right + wrong)
+    record[day] = { notes: count(one.notes), right, wrong, ...(drills > 0 ? { drills } : {}) }
   }
   return keepLatest(record)
 }
 
-/** The record with `delta` added on `day`; no count goes below zero. */
+/** The record with `delta` added on `day`; no count goes below zero, and `drills` (a note's practices) is never more than the answers. */
 export function addActivity(record: Readonly<Record<string, LearnDayActivity>>, day: string, delta: Partial<LearnDayActivity>): Record<string, LearnDayActivity> {
   const prior = Object.prototype.hasOwnProperty.call(record, day) ? record[day]! : { notes: 0, right: 0, wrong: 0 }
-  const next = {
-    notes: Math.max(0, prior.notes + (delta.notes ?? 0)),
-    right: Math.max(0, prior.right + (delta.right ?? 0)),
-    wrong: Math.max(0, prior.wrong + (delta.wrong ?? 0)),
-  }
+  const right = Math.max(0, prior.right + (delta.right ?? 0))
+  const wrong = Math.max(0, prior.wrong + (delta.wrong ?? 0))
+  const drills = Math.min(Math.max(0, (prior.drills ?? 0) + (delta.drills ?? 0)), right + wrong)
+  const next = { notes: Math.max(0, prior.notes + (delta.notes ?? 0)), right, wrong, ...(drills > 0 ? { drills } : {}) }
   return keepLatest({ ...record, [day]: next })
 }
 
@@ -5312,7 +5730,8 @@ function shareBody(text: string): string {
 export function shareText(note: Pick<LearnNote, 'at' | 'text' | 'changes' | 'moreFiles' | 'withheld' | 'root'>, names: readonly string[]): string {
   const summary = summaryOf(note.text).replace(/\*\*/g, '').trim()
   const facts = [stamp(note.at).day.slice(5), `파일 ${note.changes.length + note.moreFiles}개`, ...(names.length > 0 ? [`개념: ${names.join(' · ')}`] : [])]
-  const body = shareBody(note.text)
+  // Its practice with no line to change and no example answer (1.7.0): the mentor reads what to try, not its answer.
+  const body = shareBody(hideDrillAnswer(note.text))
   // A file left out from outside the project is named as the pane names it: by its name alone.
   const withheld = (note.withheld ?? []).map(one => ({ ...one, file: shortPath(one.file) }))
   const parts = [

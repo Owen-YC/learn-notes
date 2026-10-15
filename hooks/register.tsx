@@ -1,7 +1,26 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementConstructor, ElementTable, EngineInterface, HookFailure, InputProps, ModelUsage, Register, RenderSurface } from 'claude-code'
 
-import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnDayUsage, LearnLive, LearnNote, LearnQuizFirstTry, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSlip, LearnSubmit, LearnView, LearnWithheld } from '../types'
+import type {
+  LearnAsk,
+  LearnAskRun,
+  LearnChange,
+  LearnConcept,
+  LearnDayActivity,
+  LearnDayUsage,
+  LearnDrill,
+  LearnDrillRun,
+  LearnLive,
+  LearnNote,
+  LearnQuizFirstTry,
+  LearnQuizItem,
+  LearnQuizMarks,
+  LearnQuizRun,
+  LearnSlip,
+  LearnSubmit,
+  LearnView,
+  LearnWithheld,
+} from '../types'
 import {
   HISTORY_PER_PROJECT,
   HISTORY_PROJECTS,
@@ -233,6 +252,24 @@ import {
   otherStamps,
   shareText,
   withStamp,
+  DRILL_EMPTY,
+  DRILL_HEAD,
+  DRILL_HINT,
+  DRILL_KOREAN,
+  DRILL_UNCHANGED,
+  type Drill,
+  drillOf,
+  drillQuestion,
+  drillSection,
+  drillStateOf,
+  drillTryHead,
+  drillVerdictText,
+  fitDrill,
+  hideDrillAnswer,
+  inlineCode,
+  isDrillOver,
+  isKoreanTyped,
+  sameCode,
 } from './notes'
 
 const PANE = 'learn-notes'
@@ -267,6 +304,7 @@ const submitted = atom({ plugin: 'learn-notes', key: 'submitted' } as const, { l
 const newerSaid = atom({ plugin: 'learn-notes', key: 'newerSaid' } as const, null)
 const slips = atom({ plugin: 'learn-notes', key: 'slips' } as const, {})
 const teamTerms = atom({ plugin: 'learn-notes', key: 'teamTerms' } as const, {})
+const drillRun = atom({ plugin: 'learn-notes', key: 'drillRun' } as const, { open: null, checking: null, notice: null })
 
 /** `$.store` keys: notes per project for the next session, the concept index, merges and the last quiz. */
 const HISTORY_KEY = 'history'
@@ -824,6 +862,8 @@ function fromHistory(raw: unknown, root: string): LearnNote | undefined {
     // What a load's own timers stood for (a try again, a reload's take-up): the write they waited on is over.
     retry: undefined,
     resumed: undefined,
+    // Its practice as the learner left it (1.7.0); anything but one is dropped.
+    drill: drillStateOf(raw.drill),
   }
 }
 
@@ -1732,8 +1772,11 @@ async function journalEntriesFor($: EngineInterface, cfg: Config, days: readonly
   return found
 }
 
-/** A quiz as kept: `isRevealed` (every answer shown) is read from quizzes kept before 1.6.0 and written false; `from` marks a note's own quiz. */
-type Quiz = { at: number; items: LearnQuizItem[]; isRevealed: boolean; from?: 'note' }
+/**
+ * A quiz as kept: `isRevealed` (every answer shown) is read from quizzes kept before 1.6.0 and written false. A note's
+ * own quiz kept before 1.7.0 (`from: 'note'`, t under a note) reads as a review quiz.
+ */
+type Quiz = { at: number; items: LearnQuizItem[]; isRevealed: boolean }
 
 /** A concept's marks read back off a stored quiz question. */
 function marksFrom(raw: unknown): LearnQuizMarks | undefined {
@@ -1822,7 +1865,7 @@ async function storedQuiz($: EngineInterface): Promise<Quiz | null | undefined> 
   }
   if (!isRecord(raw) || typeof raw.at !== 'number' || !Array.isArray(raw.items)) return null
   const items = raw.items.map(quizItemOf).filter(one => one !== undefined)
-  return items.length > 0 ? { at: raw.at, items, isRevealed: raw.isRevealed === true, ...(raw.from === 'note' ? { from: 'note' as const } : {}) } : null
+  return items.length > 0 ? { at: raw.at, items, isRevealed: raw.isRevealed === true } : null
 }
 
 /** Whether the learner has seen a question's answer: shown in the pane or by /learn quiz 정답, or all of them in a quiz kept before 1.6.0. */
@@ -1952,7 +1995,8 @@ function reviewDoneText(review: { due: number; left: number }, days: Readonly<Re
   if (review.due > 0) return '오늘 복습을 마쳤습니다 · 남은 개념은 내일 나옵니다'
   // Nothing due: a review done only once an answer was graded today, not a quiz finished on another day.
   const today = Object.prototype.hasOwnProperty.call(days, stamp(now).day) ? days[stamp(now).day] : undefined
-  return today && today.right + today.wrong > 0 ? '오늘 복습을 마쳤습니다' : undefined
+  // A note's practice (1.7.0) is no review.
+  return today && today.right + today.wrong - (today.drills ?? 0) > 0 ? '오늘 복습을 마쳤습니다' : undefined
 }
 
 /** Claude's grade of a typed answer, as the pane and /learn quiz say it. */
@@ -2073,22 +2117,15 @@ async function askModel(
 
 /**
  * Each concept with the note it is asked from, while a note still holds it: that note's id, and the learner's
- * code from it. That note is `from` when it taught the concept (a note's own quiz asks about the code of the
- * note it was asked under), else the latest that did. Its code is screened first (a note kept before 1.6.0
- * may hold a .env), so a file left out is never quoted.
+ * code from it. That note is the latest that taught the concept. Its code is screened first (a note kept before
+ * 1.6.0 may hold a .env), so a file left out is never quoted.
  */
-async function withCode(
-  $: EngineInterface,
-  cfg: Config,
-  picks: readonly RankedConcept[],
-  map: Readonly<Record<string, string>>,
-  from?: string,
-): Promise<QuizPick[]> {
+async function withCode($: EngineInterface, cfg: Config, picks: readonly RankedConcept[], map: Readonly<Record<string, string>>): Promise<QuizPick[]> {
   const written = (await allNotes($)).filter(note => note.status === 'ready').sort((a, b) => b.at - a.at)
   const found: QuizPick[] = []
   for (const one of picks) {
     const teaches = (each: LearnNote) => each.concepts.some(key => resolveKey(map, key) === one.key)
-    const note = written.find(each => each.id === from && teaches(each)) ?? written.find(teaches)
+    const note = written.find(teaches)
     if (!note) {
       found.push(one)
       continue
@@ -2135,8 +2172,7 @@ function metTeamConcepts(
 /**
  * Asks the model for a new quiz and keeps it; or says why there is none. The
  * concepts due first, taken from different notes where it can (a wrong one
- * always), or `only` this note's (t in the pane: a note quiz that asks to
- * predict and to modify, about that note's code), never one marked known,
+ * always), never one marked known,
  * each asked about the code the learner made with it where a note still holds it,
  * and one whose slip is still open asked again in other code (1.7.0, 다시 도전).
  * In a repository whose team file has terms (1.7.0 D6), the places the concepts
@@ -2150,50 +2186,37 @@ async function makeQuiz(
   $: EngineInterface,
   cfg: Config,
   now: number,
-  only?: Pick<LearnNote, 'id' | 'concepts'>,
   mode: 'review' | 'team' = 'review',
 ): Promise<{ items: LearnQuizItem[]; at: number } | { error: string }> {
   const index = await read($, concepts)
   const map = await read($, aliases)
-  const taught = (only?.concepts ?? [])
-    .map(key => resolveKey(map, key))
-    .filter((key, i, all) => all.indexOf(key) === i)
-    .flatMap(key => {
-      const one = conceptAt(index, key)
-      return one ? [{ ...one, key }] : []
-    })
-  const isTeamQuiz = !only && mode === 'team'
-  // This repository's team terms (1.7.0 D6), the team file read again if it changed: a note's own quiz asks none.
-  const file = only ? undefined : await teamOf($, '')
+  const isTeamQuiz = mode === 'team'
+  // This repository's team terms (1.7.0 D6), the team file read again if it changed.
+  const file = await teamOf($, '')
   const terms = file?.practice ?? []
   // A concept whose slip is still open is asked again (다시 도전): told its last question, answer and slip. One whose
   // slip no quiz has gone over since its grade kept it is in the next review quiz whether due or not, as the line
   // under that grade said (slipsToAsk: 거의 marks no miss, so its review may be days off).
   const open = await storedSlips($, map, now)
-  const asking = new Set(only || isTeamQuiz ? [] : slipsToAsk(index, open, now))
-  // A concept the learner knows is asked about in no quiz, a note's own neither.
-  const chosen = only
-    ? taught.filter(one => !isKnown(one)).slice(0, 3)
-    : isTeamQuiz
-      ? metTeamConcepts(terms, index, map, now).slice(0, QUIZ_CANDIDATES)
-      : quizPick(index, now, QUIZ_CANDIDATES, [...asking])
+  const asking = new Set(isTeamQuiz ? [] : slipsToAsk(index, open, now))
+  // A concept the learner knows is asked about in no quiz.
+  const chosen = isTeamQuiz ? metTeamConcepts(terms, index, map, now).slice(0, QUIZ_CANDIDATES) : quizPick(index, now, QUIZ_CANDIDATES, [...asking])
   // The places the concepts due leave free (all three in a team quiz) go to the team terms not met yet, in the file's order.
   const dueCount = chosen.filter(one => asking.has(one.key) || isDue(one, now)).length
-  const free = only ? 0 : isTeamQuiz ? 3 : 3 - Math.min(3, dueCount)
+  const free = isTeamQuiz ? 3 : 3 - Math.min(3, dueCount)
   const fresh: QuizPick[] = unmetTerms(terms, index, map)
     .slice(0, free)
     .map(term => ({ key: termKey(term, map), name: term.name, count: 0, firstAt: now, lastAt: now, blurb: termBlurb(term.blurb, TERM_ASK_TEXT), files: [], team: true as const }))
   if (chosen.length === 0 && fresh.length === 0) {
-    if (only) return { error: taught.length > 0 ? '이 노트의 개념은 모두 아는 개념이라 퀴즈를 낼 수 없습니다. 되돌리려면 /learn 모른다 개념 이름.' : '이 노트에는 배울 개념이 없어 퀴즈를 낼 수 없습니다.' }
     if (isTeamQuiz) return { error: terms.length > 0 ? TEAM_ALL_KNOWN : NO_TEAM_TERMS }
     return { error: Object.keys(index).length > 0 ? ALL_KNOWN_TEXT : NO_CONCEPTS_FOR_QUIZ }
   }
   // A review quiz goes over more than one note where it can (three concepts from one note make one lesson
   // again), the slips to ask again and the concepts due before any other, then the team terms not met yet.
-  const found = await withCode($, cfg, chosen, map, only?.id)
+  const found = await withCode($, cfg, chosen, map)
   // A concept that came in as a team term: of this repository (any of its terms, in a team quiz) asked as one, by the
   // team's words; of another, its words are the team's all the same.
-  const marks = only ? {} : await storedTeamTerms($, map)
+  const marks = await storedTeamTerms($, map)
   const root = await $.session.root()
   const termOf = new Map<string, TeamTerm>()
   for (const term of terms) if (!termOf.has(termKey(term, map))) termOf.set(termKey(term, map), term)
@@ -2207,7 +2230,7 @@ async function makeQuiz(
   const isFirst = (one: QuizPick) => isTeamQuiz || isAsking(one) || isDue(one, now) || isFresh.has(one.key)
   // In the quiz's order: the concepts due, then the team terms not met, then the rest (a team quiz: the terms not met first).
   const candidates = isTeamQuiz ? [...fresh, ...marked] : [...marked.filter(isFirst), ...fresh, ...marked.filter(one => !isFirst(one))]
-  const spread = only ? marked : spreadPicks(candidates, 3, isFirst, isAsking)
+  const spread = spreadPicks(candidates, 3, isFirst, isAsking)
   // Each team term asked by the lines its words name (three files read at most), over the learner's code; then its slip.
   // It keeps this repository and the words its grade puts in the concept index: a quiz may be graded in any window.
   const picks: QuizPick[] = []
@@ -2218,7 +2241,7 @@ async function makeQuiz(
     const slip = openSlip(open, one.key)
     picks.push({ ...one, ...(teamCode ? { teamCode } : {}), ...origin, ...(slip ? { slip: { what: slip.what, question: slip.question, mine: slip.mine } } : {}) })
   }
-  const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level, only ? 'note' : 'review'), maxTokens: 1400 })
+  const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: 1400 })
   if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
   const items = parseQuiz(asked.text, picks)
   if (items.length === 0) {
@@ -2227,18 +2250,18 @@ async function makeQuiz(
   }
   // The quiz it replaces: a first try still waiting for its try again is graded as Claude graded it.
   await settleFirstTries($, cfg, now, true)
-  await keepQuiz($, { at: now, items, isRevealed: false, ...(only ? { from: 'note' as const } : {}) })
+  await keepQuiz($, { at: now, items, isRevealed: false })
   await update($, quizRun, run => ({ ...run, error: null }))
   await bankQuestions($, items, now)
   return { items, at: now }
 }
 
 /**
- * The pane's s (or t, on `only` this note's concepts; q for today's review): a
- * new quiz, the pane saying "making" until it is there or failed, and then the
- * first question's answer field holding the keys.
+ * The pane's s (q for today's review): a new quiz, the pane saying "making"
+ * until it is there or failed, and then the first question's answer field
+ * holding the keys.
  */
-async function startQuiz($: EngineInterface, cfg: Config, only?: Pick<LearnNote, 'id' | 'concepts'>): Promise<void> {
+async function startQuiz($: EngineInterface, cfg: Config): Promise<void> {
   if (isQuizMaking) return
   if (isQuizChecking) {
     await update($, quizRun, run => ({ ...run, error: CHECKING_TEXT }))
@@ -2247,7 +2270,7 @@ async function startQuiz($: EngineInterface, cfg: Config, only?: Pick<LearnNote,
   isQuizMaking = true
   try {
     await update($, quizRun, () => ({ isMaking: true, error: null }))
-    const made = await makeQuiz($, cfg, await $.clock.now(), only)
+    const made = await makeQuiz($, cfg, await $.clock.now())
     await update($, quizRun, () => ({ isMaking: false, error: 'error' in made ? made.error : null }))
     // A surface with no text field (the mobile app) draws none to focus: the engine says no, and nothing else happens.
     if (!('error' in made)) focusInPane($, quizFieldKey(made.at, 0))
@@ -2834,6 +2857,234 @@ async function askInPane($: EngineInterface, cfg: Config, id: string, text: stri
   } else if (error !== null) revealInPane($, askErrorKey(id), 'nearest', since)
 }
 
+/** What is typed in each practice field, by its key (onInput): a redraw gives the field what was typed, not its first line. */
+const drillDrafts = new Map<string, string>()
+/** The note whose practice line Claude is checking now: one at a time. */
+let drillChecking: string | null = null
+/** The feedback of a practice ended by a second "모르겠어요": what to do next, with no model call. */
+const DRILL_BLANK_FEEDBACK = 'a로 예시 답을 읽어 보고, 다음에 이 개념이 나오면 다시 고쳐 보세요.'
+
+/** A note's practice field: the first try's, and the try again's (a new element, holding the first try's line). */
+function drillFieldKey(id: string, isAgain = false): string {
+  return `drill-${id}${isAgain ? '-again' : ''}`
+}
+
+/** Drops what was typed in a note's practice fields: its try is over, or the note was written again. */
+function dropDrillDrafts(id: string): void {
+  drillDrafts.delete(drillFieldKey(id))
+  drillDrafts.delete(drillFieldKey(id, true))
+}
+
+/** Where the keys go in a note's practice: its field while one is drawn, else a (its example) while it is to see, else t. */
+function drillFocusKey(note: LearnNote): string {
+  const state = note.drill
+  if (!isDrillOver(state)) return drillFieldKey(note.id, state?.firstTry !== undefined)
+  return state!.verdict !== undefined && state!.verdict !== 'right' && state!.isAnswerSeen !== true ? 'note-drill-answer' : 'note-drill'
+}
+
+/**
+ * The pane's t under a note (1.7.0): its practice opened under the row of keys with no model call, the keys in its
+ * field (once it is over, on a or t). Never touches a quiz: one still being answered stays as it is.
+ */
+async function openDrill($: EngineInterface, id: string): Promise<void> {
+  await update($, drillRun, run => ({ ...run, open: id, notice: run.notice?.id === id ? run.notice : null }))
+  const note = (await read($, notes)).find(one => one.id === id)
+  if (note) focusInPane($, drillFocusKey(note))
+}
+
+/** The concept a note's practice goes over: the first the note taught (its 할 일 is asked of it), as the index has it now. */
+async function drillConcept($: EngineInterface, note: LearnNote): Promise<{ key: string; one: LearnConcept } | undefined> {
+  const first = note.concepts[0]
+  if (first === undefined) return undefined
+  const key = resolveKey(await read($, aliases), first)
+  const one = conceptAt(await read($, concepts), key)
+  return one ? { key, one } : undefined
+}
+
+/**
+ * Enter in a note's practice field (1.7.0): the line checked. Empty, unchanged, or typed in a Korean input mode, it is
+ * only said so, with no model call; any other goes to gradeDrill, the field giving way to "checking" meanwhile.
+ * Checked, the keys go on: to the try again's field, or once it is over to a or t.
+ */
+async function checkDrill($: EngineInterface, cfg: Config, id: string, text: string): Promise<void> {
+  const note = (await read($, notes)).find(one => one.id === id)
+  if (!note || note.status !== 'ready') return
+  const drill = drillOf(note.text, note.changes)
+  const state = note.drill
+  if (!drill || isDrillOver(state)) return
+  const first = state?.firstTry
+  drillDrafts.set(drillFieldKey(id, first !== undefined), text)
+  const say = async (said: string, isError = false): Promise<void> => {
+    await update($, drillRun, run => ({ ...run, open: id, notice: { id, text: said, ...(isError ? { isError: true as const } : {}) } }))
+  }
+  if (drillChecking !== null) return say('다른 줄을 확인하고 있습니다 · 잠시 뒤 다시 Enter', true)
+  const mine = text.trim()
+  if (mine === '') return say(DRILL_EMPTY)
+  if (!isBlankAnswer(mine)) {
+    // The line as it was, or as the first try left it: nothing changed to check.
+    if (sameCode(mine, drill.line) || (first !== undefined && !isBlankAnswer(first.mine) && sameCode(mine, first.mine))) return say(DRILL_UNCHANGED)
+    if (isKoreanTyped(mine, `${drill.indent}${drill.line}`)) return say(DRILL_KOREAN)
+  }
+  drillChecking = id
+  let error: string | undefined
+  try {
+    await update($, drillRun, run => ({ ...run, open: id, checking: id, notice: null }))
+    const graded = await gradeDrill($, cfg, note, drill, mine)
+    if ('error' in graded) error = graded.error
+  } catch (thrown) {
+    void fault($, 'grade', faultCode(thrown), '직접 해 보기를 확인하지 못했습니다')
+    error = '확인하지 못했습니다. 잠시 뒤 다시 해 보세요.'
+  } finally {
+    drillChecking = null
+    await update($, drillRun, run => ({ ...run, checking: null, ...(error !== undefined ? { notice: { id, text: error, isError: true as const } } : {}) }))
+  }
+  if (error !== undefined) return
+  const latest = (await read($, notes)).find(one => one.id === id)
+  if (latest) focusInPane($, drillFocusKey(latest))
+}
+
+/**
+ * A practice line graded (1.7.0), as a quiz's typed answer is: "모르겠어요" with no call (the hint the first time, then
+ * over); the example's own line right with no call; any other checked by Claude once against what to do, the check
+ * and the example, the lines around it sent with it (the note screened first). Short of right the first time, with a
+ * question asked back, it waits for one try again; else it is over (finishDrill).
+ */
+async function gradeDrill($: EngineInterface, cfg: Config, note: LearnNote, drill: Drill, mine: string): Promise<{ isFirstTry?: true } | { error: string }> {
+  const first = note.drill?.firstTry
+  const now = await $.clock.now()
+  const line = cut(mine, 1500)
+  if (isBlankAnswer(mine)) {
+    if (first === undefined) return keepDrillTry($, note.id, { mine: line, verdict: 'wrong', feedback: '', nudge: DRILL_HINT, at: now })
+    return finishDrill($, cfg, note, drill, { mine: line, verdict: 'wrong', feedback: DRILL_BLANK_FEEDBACK }, { first, at: now })
+  }
+  if (sameCode(mine, drill.example)) return finishDrill($, cfg, note, drill, { mine: line, verdict: 'right', feedback: '' }, { first, at: now })
+  // The code as it may go to a model: a file the settings or the team file leave out now is not sent.
+  const shown = await screened($, cfg, note)
+  const sent = drillOf(shown.text, shown.changes)
+  if (!sent) return { error: '이 줄은 지금 노트에서 빼는 파일에 있어 확인하지 않았습니다' }
+  const name = (await drillConcept($, note))?.one.name ?? '직접 해 보기'
+  const prompt = checkPrompt({ name, question: drillQuestion(sent), answer: sent.example, kind: 'modify' }, `${sent.indent}${mine}`, cfg.level, first)
+  const asked = await askModel($, cfg, 'grade', { system: CHECK_SYSTEM, prompt, maxTokens: 480, timeoutMs: 60_000 })
+  if ('error' in asked) return { error: `확인하지 못했습니다: ${asked.error}` }
+  const graded = parseCheck(asked.text)
+  if (!graded) {
+    void fault($, 'grade', 'unreadable', '직접 해 보기의 확인 결과를 읽지 못했습니다')
+    return { error: '확인 결과를 읽지 못했습니다. 다시 Enter를 눌러 보세요.' }
+  }
+  // The note written again meanwhile (w): its practice is another, and this line's grade is not kept on it.
+  const latest = (await read($, notes)).find(one => one.id === note.id)
+  if (!latest || latest.text !== note.text || isDrillOver(latest.drill)) return { error: '그사이 노트를 다시 써서 이 줄은 확인하지 않았습니다' }
+  // The slip this line showed, asked for on its first grade only (after "모르겠어요" too), as a quiz's.
+  const slip = (first === undefined || isBlankAnswer(first.mine)) && graded.slip !== undefined ? { slip: graded.slip, slipType: graded.slipType ?? ('other' as const) } : {}
+  const nudge = first === undefined && graded.verdict !== 'right' ? keptNudge(graded.nudge, sent.example) : undefined
+  if (nudge !== undefined && graded.verdict !== 'right') {
+    return keepDrillTry($, note.id, { mine: line, verdict: graded.verdict, feedback: graded.feedback, nudge, at: now, ...slip })
+  }
+  const verdict = first && !isBlankAnswer(first.mine) ? secondVerdict(first.verdict, graded.verdict) : graded.verdict
+  return finishDrill($, cfg, note, drill, { mine: line, verdict, feedback: graded.feedback, ...slip }, { first, at: now })
+}
+
+/** Keeps a practice's first try short of right on its note, for one try again: nothing marked or counted yet. */
+async function keepDrillTry($: EngineInterface, id: string, first: LearnQuizFirstTry): Promise<{ isFirstTry: true }> {
+  await setNote($, id, { drill: fitDrill({ firstTry: first, at: first.at }) })
+  void persist($)
+  return { isFirstTry: true }
+}
+
+/**
+ * A practice over (1.7.0): its grade kept on the note, and as a quiz's grade counts, its concept (the first the note
+ * taught, unless marked known) marked: right a step on (when due), right after a question asked back or the hint, or
+ * once the example was seen (`isSeen`), its step kept; partly right a step back; wrong back to the first, and first in
+ * the next quiz. A miss keeps its slip, the line as the answer. The day counts it right or wrong, as a practice (not
+ * toward the day's review); no quiz is touched. The journal gets a section for it.
+ */
+async function finishDrill(
+  $: EngineInterface,
+  cfg: Config,
+  note: LearnNote,
+  drill: Drill,
+  grade: Pick<LearnQuizItem, 'mine' | 'feedback' | 'slip' | 'slipType'> & { verdict: 'right' | 'partial' | 'wrong' },
+  how: { first?: LearnQuizFirstTry; at: number; isSeen?: boolean },
+): Promise<Record<string, never>> {
+  const { first, at } = how
+  const isRight = grade.verdict === 'right'
+  const isHelped = first !== undefined || how.isSeen === true
+  const state = fitDrill({
+    mine: grade.mine ?? '',
+    verdict: grade.verdict,
+    feedback: grade.feedback ?? '',
+    at,
+    ...(isRight && first !== undefined && !isBlankAnswer(first.mine) ? { isRetried: true as const } : {}),
+    ...(how.isSeen ? { isAnswerSeen: true as const } : {}),
+  })
+  await setNote($, note.id, { drill: state })
+  dropDrillDrafts(note.id)
+  void persist($)
+  const found = await drillConcept($, note)
+  if (found && !isKnown(found.one)) {
+    const mark: Mark = how.isSeen || (isRight && isHelped) ? markHelped : isRight ? markReviewed : grade.verdict === 'partial' ? markPartial : markWrong
+    if (await markConcepts($, cfg, mark, [found.key], at)) {
+      const item: LearnQuizItem = {
+        key: found.key,
+        name: found.one.name,
+        question: `직접 해 보기: ${drill.task}`,
+        answer: drill.example,
+        kind: 'modify',
+        mine: grade.mine ?? '',
+        verdict: grade.verdict,
+        feedback: grade.feedback ?? '',
+        result: isRight ? 'right' : 'wrong',
+        ...(first !== undefined && !how.isSeen ? { firstTry: first } : {}),
+        ...(grade.slip !== undefined ? { slip: grade.slip, slipType: grade.slipType ?? 'other' } : {}),
+      }
+      const isGraduated = conceptAt(await read($, concepts), found.key)?.knownAt === at
+      await recordSlip($, found.key, slipChange(item, { isHelped, isGraduated }), at)
+    }
+  }
+  await recordActivity($, stamp(at).day, isRight ? { right: 1, drills: 1 } : { wrong: 1, drills: 1 })
+  if (cfg.isAutoSave) void saveDrill($, cfg, note, drill, state)
+  return {}
+}
+
+/**
+ * The pane's a under a note's practice (1.7.0): its example answer shown. Once tried and waiting for its try again,
+ * that ends it as its first try was graded, the example seen (finishDrill); once graded, only shown. With no try, only
+ * where no field is drawn (the mobile app): shown, nothing graded.
+ */
+async function showDrillAnswer($: EngineInterface, cfg: Config, id: string, surface?: RenderSurface): Promise<void> {
+  const note = (await read($, notes)).find(one => one.id === id)
+  const drill = note && note.status === 'ready' ? drillOf(note.text, note.changes) : undefined
+  if (!note || !drill || drillChecking === id) return
+  const state = note.drill
+  if (state?.isAnswerSeen === true) return
+  const now = await $.clock.now()
+  if (state?.verdict !== undefined) await setNote($, id, { drill: { ...state, isAnswerSeen: true } })
+  else if (state?.firstTry !== undefined) {
+    const first = state.firstTry
+    const grade = { mine: first.mine, verdict: first.verdict, feedback: first.feedback, ...(first.slip !== undefined ? { slip: first.slip, slipType: first.slipType } : {}) }
+    await finishDrill($, cfg, note, drill, grade, { at: now, isSeen: true })
+  } else if (surface === 'mobile') await setNote($, id, { drill: { isAnswerSeen: true, at: now } })
+  else return
+  await update($, drillRun, run => ({ ...run, open: id, notice: run.notice?.id === id ? null : run.notice }))
+  void persist($)
+  if (surface !== 'mobile') focusInPane($, 'note-drill')
+}
+
+/** Appends a practice's grade to the journal its note is in, after any save still running; the note's request and words screened first. */
+function saveDrill($: EngineInterface, cfg: Config, note: LearnNote, drill: Drill, state: LearnDrill): Promise<string | undefined> {
+  return enqueue('saving', async () => {
+    try {
+      const shown = await screened($, cfg, note)
+      const section = drillSection(shown, { task: redactText(drill.task).text }, state, state.at)
+      // Into the journal of the note's own day: a practice never makes a journal day with no notes.
+      return await appendJournal($, cfg, note.root || (await $.session.root()), note.at, section)
+    } catch (error) {
+      void fault($, 'save', faultCode(error), '직접 해 보기를 파일에 쓰지 못했습니다')
+      return undefined
+    }
+  })
+}
+
 /** The days this project has journal files for, the newest first, each with its parts in order. */
 async function journalDays($: EngineInterface, cfg: Config): Promise<{ day: string; parts: string[] }[]> {
   const dir = (await journalDir($, cfg)).replace(/[\\/]+$/, '')
@@ -2947,9 +3198,11 @@ async function writeNote(
     const patch: Partial<LearnNote> =
       'error' in asked
         ? { status: 'failed', text: asked.fail ? noteFailText(asked.fail, cfg.model) : `${asked.error} · w로 다시 쓰기`, retry: undefined }
-        : { status: 'ready', text: closeConceptBold(cut(asked.text, 9000)), retry: undefined }
+        : { status: 'ready', text: closeConceptBold(cut(asked.text, 9000)), retry: undefined, drill: undefined }
     // A note cleared from the pane meanwhile, or left behind by a /cd, is still saved and stored from this copy.
     let done = (await setNote($, id, patch)) ?? { ...note, ...patch }
+    // Written again, its practice is a new one: what was typed for the old one goes.
+    if (done.status === 'ready') dropDrillDrafts(id)
     if (done.status === 'ready') {
       try {
         const keys = await learnConcepts($, cfg, done)
@@ -3878,7 +4131,7 @@ async function freshQuiz($: EngineInterface, cfg: Config, now: number, mode: 're
   isQuizMaking = true
   let made
   try {
-    made = await makeQuiz($, cfg, now, undefined, mode)
+    made = await makeQuiz($, cfg, now, mode)
   } finally {
     isQuizMaking = false
   }
@@ -4565,6 +4818,9 @@ export const register: Register = (on, options) => {
     const writeLabel = isRetryArmed(note) ? '바로 쓰기' : isBusy ? '쓰는 중…' : note.status === 'off' ? '노트 쓰기' : '다시 쓰기'
     // Above the code, the note's own words on what the change does differently.
     const summary = note.status === 'ready' ? changeSection(note.text) : undefined
+    // Its practice (1.7.0): a line of its code to change, t under it.
+    const drill = note.status === 'ready' ? drillOf(note.text, note.changes) : undefined
+    const practice = await read($, drillRun)
 
     const body =
       shown === 'quiz' ? (
@@ -4573,9 +4829,10 @@ export const register: Register = (on, options) => {
         conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el, slipRecord, team, marks)
       ) : shown === 'note' ? (
         <Box flexDirection="column">
-          {noteBody(note, isBusy, offText(note, cfg, now), el)}
+          {noteBody(note, isBusy, offText(note, cfg, now), el, drill)}
           {note.status === 'ready' && note.concepts.length > 0 && conceptLine(note, index, map, el)}
-          {note.status === 'ready' && noteTools($, cfg, note, writeLabel, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el, e.surface)}
+          {note.status === 'ready' &&
+            noteTools($, cfg, note, writeLabel, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el, e.surface, drill, practice, isTerminalFocus)}
         </Box>
       ) : (
         <Box flexDirection="column">
@@ -4807,32 +5064,40 @@ function fieldOf(el: ElementTable, surface: RenderSurface): ElementConstructor<I
 }
 
 /**
- * Under a written note, what to do with it: a quiz on its concepts (t), the
- * note explained again in plainer words under it, the note kept (e), its code
- * followed step by step on one example (r), a question about it (i, the field
- * below), and last and dim the note copied for a mentor (c) and written again
- * (w), with the latest questions and their answers.
+ * Under a written note, what to do with it: its practice (t, 1.7.0: a line of
+ * its code changed in a field below, the file left as it is; where no field is
+ * drawn, a shows its example), the note explained again in plainer words under
+ * it, the note kept (e), its code followed step by step on one example (r), a
+ * question about it (i, the field below), and last and dim the note copied for
+ * a mentor (c) and written again (w), with the practice once opened or tried,
+ * then the latest questions and their answers. A note with no practice (one
+ * before 1.7.0, a change with no line to change) has no t: q goes over its
+ * concepts with the rest.
  */
-function noteTools($: EngineInterface, cfg: Config, note: LearnNote, writeLabel: string, ask: LearnAskRun, el: ElementTable, surface: RenderSurface) {
+function noteTools(
+  $: EngineInterface,
+  cfg: Config,
+  note: LearnNote,
+  writeLabel: string,
+  ask: LearnAskRun,
+  el: ElementTable,
+  surface: RenderSurface,
+  drill: Drill | undefined,
+  practice: LearnDrillRun,
+  isFocused: boolean,
+) {
   const { Box, Text, Button, Markdown } = el
   // The mobile app draws no text field yet: there a question goes through /learn ask.
   const Input = fieldOf(el, surface)
   const fieldKey = `ask-${note.id}`
+  const isPractice = drill !== undefined && (practice.open === note.id || note.drill !== undefined)
   return (
     <Box flexDirection="column" marginTop={1}>
       <Box flexWrap="wrap" columnGap={2}>
         <Text dimColor>이 노트로</Text>
-        {note.concepts.length > 0 && (
-          <Button
-            key="note-quiz"
-            hotkey="t"
-            plain
-            label="이 노트 퀴즈"
-            onPress={async () => {
-              await update($, view, () => 'quiz')
-              void startQuiz($, cfg, note)
-            }}
-          />
+        {drill && Input && <Button key="note-drill" hotkey="t" plain label="직접 해 보기" onPress={() => void openDrill($, note.id)} />}
+        {drill && !Input && note.drill?.isAnswerSeen !== true && note.drill?.verdict !== 'right' && (
+          <Button key="note-drill-answer" hotkey="a" plain label="예시 답" onPress={press => void showDrillAnswer($, cfg, note.id, press.surface)} />
         )}
         <Button
           key="easier"
@@ -4849,6 +5114,7 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, writeLabel:
         <Button key="share" hotkey="c" plain dimColor label="복사" onPress={press => void shareNote($, cfg, note.id, press.surface)} />
         <Button key="write" hotkey="w" plain dimColor label={writeLabel} onPress={() => void writeNote($, cfg, note.id, { isRewrite: note.savedAs !== null })} />
       </Box>
+      {isPractice && drillView($, cfg, note, drill, practice, isFocused, el, surface)}
       {(note.asks ?? []).map((one, i, all) => ({ one, key: askedKey(note.id, all, i) })).slice(-2).map(({ one, key }) => (
         <Box key={key} flexDirection="column" marginTop={1}>
           <Text color="cyan" wrap="wrap">
@@ -4874,6 +5140,103 @@ function noteTools($: EngineInterface, cfg: Config, note: LearnNote, writeLabel:
           <Text color="red" wrap="wrap">
             {ask.error}
           </Text>
+        </Box>
+      )}
+    </Box>
+  )
+}
+
+/**
+ * A note's practice under its row of keys (1.7.0, t): over its field, that it is practice and the file stays as it is;
+ * a first try short of right with Claude's feedback and the question asked back; the line to change in a field of its
+ * own between the lines above and below it, numbered as the file is (the field's label its number: the terminal puts
+ * `: ` after it; the line's indent stays out of the field, fixed, and goes back on when it is checked); then a
+ * (the example) once tried, and how to send it. Over, the grade: done (the example beside a line of the learner's
+ * own), or not, with its feedback and the example on a. Where no field is drawn (the mobile app), only the example
+ * once a showed it.
+ */
+function drillView($: EngineInterface, cfg: Config, note: LearnNote, drill: Drill, run: LearnDrillRun, isFocused: boolean, el: ElementTable, surface: RenderSurface) {
+  const { Box, Text, Markdown, Button } = el
+  const Input = fieldOf(el, surface)
+  const state = note.drill
+  const isOver = isDrillOver(state)
+  const first = isOver ? undefined : state?.firstTry
+  const isChecking = run.checking === note.id
+  const notice = run.notice?.id === note.id ? run.notice : null
+  const width = String(drill.n + 1).length
+  const num = (n: number) => String(n).padStart(width)
+  const fieldKey = drillFieldKey(note.id, first !== undefined)
+  const answer = (
+    <Button key="note-drill-answer" hotkey="a" plain label="예시 답" onPress={press => void showDrillAnswer($, cfg, note.id, press.surface)} />
+  )
+  const example = <Markdown text={`**예시 답:** ${inlineCode(drill.example)}`} />
+  return (
+    <Box key={`drill-${note.id}`} flexDirection="column" marginTop={1}>
+      {Input && !isOver && <Text dimColor>{DRILL_HEAD}</Text>}
+      {first && (
+        <Box flexDirection="column">
+          <Text color={first.verdict === 'partial' || isBlankAnswer(first.mine) ? 'yellow' : 'red'} wrap="wrap">
+            {drillTryHead(first)}
+          </Text>
+          {first.feedback !== '' && <Markdown text={first.feedback} />}
+          <Markdown text={`**${isBlankAnswer(first.mine) ? '힌트' : '되묻기'}:** ${first.nudge}`} />
+        </Box>
+      )}
+      {Input && !isOver && isChecking && <Text color="cyan">확인하는 중입니다…</Text>}
+      {Input && !isOver && !isChecking && (
+        <Box flexDirection="column">
+          {drill.above !== undefined && (
+            <Text dimColor wrap="truncate-end">
+              {num(drill.n - 1)}
+              {'  '}
+              {shownText(drill.above)}
+            </Text>
+          )}
+          <Input
+            key={fieldKey}
+            label={num(drill.n)}
+            placeholder="고친 줄"
+            submitLabel="확인"
+            value={drillDrafts.get(fieldKey) ?? (first !== undefined && !isBlankAnswer(first.mine) ? first.mine : drill.line)}
+            onInput={value => void drillDrafts.set(fieldKey, value)}
+            onSubmit={value => void checkDrill($, cfg, note.id, value)}
+          />
+          {drill.below !== undefined && (
+            <Text dimColor wrap="truncate-end">
+              {num(drill.n + 1)}
+              {'  '}
+              {shownText(drill.below)}
+            </Text>
+          )}
+          {first && <Box>{answer}</Box>}
+        </Box>
+      )}
+      {notice && (
+        <Text color={notice.isError ? 'red' : 'yellow'} wrap="wrap">
+          {notice.text}
+        </Text>
+      )}
+      {Input && !isOver && !isChecking && (
+        <Text dimColor wrap="wrap">
+          {first ? `Enter: 다시 확인 · 코드는 영문 상태에서${isFocused ? ' · Tab: 버튼으로 (a 예시 답)' : ''}` : 'Enter: 확인 · 코드는 영문 상태에서'}
+        </Text>
+      )}
+      {isOver && state!.verdict === undefined && example}
+      {isOver && state!.verdict !== undefined && (
+        <Box flexDirection="column">
+          <Text color={state!.verdict === 'right' ? 'green' : state!.verdict === 'partial' ? 'yellow' : 'red'} wrap="wrap">
+            {drillVerdictText(state!)}
+          </Text>
+          {state!.verdict === 'right' && state!.mine !== undefined && !sameCode(state!.mine, drill.example) && (
+            <Markdown text={`예시 답과 견주기: ${inlineCode(drill.example)}`} />
+          )}
+          {(state!.feedback ?? '') !== '' && <Markdown text={state!.feedback!} />}
+          {state!.mine !== undefined && state!.mine !== '' && !isBlankAnswer(state!.mine) && (
+            <Text dimColor wrap="wrap">
+              내 줄: {state!.mine}
+            </Text>
+          )}
+          {state!.verdict !== 'right' && (state!.isAnswerSeen ? example : <Box>{answer}</Box>)}
         </Box>
       )}
     </Box>
@@ -4911,13 +5274,18 @@ function liveView(running: LearnLive, isDock: boolean, isAutoNote: boolean, el: 
 
 /**
  * A note as written, its "무엇이 바뀌었나" drawn as 전 / 후 / 예 lines in the
- * before/after view's colours when the note has them in that shape.
+ * before/after view's colours when the note has them in that shape, and its
+ * practice (1.7.0) with no line to change and no example answer (hideDrillAnswer;
+ * t under the note shows the line, a its example once tried), its heading naming
+ * the file the line is in.
  */
-function noteBody(note: LearnNote, isBusy: boolean, off: string, el: ElementTable) {
+function noteBody(note: LearnNote, isBusy: boolean, off: string, el: ElementTable, drill?: Drill) {
   const { Box, Text, Markdown } = el
   if (note.status === 'ready') {
-    const section = changeSection(note.text)
-    if (!section) return <Markdown text={note.text} />
+    // Wherever the practice stands in the note, before or after the change section.
+    const text = hideDrillAnswer(note.text, drill ? baseName(drill.file) : undefined)
+    const section = changeSection(text)
+    if (!section) return <Markdown text={text} />
     return (
       <Box flexDirection="column">
         {section.head !== '' && <Markdown text={section.head} />}
@@ -5783,7 +6151,7 @@ function quizView(
   return (
     <Box flexDirection="column">
       <Text bold wrap="truncate-end">
-        {current?.from === 'note' ? '이 노트 퀴즈' : isTeamOnlyQuiz(items) ? '팀 용어 퀴즈' : '복습 퀴즈'}
+        {isTeamOnlyQuiz(items) ? '팀 용어 퀴즈' : '복습 퀴즈'}
         {current && items.length > 0 && (
           <Text dimColor>
             {' '}
@@ -6028,7 +6396,7 @@ const HELP = [
   '- `/learn`: 패널 열기 · 패널의 키를 쓰려면 `ctrl+x tab`(또는 패널 클릭), Esc로 대화로 돌아갑니다 (숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다)',
   '- `/learn 복습`: 오늘 복습을 패널 퀴즈로 바로 시작 · 답 칸에 바로 적고 Enter (패널이 없는 화면에서는 대화창에 문제를 냅니다)',
   '- 패널: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작 · `p`·`n` 이전·다음 노트 · `w` 노트 쓰기, 다시 쓰기',
-  '- 노트 아래: `t` 이 노트 퀴즈 · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기 · `c` 복사(요청·경로를 빼고 멘토에게 묻기)',
+  '- 노트 아래: `t` 직접 해 보기 · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기 · `c` 복사(요청·경로를 빼고 멘토에게 묻기)',
   '- 퀴즈(`4`): 답을 적고 Enter로 채점 · 틀리면 되묻기를 보고 한 번 더 (모르면 `모르겠어요`) · 답 칸에서 Tab으로 버튼에 가서 `h` 힌트 · `a` 정답 · `o`·`x` 정답을 본 뒤 맞힘·틀림 · `f` 채점 바꾸기 · `s` 새 문제(풀던 문제가 남았으면 두 번) · `n` 틀린 개념을 배운 노트',
   '- `/learn 퀴즈`: 대화창에서 풀기 · 풀던 퀴즈, 없으면 복습할 개념으로 새 퀴즈 (내 코드의 결과를 맞히거나 바꿔 봅니다) · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트`(`힌트 2`) · `정답`',
   '- `/learn 정리`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
@@ -6118,7 +6486,8 @@ function noteState(note: LearnNote): string {
 function noteAsText(note: LearnNote): string {
   const files = note.changes.map(c => `${c.file} (+${c.added} −${c.removed})`).join(', ')
   const more = note.moreFiles > 0 ? ` 외 ${note.moreFiles}개` : ''
-  const body = note.status === 'ready' ? note.text : `(${noteState(note)})`
+  // Its practice with no line to change and no example answer (1.7.0): those are shown once tried, in the pane.
+  const body = note.status === 'ready' ? hideDrillAnswer(note.text) : `(${noteState(note)})`
   const withheld = (note.withheld ?? []).length > 0 ? `\n\n노트에서 뺀 파일: ${withheldText(note.withheld ?? [])}` : ''
   return `**${stamp(note.at).time} · ${files}${more}**${withheld}\n\n${body}`
 }

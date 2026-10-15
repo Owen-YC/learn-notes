@@ -94,6 +94,36 @@ export type LearnNote = {
    * its own try again included. A w starts the note over and clears it.
    */
   resumed?: true
+  /** How the learner did at the note's practice (`### 직접 해 보기`, t under it, 1.7.0); absent while never tried. */
+  drill?: LearnDrill
+}
+
+/**
+ * A note's practice as the learner left it (1.7.0, LearnNote.drill; 1KB of JSON at most): a first try short of right
+ * that Claude asked back on, waiting for its one try again; or the last grade (`verdict`), with the line it graded
+ * (`mine`, its secrets masked), Claude's feedback ('' for a grade made with no call) and `isRetried` when it came
+ * right on the try again; and `isAnswerSeen` once the example answer was shown (a), a grade or none (where no field
+ * is drawn, the example is shown with no try). The project's file is never changed.
+ */
+export type LearnDrill = {
+  mine?: string
+  verdict?: 'right' | 'partial' | 'wrong'
+  feedback?: string
+  firstTry?: LearnQuizFirstTry
+  isRetried?: true
+  isAnswerSeen?: true
+  /** Milliseconds since the epoch of its last change. */
+  at: number
+}
+
+/**
+ * The pane's practice under a note (1.7.0, t): the note whose practice is open, the one whose line Claude is checking
+ * now, and what the last Enter there said when it checked nothing (no change, a Korean input mode) or could not check.
+ */
+export type LearnDrillRun = {
+  open: string | null
+  checking: string | null
+  notice: { id: string; text: string; isError?: boolean } | null
 }
 
 /** One question about a note and the model's answer; a key's (r, e) is kept as its label (`예시로 따라가기`, `더 쉽게`). */
@@ -180,7 +210,7 @@ export type LearnQuizItem = {
    * absent on quizzes made before 1.6.0, or when the model named none.
    */
   kind?: 'predict' | 'why' | 'modify'
-  /** The note that taught its concept, whose code the question was made from (a note quiz's own note, else the latest that did); absent when no note held it. */
+  /** The note that taught its concept, whose code the question was made from (the latest that did; a note's own quiz before 1.7.0, that note); absent when no note held it. */
   noteId?: string
   /**
    * A typed answer's first try short of right, kept while the question waits for one try again (1.7.0): absent on
@@ -252,8 +282,11 @@ export type LearnSlipType = 'order' | 'reference' | 'scope' | 'coercion' | 'boun
  */
 export type LearnSlip = { what: string; type: LearnSlipType; question: string; mine: string; at: number; times: number; fixedAt?: number; isRight?: true }
 
-/** One day's learning: notes written, and quiz answers the learner graded right and wrong. */
-export type LearnDayActivity = { notes: number; right: number; wrong: number }
+/**
+ * One day's learning: notes written, and quiz answers the learner graded right and wrong. `drills` (1.7.0): how many of
+ * those answers were a note's practice (t), which count right and wrong but not toward the day's review; absent for none.
+ */
+export type LearnDayActivity = { notes: number; right: number; wrong: number; drills?: number }
 
 /**
  * One day's model calls this plugin made (notes, quizzes, grades, questions, recaps): how many, how many of
@@ -299,10 +332,10 @@ declare module 'claude-code' {
       /** Concept keys merged into others (/learn merge): old key → the key it counts under now. */
       aliases: Record<string, string>
       /**
-       * The last quiz: its questions, whether every answer was shown (/learn quiz 정답 before 1.6.0; now written
-       * false), and `from: 'note'` for a note's own quiz (t under a note).
+       * The last quiz: its questions, and whether every answer was shown (/learn quiz 정답 before 1.6.0; now written
+       * false). A note's own quiz (t before 1.7.0, `from: 'note'` in the store) reads as a review quiz.
        */
-      quiz: { at: number; items: LearnQuizItem[]; isRevealed: boolean; from?: 'note' } | null
+      quiz: { at: number; items: LearnQuizItem[]; isRevealed: boolean } | null
       /** The pane's quiz request: whether one is out, and the last failure to show. */
       quizRun: LearnQuizRun
       /** The pane's questions about notes, by note id: whose answer is being written, and the last failure to show. */
@@ -323,6 +356,8 @@ declare module 'claude-code' {
        * tags (rootTag), mirrored from the plugin's store for drawing (`· 팀 용어` on the concept's line).
        */
       teamTerms: Record<string, string[]>
+      /** The pane's practice under a note (1.7.0, t): which is open, which is being checked, the last word said. */
+      drillRun: LearnDrillRun
     }
   }
 }

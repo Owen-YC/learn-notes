@@ -311,7 +311,7 @@ describe('the note', () => {
     expect(text).toContain('+const b = 2')
     expect(text).toContain('### a.ts (수정, +1 −1)')
     expect(text).toContain('파일 2개가 더')
-    for (const heading of ['한 줄 요약', '무엇이 바뀌었나', '왜 이렇게 바꿨을까', '배울 개념', '직접 확인해 볼 것']) {
+    for (const heading of ['한 줄 요약', '무엇이 바뀌었나', '왜 이렇게 바꿨을까', '배울 개념', '직접 해 보기']) {
       expect(text).toContain(`### ${heading}`)
     }
   })
@@ -2433,15 +2433,12 @@ describe('1.6.0: quiz kinds, spread across notes', () => {
     expect(parseQuiz('Q1: 하나\nA1: 하나\nQ2: 둘\nA2: 둘', fromNotes).map(one => one.noteId)).toEqual(['n1', undefined])
   })
 
-  test('the quiz prompt asks for a kind with each question: all three in a review, predict and modify in a note\'s own', () => {
+  test('the quiz prompt asks for a kind with each question, all three (a note\'s own quiz is gone since 1.7.0)', () => {
     const review = quizPrompt(picks, 'beginner')
     expect(review).toContain('T1: (예측 · 왜 · 바꿔 보기 중 하나)\nQ1: (문제 한두 문장)')
     expect(review).toContain('한 퀴즈 안에서는 되도록 서로 다른 유형으로 낸다')
     expect(review).not.toContain('예측과 바꿔 보기만')
-    const note = quizPrompt(picks, 'beginner', 'note')
-    expect(note).toContain('예측과 바꿔 보기만')
-    expect(note).toContain('T1: (예측 · 바꿔 보기 중 하나)')
-    expect(note).toContain('노트의 정의를 그대로 되묻지 않는다')
+    expect(review).not.toContain('노트의 정의를 그대로 되묻지 않는다')
   })
 
   test('a typed answer is graded by what its kind asks; a question with no kind as before', () => {
