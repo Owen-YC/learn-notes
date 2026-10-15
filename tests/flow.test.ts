@@ -8732,7 +8732,8 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     const { label, placeholder, submitLabel } = field!.props as { label: string; placeholder: string; submitLabel: string }
     expect(cells(`${label}: ${placeholder} ⏎ ${submitLabel}`)).toBeLessThanOrEqual(FIELD_CELLS)
     expect(await ui.find({ type: 'Text', text: '4  }' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'Enter: 확인 · 코드는 영문 상태에서' })).toBeDefined()
+    // The field holds every letter and number key: how to get back to the buttons (the spec's words first).
+    expect(await ui.find({ type: 'Text', text: 'Enter: 확인 · 코드는 영문 상태에서 · Tab: 버튼으로 (1~4 보기)' })).toBeDefined()
     expect(focusesOf(w).at(-1)).toBe(`drill-${id}`)
     // Before one try there is no example to see.
     expect(await ui.find({ type: 'Button', key: 'note-drill-answer' })).toBeUndefined()
@@ -9019,5 +9020,274 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     await ui.press({ key: 'note-drill' })
     expect((await ui.find({ type: 'Input', key: `drill-${id}` }))?.props.value).toBe(LINE)
     await ui.unmount()
+  })
+
+  test('(검토) the pane not holding the keys says no Tab: the spec\'s words alone', async ($, on) => {
+    const { ui } = await practiced($, on)
+    await ui.unmount()
+    const unfocused = await pane($, 'terminal', { ...PANE_PROPS, isFocused: false })
+    await unfocused.press({ key: 'note-drill' })
+    expect(await unfocused.find({ type: 'Text', text: 'Enter: 확인 · 코드는 영문 상태에서' })).toBeDefined()
+    await unfocused.unmount()
+  })
+
+  test('(검토) right on the try again after a question asked back: done, 되짚어 맞힘, its step kept', async ($, on) => {
+    const known = { 'c:템플릿리터럴': { name: '템플릿 리터럴', count: 1, firstAt: NOW - 60 * DAY, lastAt: NOW - 60 * DAY, blurb: '', files: [], step: 2, reviewedAt: NOW - 30 * DAY } }
+    const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', known], ['steps', ownSteps(known)]])
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    w.answer = WRONG
+    await ui.input({ key: `drill-${id}`, text: 'return `안녕하세요, ${name}님!!`' })
+    await w.clock.settle()
+    w.answer = '판정: 맞음\n피드백: 이제 이름이 비면 "손님"이 됩니다.'
+    const mine = 'return `안녕하세요, ${name ? name : "손"}님!`'
+    await ui.input({ key: `drill-${id}-again`, text: mine })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(3)
+    expect((await ui.find({ type: 'Text', text: '✓ 해냈습니다 · 되짚어 맞힘' }))?.props.color).toBe('green')
+    expect(await ui.find({ type: 'Markdown', text: `예시 답과 견주기: \`\` ${EXAMPLE} \`\`` })).toBeDefined()
+    expect(noteOf(store).drill).toMatchObject({ verdict: 'right', mine, isRetried: true })
+    // Gone over with help: its step kept, never a step on; no miss.
+    expect(concept(store).step).toBe(2)
+    expect(concept(store).reviewedAt).toBeGreaterThanOrEqual(NOW)
+    expect(concept(store).missedAt).toBeUndefined()
+    expect(store.get('activity')).toMatchObject({ '2026-10-03': { right: 1, wrong: 0, drills: 1 } })
+    expect(w.journal().at(-1)!.text).toContain('**판정**: ✓ 해냈습니다 · 되짚어 맞힘')
+    expect(focusesOf(w).at(-1)).toBe('note-drill')
+    await ui.unmount()
+  })
+
+  test('(검토) a note written again while its line is checked keeps no grade for that line, and says so', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    w.model = 'hold'
+    await ui.input({ key: `drill-${id}`, text: 'return `안녕하세요, ${name ? name : "손"}님!`' })
+    expect(await ui.find({ type: 'Text', text: '확인하는 중입니다…' })).toBeDefined()
+    // Written again meanwhile, its call answered at once.
+    w.model = 'ok'
+    w.answer = PRACTICE_NOTE.replace('이름을 받아 인사하는 함수를 만들었습니다', '이름을 받아 공손하게 인사하는 함수입니다')
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(3)
+    w.answer = '판정: 맞음\n피드백: 좋습니다.'
+    w.release()
+    await w.clock.settle()
+    expect((await ui.find({ type: 'Text', text: '그사이 노트를 다시 써서 이 줄은 확인하지 않았습니다' }))?.props.color).toBe('red')
+    expect(await ui.find({ type: 'Text', text: /^✓ 해냈습니다/ })).toBeUndefined()
+    expect(noteOf(store).drill).toBeUndefined()
+    expect(store.get('activity')).toMatchObject({ '2026-10-03': { right: 0, wrong: 0 } })
+    expect(concept(store).reviewedAt).toBeUndefined()
+    // The new practice's field holds its line as the code has it.
+    expect((await ui.find({ type: 'Input', key: `drill-${id}` }))?.props.value).toBe(LINE)
+    await ui.unmount()
+  })
+
+  test('(검토) one line is checked at a time: Enter under another note meanwhile says so, with no call, and keeps what was typed', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, id } = await written($, on, store)
+    await turn($, () => $.tool.call({ ...WRITE_HELLO, tool_use_id: 'h2' }), 't2')
+    await finish(w)
+    const second = noteOf(store).id
+    expect(second).not.toBe(id)
+    const ui = await pane($)
+    await ui.press({ key: 'note-drill' })
+    w.model = 'hold'
+    await ui.input({ key: `drill-${second}`, text: 'return `안녕하세요, ${name ? name : "손"}님!`' })
+    expect(w.models).toHaveLength(3)
+    await ui.press({ key: 'prev' })
+    await ui.press({ key: 'note-drill' })
+    const typed = 'return `안녕하세요, ${name ?? "손"}님!`'
+    await ui.input({ key: `drill-${id}`, text: typed })
+    expect(w.models).toHaveLength(3)
+    expect((await ui.find({ type: 'Text', text: '다른 줄을 확인하고 있습니다 · 잠시 뒤 다시 Enter' }))?.props.color).toBe('red')
+    expect((await ui.find({ type: 'Input', key: `drill-${id}` }))?.props.value).toBe(typed)
+    w.answer = '판정: 맞음\n피드백: 좋습니다.'
+    w.release()
+    await w.clock.settle()
+    await ui.unmount()
+  })
+
+  test('(검토) a line in a file the team file leaves out now is never sent: said so with no call; the example\'s own line still needs none', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    w.files.set('/proj/.claude/learn-notes.md', '## 빼기\n- src/**\n')
+    await ui.press({ key: 'note-drill' })
+    await ui.input({ key: `drill-${id}`, text: 'return `안녕하세요, ${name ? name : "손"}님!`' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(1)
+    expect((await ui.find({ type: 'Text', text: '이 줄은 지금 노트에서 빼는 파일에 있어 확인하지 않았습니다' }))?.props.color).toBe('red')
+    expect(noteOf(store).drill).toBeUndefined()
+    await ui.input({ key: `drill-${id}`, text: EXAMPLE })
+    expect(w.models).toHaveLength(1)
+    expect(await ui.find({ type: 'Text', text: '✓ 해냈습니다' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('(검토) a check a reload cut off is not coming back: the reload\'s session start draws the field again', async ($, on) => {
+    // The load the reload ends: the host refuses its last word on the pane's state.
+    let isGone = false
+    on('state.set', { plugin: 'learn-notes', key: 'drillRun' }, async (_$, e, next) => (isGone && e.value.checking === null ? { deny: 'this load is gone' } : next(e)))
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    w.model = 'hold'
+    w.answer = '읽을 수 없는 답'
+    await ui.input({ key: `drill-${id}`, text: 'return `안녕하세요, ${name ? name : "손"}님!`' })
+    expect(await ui.find({ type: 'Text', text: '확인하는 중입니다…' })).toBeDefined()
+    isGone = true
+    w.release()
+    await w.clock.settle()
+    isGone = false
+    // The next load's session start: nothing is checking any more.
+    await start($)
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: '확인하는 중입니다…' })).toBeUndefined()
+    expect((await ui.find({ type: 'Input', key: `drill-${id}` }))?.props.value).toBe('return `안녕하세요, ${name ? name : "손"}님!`')
+    // A session start while a check of this load runs (a call that takes its time) leaves it running.
+    w.replies = ['timeout']
+    await ui.input({ key: `drill-${id}`, text: 'return `안녕하세요, ${name ? name : "손"}님!`' })
+    expect(await ui.find({ type: 'Text', text: '확인하는 중입니다…' })).toBeDefined()
+    await start($)
+    expect(await ui.find({ type: 'Text', text: '확인하는 중입니다…' })).toBeDefined()
+    await w.clock.advance(60_000)
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: '확인하는 중입니다…' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^확인하지 못했습니다/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('(검토) where no field is drawn, a practice the terminal left wrong has one a, and it shows the example', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    await ui.input({ key: `drill-${id}`, text: '몰라요' })
+    await ui.input({ key: `drill-${id}-again`, text: '모르겠어요' })
+    expect(await ui.find({ type: 'Text', text: '✗ 틀림' })).toBeDefined()
+    await ui.unmount()
+    const phone = await $.ui.mount({ plugin: 'learn-notes', surface: 'mobile', component: 'Pane', requestId: 'learn-notes', props: PANE_PROPS })
+    expect(await phone.findAll({ type: 'Button', key: 'note-drill-answer' })).toHaveLength(1)
+    await phone.press({ key: 'note-drill-answer' })
+    expect(await phone.find({ type: 'Text', text: '✗ 틀림 · 예시 답 봄' })).toBeDefined()
+    expect(await phone.find({ type: 'Markdown', text: `**예시 답:** \`\` ${EXAMPLE} \`\`` })).toBeDefined()
+    expect(await phone.findAll({ type: 'Button', key: 'note-drill-answer' })).toHaveLength(0)
+    expect(w.models).toHaveLength(1)
+    await phone.unmount()
+  })
+
+  test('(검토) where no field is drawn, a first try waiting for its try again says where to try it, and a ends it', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    w.answer = WRONG
+    await ui.input({ key: `drill-${id}`, text: 'return `안녕하세요, ${name}님!!`' })
+    await w.clock.settle()
+    // The terminal says nothing of it: the field is there.
+    expect(await ui.find({ type: 'Text', text: '한 번 더는 터미널·데스크톱 패널에서 고칩니다 · a: 예시 답' })).toBeUndefined()
+    await ui.unmount()
+    const phone = await $.ui.mount({ plugin: 'learn-notes', surface: 'mobile', component: 'Pane', requestId: 'learn-notes', props: PANE_PROPS })
+    expect(await phone.find({ type: 'Text', text: '✗ 아직입니다 · 한 번 더 고쳐 보세요' })).toBeDefined()
+    expect(await phone.find({ type: 'Markdown', text: '**되묻기:** name이 빈 문자열이면 무엇이 찍힐까요?' })).toBeDefined()
+    expect(await phone.find({ type: 'Text', text: '한 번 더는 터미널·데스크톱 패널에서 고칩니다 · a: 예시 답' })).toBeDefined()
+    expect(await phone.findAll({ type: 'Button', key: 'note-drill-answer' })).toHaveLength(1)
+    await phone.press({ key: 'note-drill-answer' })
+    expect(await phone.find({ type: 'Text', text: '✗ 틀림 · 예시 답 봄' })).toBeDefined()
+    expect(await phone.find({ type: 'Text', text: '한 번 더는 터미널·데스크톱 패널에서 고칩니다 · a: 예시 답' })).toBeUndefined()
+    await phone.unmount()
+  })
+
+  test('(검토) /learn where no pane can show says how to do the practice and where its example is', async ($, on) => {
+    const note = {
+      id: 'n1', turnId: 't1', at: NOW - 3_600_000, prompt: '인사 함수를 만들어 줘', answer: '',
+      changes: [{ file: 'src/hello.js', path: '/proj/src/hello.js', tool: 'Write', kind: 'create', added: 4, removed: 0, diff: ['@@ -0,0 +1,4 @@', ...HELLO.trim().split('\n').map(line => `+${line}`)].join('\n'), isCut: false }],
+      moreFiles: 0, status: 'ready', text: PRACTICE_NOTE, savedAs: 'ready', isPast: false, root: '/proj', updatedAt: NOW - 3_600_000, concepts: ['c:템플릿리터럴'],
+    }
+    const store = new Map<string, unknown>([['history', { '/proj': { at: NOW, notes: [note] } }]])
+    world(on, 'ok', null, false, store)
+    await start($)
+    const shown = (await learn($, '')).text ?? ''
+    expect(shown).toContain('- 확인: `greet("")` → "안녕하세요, 손님!"\n\n직접 해 보기: 패널에서 t로 고쳐 확인합니다 · 예시 답은 일지 파일에 있습니다')
+    expect(shown).not.toContain('name || "손"')
+    // The record Claude reads has no such line: it is for the learner.
+    const told = String((await $.tool.call({ tool: TOOL, action: 'note' })).result)
+    expect(told).not.toContain('패널에서 t로')
+  })
+
+  test('(검토) /learn where no pane can show, with notes kept in no file: how to do the practice, no file named', { options: { autoSave: false } }, async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, false, store)
+    await start($)
+    w.answer = PRACTICE_NOTE
+    await turn($, () => $.tool.call(WRITE_HELLO))
+    await finish(w)
+    const shown = (await learn($, '')).text ?? ''
+    expect(shown).toContain('\n\n직접 해 보기: 패널에서 t로 고쳐 확인합니다')
+    expect(shown).not.toContain('일지 파일')
+  })
+
+  test('(검토) a practice whose change is the quotes, in a language that reads them apart: the example is done with no call', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const RB = ['def greet(name)', "  puts 'Hello, #{name}!'", 'end', ''].join('\n')
+    w.answer = [
+      '### 한 줄 요약',
+      '인사 함수를 만들었습니다',
+      '### 배울 개념',
+      '- **문자열 보간**: 문자열 안에 값을 넣습니다 — `#{name}`',
+      '### 직접 해 보기',
+      '- 할 일: 이름이 실제로 찍히게 바꿔 보세요',
+      "- 고칠 줄: `puts 'Hello, #{name}!'`",
+      '- 확인: `greet("Kim")` → Hello, Kim!',
+      '- 예시 답: `puts "Hello, #{name}!"`',
+    ].join('\n')
+    await turn($, () => $.tool.call({ tool: 'Write', tool_use_id: 'r1', file_path: '/proj/greet.rb', content: RB }))
+    await finish(w)
+    const ui = await pane($)
+    const id = noteOf(store).id
+    await ui.press({ key: 'note-drill' })
+    expect((await ui.find({ type: 'Input', key: `drill-${id}` }))?.props.value).toBe("puts 'Hello, #{name}!'")
+    await ui.input({ key: `drill-${id}`, text: 'puts "Hello, #{name}!"' })
+    expect(w.models).toHaveLength(1)
+    expect(await ui.find({ type: 'Text', text: '아직 바꾼 곳이 없습니다 · 줄을 고친 뒤 Enter' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: '✓ 해냈습니다' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('(검토) a first try a past day left waiting is ended at the next session start as Claude graded it, on its own day', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    w.answer = WRONG
+    const mine = 'return `안녕하세요, ${name}님!!`'
+    await ui.input({ key: `drill-${id}`, text: mine })
+    await w.clock.settle()
+    await ui.unmount()
+    // The same day: it waits for its try again.
+    await start($)
+    await w.clock.settle()
+    expect(noteOf(store).drill).toMatchObject({ firstTry: { mine } })
+    expect(Object.keys((store.get('slips') as Record<string, unknown> | undefined) ?? {})).toHaveLength(0)
+    await w.clock.advance(DAY)
+    await start($)
+    await w.clock.settle()
+    expect(noteOf(store).drill).toMatchObject({ verdict: 'wrong', mine })
+    expect(noteOf(store).drill?.firstTry).toBeUndefined()
+    expect(concept(store)).toMatchObject({ step: 0, missedAt: expect.any(Number) })
+    expect(concept(store).missedAt!).toBeLessThan(NOW + DAY)
+    expect(store.get('activity')).toMatchObject({ '2026-10-03': { right: 0, wrong: 1, drills: 1 } })
+    expect(Object.values(store.get('slips') as Record<string, { what: string; mine: string }>)).toEqual([
+      expect.objectContaining({ what: '빈 문자열도 이름이 있는 것으로 봄', mine }),
+    ])
+    expect(w.journal().at(-1)!.text).toContain('**판정**: ✗ 틀림')
+    const later = await pane($)
+    expect(await later.find({ type: 'Text', text: '✗ 틀림' })).toBeDefined()
+    expect(await later.find({ type: 'Button', key: 'note-drill-answer' })).toBeDefined()
+    expect(await later.find({ type: 'Input', key: `drill-${id}-again` })).toBeUndefined()
+    // Once: a later start grades it no more.
+    await start($)
+    await w.clock.settle()
+    expect(store.get('activity')).toMatchObject({ '2026-10-03': { right: 0, wrong: 1, drills: 1 } })
+    await later.unmount()
   })
 })

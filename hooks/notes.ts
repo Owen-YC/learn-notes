@@ -1690,6 +1690,11 @@ function drillSpan(lines: readonly string[]): { start: number; end: number } | u
   return { start, end: after === -1 ? lines.length : start + 1 + after }
 }
 
+/** What a practice's labelled line says on its own line, after its label: '' for a label alone, whose value is the next line. */
+function labelValue(m: RegExpExecArray): string {
+  return m[2]!.replace(/\*\*$/, '').trim()
+}
+
 /** The practice's labelled lines by label (spaces taken out: 할일 · 고칠줄 · 확인 · 예시답), the first of each; a label alone takes the next line. */
 function drillParts(lines: readonly string[]): Map<string, string> {
   const parts = new Map<string, string>()
@@ -1698,16 +1703,28 @@ function drillParts(lines: readonly string[]): Map<string, string> {
     if (!m) continue
     const label = m[1]!.replace(/\s+/g, '')
     if (parts.has(label)) continue
-    let value = m[2]!.replace(/\*\*$/, '').trim()
+    let value = labelValue(m)
     if (value === '') {
-      // The code on the next line, alone or the first in a fence.
-      const next = lines.slice(i + 1).find(one => one.trim() !== '' && !FENCE.test(one.trim()))
-      if (next !== undefined && !DRILL_LABEL.test(next)) value = next.trim().replace(/^[-*+•]\s+/, '')
+      // The next line that is not blank, a bullet or not (hideDrillAnswer hides that line); in a fence, its first
+      // line, all of it code (a template's backticks too).
+      const rest = lines.slice(i + 1)
+      const at = rest.findIndex(one => one.trim() !== '')
+      const next = at === -1 ? undefined : rest[at]!
+      if (next !== undefined && FENCE.test(next.trim())) {
+        const code = rest.slice(at + 1).find(one => one.trim() !== '' && !FENCE.test(one.trim()))
+        if (code !== undefined) value = inlineCode(code.trim())
+      } else if (next !== undefined && !DRILL_LABEL.test(next)) value = next.trim().replace(/^[-*+•]\s+/, '')
     }
     parts.set(label, value)
   }
   return parts
 }
+
+/**
+ * A labelled value the store cut off (forHistory: `…` at the text's end, after the tick closeTicks put back): what
+ * it quotes is part of the code, never a line to change or an example to grade by.
+ */
+const CUT_SHORT = /…\s*$/
 
 /** The code a labelled line quotes: inside `` `` `` (a backtick in it) or `` ` ``; else the words as they are when no backtick is there. */
 function quotedCode(value: string): string | undefined {
@@ -1752,8 +1769,9 @@ function drillSpot(
 /**
  * A note's practice (1.7.0, `### 직접 해 보기`: 할 일 · 고칠 줄 · 확인 · 예시 답), its line found in the note's changed
  * code; undefined for none: a note before 1.7.0, `할 일: 없음` (a change with no line to change: a setting, a style, a
- * document), no line or example quoted, a line longer than DRILL_LINE_MAX, or one the changed code does not hold (a
- * secret masked in it too). The line is the code's own, its indent apart.
+ * document), no line or example quoted, either cut off by the store (CUT_SHORT), a line longer than DRILL_LINE_MAX,
+ * one the changed code does not hold (a secret masked in it too), or an example that is that line as a practice
+ * compares them (sameLine). The line is the code's own, its indent apart.
  */
 export function drillOf(text: string, changes: readonly Pick<LearnChange, 'file' | 'path' | 'diff'>[]): Drill | undefined {
   const lines = text.split('\n')
@@ -1762,6 +1780,8 @@ export function drillOf(text: string, changes: readonly Pick<LearnChange, 'file'
   const parts = drillParts(lines.slice(span.start + 1, span.end))
   const task = (parts.get('할일') ?? '').trim()
   if (task === '' || NONE_SAID.test(task)) return undefined
+  // A note the store cut inside its line or its example (a later session's copy, forHistory): no practice.
+  if (CUT_SHORT.test(parts.get('고칠줄') ?? '') || CUT_SHORT.test(parts.get('예시답') ?? '')) return undefined
   const quote = quotedCode(parts.get('고칠줄') ?? '')?.trim()
   const example = quotedCode(parts.get('예시답') ?? '')?.trim()
   if (quote === undefined || example === undefined || quote === '' || example === '' || [...quote].length > DRILL_LINE_MAX) return undefined
@@ -1769,10 +1789,13 @@ export function drillOf(text: string, changes: readonly Pick<LearnChange, 'file'
   if (!spot || spot.text.includes(REDACTED)) return undefined
   const change = changes[spot.change]!
   const indent = /^\s*/.exec(spot.text)![0]
+  const line = spot.text.slice(indent.length).trimEnd()
+  // An example that is the line itself as a practice compares them (sameLine) could never be done.
+  if (sameCode(line, example, quotesAlike(change.file))) return undefined
   return {
     task,
     check: (parts.get('확인') ?? '').trim(),
-    line: spot.text.slice(indent.length).trimEnd(),
+    line,
     indent,
     example,
     file: change.file,
@@ -1813,6 +1836,8 @@ export function hideDrillAnswer(text: string, file?: string): string {
   }
   const kept: string[] = []
   let isHidden = false
+  // A hidden label alone on its line: its value is the next line that is not blank, whatever it is, as drillParts reads it.
+  let isAwaited = false
   let fence: string | undefined
   for (const raw of section) {
     const line = raw.trim()
@@ -1824,14 +1849,19 @@ export function hideDrillAnswer(text: string, file?: string): string {
     const label = DRILL_LABEL.exec(raw)
     if (label) {
       isHidden = DRILL_ANSWER_LABELS.includes(label[1]!.replace(/\s+/g, ''))
+      isAwaited = isHidden && labelValue(label) === ''
       if (!isHidden) kept.push(raw)
       continue
     }
     const opens = FENCE.exec(line)
     if (opens) fence = opens[1]!
+    if (isAwaited && line !== '') {
+      isAwaited = false
+      continue
+    }
     // A hidden line's code runs on below it (indented, a fence, a quote alone); a blank line or other words end it.
     if (isHidden && line !== '' && (opens !== null || /^\s/.test(raw) || line.startsWith('`'))) continue
-    isHidden = false
+    if (!isAwaited) isHidden = false
     kept.push(raw)
   }
   const head = lines[span.start]!.trimEnd()
@@ -1841,10 +1871,11 @@ export function hideDrillAnswer(text: string, file?: string): string {
 
 /**
  * A line of code as a practice compares it: its spaces run together, and none beside a sign (`a+b` is `a + b`); no
- * `;` at its end; a string's quotes made one kind (a template's backticks kept), what is inside a string as written
- * but a template's `${…}`, compared as code.
+ * `;` at its end; a string's quotes made one kind (a template's backticks kept) unless `isQuoteFree` is false (a
+ * language that reads them apart, quotesAlike), what is inside a string as written but a template's `${…}`, compared
+ * as code.
  */
-export function normalizeCode(text: string): string {
+export function normalizeCode(text: string, isQuoteFree = true): string {
   const s = text.trim()
   const isWord = (ch: string | undefined) => ch !== undefined && /[\p{L}\p{N}_$]/u.test(ch)
   let out = ''
@@ -1866,7 +1897,7 @@ export function normalizeCode(text: string): string {
             if (s[k] === '{') depth += 1
             else if (s[k] === '}' && --depth === 0) break
           }
-          body += `\${${normalizeCode(s.slice(j + 2, k))}}`
+          body += `\${${normalizeCode(s.slice(j + 2, k), isQuoteFree)}}`
           j = k + 1
         } else {
           body += s[j]
@@ -1880,7 +1911,8 @@ export function normalizeCode(text: string): string {
     if (ch === '"' || ch === "'") {
       let j = i + 1
       while (j < s.length && s[j] !== ch) j += s[j] === '\\' ? 2 : 1
-      out += `"${s.slice(i + 1, Math.min(j, s.length))}${j < s.length ? '"' : ''}`
+      const quote = isQuoteFree ? '"' : ch
+      out += `${quote}${s.slice(i + 1, Math.min(j, s.length))}${j < s.length ? quote : ''}`
       i = j + 1
       continue
     }
@@ -1898,8 +1930,25 @@ export function normalizeCode(text: string): string {
 }
 
 /** True when two lines are the same code as a practice compares them (normalizeCode). */
-export function sameCode(a: string, b: string): boolean {
-  return normalizeCode(a) === normalizeCode(b)
+export function sameCode(a: string, b: string, isQuoteFree = true): boolean {
+  return normalizeCode(a, isQuoteFree) === normalizeCode(b, isQuoteFree)
+}
+
+/**
+ * Files whose language reads a string the same between `'…'` and `"…"`: JavaScript and TypeScript (and the
+ * components holding them), Python, Lua, CSS and HTML. Elsewhere the quotes say something (Ruby, PHP and the shell
+ * put values only into `"…"`; C, Java, Rust and Go make `'a'` one character; SQL makes `"a"` a name).
+ */
+const QUOTES_ALIKE = /\.(?:[cm]?[jt]sx?|vue|svelte|astro|py[iw]?|lua|css|scss|less|html?)$/i
+
+/** True for a file whose language reads `'…'` and `"…"` as the same string (QUOTES_ALIKE). */
+export function quotesAlike(file: string): boolean {
+  return QUOTES_ALIKE.test(file)
+}
+
+/** True when two lines are the same code in a practice's file: its quotes one kind only where its language reads them so. */
+export function sameLine(drill: Pick<Drill, 'file'>, a: string, b: string): boolean {
+  return sameCode(a, b, quotesAlike(drill.file))
 }
 
 /** Hangul jamo standing alone: what English keys type in a Korean input mode (`return` comes out as `ㄱㄷ셔구`). */

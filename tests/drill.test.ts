@@ -4,6 +4,7 @@ import type { LearnChange, LearnNote } from '../types'
 import {
   DRILL_LINE_MAX,
   DRILL_MAX_BYTES,
+  HISTORY_TEXT_BUDGET,
   addActivity,
   askPrompt,
   checkPrompt,
@@ -24,7 +25,9 @@ import {
   normalizeCode,
   notePrompt,
   quizPrompt,
+  quotesAlike,
   sameCode,
+  sameLine,
   todayReview,
 } from '../hooks/notes'
 
@@ -274,5 +277,87 @@ describe('1.7.0: a note\'s practice, 직접 해 보기 (D8)', () => {
     const prompt = quizPrompt([{ name: '클로저', count: 1, firstAt: AT, lastAt: AT, blurb: '바깥 변수를 기억한다', files: [] }], 'beginner')
     expect(prompt).toContain('T1: (예측 · 왜 · 바꿔 보기 중 하나)')
     expect(prompt).not.toContain('예측과 바꿔 보기만')
+  })
+})
+
+describe('1.7.0 (7/8 검토): a practice cut short, an answer on a bullet of its own, quotes as the language reads them', () => {
+  /** The note with `tail` for its practice, words before it so that a cut at HISTORY_TEXT_BUDGET falls right after `upTo` in it. */
+  function cutAt(upTo: string, tail = PRACTICE.join('\n')): LearnNote {
+    const head = NOTE.slice(0, NOTE.indexOf('### 직접 해 보기'))
+    expect(tail).toContain(upTo)
+    const pad = HISTORY_TEXT_BUDGET - 1 - head.length - (tail.indexOf(upTo) + upTo.length)
+    const text = head.replace('더 공손하게 인사하려고 바꿨습니다.', `더 공손하게 인사하려고 바꿨습니다.${'가'.repeat(pad)}`) + tail
+    return { id: 'n1', turnId: 't1', at: AT, prompt: '', answer: '', changes: [change()], moreFiles: 0, status: 'ready', text, savedAs: 'ready', isPast: false, root: '/proj', updatedAt: AT, concepts: [] }
+  }
+
+  test('a note the store cut inside its practice\'s example or line has no practice: never an example cut short', () => {
+    const inExample = forHistory(cutAt('${name ||'), false)
+    expect(inExample.text.endsWith('${name ||`…')).toBe(true)
+    expect(drillOf(inExample.text, inExample.changes)).toBeUndefined()
+    // Cut inside the line to change: none either (no example left), and none where the line has no ticks to close.
+    const inLine = forHistory(cutAt('고칠 줄: `` return `안녕'), false)
+    expect(drillOf(inLine.text, inLine.changes)).toBeUndefined()
+    const words = PRACTICE.join('\n').replace(/예시 답: .*$/m, '예시 답: return "안녕하세요, " + (name || "손") + "님!"')
+    expect(drillOf(cutAt(words, words).text, [change()])).toMatchObject({ example: 'return "안녕하세요, " + (name || "손") + "님!"' })
+    const inWords = forHistory(cutAt('예시 답: return "안녕하세요, " + (name', words), false)
+    expect(drillOf(inWords.text, inWords.changes)).toBeUndefined()
+    // A note the store did not cut keeps its practice, whatever its length.
+    const whole = cutAt('`` return `안녕하세요, ${name || "손"}님!` ``')
+    expect(forHistory(whole, false).text).toBe(whole.text)
+    expect(drillOf(forHistory(whole, false).text, [change()])).toMatchObject({ example: 'return `안녕하세요, ${name || "손"}님!`' })
+  })
+
+  test('an answer on a line of its own under its label, a bullet or not, after a blank line or not, is hidden as drillOf reads it', () => {
+    const split = NOTE.replace(
+      PRACTICE.join('\n'),
+      [
+        '### 직접 해 보기',
+        '- 할 일: 이름이 비어 있으면 "손님"에게 인사하게 바꿔 보세요',
+        '- 고칠 줄:',
+        '- `` return `안녕하세요, ${name}님!` ``',
+        '- 확인: `greet("")` → "안녕하세요, 손님!"',
+        '- 예시 답:',
+        '',
+        '* `` return `안녕하세요, ${name || "손"}님!` ``',
+        '',
+        '참고로 템플릿 리터럴은 백틱으로 씁니다.',
+      ].join('\n'),
+    )
+    expect(drillOf(split, [change()])).toMatchObject({ line: 'return `안녕하세요, ${name}님!`', example: 'return `안녕하세요, ${name || "손"}님!`', n: 12 })
+    const shown = hideDrillAnswer(split, 'hello.js')
+    expect(shown).not.toContain('${name || "손"}')
+    expect(shown).not.toContain('${name}님!')
+    expect(shown).toContain('### 직접 해 보기 · hello.js\n- 할 일: 이름이 비어 있으면 "손님"에게 인사하게 바꿔 보세요\n- 확인: `greet("")` → "안녕하세요, 손님!"')
+    // Words after the answer, past a blank line, are the note's own and stay.
+    expect(shown).toContain('참고로 템플릿 리터럴은 백틱으로 씁니다.')
+    // The answer's code in a fence under its label: the whole fence.
+    const fenced = NOTE.replace(/- 예시 답: .*$/m, ['- 예시 답:', '```js', 'return `안녕하세요, ${name || "손"}님!`', '```'].join('\n'))
+    expect(drillOf(fenced, [change()])?.example).toBe('return `안녕하세요, ${name || "손"}님!`')
+    expect(hideDrillAnswer(fenced)).not.toContain('${name || "손"}')
+    expect(hideDrillAnswer(fenced)).not.toContain('```')
+  })
+
+  test('quotes are one kind only where the language reads them so: a quote changed elsewhere is a change, and a practice of only that in JavaScript is none', () => {
+    expect(quotesAlike('src/hello.js')).toBe(true)
+    expect(quotesAlike('app/view.tsx')).toBe(true)
+    expect(quotesAlike('sum.py')).toBe(true)
+    for (const file of ['greet.rb', 'run.sh', 'index.php', 'main.c', 'App.java', 'lib.rs', 'main.go', 'query.sql', 'data.json', 'Makefile']) expect(quotesAlike(file)).toBe(false)
+    expect(sameCode("echo '$HOME'", 'echo "$HOME"')).toBe(true)
+    expect(sameCode("echo '$HOME'", 'echo "$HOME"', false)).toBe(false)
+    expect(sameCode("char c = 'a';", 'char c = "a"', false)).toBe(false)
+    // Spaces and the ; at its end are aside in every language.
+    expect(sameCode("puts  'a' ;", "puts 'a'", false)).toBe(true)
+    expect(sameLine({ file: 'main.c' }, "char c = 'b';", 'char c = "b";')).toBe(false)
+    expect(sameLine({ file: 'src/hello.js' }, "x = 'b'", 'x = "b"')).toBe(true)
+    // A Ruby practice whose change is the quotes: there is one, and its example is no "unchanged" line.
+    const ruby = ['@@ -1,3 +1,3 @@', ' def greet(name)', "-  puts 'Hi'", "+  puts 'Hello, #{name}!'", ' end'].join('\n')
+    const text = NOTE.replace(/고칠 줄: .*$/m, "고칠 줄: `puts 'Hello, #{name}!'`").replace(/예시 답: .*$/m, '예시 답: `puts "Hello, #{name}!"`')
+    const drill = drillOf(text, [change(ruby, 'greet.rb')])
+    expect(drill).toMatchObject({ line: "puts 'Hello, #{name}!'", example: 'puts "Hello, #{name}!"', file: 'greet.rb' })
+    expect(sameLine(drill!, drill!.line, drill!.example)).toBe(false)
+    expect(sameLine(drill!, 'puts "Hello, #{name}!"', drill!.example)).toBe(true)
+    // The same in JavaScript changes nothing the code does: no practice.
+    const js = ['@@ -1,1 +1,1 @@', "-const a = 'x'", "+const greeting = 'Hello'"].join('\n')
+    expect(drillOf(NOTE.replace(/고칠 줄: .*$/m, "고칠 줄: `const greeting = 'Hello'`").replace(/예시 답: .*$/m, '예시 답: `const greeting = "Hello";`'), [change(js)])).toBeUndefined()
   })
 })
