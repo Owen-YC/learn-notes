@@ -8,6 +8,7 @@ import type {
   LearnDayActivity,
   LearnDayUsage,
   LearnNote,
+  LearnQuizFirstTry,
   LearnQuizItem,
   LearnQuizMarks,
   LearnSubmit,
@@ -3229,8 +3230,17 @@ const KIND_CHECK: Readonly<Record<QuizKind, string>> = {
   why: '왜 문제다. 무엇이 달라지는지, 또는 왜 그렇게 썼는지의 핵심을 짚으면 낱말이 달라도 맞음이다.',
 }
 
-/** The one user message the model reads to grade a typed answer; a question's kind adds how that kind is graded. */
-export function checkPrompt(item: Pick<LearnQuizItem, 'name' | 'question' | 'answer' | 'kind'>, mine: string, level: Level): string {
+/**
+ * The one user message the model reads to grade a typed answer; a question's kind adds how that kind is graded.
+ * A first try graded short of right asks for one question back (되묻기) to try again with; the try again (`first`
+ * given) carries that first try and what it was asked, and asks for none: it is the last.
+ */
+export function checkPrompt(
+  item: Pick<LearnQuizItem, 'name' | 'question' | 'answer' | 'kind'>,
+  mine: string,
+  level: Level,
+  first?: Pick<LearnQuizFirstTry, 'mine' | 'verdict' | 'feedback' | 'nudge'>,
+): string {
   return [
     LEVEL_TEXT[level],
     '',
@@ -3240,25 +3250,83 @@ export function checkPrompt(item: Pick<LearnQuizItem, 'name' | 'question' | 'ans
     item.question,
     '## 모범 답',
     item.answer,
+    ...(first ? ['## 학습자의 첫 답과 받은 되묻기', ...firstTryLines(first)] : []),
     '## 학습자의 답',
     cut(mine, 1500),
     '',
     '판정은 셋 중 하나다. 맞음: 핵심을 맞게 이해했다. 거의: 방향은 맞지만 중요한 부분이 빠졌거나 일부가 틀렸다. 틀림: 틀렸거나 관계없는 답이다("모르겠다"도 틀림).',
     ...(item.kind ? [KIND_CHECK[item.kind]] : []),
-    '피드백은 한두 문장으로, 학습자의 답에서 맞은 점과 빠진 점을 구체적으로 짚는다. 모범 답을 그대로 옮기지 않는다.',
+    '피드백은 한두 문장이다. 학습자의 답대로라면 무엇이 되는지(값이나 동작)를 먼저 짚고, 맞은 점 하나를 인정한다. 모범 답을 그대로 옮기지 않는다.',
+    first
+      ? '마지막 시도다. 되묻기는 쓰지 않는다.'
+      : '되묻기는 판정이 거의나 틀림일 때만 쓰는 질문 한 문장이다. 학습자가 자기 답의 어디가 어긋났는지 스스로 알아차리게 묻는다. 답·고칠 코드·개념 이름은 말하지 않는다.',
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
     '판정: (맞음 · 거의 · 틀림 중 하나)',
     '피드백: (한두 문장)',
+    ...(first ? [] : ['되묻기: (거의·틀림일 때만 질문 한 문장. 맞음이면 이 줄을 쓰지 않는다)']),
   ].join('\n')
 }
 
-/** The grade read back from the model's reply (the two lines asked for, or a JSON object), or undefined when it is not one. */
-export function parseCheck(text: string): { verdict: 'right' | 'partial' | 'wrong'; feedback: string } | undefined {
+/** A first try as the try again's grade reads it: the answer, its grade and feedback, and what it was asked back; or that the learner did not know, and the hint they were shown. */
+function firstTryLines(first: Pick<LearnQuizFirstTry, 'mine' | 'verdict' | 'feedback' | 'nudge'>): string[] {
+  if (isBlankAnswer(first.mine)) return ['첫 답: (모르겠다고 했다)', `받은 힌트: ${first.nudge}`]
+  return [
+    `첫 답: ${cut(first.mine, 1500)}`,
+    `첫 판정: ${first.verdict === 'partial' ? '거의' : '틀림'}`,
+    ...(first.feedback !== '' ? [`받은 피드백: ${first.feedback}`] : []),
+    `받은 되묻기: ${first.nudge}`,
+  ]
+}
+
+/**
+ * The labels a grade's reply is asked to put each at the head of a line of its own. Each is read up to the next,
+ * so a line added after the feedback never runs into it; the last two are asked for from 1.7.0's mistakes on.
+ */
+const CHECK_LABEL = /^\s*(?:\*\*)?(판정|피드백|되묻기|헷갈린\s*점|유형)(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*)$/
+
+/** Each label's text in a grade's reply (see CHECK_LABEL), with the lines under it; a label seen twice keeps its first. */
+function checkParts(text: string): Map<string, string> {
+  const parts = new Map<string, string[]>()
+  let current: string[] | undefined
+  for (const line of text.split('\n')) {
+    const m = CHECK_LABEL.exec(line)
+    const label = m ? m[1]!.replace(/\s+/g, '') : undefined
+    if (m && label !== undefined && !parts.has(label)) {
+      current = [m[2]!]
+      parts.set(label, current)
+    } else if (m) {
+      current = undefined
+    } else if (current) {
+      current.push(line)
+    }
+  }
+  return new Map([...parts].map(([label, lines]) => [label, lines.join('\n').trim()]))
+}
+
+/** A question asked back as the reply wrote it, or undefined for none (an empty line, "없음", a dash). */
+function nudgeOf(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const text = raw.replace(/\n{2,}/g, '\n').trim()
+  if (text === '' || /^[(（]?\s*(?:없음|없습니다|해당\s*없음|none|n\/a|-+)\s*[)）]?[.。]?$/i.test(text)) return undefined
+  return closeFence(cut(text, 300))
+}
+
+/**
+ * The grade read back from the model's reply (the labelled lines asked for, or a JSON object), or undefined when it
+ * is not one. `nudge` is the question asked back (되묻기), for a grade short of right only; a reply with no such
+ * line grades as before 1.7.0.
+ */
+export function parseCheck(text: string): { verdict: 'right' | 'partial' | 'wrong'; feedback: string; nudge?: string } | undefined {
   const words: Record<string, 'right' | 'partial' | 'wrong'> = {
     맞음: 'right', 정답: 'right', right: 'right', correct: 'right',
     거의: 'partial', 부분: 'partial', 부분정답: 'partial', partial: 'partial',
     틀림: 'wrong', 오답: 'wrong', wrong: 'wrong', incorrect: 'wrong',
   }
+  const graded = (verdict: 'right' | 'partial' | 'wrong', feedback: string, nudge: string | undefined) => ({
+    verdict,
+    feedback: cut(feedback.replace(/\n{2,}/g, '\n'), 600),
+    ...(verdict !== 'right' && nudge !== undefined ? { nudge } : {}),
+  })
   const json = /\{[\s\S]*\}/.exec(text)?.[0]
   if (json) {
     try {
@@ -3266,17 +3334,48 @@ export function parseCheck(text: string): { verdict: 'right' | 'partial' | 'wron
       if (typeof raw === 'object' && raw !== null) {
         const r = raw as Record<string, unknown>
         const verdict = typeof r.verdict === 'string' ? words[r.verdict.trim().toLowerCase()] : undefined
-        if (verdict) return { verdict, feedback: cut(String(r.feedback ?? '').trim(), 600) }
+        if (verdict) return graded(verdict, String(r.feedback ?? '').trim(), nudgeOf(r.nudge ?? r['되묻기']))
       }
     } catch {
       // Not JSON after all: the lines below.
     }
   }
-  const verdictLine = /^\s*(?:\*\*)?판정(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*([^\s*·,.(]+)/m.exec(text)?.[1]?.toLowerCase()
-  const verdict = verdictLine === undefined ? undefined : words[verdictLine]
+  const parts = checkParts(text)
+  const verdictWord = /^([^\s*·,.(]+)/.exec(parts.get('판정') ?? '')?.[1]?.toLowerCase()
+  const verdict = verdictWord === undefined ? undefined : words[verdictWord]
   if (!verdict) return undefined
-  const feedback = /^\s*(?:\*\*)?피드백(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*([\s\S]*)$/m.exec(text)?.[1]?.trim() ?? ''
-  return { verdict, feedback: cut(feedback.replace(/\n{2,}/g, '\n'), 600) }
+  return graded(verdict, parts.get('피드백') ?? '', nudgeOf(parts.get('되묻기')))
+}
+
+/**
+ * True when a typed quiz answer only says the learner does not know (모르겠어요 · 모르겠습니다 · 몰라 · 몰라요 ·
+ * 잘 모르겠어요, and the like), or is question marks alone: nothing for a model to grade, so none is called.
+ */
+export function isBlankAnswer(text: string): boolean {
+  const said = text.trim().replace(/\s+/g, ' ')
+  if (/^[?？]+$/.test(said)) return true
+  const words = said.replace(/[\s.!?？~…ㅠㅜ]+$/u, '')
+  return /^(?:(?:잘|전혀|진짜|정말|아직)\s*)?(?:모르겠(?:어요|습니다|어|음|다|네요|는데요?)?|몰라(?:요)?|모름|모릅니다|idk|i\s*don'?t\s*know|dunno)$/i.test(words)
+}
+
+/**
+ * The question asked back under a first try (parseCheck's `nudge`), unless it gives the model answer away: that
+ * answer whole inside it (spaces, quotes and punctuation aside), when it is more than one character. A question
+ * dropped grades the first try at once, as before 1.7.0.
+ */
+export function keptNudge(nudge: string | undefined, answer: string): string | undefined {
+  if (nudge === undefined) return undefined
+  const plain = (text: string) => squash(text).replace(/[.,!?。·`'"“”‘’()（）]/g, '').toLowerCase()
+  const asked = plain(nudge)
+  const whole = plain(answer)
+  if (asked === '' || asked === whole) return undefined
+  return whole.length >= 2 && asked.includes(whole) ? undefined : nudge
+}
+
+/** The grade of a try again after a first try short of right: right, partly right only when both tries were, else wrong. */
+export function secondVerdict(first: LearnQuizFirstTry['verdict'], second: 'right' | 'partial' | 'wrong'): 'right' | 'partial' | 'wrong' {
+  if (second === 'right') return 'right'
+  return first === 'partial' && second === 'partial' ? 'partial' : 'wrong'
 }
 
 /** True when two journal requests are one note's: the same words, one perhaps cut short or written on one line by an older build. */

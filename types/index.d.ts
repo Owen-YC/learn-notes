@@ -182,7 +182,20 @@ export type LearnQuizItem = {
   kind?: 'predict' | 'why' | 'modify'
   /** The note that taught its concept, whose code the question was made from (a note quiz's own note, else the latest that did); absent when no note held it. */
   noteId?: string
+  /**
+   * A typed answer's first try short of right, kept while the question waits for one try again (1.7.0): absent on
+   * quizzes made before, and on questions answered right at once or graded with no try again. It stays once the
+   * question is graded, so a right second try keeps its concept's step (recalled with help).
+   */
+  firstTry?: LearnQuizFirstTry
 }
+
+/**
+ * The first try at a question (LearnQuizItem.firstTry): the learner's answer, Claude's grade of it (partly right or
+ * wrong) and its feedback, and the question asked back (되묻기) for one try again; or, for an answer that only said
+ * "모르겠어요" (isBlankAnswer), the question's hint in the nudge's place, with no grade asked for (`feedback` empty).
+ */
+export type LearnQuizFirstTry = { mine: string; verdict: 'partial' | 'wrong'; feedback: string; nudge: string; at: number }
 
 /** One day's learning: notes written, and quiz answers the learner graded right and wrong. */
 export type LearnDayActivity = { notes: number; right: number; wrong: number }

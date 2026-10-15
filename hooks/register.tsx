@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, EngineInterface, HookFailure, ModelUsage, Register, RenderSurface } from 'claude-code'
+import type { ElementConstructor, ElementTable, EngineInterface, HookFailure, InputProps, ModelUsage, Register, RenderSurface } from 'claude-code'
 
-import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnDayUsage, LearnLive, LearnNote, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSubmit, LearnView, LearnWithheld } from '../types'
+import type { LearnAsk, LearnAskRun, LearnChange, LearnConcept, LearnDayActivity, LearnDayUsage, LearnLive, LearnNote, LearnQuizFirstTry, LearnQuizItem, LearnQuizMarks, LearnQuizRun, LearnSubmit, LearnView, LearnWithheld } from '../types'
 import {
   HISTORY_PER_PROJECT,
   HISTORY_PROJECTS,
@@ -21,6 +21,9 @@ import {
   type QuizPick,
   checkPrompt,
   parseCheck,
+  isBlankAnswer,
+  keptNudge,
+  secondVerdict,
   activityFromNotes,
   addActivity,
   addUsage,
@@ -1604,12 +1607,21 @@ function marksFrom(raw: unknown): LearnQuizMarks | undefined {
   }
 }
 
+/** A question's first try read back from the store (LearnQuizItem.firstTry); undefined when it is not one. */
+function firstTryOf(raw: unknown): LearnQuizFirstTry | undefined {
+  if (!isRecord(raw)) return undefined
+  const { mine, verdict, feedback, nudge, at } = raw
+  if (typeof mine !== 'string' || (verdict !== 'partial' && verdict !== 'wrong') || typeof nudge !== 'string' || nudge === '' || typeof at !== 'number') return undefined
+  return { mine, verdict, feedback: typeof feedback === 'string' ? feedback : '', nudge, at }
+}
+
 /** One quiz question read back from the store; undefined when it is not one. */
 function quizItemOf(one: unknown): LearnQuizItem | undefined {
   if (!isRecord(one)) return undefined
   const { key, name, question, answer, hint, isHinted, isShown, result, gradedAt, mine, verdict, feedback, kind, noteId } = one
   if (typeof key !== 'string' || typeof name !== 'string' || typeof question !== 'string' || typeof answer !== 'string') return undefined
   const before = marksFrom(one.before)
+  const firstTry = firstTryOf(one.firstTry)
   return {
     key,
     name,
@@ -1626,6 +1638,7 @@ function quizItemOf(one: unknown): LearnQuizItem | undefined {
     ...(before ? { before } : {}),
     ...(kind === 'predict' || kind === 'why' || kind === 'modify' ? { kind } : {}),
     ...(typeof noteId === 'string' && noteId !== '' ? { noteId } : {}),
+    ...(firstTry ? { firstTry } : {}),
   }
 }
 
@@ -1651,8 +1664,9 @@ function isOpen(current: Quiz, item: LearnQuizItem): boolean {
 
 /**
  * True for a question the quiz still waits on, which q and /learn 복습 keep
- * rather than start today's review over it: one still to answer, or one of
- * today's quiz whose answer was seen in the pane (a) and waits for o or x.
+ * rather than start today's review over it: one still to answer (a first try
+ * waiting for its try again among them), or one of today's quiz whose answer
+ * was seen (a where no field is drawn, /learn quiz 정답) and waits for o or x.
  * One seen in a quiz of another day, or in a quiz kept before 1.6.0 that
  * showed every answer at once (/learn quiz 정답), waits no more.
  */
@@ -1663,6 +1677,11 @@ function isAwaited(current: Quiz, item: LearnQuizItem, now: number): boolean {
 
 /** The pane's answer field for question `i` of the quiz asked at `at`: a new quiz's fields are new elements. */
 const quizFieldKey = (at: number, i: number) => `quiz-mine-${at}-${i}`
+
+/** The field question `i` takes its answer in now: after a first try, the try again's own (a new element, so it is drawn empty). */
+function answerKey(current: Quiz, i: number): string {
+  return `${quizFieldKey(current.at, i)}${current.items[i]?.firstTry !== undefined ? '-again' : ''}`
+}
 
 /** A wrong answer: gone over now, back to the first step, and first in the next quiz. */
 const markWrong: Mark = (index, keys, at) => markMissed(markReviewed(index, keys, at), keys, at)
@@ -1677,16 +1696,41 @@ function markFor(result: 'right' | 'wrong', verdict: LearnQuizItem['verdict'], i
 }
 
 /**
- * True when a graded question's answer leaned on help: its hint was seen, or
- * the learner graded it themselves, which they do only once its answer is seen.
+ * True when a graded question's answer leaned on help: its hint was seen, it
+ * was right only on a try again (after the question asked back), or the
+ * learner graded it themselves, which they do only once its answer is seen.
  */
 function isHelpedGrade(item: LearnQuizItem): boolean {
-  return item.isHinted === true || item.mine === undefined
+  // A first try stays on a question only once a try again graded it (one graded with none drops it).
+  return item.isHinted === true || item.mine === undefined || item.firstTry !== undefined
 }
 
-/** A graded question's help, after its mark: · 힌트 봄, and · 정답 봄 for one graded right after seeing its answer. */
+/**
+ * A graded question's help, after its mark: · 힌트 봄, · 되짚어 맞힘 for one right on a try again after the
+ * question asked back, and · 정답 봄 for one graded right after seeing its answer.
+ */
 function helpText(item: LearnQuizItem): string {
-  return `${item.isHinted === true ? ' · 힌트 봄' : ''}${item.result === 'right' && item.mine === undefined ? ' · 정답 봄' : ''}`
+  const isRetried = item.result === 'right' && item.firstTry !== undefined && !isBlankAnswer(item.firstTry.mine)
+  return `${item.isHinted === true ? ' · 힌트 봄' : ''}${isRetried ? ' · 되짚어 맞힘' : ''}${item.result === 'right' && item.mine === undefined ? ' · 정답 봄' : ''}`
+}
+
+/**
+ * What stands over a question waiting for its try again: how far the first try got (partly, or not yet), or, after
+ * "모르겠어요", to try again with the hint.
+ */
+function firstTryHead(first: LearnQuizFirstTry): string {
+  if (isBlankAnswer(first.mine)) return '힌트를 보고 한 번 더 떠올려 보세요'
+  return first.verdict === 'partial' ? '△ 아직입니다 · 방향은 맞습니다' : '✗ 아직입니다 · 한 번 더 떠올려 보세요'
+}
+
+/** What the try again is asked under: the question Claude asked back (되묻기), or the hint after "모르겠어요". */
+function nudgeLabel(first: LearnQuizFirstTry): string {
+  return isBlankAnswer(first.mine) ? '힌트' : '되묻기'
+}
+
+/** A first try as a grade gives it: its answer, Claude's grade (partly right or wrong) and feedback; "모르겠어요" with a word in the feedback's place. */
+function firstGrade(first: LearnQuizFirstTry): Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback'> {
+  return { mine: first.mine, verdict: first.verdict, feedback: first.feedback !== '' ? first.feedback : BLANK_FEEDBACK }
 }
 
 /**
@@ -1746,14 +1790,14 @@ function resultMark(item: LearnQuizItem): string {
 
 /**
  * What happens to the concepts a finished quiz missed (the wrong first next
- * time, the partly right a little sooner), and to the ones right after a hint
- * or the answer (back after as long again).
+ * time, the partly right a little sooner), and to the ones right after a hint,
+ * a question asked back or the answer (back after as long again).
  */
 function missesText(items: readonly LearnQuizItem[], separator = ' · '): string {
   const parts: string[] = []
   if (items.some(item => item.result === 'wrong' && !isPartly(item))) parts.push('틀린 개념은 다음 퀴즈에 먼저 나옵니다')
   else if (items.some(isPartly)) parts.push('거의 맞힌 개념은 조금 일찍 다시 나옵니다')
-  if (items.some(item => item.result === 'right' && isHelpedGrade(item))) parts.push('힌트나 정답을 보고 맞힌 개념은 같은 간격 뒤 다시 나옵니다')
+  if (items.some(item => item.result === 'right' && isHelpedGrade(item))) parts.push('힌트·되묻기·정답을 보고 맞힌 개념은 같은 간격 뒤 다시 나옵니다')
   return parts.join(separator)
 }
 
@@ -1762,6 +1806,8 @@ const ALL_KNOWN_TEXT = '모든 개념이 아는 개념이라 퀴즈에 낼 개�
 const CHECKING_TEXT = '답을 채점하고 있습니다. 채점이 끝난 뒤 새 문제를 받으세요.'
 const MOVED_TEXT = '그사이 새 퀴즈가 나와 이 답은 채점하지 않았습니다.'
 const GRADE_NOT_KEPT = '채점을 적지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.'
+/** The feedback kept on a question graded wrong for "모르겠어요" with no model call (its hint seen, or none to see). */
+const BLANK_FEEDBACK = '정답을 읽어 보고, 다음에 이 개념이 나오면 다시 떠올려 보세요.'
 
 /** What to say when the model in /config cannot be called (an organization's policy, a name this build does not know). */
 function noModelText(cfg: Config): string {
@@ -1900,6 +1946,8 @@ async function makeQuiz(
     void fault($, 'quiz', 'unreadable', '모델의 답을 문제로 읽지 못했습니다')
     return { error: '퀴즈를 내지 못했습니다: 모델의 답을 문제로 읽지 못했습니다. 다시 해 보세요.' }
   }
+  // The quiz it replaces: a first try still waiting for its try again is graded as Claude graded it.
+  await settleFirstTries($, cfg, now, true)
   await keepQuiz($, { at: now, items, isRevealed: false, ...(only ? { from: 'note' as const } : {}) })
   await update($, quizRun, run => ({ ...run, error: null }))
   await bankQuestions($, items, now)
@@ -1946,13 +1994,30 @@ async function showHint($: EngineInterface, i: number): Promise<void> {
   await keepQuiz($, { ...current, items: current.items.map((one, j) => (j === i ? { ...one, isHinted: true } : one)) })
 }
 
-/** The pane's a: one question's answer. */
-async function showAnswer($: EngineInterface, i: number): Promise<void> {
+/**
+ * The pane's a, and /learn quiz 정답: one question's answer. After a first try
+ * the answer is its grade too, the first try's as Claude graded it (partly
+ * right or wrong), with no o or x; before one (where no field is drawn, after
+ * a grade that did not come back, or asked for in the conversation) the answer
+ * shows for the learner to grade with o or x.
+ */
+async function showAnswer($: EngineInterface, cfg: Config, i: number): Promise<'graded' | undefined> {
   await disarm($)
   const current = await lastQuiz($)
   const item = current?.items[i]
-  if (!current || !item || isAnswerShown(current, item)) return
+  if (!current || !item || isAnswerShown(current, item)) return undefined
+  if (item.firstTry !== undefined && item.result === undefined) {
+    const kept = await gradeFirstTry($, cfg, current, i, 'wrong')
+    if (kept === 'failed') await update($, quizRun, run => ({ ...run, error: GRADE_NOT_KEPT }))
+    return kept === 'kept' ? 'graded' : undefined
+  }
   await keepQuiz($, { ...current, items: current.items.map((one, j) => (j === i ? { ...one, isShown: true } : one)) })
+  return undefined
+}
+
+/** The pane's a: the answer, and once that graded a first try, the keys on to the next question, as after o or x. */
+async function answerInPane($: EngineInterface, cfg: Config, i: number): Promise<void> {
+  if ((await showAnswer($, cfg, i)) === 'graded') await focusNextQuestion($)
 }
 
 /** The pane's o and x: the learner's own grade for one question whose answer they saw. */
@@ -1982,7 +2047,8 @@ async function applyGrade(
   current: Quiz,
   i: number,
   result: 'right' | 'wrong',
-  extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback'>,
+  extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback' | 'isLearnerGraded'>,
+  how: { at?: number; isFirstDropped?: boolean } = {},
 ): Promise<'kept' | 'busy' | 'moved' | 'failed'> {
   const mark = `${current.at}:${i}`
   if (grading.has(mark)) return 'busy'
@@ -1993,10 +2059,18 @@ async function applyGrade(
     if (fresh.at !== current.at) return 'moved'
     const item = fresh.items[i]
     if (!item || item.result !== undefined) return 'busy'
-    const now = await $.clock.now()
-    // Right after its hint, or graded by the learner once its answer showed: recalled with help, so its step stays.
-    const isHelped = isHelpedGrade({ ...item, ...extra })
-    const before = await markConcepts($, cfg, markFor(result, extra.verdict, isHelped), [item.key], now)
+    // A first try graded when it was tried (a quiz left behind), else now.
+    const now = how.at ?? (await $.clock.now())
+    // A first try graded with no try again is kept as a typed answer graded at once: no first try then.
+    const graded = (one: LearnQuizItem): LearnQuizItem => {
+      const next: LearnQuizItem = { ...one, ...extra }
+      if (how.isFirstDropped) delete next.firstTry
+      return next
+    }
+    // Right after its hint or a try again, or graded by the learner once its answer showed: recalled with help, so its step stays.
+    const isHelped = isHelpedGrade(graded(item))
+    // The learner's own word is fully right or fully wrong, never "partly", whatever Claude's verdict was.
+    const before = await markConcepts($, cfg, markFor(result, extra.isLearnerGraded === true ? undefined : extra.verdict, isHelped), [item.key], now)
     if (!before) return 'failed'
     // Read again: the quiz may have moved on while the concepts were written.
     const latest = (await lastQuiz($)) ?? fresh
@@ -2004,7 +2078,7 @@ async function applyGrade(
     const prior = before[0]
     await keepQuiz($, {
       ...latest,
-      items: latest.items.map((one, j) => (j === i ? { ...one, ...extra, isShown: true, result, gradedAt: now, ...(prior ? { before: prior } : {}) } : one)),
+      items: latest.items.map((one, j) => (j === i ? { ...graded(one), isShown: true, result, gradedAt: now, ...(prior ? { before: prior } : {}) } : one)),
     })
     await update($, quizRun, run => ({ ...run, error: null }))
     await recordActivity($, stamp(now).day, result === 'right' ? { right: 1 } : { wrong: 1 })
@@ -2051,35 +2125,152 @@ async function regradeQuiz($: EngineInterface, cfg: Config, current: Quiz, i: nu
   }
 }
 
-/** The pane's f: the learner turns Claude's grade of their typed answer the other way. */
+/**
+ * The pane's f: the learner turns Claude's grade of their typed answer the
+ * other way; under a first try (맞았는데요), the first try graded right, as
+ * if Claude had graded it so.
+ */
 async function flipGrade($: EngineInterface, cfg: Config, i: number): Promise<void> {
   await disarm($)
   const current = await lastQuiz($)
   const item = current?.items[i]
+  if (current && item?.firstTry !== undefined && item.result === undefined) {
+    // "모르겠어요" was no answer to turn right.
+    if (isBlankAnswer(item.firstTry.mine)) return
+    const kept = await gradeFirstTry($, cfg, current, i, 'right')
+    if (kept === 'failed') await update($, quizRun, run => ({ ...run, error: GRADE_NOT_KEPT }))
+    else if (kept === 'kept') await focusNextQuestion($)
+    return
+  }
   if (!current || !item || item.result === undefined || item.verdict === undefined) return
   if ((await regradeQuiz($, cfg, current, i, item.result === 'right' ? 'wrong' : 'right')) === 'failed') {
     await update($, quizRun, run => ({ ...run, error: GRADE_NOT_KEPT }))
   }
 }
 
-/** Claude grades a typed answer to question `i` against its answer and the grade is kept: the question as graded, or why there is no grade. */
-async function gradeTyped($: EngineInterface, cfg: Config, current: Quiz, i: number, mine: string): Promise<{ item: LearnQuizItem } | { error: string }> {
+/**
+ * Claude grades a typed answer to question `i` against its answer and the
+ * grade is kept: the question as graded, or why there is no grade. A first try
+ * short of right that Claude asks a question back on is not graded yet: it is
+ * kept for one try again (`isFirstTry`), and the try again carries it to the
+ * grade, which is then final. "모르겠어요" calls no model: the hint in the
+ * question's place the first time, the answer (graded wrong) once it is seen.
+ */
+async function gradeTyped(
+  $: EngineInterface,
+  cfg: Config,
+  current: Quiz,
+  i: number,
+  mine: string,
+): Promise<{ item: LearnQuizItem; isFirstTry?: true } | { error: string }> {
   const item = current.items[i]
   if (!item) return { error: '없는 문제입니다.' }
-  const asked = await askModel($, cfg, 'grade', { system: CHECK_SYSTEM, prompt: checkPrompt(item, mine, cfg.level), maxTokens: 400, timeoutMs: 60_000 })
+  const first = item.firstTry
+  const said = cut(mine, 1500)
+  if (isBlankAnswer(mine)) {
+    if (first === undefined && item.hint !== undefined && item.isHinted !== true) {
+      return keepFirstTry($, current, i, { mine: said, verdict: 'wrong', feedback: '', nudge: item.hint, at: await $.clock.now() })
+    }
+    return keptGrade($, cfg, current, i, 'wrong', { mine: said, verdict: 'wrong', feedback: BLANK_FEEDBACK })
+  }
+  const asked = await askModel($, cfg, 'grade', { system: CHECK_SYSTEM, prompt: checkPrompt(item, mine, cfg.level, first), maxTokens: 480, timeoutMs: 60_000 })
   if ('error' in asked) return { error: `채점하지 못했습니다: ${asked.error}` }
   const graded = parseCheck(asked.text)
   if (!graded) {
     void fault($, 'grade', 'unreadable', '채점 결과를 읽지 못했습니다')
     return { error: '채점 결과를 읽지 못했습니다. 다시 보내 보세요.' }
   }
-  // Almost right is not right yet: counted wrong, its concept a step back.
-  const kept = await applyGrade($, cfg, current, i, graded.verdict === 'right' ? 'right' : 'wrong', { mine: cut(mine, 1500), ...graded })
+  // Short of right the first time, with a question asked back that does not give the answer away: one try again.
+  const nudge = first === undefined && graded.verdict !== 'right' ? keptNudge(graded.nudge, item.answer) : undefined
+  if (nudge !== undefined && graded.verdict !== 'right') {
+    return keepFirstTry($, current, i, { mine: said, verdict: graded.verdict, feedback: graded.feedback, nudge, at: await $.clock.now() })
+  }
+  // Almost right is not right yet: counted wrong, its concept a step back (after a try again, only when both tries were).
+  const verdict = first ? secondVerdict(first.verdict, graded.verdict) : graded.verdict
+  return keptGrade($, cfg, current, i, verdict === 'right' ? 'right' : 'wrong', { mine: said, verdict, feedback: graded.feedback })
+}
+
+/** applyGrade for a typed answer: the question as graded, or why there is no grade. */
+async function keptGrade(
+  $: EngineInterface,
+  cfg: Config,
+  current: Quiz,
+  i: number,
+  result: 'right' | 'wrong',
+  extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback'>,
+): Promise<{ item: LearnQuizItem } | { error: string }> {
+  const kept = await applyGrade($, cfg, current, i, result, extra)
   if (kept === 'failed') return { error: GRADE_NOT_KEPT }
   if (kept === 'busy') return { error: '이 문제는 그사이 이미 채점했습니다.' }
   const latest = (await lastQuiz($)) ?? current
   if (kept === 'moved' || latest.at !== current.at) return { error: MOVED_TEXT }
-  return { item: latest.items[i] ?? { ...item, mine, ...graded } }
+  return { item: latest.items[i] ?? { ...current.items[i]!, ...extra, result } }
+}
+
+/**
+ * Keeps a first try on question `i`, its concept not marked and nothing
+ * counted: the question stays open for one try again (in a field of its own),
+ * the try's hint marked seen when the hint is what it is asked under.
+ */
+async function keepFirstTry($: EngineInterface, current: Quiz, i: number, first: LearnQuizFirstTry): Promise<{ item: LearnQuizItem; isFirstTry: true } | { error: string }> {
+  const mark = `${current.at}:${i}`
+  if (grading.has(mark)) return { error: '이 문제는 그사이 이미 채점했습니다.' }
+  grading.add(mark)
+  try {
+    const latest = (await lastQuiz($)) ?? current
+    if (latest.at !== current.at) return { error: MOVED_TEXT }
+    const item = latest.items[i]
+    if (!item || item.result !== undefined || item.firstTry !== undefined) return { error: '이 문제는 그사이 이미 채점했습니다.' }
+    const isHint = isBlankAnswer(first.mine)
+    const tried: LearnQuizItem = { ...item, firstTry: first, ...(isHint ? { isHinted: true } : {}) }
+    await keepQuiz($, { ...latest, items: latest.items.map((one, j) => (j === i ? tried : one)) })
+    await update($, quizRun, run => ({ ...run, error: null }))
+    return { item: tried, isFirstTry: true }
+  } finally {
+    grading.delete(mark)
+  }
+}
+
+/**
+ * A first try graded with no try again, graded then as a typed answer graded
+ * at once is (no first try kept, so a later f turns it as such). `wrong`
+ * grades it as Claude did, partly right or wrong (the answer seen; a quiz left
+ * behind, on the day it was tried: `at`), or, said by the learner
+ * (`isLearner`: /learn quiz 틀림), fully wrong as their own word always is.
+ * `right` is the learner's own grade over Claude's (f 맞았는데요, /learn quiz
+ * 맞음): right the first time.
+ */
+function gradeFirstTry(
+  $: EngineInterface,
+  cfg: Config,
+  current: Quiz,
+  i: number,
+  result: 'right' | 'wrong',
+  how: { isLearner?: boolean; at?: number } = {},
+): Promise<'kept' | 'busy' | 'moved' | 'failed'> {
+  const first = current.items[i]?.firstTry
+  if (first === undefined) return Promise.resolve('busy')
+  if (result === 'right') return applyGrade($, cfg, current, i, 'right', { ...firstGrade(first), isLearnerGraded: true }, { isFirstDropped: true })
+  const extra = { ...firstGrade(first), ...(how.isLearner ? { isLearnerGraded: true } : {}) }
+  return applyGrade($, cfg, current, i, 'wrong', extra, { isFirstDropped: true, ...(how.at !== undefined ? { at: how.at } : {}) })
+}
+
+/**
+ * Every first try of the last quiz still waiting for its try again, graded as
+ * Claude graded it, on the day it was tried: once a new quiz replaces the quiz
+ * (`isReplaced`), or a later day has come. A miss is never lost by leaving it.
+ */
+async function settleFirstTries($: EngineInterface, cfg: Config, now: number, isReplaced: boolean): Promise<void> {
+  const current = await lastQuiz($)
+  if (!current) return
+  for (const [i, item] of current.items.entries()) {
+    const first = item.firstTry
+    if (first === undefined || item.result !== undefined) continue
+    if (!isReplaced && stamp(first.at).day === stamp(now).day) continue
+    const latest = (await lastQuiz($)) ?? current
+    if (latest.at !== current.at) return
+    await gradeFirstTry($, cfg, latest, i, 'wrong', { at: first.at })
+  }
 }
 
 /**
@@ -2097,17 +2288,19 @@ async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: str
     return
   }
   if (mine === '') {
-    // Recalling first, even wrongly, is what makes it stay: the answer is the last way out, not one of two.
-    const stuck = item.hint !== undefined && item.isHinted !== true ? '막히면 h로 힌트를 봅니다.' : '정말 떠오르지 않으면 a로 정답을 봅니다.'
-    await update($, quizRun, run => ({ ...run, error: `답을 적은 뒤 Enter를 누르세요. 틀려도 괜찮으니 먼저 떠올려 적어 보세요 · ${stuck}` }))
+    // Recalling first, even wrongly, is what makes it stay: "모르겠어요" is the way out, the hint before the answer.
+    const isHintLeft = item.hint !== undefined && item.isHinted !== true && item.firstTry === undefined
+    await update($, quizRun, run => ({ ...run, error: `모르겠으면 '모르겠어요'라고 적고 Enter${isHintLeft ? ' · 막히면 h로 힌트' : ''}` }))
     return
   }
   isQuizChecking = true
   let error: string | null = null
+  let isFirstTry = false
   try {
     await update($, quizRun, run => ({ ...run, checking: i, error: null, armedNew: null }))
     const graded = await gradeTyped($, cfg, current, i, mine)
     if ('error' in graded) error = graded.error
+    else isFirstTry = graded.isFirstTry === true
   } catch (thrown) {
     void fault($, 'grade', faultCode(thrown), '답을 채점하지 못했습니다')
     error = '채점하지 못했습니다. 잠시 뒤 다시 해 보세요.'
@@ -2117,7 +2310,9 @@ async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: str
     await update($, quizRun, run => ({ ...run, checking: null, error: error ?? run.error, draft: error !== null ? { at: current.at, i, text: mine } : null }))
   }
   if (error !== null) return
-  await focusNextQuestion($)
+  // One try again: its own field, drawn empty, takes the keys (in the input mode the first answer was typed in).
+  if (isFirstTry) focusInPane($, `${quizFieldKey(current.at, i)}-again`)
+  else await focusNextQuestion($)
 }
 
 /** After a grade, the keys to the question the pane shows next: the first not graded, or s once all are. One whose answer was seen has no field; the ring stays put. */
@@ -2126,7 +2321,7 @@ async function focusNextQuestion($: EngineInterface): Promise<void> {
   if (!latest) return
   const next = latest.items.findIndex(one => one.result === undefined)
   if (next === -1) focusInPane($, 'quiz-new')
-  else if (isOpen(latest, latest.items[next]!)) focusInPane($, quizFieldKey(latest.at, next))
+  else if (isOpen(latest, latest.items[next]!)) focusInPane($, answerKey(latest, next))
 }
 
 /** The quiz as it stands now, in the session and the store. */
@@ -2801,11 +2996,17 @@ async function stepNote($: EngineInterface, delta: number): Promise<void> {
   })
 }
 
-/** What a question in a /learn quiz list says before itself: its grade (and help), Claude grading it now, or its answer seen. */
+/** What a question in a /learn quiz list says before itself: its grade (and help), Claude grading it now, a try again waiting, or its answer seen. */
 function quizItemState(current: Quiz, item: LearnQuizItem, isChecking: boolean): string {
   if (item.result !== undefined) return `${resultMark(item)}${helpText(item)} · `
   if (isChecking) return '채점 중 · '
+  if (item.firstTry !== undefined) return '한 번 더 · '
   return isAnswerShown(current, item) ? '정답 봄 · ' : ''
+}
+
+/** How a try again is sent in the conversation, and the answer asked for instead. */
+function againText(n: number): string {
+  return `한 번 더: /learn 퀴즈 ${n} 새 답 · 정답: /learn 퀴즈 정답 ${n}`
 }
 
 /** The first question still to answer, past the one Claude is grading now: its index, or -1. */
@@ -2822,7 +3023,8 @@ function quizListText(current: Quiz, now: number, tail: string, checking?: numbe
   const lines = current.items.map((item, i) => listItem(i + 1, `${quizItemState(current, item, i === checking)}${item.question}`))
   const open = firstOpen(current, checking)
   const seen = current.items.flatMap((item, i) => (item.result === undefined && i !== checking && isAnswerShown(current, item) ? [i + 1] : []))
-  const next = open === -1 ? '모두 채점했거나 정답을 봤습니다' : `답을 적어 채점받기: /learn 퀴즈 ${open + 1} 내 답`
+  const next =
+    open === -1 ? '모두 채점했거나 정답을 봤습니다' : current.items[open]!.firstTry !== undefined ? againText(open + 1) : `답을 적어 채점받기: /learn 퀴즈 ${open + 1} 내 답`
   return [
     `풀던 퀴즈 · ${current.items.length}문제 중 ${graded}개 채점 (${when(current.at, now)})`,
     '',
@@ -2849,6 +3051,16 @@ async function typedAnswer($: EngineInterface, cfg: Config, current: Quiz, n: nu
     await update($, quizRun, run => ({ ...run, checking: n - 1, error: null }))
     const graded = await gradeTyped($, cfg, current, n - 1, mine)
     if ('error' in graded) return graded.error
+    // Short of right the first time: where it went, the question asked back (or the hint), and how to try again.
+    const first = graded.isFirstTry ? graded.item.firstTry : undefined
+    if (first !== undefined) {
+      return [
+        ...(lead ? [lead, ''] : []),
+        `${n}번 ${firstTryHead(first)}${first.feedback !== '' ? ` · ${first.feedback}` : ''}`,
+        `${nudgeLabel(first)}: ${first.nudge}`,
+        againText(n),
+      ].join('\n')
+    }
     const after = (await lastQuiz($)) ?? current
     const next = after.items.findIndex(one => isOpen(after, one))
     const right = after.items.filter(one => one.result === 'right').length
@@ -2886,7 +3098,7 @@ async function typedAnswer($: EngineInterface, cfg: Config, current: Quiz, n: nu
  * open, or number `said`), seen now so a grade the learner gives it keeps its
  * step; every answer once no question is left open.
  */
-async function answerText($: EngineInterface, current: Quiz, said: number | undefined): Promise<string> {
+async function answerText($: EngineInterface, cfg: Config, current: Quiz, said: number | undefined): Promise<string> {
   const checking = (await read($, quizRun)).checking
   const n = said ?? firstOpen(current, checking) + 1
   if (said === undefined && n === 0) {
@@ -2903,14 +3115,16 @@ async function answerText($: EngineInterface, current: Quiz, said: number | unde
   const item = current.items[n - 1]
   if (!item) return `문제 번호를 1~${current.items.length} 사이로 알려 주세요. 예: /learn 퀴즈 정답 ${current.items.length}`
   if (checking === n - 1) return `${n}번은 지금 Claude가 채점하고 있습니다. 채점이 끝나면 정답도 함께 보입니다.`
-  if (item.result === undefined) await showAnswer($, n - 1)
+  // After a first try, seeing the answer grades it (as Claude graded the first try): no grade left to give.
+  if (item.result === undefined) await showAnswer($, cfg, n - 1)
   const after = (await lastQuiz($)) ?? current
+  const shown = after.at === current.at ? (after.items[n - 1] ?? item) : item
   const next = firstOpen(after, checking)
   const steps = [
-    ...(item.result === undefined ? [`스스로 채점: /learn 퀴즈 맞음 ${n} · /learn 퀴즈 틀림 ${n}`] : []),
+    ...(shown.result === undefined ? [`스스로 채점: /learn 퀴즈 맞음 ${n} · /learn 퀴즈 틀림 ${n}`] : []),
     ...(next !== -1 ? [`다음 문제: /learn 퀴즈 ${next + 1} 내 답`] : []),
   ]
-  const mark = item.result !== undefined ? ` · ${resultMark(item)}` : ''
+  const mark = shown.result !== undefined ? ` · ${resultMark(shown)}` : ''
   return `${n}번 정답\n\n${item.answer}\n(개념: ${item.name}${mark})${steps.length > 0 ? `\n\n${steps.join(' · ')}` : ''}`
 }
 
@@ -2928,8 +3142,8 @@ const REVIEW_PLEASE = /^(?:하기|해\s*(?:줘|주세요|줄래)|할래|좀|plea
 const QUIZ_NEW = /^(?:새로|새|new)(?:\s*(?:문제|퀴즈|quiz|questions?))?(?:\s*받기)?$/i
 /** The quiz being answered asked for again: 문제, or 다음 (문제) · 목록 as the replies' "다음 문제: …" may be read. */
 const QUIZ_LIST = /^(?:문제|questions?|다음|다음\s*문제|목록|next|list)$/i
-/** How /learn quiz is used asked for, the replies' own "내 답" placeholder among it: nothing to grade. */
-const QUIZ_HELP = /^(?:help|도움말|도움|쓰는\s*법|사용법|usage|내\s*답|\?)$/i
+/** How /learn quiz is used asked for, the replies' own "내 답" and "새 답" placeholders among it: nothing to grade. */
+const QUIZ_HELP = /^(?:help|도움말|도움|쓰는\s*법|사용법|usage|[내새]\s*답|\?)$/i
 
 /**
  * /learn quiz and what may follow it: the quiz being answered (a new one when
@@ -2941,6 +3155,8 @@ const QUIZ_HELP = /^(?:help|도움말|도움|쓰는\s*법|사용법|usage|내\s*
  */
 async function quizCommand($: EngineInterface, cfg: Config, said: string): Promise<string> {
   const now = await $.clock.now()
+  // A first try of a day gone by waits no more (not while Claude grades a try again, which is today's).
+  if (!isQuizChecking) await settleFirstTries($, cfg, now, false)
   const current = await lastQuiz($)
   // The number first (1 힌트 · 2 정답) is the same ask as after: not an answer to grade.
   const flipped = /^(\d+)\s*번?\s+(힌트|hints?|정답|answers?)(?:\s*보기)?$/i.exec(said)
@@ -2952,7 +3168,7 @@ async function quizCommand($: EngineInterface, cfg: Config, said: string): Promi
   const answer = /^(정답|답|answer|answers)\s*(?:(\d+)\s*번?)?(?:\s*보기)?$/i.exec(rest)
   if (answer) {
     if (!current) return NO_QUIZ
-    return answerText($, current, answer[2] === undefined ? undefined : Number(answer[2]))
+    return answerText($, cfg, current, answer[2] === undefined ? undefined : Number(answer[2]))
   }
   if (QUIZ_LIST.test(rest)) {
     if (!current) return NO_QUIZ
@@ -2983,15 +3199,17 @@ async function quizCommand($: EngineInterface, cfg: Config, said: string): Promi
     const result = /^(맞|right|correct)/i.test(grade[1]!) ? 'right' : 'wrong'
     const word = result === 'right' ? '맞음' : '틀림'
     const said = [...new Set((grade[2]!.match(/\d+/g) ?? []).map(Number))]
-    // No number: the one question there is, or the one whose answer was just seen and not graded.
-    const seen = current.items.flatMap((item, i) => (item.result === undefined && isAnswerShown(current, item) ? [i + 1] : []))
+    // A first try (not "모르겠어요") was answered: 맞음 grades it right as the learner says, 틀림 as Claude graded it.
+    const isTried = (item: LearnQuizItem) => item.result === undefined && item.firstTry !== undefined && !isBlankAnswer(item.firstTry.mine)
+    // No number: the one question there is, or the one whose answer was just seen (or tried) and not graded.
+    const seen = current.items.flatMap((item, i) => (item.result === undefined && (isAnswerShown(current, item) || isTried(item)) ? [i + 1] : []))
     const numbers = said.length > 0 ? said : current.items.length === 1 ? [1] : seen.length === 1 ? seen : []
     if (numbers.length === 0 || numbers.some(n => current.items[n - 1] === undefined)) {
       return `문제 번호를 1~${current.items.length} 사이로 알려 주세요. 예: /learn 퀴즈 ${word} ${current.items.length}`
     }
     const checking = (await read($, quizRun)).checking
     if (typeof checking === 'number' && numbers.includes(checking + 1)) return `${checking + 1}번은 지금 Claude가 채점하고 있습니다. 채점이 끝난 뒤 다시 알려 주세요.`
-    const unseen = numbers.filter(n => isOpen(current, current.items[n - 1]!))
+    const unseen = numbers.filter(n => isOpen(current, current.items[n - 1]!) && !isTried(current.items[n - 1]!))
     if (unseen.length > 0) {
       return `${unseen.join(', ')}번은 아직 정답을 보지 않았습니다. 답을 적어 채점받기: /learn 퀴즈 ${unseen[0]} 내 답 · 정답 보기: /learn 퀴즈 정답 ${unseen[0]}`
     }
@@ -3003,13 +3221,19 @@ async function quizCommand($: EngineInterface, cfg: Config, said: string): Promi
       if (latest.at !== current.at) return MOVED_TEXT
       const item = latest.items[n - 1]!
       if (item.result === result && !isPartly(item)) continue
-      const done = item.result === undefined ? await applyGrade($, cfg, latest, n - 1, result, {}) : await regradeQuiz($, cfg, latest, n - 1, result)
+      const tried = isTried(item)
+      const done = tried
+        ? await gradeFirstTry($, cfg, latest, n - 1, result, { isLearner: true })
+        : item.result === undefined
+          ? await applyGrade($, cfg, latest, n - 1, result, {})
+          : await regradeQuiz($, cfg, latest, n - 1, result)
       if (done === 'failed') return GRADE_NOT_KEPT
       if (done === 'moved') return MOVED_TEXT
       if (done === 'kept') {
         changed.push(`${n}. ${item.name}`)
         changedAt.push(n - 1)
-        if (isHelpedGrade(item)) helped += 1
+        // Right over a first try, as the learner says it was: recalled by themselves unless its hint was seen.
+        if (tried ? item.isHinted === true : isHelpedGrade(item)) helped += 1
       }
     }
     if (changed.length === 0) return `이미 ${word}으로 적혀 있습니다.`
@@ -3028,6 +3252,9 @@ async function quizCommand($: EngineInterface, cfg: Config, said: string): Promi
   const typed = /^(\d+)\s*번?\s*[.):]?\s+([\s\S]+)$/.exec(rest)
   if (typed) {
     if (!current) return NO_QUIZ
+    // The replies' own "내 답" · "새 답", sent as they stand: what goes there, not an answer to grade.
+    const placeholder = /^[내새]\s*답$/.exec(typed[2]!.trim())?.[0]
+    if (placeholder !== undefined) return `'${placeholder}' 자리에 떠올린 답을 적어 보내 주세요: /learn 퀴즈 ${typed[1]} (떠올린 답)`
     return typedAnswer($, cfg, current, Number(typed[1]), typed[2]!.trim())
   }
   if (rest !== '' && !isNew) {
@@ -3127,6 +3354,8 @@ export const register: Register = (on, options) => {
       const last = await lastQuiz($)
       if (last) await update($, quiz, () => last)
     }
+    // A first try a past day left waiting for its try again is graded as Claude graded it, on that day.
+    if (!isQuizChecking) await settleFirstTries($, cfg, await $.clock.now(), false)
     return next(e)
   })
 
@@ -3400,8 +3629,9 @@ export const register: Register = (on, options) => {
       if (ask !== '' || Object.keys(index).length === 0) return { text: await quizCommand($, cfg, ask) }
       // Asked from Remote Control or a chat channel, the pane is on a screen nobody there sees: the quiz comes in the reply.
       const isAway = isAwayOrigin(e.origin) || (await isCloudSession($))
-      const current = await lastQuiz($)
       const now = await $.clock.now()
+      await settleFirstTries($, cfg, now, false)
+      const current = await lastQuiz($)
       const today = todayReview(index, await read($, activity), now)
       // Nothing due (or today's share done) and nothing left to answer: no new quiz asked unbidden, wherever it was asked.
       if (today.left === 0 && !(current?.items.some(item => isAwaited(current, item, now)) ?? false)) {
@@ -3660,7 +3890,7 @@ export const register: Register = (on, options) => {
     const isTerminalFocus = e.surface === 'terminal' && e.props.isFocused === true
     // The quiz view with an answer field to type in: the keys go there first (autoFocus), in either input mode.
     const asked = current ? current.items.findIndex(item => item.result === undefined) : -1
-    const isAnswering = shown === 'quiz' && current !== null && asked !== -1 && isOpen(current, current.items[asked]!) && 'Input' in el && run.checking !== asked
+    const isAnswering = shown === 'quiz' && current !== null && asked !== -1 && isOpen(current, current.items[asked]!) && fieldOf(el, e.surface) !== undefined && run.checking !== asked
     const keysHint =
       e.surface === 'terminal' ? (
         <Text dimColor wrap="wrap">
@@ -3706,7 +3936,7 @@ export const register: Register = (on, options) => {
           {hasConcepts && keysHint}
           {hasConcepts && shown !== 'note' ? (
             <Box marginTop={1} flexDirection="column">
-              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, review, list, isTerminalFocus, el) : conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el)}
+              {shown === 'quiz' ? quizView($, cfg, current, run, hasConcepts, now, review, list, isTerminalFocus, el, e.surface) : conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el)}
             </Box>
           ) : (
             welcome
@@ -3728,14 +3958,14 @@ export const register: Register = (on, options) => {
 
     const body =
       shown === 'quiz' ? (
-        quizView($, cfg, current, run, hasConcepts, now, review, list, isTerminalFocus, el)
+        quizView($, cfg, current, run, hasConcepts, now, review, list, isTerminalFocus, el, e.surface)
       ) : shown === 'concepts' ? (
         conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el)
       ) : shown === 'note' ? (
         <Box flexDirection="column">
           {noteBody(note, isBusy, offText(note, cfg, now), el)}
           {note.status === 'ready' && note.concepts.length > 0 && conceptLine(note, index, map, el)}
-          {note.status === 'ready' && noteTools($, cfg, note, writeLabel, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el)}
+          {note.status === 'ready' && noteTools($, cfg, note, writeLabel, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el, e.surface)}
         </Box>
       ) : (
         <Box flexDirection="column">
@@ -3874,7 +4104,7 @@ function viewStrip($: EngineInterface, cfg: Config, mode: LearnView, hasNote: bo
     }
     const go =
       one === 'quiz'
-        ? () => showQuiz($)
+        ? () => showQuiz($, cfg)
         : async () => {
             await disarm($)
             await update($, view, () => one)
@@ -3912,8 +4142,10 @@ function viewStrip($: EngineInterface, cfg: Config, mode: LearnView, hasNote: bo
  */
 async function reviewNow($: EngineInterface, cfg: Config): Promise<void> {
   await update($, view, () => 'quiz')
-  const current = await lastQuiz($)
   const now = await $.clock.now()
+  // A first try of a day gone by waits no more: graded as Claude graded it, before today's review is asked for.
+  await settleFirstTries($, cfg, now, false)
+  const current = await lastQuiz($)
   // A question whose answer was seen today still waits for o or x: kept, as s keeps it.
   if (!current || !current.items.some(item => isAwaited(current, item, now))) {
     void startQuiz($, cfg)
@@ -3927,8 +4159,9 @@ async function reviewNow($: EngineInterface, cfg: Config): Promise<void> {
  * the question it shows, so the answer is typed at once (in either input mode)
  * and no letter of it presses one of the quiz's buttons.
  */
-async function showQuiz($: EngineInterface): Promise<void> {
+async function showQuiz($: EngineInterface, cfg: Config): Promise<void> {
   await update($, view, () => 'quiz')
+  await settleFirstTries($, cfg, await $.clock.now(), false)
   const current = await lastQuiz($)
   if (current) focusShown($, current)
 }
@@ -3951,7 +4184,16 @@ async function pressNew($: EngineInterface, cfg: Config): Promise<void> {
 /** The keys to the answer field of the question the quiz view shows (the first not graded), while it is still to answer. */
 function focusShown($: EngineInterface, current: Quiz): void {
   const at = current.items.findIndex(item => item.result === undefined)
-  if (at !== -1 && isOpen(current, current.items[at]!)) focusInPane($, quizFieldKey(current.at, at))
+  if (at !== -1 && isOpen(current, current.items[at]!)) focusInPane($, answerKey(current, at))
+}
+
+/**
+ * The text field `el` draws, or undefined on a surface that draws none (the mobile app, where a question goes
+ * through /learn ask and a quiz through a, o and x). The engine completes every surface's table with every
+ * element, one the surface lacks drawing a fragment, so `'Input' in el` alone cannot tell (it held on mobile too).
+ */
+function fieldOf(el: ElementTable, surface: RenderSurface): ElementConstructor<InputProps> | undefined {
+  return surface !== 'mobile' && 'Input' in el ? el.Input : undefined
 }
 
 /**
@@ -3961,10 +4203,10 @@ function focusShown($: EngineInterface, current: Quiz): void {
  * below), and last and dim the note copied for a mentor (c) and written again
  * (w), with the latest questions and their answers.
  */
-function noteTools($: EngineInterface, cfg: Config, note: LearnNote, writeLabel: string, ask: LearnAskRun, el: ElementTable) {
+function noteTools($: EngineInterface, cfg: Config, note: LearnNote, writeLabel: string, ask: LearnAskRun, el: ElementTable, surface: RenderSurface) {
   const { Box, Text, Button, Markdown } = el
   // The mobile app draws no text field yet: there a question goes through /learn ask.
-  const Input = 'Input' in el ? el.Input : undefined
+  const Input = fieldOf(el, surface)
   const fieldKey = `ask-${note.id}`
   return (
     <Box flexDirection="column" marginTop={1}>
@@ -4836,11 +5078,15 @@ function conceptsView(
 
 /**
  * The quiz, one question at a time, each titled with its kind (예측 · 왜 ·
- * 바꿔 보기): the learner types an answer for Claude to grade (i, Enter), or
- * looks at a hint (h) or the answer (a) and grades it themselves (o, x); a
- * wrong one comes first next time. The questions already graded stay above as
- * one line each, the last one Claude graded opened up, with the note that
- * taught its concept (n) when it was wrong and the pane holds that note.
+ * 바꿔 보기): the learner types an answer for Claude to grade (i, Enter),
+ * after a hint (h) if they like. A first try short of right gets a question
+ * asked back and a field for one try again, the answer (a, graded as the first
+ * try was) and f (맞았는데요) under it. Where no field is drawn (the mobile
+ * app), or a grade did not come back, the answer (a) shows for the learner to
+ * grade themselves (o, x). A wrong one comes first next time. The questions
+ * already graded stay above as one line each, the last one Claude graded
+ * opened up (unless a try again is on show), with the note that taught its
+ * concept (n) when it was wrong and the pane holds that note.
  */
 function quizView(
   $: EngineInterface,
@@ -4853,17 +5099,19 @@ function quizView(
   list: readonly LearnNote[],
   isFocused: boolean,
   el: ElementTable,
+  surface: RenderSurface,
 ) {
   const { Box, Text, Markdown, Button } = el
   // The mobile app draws no text field yet: there the answer is shown and graded by hand.
-  const Input = 'Input' in el ? el.Input : undefined
+  const Input = fieldOf(el, surface)
   const items = current?.items ?? []
   const graded = items.filter(item => item.result !== undefined)
   const right = graded.filter(item => item.result === 'right').length
   const at = items.findIndex(item => item.result === undefined)
-  // The answer graded last, when Claude graded it, stays open with its feedback until the next one is graded.
+  // The answer graded last, when Claude graded it, stays open with its feedback until the next one is graded,
+  // or a try again is on show (its f is the try's own).
   const lastAt = graded.length === 0 ? -1 : items.indexOf(graded.reduce((a, b) => ((b.gradedAt ?? 0) >= (a.gradedAt ?? 0) ? b : a)))
-  const opened = lastAt !== -1 && items[lastAt]?.verdict !== undefined ? lastAt : -1
+  const opened = lastAt !== -1 && items[lastAt]?.verdict !== undefined && items[at]?.firstTry === undefined ? lastAt : -1
   const fieldKey = (i: number) => quizFieldKey(current?.at ?? 0, i)
   return (
     <Box flexDirection="column">
@@ -4890,6 +5138,7 @@ function quizView(
       {hasConcepts && items.length === 0 && !run.isMaking && (
         <Text dimColor wrap="wrap">
           s를 누르면 복습할 개념으로 내 코드에서 3문제를 냅니다 · 먼저 떠올려 적어 보세요. 틀린 답을 바로잡을 때 더 오래 남습니다
+          {Input ? " · 모르면 '모르겠어요'라고 적고 Enter" : ''}
         </Text>
       )}
       {run.isMaking && <Text color="cyan">문제를 만드는 중입니다…</Text>}
@@ -4955,6 +5204,9 @@ function quizView(
           )
         }
         if (i !== at || !current) return null
+        const first = item.firstTry
+        // A grade that did not come back left its answer in the field: the answer may be seen and graded by hand then.
+        const isUngraded = run.draft != null && run.draft.at === current.at && run.draft.i === i
         return (
           <Box key={`quiz-${i}`} flexDirection="column" marginTop={1}>
             <Text bold>
@@ -4962,7 +5214,7 @@ function quizView(
               {item.kind !== undefined ? ` · ${KIND_LABEL[item.kind]}` : ''}
             </Text>
             <Markdown text={item.question} />
-            {item.hint !== undefined && item.isHinted === true && (
+            {item.hint !== undefined && item.isHinted === true && first?.nudge !== item.hint && (
               <Box flexDirection="column">
                 <Text color="yellow">힌트</Text>
                 <Markdown text={item.hint} />
@@ -4980,6 +5232,43 @@ function quizView(
               </Box>
             ) : run.checking === i ? (
               <Text color="cyan">채점하는 중입니다…</Text>
+            ) : first !== undefined ? (
+              <Box flexDirection="column" marginTop={1}>
+                <Text color={first.verdict === 'partial' || isBlankAnswer(first.mine) ? 'yellow' : 'red'} wrap="wrap">
+                  {firstTryHead(first)}
+                </Text>
+                {!isBlankAnswer(first.mine) && (
+                  <Text dimColor wrap="wrap">
+                    내 답: {first.mine}
+                  </Text>
+                )}
+                {first.feedback !== '' && <Markdown text={first.feedback} />}
+                <Markdown text={`**${nudgeLabel(first)}:** ${first.nudge}`} />
+                {Input && (
+                  <Input
+                    key={`${fieldKey(i)}-again`}
+                    autoFocus
+                    label="내 답 (한 번 더)"
+                    placeholder="고쳐 적기"
+                    submitLabel="다시 채점"
+                    value={isUngraded ? run.draft!.text : ''}
+                    onSubmit={value => void checkAnswer($, cfg, i, value)}
+                  />
+                )}
+                <Box flexWrap="wrap" columnGap={2}>
+                  {Input && (
+                    <Button key="quiz-type" hotkey="i" plain label="답 적기" onPress={() => void $.ui.focus({ requestId: PANE, key: `${fieldKey(i)}-again` }).catch(() => undefined)} />
+                  )}
+                  <Button key="quiz-answer" hotkey="a" plain label="정답 보기" onPress={() => answerInPane($, cfg, i)} />
+                  {!isBlankAnswer(first.mine) && <Button key="quiz-flip" hotkey="f" plain dimColor label="맞았는데요" onPress={() => flipGrade($, cfg, i)} />}
+                  {!Input && <Text dimColor>한 번 더: /learn 퀴즈 {i + 1} 새 답</Text>}
+                </Box>
+                {Input && isFocused && (
+                  <Text dimColor wrap="wrap">
+                    Enter: 다시 채점 · Tab: 버튼으로 ({['a 정답', ...(isBlankAnswer(first.mine) ? [] : ['f 맞았는데요'])].join(' · ')})
+                  </Text>
+                )}
+              </Box>
             ) : (
               <Box flexDirection="column" marginTop={1}>
                 {Input && (
@@ -4989,7 +5278,7 @@ function quizView(
                     label="내 답"
                     placeholder="답을 적고 Enter"
                     submitLabel="채점받기"
-                    value={run.draft && run.draft.at === current.at && run.draft.i === i ? run.draft.text : ''}
+                    value={isUngraded ? run.draft!.text : ''}
                     onSubmit={value => void checkAnswer($, cfg, i, value)}
                   />
                 )}
@@ -4998,13 +5287,14 @@ function quizView(
                     <Button key="quiz-type" hotkey="i" plain label="답 적기" onPress={() => void $.ui.focus({ requestId: PANE, key: fieldKey(i) }).catch(() => undefined)} />
                   )}
                   {item.hint !== undefined && item.isHinted !== true && <Button key="quiz-hint" hotkey="h" plain label="힌트" onPress={() => showHint($, i)} />}
-                  <Button key="quiz-answer" hotkey="a" plain label={Input ? '정답만 보기' : '정답 보기'} onPress={() => showAnswer($, i)} />
+                  {/* Before one try the answer is only for grading by hand: where no field is drawn, or a grade did not come back. */}
+                  {(!Input || isUngraded) && <Button key="quiz-answer" hotkey="a" plain label="정답 보기" onPress={() => answerInPane($, cfg, i)} />}
                   {!Input && <Text dimColor>먼저 스스로 답해 보세요</Text>}
                 </Box>
                 {/* While the field holds the keys every letter is typed into it: how to reach the buttons. */}
                 {Input && isFocused && (
                   <Text dimColor wrap="wrap">
-                    답 칸에서 Enter: 채점 · Tab: 버튼으로 ({[...(item.hint !== undefined && item.isHinted !== true ? ['h 힌트'] : []), 'a 정답', '1~4 보기'].join(' · ')})
+                    답 칸에서 Enter: 채점 · Tab: 버튼으로 ({[...(item.hint !== undefined && item.isHinted !== true ? ['h 힌트'] : []), ...(isUngraded ? ['a 정답'] : []), '1~4 보기'].join(' · ')})
                   </Text>
                 )}
               </Box>
@@ -5044,7 +5334,7 @@ const HELP = [
   '- `/learn 복습`: 오늘 복습을 패널 퀴즈로 바로 시작 · 답 칸에 바로 적고 Enter (패널이 없는 화면에서는 대화창에 문제를 냅니다)',
   '- 패널: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작 · `p`·`n` 이전·다음 노트 · `w` 노트 쓰기, 다시 쓰기',
   '- 노트 아래: `t` 이 노트 퀴즈 · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기 · `c` 복사(요청·경로를 빼고 멘토에게 묻기)',
-  '- 퀴즈(`4`): 답을 적고 Enter로 채점 · 답 칸에서 Tab으로 버튼에 가서 `h` 힌트 · `a` 정답 보기 · `o`·`x` 맞힘·틀림 · `f` 채점 바꾸기 · `s` 새 문제(풀던 문제가 남았으면 두 번) · `n` 틀린 개념을 배운 노트',
+  '- 퀴즈(`4`): 답을 적고 Enter로 채점 · 틀리면 되묻기를 보고 한 번 더 (모르면 `모르겠어요`) · 답 칸에서 Tab으로 버튼에 가서 `h` 힌트 · `a` 정답 · `f` 채점 바꾸기 · `s` 새 문제(풀던 문제가 남았으면 두 번) · `n` 틀린 개념을 배운 노트',
   '- `/learn 퀴즈`: 대화창에서 풀기 · 풀던 퀴즈, 없으면 복습할 개념으로 새 퀴즈 (내 코드의 결과를 맞히거나 바꿔 봅니다) · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트`(`힌트 2`) · `정답`',
   '- `/learn 정리`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
   '- `/learn 질문 …`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기',
