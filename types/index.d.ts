@@ -212,8 +212,11 @@ export type LearnQuizRun = {
   error: string | null
   /** The question whose typed answer Claude is grading now, if any. */
   checking?: number | null
-  /** A typed answer whose grading failed, put back in its question's field to send again. */
-  draft?: { at: number; i: number; text: string } | null
+  /**
+   * A typed answer that did not go in, put back in its question's field to send again: its grade failed
+   * (`isFailed`, the answer may then be seen and graded by hand), or another answer was being graded.
+   */
+  draft?: { at: number; i: number; text: string; isFailed?: boolean } | null
   /** The quiz (by when it was asked) whose s was pressed once with questions still to grade: the next s makes a new one. */
   armedNew?: number | null
 }

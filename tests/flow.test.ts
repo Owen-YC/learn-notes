@@ -4437,10 +4437,10 @@ describe('1.6.0: views on 1 to 4, q for today\'s review, the keys where they are
     const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
     await ui.press({ key: 'view-quiz' })
     expect((await ui.find({ type: 'Input', key: mineKey(store, 0) }))?.props.autoFocus).toBe(true)
-    // Before a first try no answer waits a Tab away (1.7.0 D4): h while the hint is still to see.
-    expect(await ui.find({ type: 'Text', text: '답 칸에서 Enter: 채점 · Tab: 버튼으로 (h 힌트 · 1~4 보기)' })).toBeDefined()
+    // Before a first try no answer waits a Tab away (1.7.0 D4): h while the hint is still to see, and "모르겠어요" the way out.
+    expect(await ui.find({ type: 'Text', text: "답 칸에서 Enter: 채점 · 모르면 '모르겠어요' · Tab: 버튼으로 (h 힌트 · 1~4 보기)" })).toBeDefined()
     await ui.press({ key: 'quiz-hint' })
-    expect(await ui.find({ type: 'Text', text: '답 칸에서 Enter: 채점 · Tab: 버튼으로 (1~4 보기)' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: "답 칸에서 Enter: 채점 · 모르면 '모르겠어요' · Tab: 버튼으로 (1~4 보기)" })).toBeDefined()
     // Over the field the keys line says where the keys go first, that the answer may be typed in either input mode,
     // and (as 9795f1a meant) that the buttons a Tab away take their letter keys in the English one.
     expect(await ui.find({ type: 'Text', text: 'Esc: 대화로 돌아가기 · 답은 한/영 상관없이, 버튼의 글자 키는 영문 상태에서' })).toBeDefined()
@@ -7291,5 +7291,303 @@ describe('1.7.0: a question asked back, and one try again (D4)', () => {
     await ui.press({ key: 'quiz-answer' })
     expect(await ui.find({ type: 'Button', key: 'quiz-right' })).toBeDefined()
     await ui.unmount()
+  })
+
+  /** A first try left in the pane yesterday, this window open since: no session start in between. */
+  async function leftYesterday($: Engine, on: On) {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const triedAt = w.clock.now()
+    w.answer = WRONG
+    await ui.input({ key: mineKey(store, 0), text: '전역 변수' })
+    await w.clock.settle()
+    await w.clock.advance(DAY)
+    return { store, w, ui, triedAt }
+  }
+  /** That first try graded as Claude graded it, on the day it was tried, once. */
+  function settledOnItsDay(store: Map<string, unknown>, triedAt: number) {
+    expect(concept(store, '클로저')).toMatchObject({ step: 0, missedAt: triedAt })
+    expect(quizItems(store)[0]).toMatchObject({ result: 'wrong', verdict: 'wrong', gradedAt: triedAt, mine: '전역 변수' })
+    expect(quizItems(store)[0]!.firstTry).toBeUndefined()
+    expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 0, wrong: 1 } })
+  }
+  const SETTLED = '날이 바뀌어 한 번 더를 기다리던 1번 (✗ 틀림)은 첫 답의 판정대로 매겼습니다.'
+
+  test('a day gone by with the window open: 4 settles a first try left waiting, on its own day (review)', async ($, on) => {
+    const { store, w, ui, triedAt } = await leftYesterday($, on)
+    // 4 from another view (in the quiz view it is the view shown, no key).
+    await ui.press({ key: 'view-concepts' })
+    await ui.press({ key: 'view-quiz' })
+    await w.clock.settle()
+    settledOnItsDay(store, triedAt)
+    expect(await ui.find({ type: 'Input', key: `${mineKey(store, 0)}-again` })).toBeUndefined()
+    expect(focusesOf(w).at(-1)).toBe(mineKey(store, 1))
+    await ui.unmount()
+  })
+
+  test('a day gone by with the window open: q settles it, and keeps the quiz for the questions still open (review)', async ($, on) => {
+    const { store, w, ui, triedAt } = await leftYesterday($, on)
+    const calls = w.models.length
+    // q from another view (the quiz view draws none while a quiz is answered).
+    await ui.press({ key: 'view-concepts' })
+    await ui.press({ key: 'review' })
+    await w.clock.settle()
+    settledOnItsDay(store, triedAt)
+    expect(w.models).toHaveLength(calls)
+    await ui.unmount()
+  })
+
+  test('a day gone by with the window open: /learn 퀴즈 settles it and says so first (review)', async ($, on) => {
+    const { store, w, ui, triedAt } = await leftYesterday($, on)
+    const listed = (await learn($, 'quiz')).text ?? ''
+    expect(listed.split('\n\n')[0]).toBe(SETTLED)
+    expect(listed).toContain('1. ✗ 틀림 · 문제 하나')
+    settledOnItsDay(store, triedAt)
+    // Said once: the next reply has nothing to say of it.
+    expect((await learn($, 'quiz')).text).not.toContain('날이 바뀌어')
+    await ui.unmount()
+  })
+
+  test('a day gone by with the window open: /learn 복습 settles it and says so (review)', async ($, on) => {
+    const { store, w, ui, triedAt } = await leftYesterday($, on)
+    const reply = (await learn($, '복습')).text ?? ''
+    expect(reply.split('\n\n')[0]).toBe(SETTLED)
+    settledOnItsDay(store, triedAt)
+    await w.clock.settle()
+    await ui.unmount()
+  })
+
+  test('a try again sent in the conversation after midnight: the first try was settled, and the reply says why (review)', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = HINTED
+    await learn($, 'quiz')
+    w.answer = WRONG
+    await learn($, 'quiz 1 전역 변수')
+    await w.clock.advance(23 * 3_600_000 + 10 * 60_000)
+    w.answer = RIGHT
+    const calls = w.models.length
+    expect((await learn($, 'quiz 1 바깥 함수의 변수')).text).toBe(`${SETTLED}\n\n1번은 이미 채점했습니다 (✗ 틀림). 새 문제: /learn 퀴즈 새로`)
+    expect(w.models).toHaveLength(calls)
+  })
+
+  test('a try again Claude is grading is not settled meanwhile by 4, q or /learn 복습: its grade stands (review)', async ($, on) => {
+    const { store, w, ui } = await leftYesterday($, on)
+    w.model = 'hold'
+    w.answer = RIGHT
+    await ui.input({ key: `${mineKey(store, 0)}-again`, text: '바깥 함수의 변수 환경' })
+    expect(await ui.find({ type: 'Text', text: '채점하는 중입니다…' })).toBeDefined()
+    await ui.press({ key: 'view-concepts' })
+    await ui.press({ key: 'view-quiz' })
+    await ui.press({ key: 'view-concepts' })
+    await ui.press({ key: 'review' })
+    await learn($, '복습')
+    expect(quizItems(store)[0]!.result).toBeUndefined()
+    w.release()
+    await w.clock.settle()
+    expect(quizItems(store)[0]).toMatchObject({ result: 'right', verdict: 'right', mine: '바깥 함수의 변수 환경' })
+    expect(await ui.find({ type: 'Text', text: /이미 채점했습니다/ })).toBeUndefined()
+    expect(concept(store, '클로저')).toMatchObject({ step: 2 })
+    expect(store.get('activity')).toEqual({ '2026-10-04': { notes: 0, right: 1, wrong: 0 } })
+    await ui.unmount()
+  })
+
+  test('a try again waiting is listed with the answer typed and the question asked back, in the conversation and away (review)', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = HINTED
+    await learn($, 'quiz')
+    w.answer = WRONG
+    await learn($, 'quiz 1 전역 변수')
+    const nudged = '1. 한 번 더 · 문제 하나\n   내 답: 전역 변수\n   되묻기: 안쪽 함수가 다시 불릴 때 count는 어디에 남아 있을까요?'
+    expect((await learn($, 'quiz')).text).toContain(nudged)
+    expect((await learn($, 'quiz 다음')).text).toContain(nudged)
+    const away = await $.command.run({ command: 'learn', args: '복습', origin: { kind: 'channel', server: 'slack' }, presentation: { isFullscreen: true, columns: 160 } })
+    expect(away.text).toContain(nudged)
+    expect(away.text).toContain('한 번 더: /learn 퀴즈 1 새 답 · 정답: /learn 퀴즈 정답 1')
+    // After "모르겠어요": the hint in that place, and no answer of the learner's to repeat.
+    await learn($, 'quiz 2 모르겠어요')
+    const listed = (await learn($, 'quiz 문제')).text ?? ''
+    expect(listed).toContain('2. 한 번 더 · 문제 둘\n   힌트: 둘째 힌트')
+    expect(listed).not.toContain('내 답: 모르겠어요')
+  })
+
+  test('what comes next after a grade or an answer seen is a try again when one waits there, not a new answer and the hint (review)', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = HINTED
+    await learn($, 'quiz')
+    w.answer = WRONG
+    await learn($, 'quiz 1 전역 변수')
+    w.answer = RIGHT
+    const graded = (await learn($, 'quiz 2 맞는 답')).text ?? ''
+    expect(graded.split('\n').at(-1)).toBe('한 번 더: /learn 퀴즈 1 새 답 · 정답: /learn 퀴즈 정답 1')
+    expect(graded).not.toContain('막히면')
+    const shown = (await learn($, 'quiz 정답 3')).text ?? ''
+    expect(shown.split('\n').at(-1)).toBe('스스로 채점: /learn 퀴즈 맞음 3 · /learn 퀴즈 틀림 3 · 한 번 더: /learn 퀴즈 1 새 답 · 정답: /learn 퀴즈 정답 1')
+  })
+
+  test('"모르겠어요" sent with no number is taken, not said to be graded (review)', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = HINTED
+    await learn($, 'quiz')
+    const calls = w.models.length
+    const reply = (await learn($, 'quiz 모르겠어요')).text ?? ''
+    expect(reply.split('\n')[0]).toBe('1번 답으로 받았습니다')
+    expect(reply).toContain('1번 힌트를 보고 한 번 더 떠올려 보세요')
+    expect(w.models).toHaveLength(calls)
+    // An answer Claude grades still says so (here the try again of the question still being answered).
+    w.answer = RIGHT
+    expect(((await learn($, 'quiz 바깥 변수')).text ?? '').split('\n')[0]).toBe('1번 답으로 채점했습니다')
+    expect(w.models).toHaveLength(calls + 1)
+  })
+
+  test('a try again\'s field is drawn empty though a failed grade left the first answer behind (review)', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w, { ...PANE_PROPS, isFocused: true })
+    w.replies = [{ status: 500, error: 'api_error' }]
+    await ui.input({ key: mineKey(store, 0), text: '처음 적은 답' })
+    await w.clock.settle()
+    expect((await ui.find({ type: 'Input', key: mineKey(store, 0) }))?.props.value).toBe('처음 적은 답')
+    w.answer = WRONG
+    await learn($, 'quiz 1 처음 적은 답')
+    expect((await ui.find({ type: 'Input', key: `${mineKey(store, 0)}-again` }))?.props.value).toBe('')
+    await ui.unmount()
+  })
+
+  test('an answer turned away while another is graded stays in its field, with no answer to see before a try (review)', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w, { ...PANE_PROPS, isFocused: true })
+    w.model = 'hold'
+    w.answer = RIGHT
+    const chat = learn($, 'quiz 2 아무 답')
+    await w.clock.settle()
+    await ui.input({ key: mineKey(store, 0), text: '아무 생각' })
+    expect(await ui.find({ type: 'Text', text: /다른 답을 채점하고 있습니다/ })).toBeDefined()
+    expect((await ui.find({ type: 'Input', key: mineKey(store, 0) }))?.props.value).toBe('아무 생각')
+    expect(await ui.find({ type: 'Button', key: 'quiz-answer' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /a 정답/ })).toBeUndefined()
+    w.release()
+    await chat
+    await w.clock.settle()
+    await ui.unmount()
+  })
+
+  test('after "모르겠어요" and the hint, a partly right answer is △, as partly right after h is (review)', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    await ui.input({ key: mineKey(store, 0), text: '모르겠어요' })
+    await w.clock.settle()
+    w.answer = PARTLY
+    await ui.input({ key: `${mineKey(store, 0)}-again`, text: '0 1 2 3' })
+    await w.clock.settle()
+    expect(quizItems(store)[0]).toMatchObject({ result: 'wrong', verdict: 'partial', mine: '0 1 2 3' })
+    expect(await ui.find({ type: 'Text', text: /^△ 거의 맞음 1\. 클로저 · 힌트 봄 · 방금 채점$/ })).toBeDefined()
+    expect(concept(store, '클로저')).toMatchObject({ step: 1, reviewedAt: NOW })
+    expect(concept(store, '클로저').missedAt).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('"??" is JavaScript\'s own operator, an answer to grade; "?" alone is not (review)', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const calls = w.models.length
+    w.answer = RIGHT
+    await ui.input({ key: mineKey(store, 0), text: '??' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(calls + 1)
+    expect(quizItems(store)[0]).toMatchObject({ result: 'right', mine: '??' })
+    await ui.unmount()
+  })
+
+  test('another window\'s grade is not done again here: 4 in a window open since yesterday leaves the store as that window left it (review)', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const oldAt = (store.get('quiz') as { at: number }).at
+    w.answer = WRONG
+    await ui.input({ key: mineKey(store, 0), text: '전역 변수' })
+    await w.clock.settle()
+    // Window A, the next day: settled the first try, made today's quiz and got that concept right.
+    await w.clock.advance(DAY)
+    const today = w.clock.now()
+    const index = store.get('concepts') as Record<string, Record<string, unknown>>
+    const key = Object.keys(index).find(one => index[one]!.name === '클로저')!
+    const { missedAt: _, ...rest } = index[key]!
+    index[key] = { ...rest, step: 1, reviewedAt: today }
+    const newer = { at: today, isRevealed: false, items: [{ key, name: '클로저', question: 'A의 새 문제', answer: 'A의 답', result: 'right', gradedAt: today, mine: '맞는 답', verdict: 'right', isShown: true }] }
+    store.set('quiz', newer)
+    store.set('activity', { '2026-10-03': { notes: 0, right: 0, wrong: 1 }, '2026-10-04': { notes: 0, right: 1, wrong: 0 } })
+    // Window B, open since yesterday: 3, then 4.
+    await ui.press({ key: 'view-concepts' })
+    await ui.press({ key: 'view-quiz' })
+    await w.clock.settle()
+    expect(concept(store, '클로저')).toMatchObject({ step: 1, reviewedAt: today })
+    expect(concept(store, '클로저').missedAt).toBeUndefined()
+    expect(store.get('quiz')).toEqual(newer)
+    expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 0, wrong: 1 }, '2026-10-04': { notes: 0, right: 1, wrong: 0 } })
+    // The try again it showed is no more: the quiz the store holds is drawn.
+    expect(await ui.find({ type: 'Input', key: `quiz-mine-${oldAt}-0-again` })).toBeUndefined()
+    expect(await ui.find({ type: 'Markdown', text: 'A의 새 문제' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^✓ 맞힘 1\. 클로저/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a new quiz made here settles a first try another window left in the store, though this window never saw it (review)', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = HINTED
+    await learn($, 'quiz')
+    // Window A's quiz, with a first try waiting, took the store's place since.
+    await w.clock.advance(60_000)
+    const triedAt = w.clock.now()
+    const index = store.get('concepts') as Record<string, { name: string }>
+    const key = Object.keys(index).find(one => index[one]!.name === 'map')!
+    store.set('quiz', {
+      at: triedAt,
+      isRevealed: false,
+      items: [{ key, name: 'map', question: 'A의 문제', answer: 'A의 답', firstTry: { mine: '틀린 답', verdict: 'partial', feedback: '거의', nudge: '끝은요?', at: triedAt } }],
+    })
+    await w.clock.advance(60_000)
+    w.answer = HINTED
+    await learn($, 'quiz 새로')
+    expect(concept(store, 'map')).toMatchObject({ step: 1, reviewedAt: triedAt })
+    expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 0, wrong: 1 } })
+    expect((store.get('quiz') as { at: number }).at).not.toBe(triedAt)
+  })
+
+  test('the question screen says "모르겠어요" is the way out, with no hint or none left; the help keeps o and x (review)', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w, { ...PANE_PROPS, isFocused: true })
+    expect(await ui.find({ type: 'Text', text: "답 칸에서 Enter: 채점 · 모르면 '모르겠어요' · Tab: 버튼으로 (h 힌트 · 1~4 보기)" })).toBeDefined()
+    // The third question has no hint: the way out is still said.
+    w.answer = RIGHT
+    await ui.input({ key: mineKey(store, 0), text: '답 하나' })
+    await w.clock.settle()
+    await ui.input({ key: mineKey(store, 1), text: '답 둘' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: "답 칸에서 Enter: 채점 · 모르면 '모르겠어요' · Tab: 버튼으로 (1~4 보기)" })).toBeDefined()
+    await ui.unmount()
+    // o and x are still keys (the mobile app, an answer seen with /learn 퀴즈 정답, a grade that did not come back).
+    expect((await learn($, '도움말')).text).toContain('`o`·`x`')
   })
 })

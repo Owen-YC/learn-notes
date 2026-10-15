@@ -3350,10 +3350,11 @@ export function parseCheck(text: string): { verdict: 'right' | 'partial' | 'wron
 /**
  * True when a typed quiz answer only says the learner does not know (모르겠어요 · 모르겠습니다 · 몰라 · 몰라요 ·
  * 잘 모르겠어요, and the like), or is question marks alone: nothing for a model to grade, so none is called.
+ * "??" is not: it is JavaScript's and TypeScript's own operator (a ?? b), an answer a question may want.
  */
 export function isBlankAnswer(text: string): boolean {
   const said = text.trim().replace(/\s+/g, ' ')
-  if (/^[?？]+$/.test(said)) return true
+  if (/^[?？]+$/.test(said)) return said !== '??'
   const words = said.replace(/[\s.!?？~…ㅠㅜ]+$/u, '')
   return /^(?:(?:잘|전혀|진짜|정말|아직)\s*)?(?:모르겠(?:어요|습니다|어|음|다|네요|는데요?)?|몰라(?:요)?|모름|모릅니다|idk|i\s*don'?t\s*know|dunno)$/i.test(words)
 }

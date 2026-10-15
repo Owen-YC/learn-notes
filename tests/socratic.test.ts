@@ -36,10 +36,10 @@ describe('1.7.0: a question asked back, and one try again (D4)', () => {
   })
 
   test('"모르겠어요" and the like, or question marks alone, are no answer; an answer that only begins so is one', () => {
-    for (const blank of ['모르겠어요', '모르겠습니다', '몰라', '몰라요', '잘 모르겠어요', '잘 모르겠어요ㅠㅠ', '모르겠어요.', '모르겠어요?', '?', '？？', '  몰라요!  ', 'idk', "I don't know"]) {
+    for (const blank of ['모르겠어요', '모르겠습니다', '몰라', '몰라요', '잘 모르겠어요', '잘 모르겠어요ㅠㅠ', '모르겠어요.', '모르겠어요?', '?', '???', '？？', '  몰라요!  ', 'idk', "I don't know"]) {
       expect(isBlankAnswer(blank)).toBe(true)
     }
-    for (const answer of ['모르겠어요 아마 3?', '0 1 2', '몰라서 i를 3까지 찍어요', '틀린 것 같은데 모르겠어요', '', '3?']) {
+    for (const answer of ['모르겠어요 아마 3?', '0 1 2', '몰라서 i를 3까지 찍어요', '틀린 것 같은데 모르겠어요', '', '3?', '??', ' ?? ']) {
       expect(isBlankAnswer(answer)).toBe(false)
     }
   })
