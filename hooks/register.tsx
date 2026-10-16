@@ -6654,6 +6654,12 @@ function quizView(
                     )
                   </Text>
                 )}
+                {/* Where no Tab line is drawn (the desktop app, VS Code, a pane without the keys), the way out still is. */}
+                {Input && !isFocused && (
+                  <Text dimColor wrap="wrap">
+                    모르면 '모르겠어요'라고 적고 Enter
+                  </Text>
+                )}
               </Box>
             )}
           </Box>

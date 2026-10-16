@@ -111,7 +111,7 @@ type World = {
 function world(
   on: On,
   model: Model = 'ok',
-  panes: { isShown: boolean; isPlaced?: boolean } | null = null,
+  panes: { isShown: boolean; isPlaced?: boolean; isFocused?: boolean } | null = null,
   isPlaced = true,
   store: Map<string, unknown> = new Map(),
   env: Record<string, string> = {},
@@ -257,7 +257,7 @@ function world(
     return { value: undefined }
   })
   on('ui.panes', () => ({
-    value: panes ? [{ id: 'learn-notes', title: '학습 노트', isShown: panes.isShown, isFocused: false, isPlaced: panes.isPlaced ?? true }] : [],
+    value: panes ? [{ id: 'learn-notes', title: '학습 노트', isShown: panes.isShown, isFocused: panes.isFocused === true, isPlaced: panes.isPlaced ?? true }] : [],
   }))
   on('ui.open', (_$, e) => {
     w.opened.push(e.id)
@@ -5636,7 +5636,7 @@ describe('1.7.0: /learn 진단, and failures that say their cause', () => {
   const end = ($: Engine) => $.session.end({ reason: 'prompt_input_exit', sessionId: 's1', resume: { id: 's1' } })
 
   test('/learn 진단 is copied and written in the reply, with no model call: versions, screen, settings, today, store, journal', { options: { dailyAutoNotes: 40 } }, async ($, on) => {
-    const w = world(on, 'ok', { isShown: true }, true, new Map(), { WT_SESSION: '{a1b2}', TERM_PROGRAM: 'vscode' })
+    const w = world(on, 'ok', { isShown: true }, true, new Map(), { WT_SESSION: '{a1b2}', TMUX: '/tmp/tmux-1000/default,1,0', TERM_PROGRAM: 'vscode' })
     w.locked = ['learn-notes.dailyAutoNotes']
     await start($)
     await fullscreen($)
@@ -5650,7 +5650,7 @@ describe('1.7.0: /learn 진단, and failures that say their cause', () => {
     expect(w.copied).toEqual([lines.slice(3).join('\n')])
     expect(lines[3]).toMatch(/^learn-notes 진단 · 2026-10-0[23] \d\d:\d\d$/)
     expect(lines).toContain('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
-    expect(lines).toContain('- 화면: terminal · 패널 오른쪽 60칸 · 터미널 200칸 · 키는 대화에 · Windows Terminal · vscode')
+    expect(lines).toContain('- 화면: terminal · 패널 오른쪽 60칸 · 터미널 200칸 · 키는 대화에 · Windows Terminal · tmux · vscode')
     expect(reply).toContain('- 설정: 자동 노트 켬 · haiku · 하루 한도 40(관리자 잠금) · 일지 켬(기본 폴더) · 패널 자동 열기 켬 · 설명 수준 beginner')
     expect(lines).toContain('- 오늘: 노트 1개 · 모델 호출 1번 · 실패 0번')
     expect(reply).toMatch(/\n- 저장소: \d+KB \/ 4MB \(history \d+KB · /)
@@ -6007,6 +6007,61 @@ describe('1.7.0: /learn 진단, and failures that say their cause', () => {
     w.rootFails = true
     expect((await learn($, '찾기 const')).text).toBe(COMMAND_FAILED)
     expect(await diag($)).toContain('훅 · command.run 훅 멈춤')
+  })
+
+  /** A note the journal has not taken yet, as an earlier session left it in the store. */
+  const UNSAVED_NOTE = (id: string) => ({ id, turnId: id, at: NOW - 3_600_000, prompt: '예전 요청', answer: '', changes: [], moreFiles: 0, status: 'ready', text: NOTE_TEXT, savedAs: null, isUnsaved: true, concepts: [], updatedAt: NOW })
+
+  test('(교차 검토 8) the screen line says the keys are in the pane while the pane holds them', async ($, on) => {
+    world(on, 'ok', { isShown: true, isFocused: true })
+    await start($)
+    const reply = await diag($)
+    expect(reply).toContain(' · 키는 패널에')
+    expect(reply).not.toContain('키는 대화에')
+  })
+
+  test('(교차 검토 8) a saveDir on a share (\\\\server\\share) is named a network folder before any write fails there', { options: { saveDir: '\\\\server\\share\\notes' } }, async ($, on) => {
+    world(on)
+    await start($)
+    expect(await diag($)).toContain('일지 켬(네트워크 폴더)')
+  })
+
+  test('(교차 검토 8) the journal line counts this project\'s unsaved notes alone, never another project\'s', async ($, on) => {
+    const store = new Map<string, unknown>([['history', { '/other': { at: NOW, notes: [UNSAVED_NOTE('o1'), UNSAVED_NOTE('o2')] } }]])
+    world(on, 'ok', null, true, store)
+    await start($)
+    expect((await diag($)).split('\n')).toContain('- 일지: 못 쓴 노트 없음')
+  })
+
+  test('(교차 검토 8) /learn anki that cannot write its file says why', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', THREE_CONCEPTS]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.writeFails = true
+    const reply = (await learn($, 'anki')).text ?? ''
+    expect(reply).toContain("Anki 파일을 쓰지 못했습니다: 폴더에 쓸 권한이 없습니다(Windows의 '제어된 폴더 액세스'")
+  })
+
+  test('(교차 검토 8) a -p or SDK run says no check line and leaves the day\'s line to the interactive window', async ($, on) => {
+    const store = new Map<string, unknown>([
+      ['history', { '/proj': { at: NOW, notes: [UNSAVED_NOTE('u1')] } }],
+      ['faults', { list: [{ at: NOW - 3_600_000, last: NOW - 3_600_000, area: 'save', code: 'EACCES', n: 1 }] }],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    await w.clock.settle()
+    expect(w.transcript.filter(line => line.startsWith('learn-notes 점검'))).toEqual([])
+    expect((store.get('faults') as { noticeDay?: string }).noticeDay).toBeUndefined()
+    // The interactive window that day still has it.
+    await start($)
+    expect(w.transcript.filter(line => line.startsWith('learn-notes 점검'))).toEqual(['learn-notes 점검: 일지에 아직 못 쓴 노트 1개 (폴더에 쓸 권한 없음) · /learn 진단'])
+  })
+
+  test('(교차 검토 8) a store refusal over a day old says no check line', async ($, on) => {
+    const store = new Map<string, unknown>([['faults', { list: [{ at: NOW - 25 * 3_600_000, last: NOW - 25 * 3_600_000, area: 'store', code: 'store-full', n: 1 }] }]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    expect(w.transcript.filter(line => line.startsWith('learn-notes 점검'))).toEqual([])
   })
 })
 
@@ -8273,6 +8328,37 @@ describe('1.7.0: a question asked back, and one try again (D4)', () => {
       await ui.unmount()
     })
   }
+
+  test('(교차 검토 8) a quiz kept from before says the way out on its question where no Tab line is drawn: the desktop app, VS Code, a pane without the keys', async ($, on) => {
+    const WAY_OUT = "모르면 '모르겠어요'라고 적고 Enter"
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    // The quiz is made first (as for anyone past their first quiz, or up from 1.6.x): no empty quiz screen says it.
+    const term = await quizIn($, w, { ...PANE_PROPS, isFocused: true })
+    expect(await term.find({ type: 'Text', text: /^답 칸에서 Enter: 채점 · 모르면 '모르겠어요' · Tab: 버튼으로 \(/ })).toBeDefined()
+    expect(await term.find({ type: 'Text', text: WAY_OUT })).toBeUndefined()
+    await term.unmount()
+    const views: [('terminal' | 'desktop' | 'vscode'), typeof PANE_PROPS][] = [
+      ['desktop', PANE_PROPS],
+      ['vscode', PANE_PROPS],
+      ['terminal', { ...PANE_PROPS, isFocused: false }],
+    ]
+    for (const [surface, props] of views) {
+      const ui = await pane($, surface, props)
+      expect(await ui.find({ type: 'Input', key: mineKey(store, 0) })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: WAY_OUT })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /Tab: 버튼으로/ })).toBeUndefined()
+      await ui.unmount()
+    }
+    // It costs no call there either: the hint comes back.
+    const desk = await pane($, 'desktop')
+    await desk.input({ key: mineKey(store, 0), text: '모르겠어요' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(1)
+    expect(await desk.find({ type: 'Input', key: `${mineKey(store, 0)}-again` })).toBeDefined()
+    await desk.unmount()
+  })
 })
 
 describe('1.7.0: what a quiz found wrong, asked again in other code (오답 노트, D5)', () => {

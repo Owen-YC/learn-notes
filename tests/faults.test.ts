@@ -221,6 +221,7 @@ describe('1.7.0: faults kept as codes, and /learn 진단 made of them', () => {
     expect(saveFailText('EACCES')).toContain("Windows의 '제어된 폴더 액세스'나 보안 프로그램")
     expect(saveFailText('EPERM')).toBe(saveFailText('EACCES'))
     expect(saveFailText('EBUSY')).toBe('학습 노트를 파일에 쓰지 못했습니다: 다른 프로그램이 파일을 잡고 있습니다 · 다음 노트 때 다시 씁니다 · /learn 진단')
+    expect(saveFailText('EROFS')).toBe('학습 노트를 파일에 쓰지 못했습니다: 읽기 전용 위치입니다 · /config의 saveDir를 쓸 수 있는 폴더로 바꿔 주세요 · /learn 진단')
     expect(saveFailText('network')).toBe('학습 노트를 파일에 쓰지 못했습니다: 네트워크 위치입니다 · /config의 saveDir를 내 컴퓨터 폴더로 바꿔 주세요 · /learn 진단')
     expect(saveFailText('ENOENT')).toBe('학습 노트를 파일에 쓰지 못했습니다: 저장 폴더가 없습니다 · /config의 saveDir를 확인해 주세요 · /learn 진단')
     expect(saveFailText('error')).toBe('학습 노트를 파일에 쓰지 못했습니다 · 다음 노트 때 다시 씁니다 · /learn 진단')
