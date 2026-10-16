@@ -2086,6 +2086,8 @@ function missesText(items: readonly LearnQuizItem[], separator = ' · '): string
 const NO_CONCEPTS_FOR_QUIZ = '아직 모인 개념이 없어 퀴즈를 낼 수 없습니다. 노트가 쓰이면 "배울 개념"이 쌓입니다.'
 const ALL_KNOWN_TEXT = '모든 개념이 아는 개념이라 퀴즈에 낼 개념이 없습니다. 되돌리려면 /learn 모른다 개념 이름.'
 const CHECKING_TEXT = '답을 채점하고 있습니다. 채점이 끝난 뒤 새 문제를 받으세요.'
+/** An answer entered in the pane while a new quiz is made (checkAnswer): kept in its field, not graded. */
+const MAKING_TEXT = '새 문제를 만들고 있습니다. 문제가 나온 뒤 답하세요.'
 const MOVED_TEXT = '그사이 새 퀴즈가 나와 이 답은 채점하지 않았습니다.'
 /** An answer to a question another window took a first try at meanwhile (1.7.0): this window now shows that try's question asked back. */
 const TRIED_ELSEWHERE = '이 문제는 그사이 다른 창에서 먼저 답했습니다. 한 번 더 적어 보세요.'
@@ -2739,6 +2741,13 @@ async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: str
   if (!current || !item || !isOpen(current, item)) return
   if (isQuizChecking) {
     await update($, quizRun, run => ({ ...run, error: '다른 답을 채점하고 있습니다. 잠시 뒤 다시 Enter를 누르세요.', draft: { at: current.at, i, text: mine } }))
+    return
+  }
+  // A new quiz being made replaces this one, and grades every first try still waiting as Claude graded it
+  // (settleFirstTries), which it could not while this answer was graded: turned away as one sent by /learn 퀴즈 is,
+  // and kept in its field.
+  if (isQuizMaking) {
+    await update($, quizRun, run => ({ ...run, error: MAKING_TEXT, draft: { at: current.at, i, text: mine } }))
     return
   }
   if (mine === '') {
@@ -4257,6 +4266,8 @@ async function freshQuiz($: EngineInterface, cfg: Config, now: number, mode: 're
     made = await makeQuiz($, cfg, now, mode)
   } finally {
     isQuizMaking = false
+    // The pane's word to an answer entered meanwhile holds no more, made or not (its answer stays in its field).
+    await update($, quizRun, run => (run.error === MAKING_TEXT ? { ...run, error: null } : run))
   }
   if ('error' in made) return made.error
   return [

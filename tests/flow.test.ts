@@ -407,7 +407,7 @@ function learn($: Engine, args: string) {
   })
 }
 
-function pane($: Engine, surface: 'terminal' | 'desktop' = 'terminal', props = PANE_PROPS) {
+function pane($: Engine, surface: 'terminal' | 'desktop' | 'vscode' = 'terminal', props = PANE_PROPS) {
   return $.ui.mount({ plugin: 'learn-notes', surface, component: 'Pane', requestId: 'learn-notes', props })
 }
 
@@ -6151,6 +6151,46 @@ describe('1.7.0: the version stamp, and the schema guard', () => {
     expect(said(w.toasts)).toEqual([])
     expect(w.sets).not.toContain('concepts')
   })
+
+  test('(교차 검토 3) a window open before the update hears of it at a turn\'s end, with no /learn', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    // The newer build opens in another window once this one has been open a while.
+    await w.clock.advance(11 * MINUTE)
+    store.set('sessions', { ...(store.get('sessions') as object), 'session-new': { v: '1.7.1', at: NOW + 11 * MINUTE } })
+    await turn($, async () => {})
+    await finish(w)
+    expect(said(w.transcript)).toEqual([NOTICE])
+    expect(said(w.toasts)).toEqual([NOTICE])
+  })
+
+  test('(교차 검토 3) a turn\'s end reads the other windows\' stamps at most every ten minutes', async ($, on) => {
+    let reads = 0
+    const store = new (class extends Map<string, unknown> {
+      override get(key: string) {
+        if (key === 'sessions') reads += 1
+        return super.get(key)
+      }
+    })()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    await w.clock.advance(MINUTE)
+    store.set('sessions', { ...(store.get('sessions') as object), 'session-new': { v: '1.7.1', at: NOW + MINUTE } })
+    // A minute after the start's look: not read again, nothing said.
+    const before = reads
+    await turn($, async () => {})
+    await finish(w)
+    expect(reads).toBe(before)
+    expect(said(w.transcript)).toEqual([])
+    // Ten minutes on: read, and said.
+    await w.clock.advance(10 * MINUTE)
+    await turn($, async () => {}, 't2')
+    await finish(w)
+    expect(reads).toBeGreaterThan(before)
+    expect(said(w.transcript)).toEqual([NOTICE])
+    expect(said(w.toasts)).toEqual([NOTICE])
+  })
 })
 
 describe('1.7.0: a note copied for a mentor: c and /learn 공유', () => {
@@ -7904,6 +7944,131 @@ describe('1.7.0: a question asked back, and one try again (D4)', () => {
     expect(concept(store, second)).toMatchObject({ step: 0, missedAt: at })
     await ui.unmount()
   })
+
+  test('(교차 검토 3) a try again entered while two s make a new quiz is turned away: the new quiz grades its first try as Claude did, with no grade call', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const again = `${mineKey(store, 0)}-again`
+    w.answer = WRONG
+    await ui.input({ key: mineKey(store, 0), text: '전역 변수' })
+    await w.clock.settle()
+    // Two s, the new quiz's call held: the old question and its try again's field are still drawn meanwhile.
+    await w.clock.advance(60_000)
+    w.answer = HINTED
+    w.model = 'hold'
+    await ui.press({ key: 'quiz-new' })
+    await ui.press({ key: 'quiz-new' })
+    expect(await ui.find({ type: 'Text', text: '문제를 만드는 중입니다…' })).toBeDefined()
+    expect(await ui.find({ type: 'Input', key: again })).toBeDefined()
+    const calls = w.models.length
+    await ui.input({ key: again, text: '1' })
+    expect(w.models).toHaveLength(calls)
+    expect((await ui.find({ type: 'Text', text: '새 문제를 만들고 있습니다. 문제가 나온 뒤 답하세요.' }))?.props.color).toBe('red')
+    w.release()
+    await w.clock.settle()
+    // The new quiz graded the first try wrong, on its own day: the miss and the day's count kept, nothing said of a lost answer.
+    expect(concept(store, '클로저')).toMatchObject({ step: 0, missedAt: NOW })
+    expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 0, wrong: 1 } })
+    expect(quizItems(store).every(one => one.firstTry === undefined && one.result === undefined)).toBe(true)
+    expect(w.models).toHaveLength(calls)
+    expect(await ui.find({ type: 'Text', text: '그사이 새 퀴즈가 나와 이 답은 채점하지 않았습니다.' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: '새 문제를 만들고 있습니다. 문제가 나온 뒤 답하세요.' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('(교차 검토 3) the same while /learn 퀴즈 새로 makes it: the answer stays in its field, and the line goes once the call is over', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const again = `${mineKey(store, 0)}-again`
+    w.answer = WRONG
+    await ui.input({ key: mineKey(store, 0), text: '전역 변수' })
+    await w.clock.settle()
+    // The new quiz's call held, and then nothing in it read as a question: the quiz and its first try stay.
+    w.answer = '문제를 낼 수 없습니다'
+    w.model = 'hold'
+    const before = w.models.length
+    const reply = learn($, '퀴즈 새로')
+    await w.clock.settle()
+    expect(w.models).toHaveLength(before + 1)
+    const calls = w.models.length
+    await ui.input({ key: again, text: '바깥 함수의 변수' })
+    expect(w.models).toHaveLength(calls)
+    expect(await ui.find({ type: 'Text', text: '새 문제를 만들고 있습니다. 문제가 나온 뒤 답하세요.' })).toBeDefined()
+    w.release()
+    expect((await reply).text).toContain('퀴즈를 내지 못했습니다')
+    await w.clock.settle()
+    expect(w.models).toHaveLength(calls)
+    expect(await ui.find({ type: 'Text', text: '새 문제를 만들고 있습니다. 문제가 나온 뒤 답하세요.' })).toBeUndefined()
+    expect((await ui.find({ type: 'Input', key: again }))?.props.value).toBe('바깥 함수의 변수')
+    expect(quizItems(store)[0]).toMatchObject({ firstTry: { mine: '전역 변수', verdict: 'wrong' } })
+    expect(quizItems(store)[0]!.result).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('(교차 검토 3) a try again waiting on the last question left keeps the quiz from q, /learn 복습 and one s, as an open question does', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    w.answer = RIGHT
+    await ui.input({ key: mineKey(store, 0), text: '답 하나' })
+    await w.clock.settle()
+    await ui.input({ key: mineKey(store, 1), text: '답 둘' })
+    await w.clock.settle()
+    w.answer = WRONG
+    await ui.input({ key: mineKey(store, 2), text: '전역 변수' })
+    await w.clock.settle()
+    const calls = w.models.length
+    const at = (store.get('quiz') as { at: number }).at
+    const isKept = () => {
+      expect(w.models).toHaveLength(calls)
+      expect((store.get('quiz') as { at: number }).at).toBe(at)
+      expect(quizItems(store)[2]).toMatchObject({ firstTry: { mine: '전역 변수', verdict: 'wrong' } })
+      expect(quizItems(store)[2]!.result).toBeUndefined()
+    }
+    isKept()
+    // Only that try again is left: the quiz is still being answered, so no q in its view.
+    expect(await ui.find({ type: 'Button', key: 'review' })).toBeUndefined()
+    await ui.press({ key: 'view-concepts' })
+    await ui.press({ key: 'review' })
+    await w.clock.settle()
+    isKept()
+    await learn($, '복습')
+    await w.clock.settle()
+    isKept()
+    // One s asks first, as with any question left.
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    isKept()
+    expect(await ui.find({ type: 'Text', text: '풀던 문제 1개가 남았습니다 · s를 한 번 더 누르면 새 문제를 받습니다' })).toBeDefined()
+    expect(await ui.find({ type: 'Input', key: `${mineKey(store, 2)}-again` })).toBeDefined()
+    await ui.unmount()
+  })
+
+  for (const surface of ['desktop', 'vscode'] as const) {
+    test(`(교차 검토 3) ${surface} draws the answer field as the terminal does: no a before the first answer, and a field of its own for the try again`, async ($, on) => {
+      const store = dueStore()
+      const w = world(on, 'ok', null, true, store)
+      await start($)
+      w.answer = HINTED
+      const ui = await pane($, surface)
+      await ui.press({ key: 'view-quiz' })
+      await ui.press({ key: 'quiz-new' })
+      await w.clock.settle()
+      expect(await ui.find({ type: 'Input', key: mineKey(store, 0) })).toBeDefined()
+      expect(await ui.find({ type: 'Button', key: 'quiz-answer' })).toBeUndefined()
+      w.answer = PARTLY
+      await ui.input({ key: mineKey(store, 0), text: '0 1 2 3' })
+      await w.clock.settle()
+      expect(await ui.find({ type: 'Input', key: `${mineKey(store, 0)}-again` })).toBeDefined()
+      expect(quizItems(store)[0]).toMatchObject({ firstTry: { verdict: 'partial' } })
+      await ui.unmount()
+    })
+  }
 })
 
 describe('1.7.0: what a quiz found wrong, asked again in other code (오답 노트, D5)', () => {
@@ -9916,4 +10081,20 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect(journal).not.toContain(KEY)
     await ui.unmount()
   })
+
+  for (const surface of ['desktop', 'vscode'] as const) {
+    test(`(교차 검토 3) ${surface} draws the question field under a note, and t opens the line in a field, as the terminal does`, async ($, on) => {
+      const store = new Map<string, unknown>()
+      const { w, id } = await written($, on, store)
+      const ui = await pane($, surface)
+      expect(await ui.find({ type: 'Input', key: `ask-${id}` })).toBeDefined()
+      expect(await ui.find({ type: 'Button', key: 'note-drill' })).toBeDefined()
+      await ui.press({ key: 'note-drill' })
+      expect((await ui.find({ type: 'Input', key: `drill-${id}` }))?.props).toMatchObject({ value: LINE })
+      // With a field to type in, the example waits for one try.
+      expect(await ui.find({ type: 'Button', key: 'note-drill-answer' })).toBeUndefined()
+      expect(w.models).toHaveLength(1)
+      await ui.unmount()
+    })
+  }
 })
