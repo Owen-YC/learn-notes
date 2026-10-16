@@ -30,6 +30,8 @@ import {
   teamPracticeText,
   teamProgressText,
   teamRecordLine,
+  teamSlots,
+  quizStartText,
   termBlurb,
   termLines,
   termSource,
@@ -281,6 +283,24 @@ describe('1.7.0: what the team terms say (D6)', () => {
     const report = reportMarkdown({ range, activity: {}, index: {}, now: NOW, team: { total: 3, met: ['fetcher'] } })
     expect(report).toContain('- 지금 복습할 개념 0개\n- 이 저장소 팀 용어: 3개 중 1개 만남 (fetcher) · 아직 2개 (/learn 퀴즈 팀)\n')
     expect(reportMarkdown({ range, activity: {}, index: {}, now: NOW })).not.toContain('팀 용어')
+  })
+
+  test('(교차 검토 5) before a first quiz, s says what it asks as makeQuiz fills its places: concepts, team terms, or both', () => {
+    // The places the review (concepts due, slips to ask again) leaves free go to the terms not met, three at most.
+    expect(teamSlots(5, 0)).toBe(3)
+    expect(teamSlots(5, 1)).toBe(2)
+    expect(teamSlots(1, 0)).toBe(1)
+    expect(teamSlots(5, 3)).toBe(0)
+    expect(teamSlots(5, 7)).toBe(0)
+    expect(teamSlots(0, 0)).toBe(0)
+    // None to the team terms: the concepts, as before 1.7.0.
+    expect(quizStartText(0, 4)).toBe('s를 누르면 복습할 개념으로 내 코드에서 3문제를 냅니다')
+    // All three, or no concept short of known left for the rest: the team terms alone, as many as they are.
+    expect(quizStartText(3, 2)).toBe('s를 누르면 이 저장소의 팀 용어로 3문제를 냅니다')
+    expect(quizStartText(2, 0)).toBe('s를 누르면 이 저장소의 팀 용어로 2문제를 냅니다')
+    // Both: three, or as many as there are to ask.
+    expect(quizStartText(2, 1)).toBe('s를 누르면 복습할 개념과 이 저장소의 팀 용어로 3문제를 냅니다')
+    expect(quizStartText(1, 1)).toBe('s를 누르면 복습할 개념과 이 저장소의 팀 용어로 2문제를 냅니다')
   })
 })
 

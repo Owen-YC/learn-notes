@@ -2904,6 +2904,25 @@ export function teamPracticeText(total: number, unmet: number, way: TeamWay): st
   return unmet >= total ? `팀 용어 ${total}개로 연습할 수 있습니다 · ${way}` : teamProgressText(total, unmet, way)
 }
 
+/**
+ * The places of a new review quiz (three) that this repository's team terms not met yet (`unmet`) take, as makeQuiz
+ * fills them: the ones the concepts due and the slips to ask again (`filled`) leave free.
+ */
+export function teamSlots(unmet: number, filled: number): number {
+  return Math.max(0, Math.min(unmet, 3 - Math.min(3, filled)))
+}
+
+/**
+ * What s says it asks before a quiz's first (1.7.0 D6), as makeQuiz fills its three places: the concepts alone while
+ * the team terms take none (`slots`, teamSlots); the team terms alone when they take all three, or no concept short of
+ * known (`live`) is left for the rest; else both, as many questions as there are to ask.
+ */
+export function quizStartText(slots: number, live: number): string {
+  if (slots === 0) return 's를 누르면 복습할 개념으로 내 코드에서 3문제를 냅니다'
+  if (slots >= 3 || live === 0) return `s를 누르면 이 저장소의 팀 용어로 ${slots}문제를 냅니다`
+  return `s를 누르면 복습할 개념과 이 저장소의 팀 용어로 ${Math.min(3, live + slots)}문제를 냅니다`
+}
+
 /** The team terms not met yet, the first few by name: `아직: 캐시 키 · 페이지네이션 커서 외 5개`. */
 export function teamLeftText(unmet: readonly Pick<TeamTerm, 'name'>[], shown = 2): string {
   return `아직: ${unmet

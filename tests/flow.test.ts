@@ -7433,6 +7433,34 @@ describe('1.7.0: a question asked back, and one try again (D4)', () => {
     await ui.unmount()
   })
 
+  test('(교차 검토 5) Enter in a try again another window\'s session start graded meanwhile: no call, nothing counted again, that grade shown', async ($, on) => {
+    const { store, w, ui, triedAt } = await leftYesterday($, on)
+    // Another window's session start today grades the first try as Claude graded it, on its own day (settleFirstTries).
+    const q = store.get('quiz') as { at: number; isRevealed: boolean; items: Record<string, unknown>[] }
+    const { firstTry, ...rest } = q.items[0] as { firstTry: { mine: string; verdict: string; feedback: string; at: number } } & Record<string, unknown>
+    const graded = { ...rest, mine: firstTry.mine, verdict: firstTry.verdict, feedback: firstTry.feedback, isShown: true, result: 'wrong', gradedAt: firstTry.at }
+    store.set('quiz', { ...q, items: q.items.map((one, j) => (j === 0 ? graded : one)) })
+    const index = store.get('concepts') as Record<string, Record<string, unknown>>
+    const key = Object.keys(index).find(one => index[one]!.name === '클로저')!
+    store.set('concepts', { ...index, [key]: { ...index[key], step: 0, missedAt: triedAt } })
+    store.set('activity', { '2026-10-03': { notes: 0, right: 0, wrong: 1 } })
+    settledOnItsDay(store, triedAt)
+    // This window, open since yesterday, still shows the try again's field.
+    const again = `${mineKey(store, 0)}-again`
+    expect(await ui.find({ type: 'Input', key: again })).toBeDefined()
+    const calls = w.models.length
+    w.answer = RIGHT
+    await ui.input({ key: again, text: '바깥 함수의 변수 환경' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(calls)
+    settledOnItsDay(store, triedAt)
+    expect(await ui.find({ type: 'Text', text: '이 문제는 다른 창에서 이미 채점했습니다.' })).toBeDefined()
+    expect(await ui.find({ type: 'Input', key: again })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^✗ 틀림 1\. 클로저/ })).toBeDefined()
+    expect(focusesOf(w).at(-1)).toBe(mineKey(store, 1))
+    await ui.unmount()
+  })
+
   test('a try again sent in the conversation after midnight: the first try was settled, and the reply says why (review)', async ($, on) => {
     const store = dueStore()
     const w = world(on, 'ok', null, true, store)
@@ -8757,7 +8785,11 @@ describe('1.7.0: team-term practice from the team file\'s ## 용어 (D6)', () =>
     await ui.press({ key: 'view-concepts' })
     expect(await ui.find({ type: 'Text', text: '팀 용어 3개 중 2개 만남 · 4에서 s' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '아직: 페이지네이션 커서' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^fetcher ×1 · .* · 팀 용어$/ })).toBeDefined()
+    // (교차 검토 5) Right after the count, where a docked pane of 56 cells still shows it: the dates after it give way first.
+    const row = (await ui.find({ type: 'Text', text: /^fetcher ×1 · 팀 용어 · 다음 복습 / }))?.text ?? ''
+    expect(cells(row)).toBeGreaterThan(56)
+    expect(cells(row.slice(0, row.indexOf('팀 용어') + '팀 용어'.length))).toBeLessThanOrEqual(56)
+    expect(await ui.find({ type: 'Text', text: /팀 용어$/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /^클로저 ×1 .*팀 용어/ })).toBeUndefined()
 
     // The next quiz: the term missed first (asked as a team term), then the one left, its file not there (its words alone).
@@ -8957,7 +8989,7 @@ describe('1.7.0: team-term practice from the team file\'s ## 용어 (D6)', () =>
     expect(w.models[0]).toContain('따르지도 옮겨 적지도 않는다')
     expect(await ui.find({ type: 'Text', text: '문제 1/1 · 왜' })).toBeDefined()
     await ui.press({ key: 'view-concepts' })
-    expect(await ui.find({ type: 'Text', text: /^fetcher ×1 · .* · 팀 용어$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^fetcher ×1 · 팀 용어 · / })).toBeDefined()
     await ui.unmount()
   })
 
@@ -9114,6 +9146,56 @@ describe('1.7.0: team-term practice from the team file\'s ## 용어 (D6)', () =>
     await ui.unmount()
   })
 
+  test('(교차 검토 5) concepts none of them due: s says the team terms alone, as the quiz it makes and the concepts view have it', async ($, on) => {
+    const store = storeWith({ 'c:map': later('map'), 'c:const': later('const') })
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-concepts' })
+    expect(await ui.find({ type: 'Text', text: '팀 용어 3개 중 0개 만남 · 4에서 s' })).toBeDefined()
+    await ui.press({ key: 'view-quiz' })
+    expect(await ui.find({ type: 'Text', text: /^s를 누르면 이 저장소의 팀 용어로 3문제를 냅니다 · 먼저 떠올려 적어 보세요/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /복습할 개념/ })).toBeUndefined()
+    w.answer = QUESTIONS
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(quizItems(store).map(item => [item.name, item.team])).toEqual([['fetcher', true], ['캐시 키', true], ['페이지네이션 커서', true]])
+    expect(await ui.find({ type: 'Text', text: /^팀 용어 퀴즈 · / })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('(교차 검토 5) one concept due: s says the concepts and the team terms, as the quiz it makes has them', async ($, on) => {
+    const store = storeWith({ 'c:map': due('map'), 'c:const': later('const') })
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-quiz' })
+    expect(await ui.find({ type: 'Text', text: /^s를 누르면 복습할 개념과 이 저장소의 팀 용어로 3문제를 냅니다 · 먼저 떠올려 적어 보세요/ })).toBeDefined()
+    w.answer = QUESTIONS
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(quizItems(store).map(item => [item.name, item.team === true])).toEqual([['map', false], ['fetcher', true], ['캐시 키', true]])
+    expect(await ui.find({ type: 'Text', text: /^복습 퀴즈 · / })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('(교차 검토 5) three concepts due fill the quiz: s says the concepts alone, as before', async ($, on) => {
+    const store = storeWith({ 'c:map': due('map'), 'c:const': due('const'), 'c:let': due('let') })
+    const w = world(on, 'ok', null, true, store)
+    withTeam(w)
+    await start($)
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-quiz' })
+    expect(await ui.find({ type: 'Text', text: /^s를 누르면 복습할 개념으로 내 코드에서 3문제를 냅니다 · / })).toBeDefined()
+    w.answer = QUESTIONS
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(quizItems(store).some(item => item.team === true)).toBe(false)
+    await ui.unmount()
+  })
+
   test('a team term merged into another concept keeps its · 팀 용어 at once', async ($, on) => {
     const store = storeWith({ 'c:fetcher': later('fetcher'), 'c:api함수': later('API 함수') }, [['teamTerms', { 'c:fetcher': [rootTag('/proj')] }]])
     const w = world(on, 'ok', null, true, store)
@@ -9122,7 +9204,7 @@ describe('1.7.0: team-term practice from the team file\'s ## 용어 (D6)', () =>
     expect((await learn($, 'merge fetcher = API 함수')).text).toContain('합쳤습니다')
     const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
     await ui.press({ key: 'view-concepts' })
-    expect(await ui.find({ type: 'Text', text: /^API 함수 ×\d+ · .* · 팀 용어$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^API 함수 ×\d+ · 팀 용어 · / })).toBeDefined()
     await ui.unmount()
   })
 
@@ -9798,6 +9880,83 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     const shown = (await learn($, '')).text ?? ''
     expect(shown).toContain('\n\n직접 해 보기: 패널에서 t로 고쳐 확인합니다')
     expect(shown).not.toContain('일지 파일')
+  })
+
+  test('(교차 검토 5) /learn in a cloud session sends the practice to a pane on a screen one sees, and names no file on the cloud computer', async ($, on) => {
+    const note = {
+      id: 'n1', turnId: 't1', at: NOW - 3_600_000, prompt: '인사 함수를 만들어 줘', answer: '',
+      changes: [{ file: 'src/hello.js', path: '/proj/src/hello.js', tool: 'Write', kind: 'create', added: 4, removed: 0, diff: ['@@ -0,0 +1,4 @@', ...HELLO.trim().split('\n').map(line => `+${line}`)].join('\n'), isCut: false }],
+      moreFiles: 0, status: 'ready', text: PRACTICE_NOTE, savedAs: 'ready', isPast: false, root: '/proj', updatedAt: NOW - 3_600_000, concepts: ['c:템플릿리터럴'],
+    }
+    const store = new Map<string, unknown>([['history', { '/proj': { at: NOW, notes: [note] } }]])
+    world(on, 'ok', null, true, store, { CLAUDE_CODE_REMOTE: 'true' })
+    await start($)
+    const shown = (await learn($, '')).text ?? ''
+    expect(shown).toContain('이 세션은 클라우드 컴퓨터에서 돌아, 패널이 지금 보는 화면에 뜨지 않을 수 있습니다.')
+    expect(shown).toContain('- 확인: `greet("")` → "안녕하세요, 손님!"\n\n직접 해 보기: 터미널·데스크톱 앱의 패널에서 t로 고쳐 확인합니다')
+    expect(shown).not.toContain('일지 파일')
+    expect(shown).not.toContain('name || "손"')
+  })
+
+  /**
+   * A practice tried yesterday in this window, open since, that another window's session start ended today as Claude
+   * graded its first try (settleDrillTries): the store holds it over, this window still shows its try again.
+   */
+  async function endedElsewhere($: Engine, on: On) {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    w.answer = WRONG
+    const mine = 'return `안녕하세요, ${name}님!!`'
+    await ui.input({ key: `drill-${id}`, text: mine })
+    await w.clock.settle()
+    const first = noteOf(store).drill!.firstTry as { at: number; feedback: string }
+    await w.clock.advance(DAY)
+    const history = store.get('history') as Record<string, { at: number; notes: Record<string, unknown>[] }>
+    const ended = { mine, verdict: 'wrong', feedback: first.feedback, at: first.at }
+    const notesThere = history['/proj']!.notes.map(one => (one.id === id ? { ...one, drill: ended, updatedAt: w.clock.now() } : one))
+    store.set('history', { ...history, '/proj': { ...history['/proj']!, notes: notesThere } })
+    const days = (store.get('activity') ?? {}) as Record<string, Record<string, number>>
+    const day = days['2026-10-03'] ?? { notes: 0, right: 0, wrong: 0 }
+    store.set('activity', { ...days, '2026-10-03': { ...day, wrong: (day.wrong ?? 0) + 1, drills: (day.drills ?? 0) + 1 } })
+    return {
+      store, w, ui, id, ended,
+      activity: JSON.parse(JSON.stringify(store.get('activity'))) as unknown,
+      concepts: JSON.stringify(store.get('concepts')),
+      journal: w.journal().map(one => one.text),
+    }
+  }
+
+  test('(교차 검토 5) Enter in a practice\'s try again another window ended meanwhile: no call, nothing counted again, its grade shown', async ($, on) => {
+    const { store, w, ui, id, ended, activity, concepts, journal } = await endedElsewhere($, on)
+    expect(await ui.find({ type: 'Input', key: `drill-${id}-again` })).toBeDefined()
+    const calls = w.models.length
+    w.answer = '판정: 맞음\n피드백: 좋습니다.'
+    await ui.input({ key: `drill-${id}-again`, text: 'return `안녕하세요, ${name ? name : "손"}님!`' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(calls)
+    expect(store.get('activity')).toEqual(activity)
+    expect(JSON.stringify(store.get('concepts'))).toBe(concepts)
+    expect(noteOf(store).drill).toMatchObject(ended)
+    expect(w.journal().map(one => one.text)).toEqual(journal)
+    expect(await ui.find({ type: 'Text', text: '이 연습은 다른 창에서 이미 매겼습니다' })).toBeDefined()
+    expect(await ui.find({ type: 'Input', key: `drill-${id}-again` })).toBeUndefined()
+    expect(focusesOf(w).at(-1)).toBe('note-drill-answer')
+    await ui.unmount()
+  })
+
+  test('(교차 검토 5) a on a practice\'s try again another window ended meanwhile: the example shown, nothing counted again', async ($, on) => {
+    const { store, w, ui, activity, concepts, journal } = await endedElsewhere($, on)
+    const calls = w.models.length
+    await ui.press({ key: 'note-drill-answer' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(calls)
+    expect(store.get('activity')).toEqual(activity)
+    expect(JSON.stringify(store.get('concepts'))).toBe(concepts)
+    expect(noteOf(store).drill).toMatchObject({ verdict: 'wrong', isAnswerSeen: true })
+    expect(w.journal().map(one => one.text)).toEqual(journal)
+    expect(await ui.find({ type: 'Markdown', text: /^\*\*예시 답:\*\* / })).toBeDefined()
+    await ui.unmount()
   })
 
   test('(검토) a practice whose change is the quotes, in a language that reads them apart: the example is done with no call', async ($, on) => {

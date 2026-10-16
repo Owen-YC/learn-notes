@@ -85,6 +85,8 @@ import {
   teamPracticeText,
   teamMetText,
   teamRecordLine,
+  teamSlots,
+  quizStartText,
   termBlurb,
   termKey,
   distinctTerms,
@@ -2730,6 +2732,25 @@ function settledText(settled: readonly { n: number; mark: string }[]): string {
   return `날이 바뀌어 한 번 더를 기다리던 ${settled.map(one => `${one.n}번 (${one.mark})`).join(' · ')}은 첫 답의 판정대로 매겼습니다.`
 }
 
+/** What the pane says on Enter in a try again that another window graded meanwhile (tryGoneText). */
+const GRADED_ELSEWHERE = '이 문제는 다른 창에서 이미 채점했습니다.'
+
+/**
+ * Before Claude grades a try again this window shows (its first try kept here): whether the quiz every window shares
+ * (sharedQuiz) waits on it no more, another window having graded it (at its session start too: a past day's first
+ * try, as Claude graded it, settleFirstTries) or replaced its quiz. That quiz is drawn here then, and what to say is
+ * returned: Claude is not asked, and nothing is counted again. Undefined while the try again still waits.
+ */
+async function tryGoneText($: EngineInterface, current: Quiz, i: number): Promise<string | undefined> {
+  if (current.items[i]?.firstTry === undefined) return undefined
+  const shared = await sharedQuiz($)
+  if (!shared) return undefined
+  const isMoved = shared.at !== current.at
+  if (!isMoved && shared.items[i]?.result === undefined) return undefined
+  await showShared($, shared)
+  return isMoved ? MOVED_TEXT : GRADED_ELSEWHERE
+}
+
 /**
  * Enter in the quiz's answer field: Claude grades the learner's own answer, the
  * pane saying so meanwhile; graded, the keys move on to the next question's
@@ -2749,6 +2770,14 @@ async function checkAnswer($: EngineInterface, cfg: Config, i: number, text: str
   // and kept in its field.
   if (isQuizMaking) {
     await update($, quizRun, run => ({ ...run, error: MAKING_TEXT, draft: { at: current.at, i, text: mine } }))
+    return
+  }
+  // A window open since a past day: its try again may have been graded in another window meanwhile (or its quiz
+  // replaced there), which this window's quiz does not know. The store's quiz is drawn then, and Claude is not asked.
+  const gone = await tryGoneText($, current, i)
+  if (gone !== undefined) {
+    await update($, quizRun, run => ({ ...run, error: gone, ...(isDraftOf(run, current.at, i) ? { draft: null } : {}) }))
+    await focusNextQuestion($)
     return
   }
   if (mine === '') {
@@ -3013,6 +3042,18 @@ async function checkDrill($: EngineInterface, cfg: Config, id: string, text: str
     await update($, drillRun, run => ({ ...run, open: id, notice: { id, text: said, ...(isError ? { isError: true as const } : {}) } }))
   }
   if (drillChecking !== null) return say('다른 줄을 확인하고 있습니다 · 잠시 뒤 다시 Enter', true)
+  // A window open since a past day: another window may have ended this practice meanwhile (its session start). Its
+  // grade is taken here then, and the try again is not checked nor counted a second time.
+  const ended = await endedDrill($, note)
+  if (ended) {
+    await setNote($, id, { drill: ended })
+    dropDrillDrafts(id)
+    void persist($)
+    await say(DRILL_ENDED_ELSEWHERE)
+    const latest = (await read($, notes)).find(one => one.id === id)
+    if (latest) focusInPane($, drillFocusKey(latest))
+    return
+  }
   const mine = text.trim()
   if (mine === '') return say(DRILL_EMPTY)
   if (!isBlankAnswer(mine)) {
@@ -3078,6 +3119,24 @@ async function gradeDrill($: EngineInterface, cfg: Config, note: LearnNote, dril
   }
   const verdict = first && !isBlankAnswer(first.mine) ? secondVerdict(first.verdict, graded.verdict) : graded.verdict
   return finishDrill($, cfg, note, drill, { mine: line, verdict, feedback: graded.feedback, ...slip }, { first, at: now })
+}
+
+/** What a practice's try again says when another window ended the practice meanwhile (endedDrill). */
+const DRILL_ENDED_ELSEWHERE = '이 연습은 다른 창에서 이미 매겼습니다'
+
+/**
+ * A practice this window shows waiting for its try again that the store holds over (1.7.0): another window ended it
+ * meanwhile, at its session start too (settleDrillTries). The store's state then, for this window to take, so its try
+ * again is not checked, nor its example's a counted, a second time. Undefined while the store agrees or cannot be read.
+ */
+async function endedDrill($: EngineInterface, note: LearnNote): Promise<LearnDrill | undefined> {
+  if (note.drill?.firstTry === undefined || isDrillOver(note.drill)) return undefined
+  try {
+    const stored = (await storedNotes($, note.root || (await $.session.root()))).find(one => one.id === note.id)
+    return stored && isDrillOver(stored.drill) ? stored.drill : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** Keeps a practice's first try short of right on its note, for one try again: nothing marked or counted yet. */
@@ -3173,8 +3232,9 @@ async function finishDrill(
 
 /**
  * The pane's a under a note's practice (1.7.0): its example answer shown. Once tried and waiting for its try again,
- * that ends it as its first try was graded, the example seen (finishDrill); once graded, only shown. With no try, only
- * where no field is drawn (the mobile app): shown, nothing graded.
+ * that ends it as its first try was graded, the example seen (finishDrill), unless another window ended it meanwhile
+ * (endedDrill: its grade taken, only shown); once graded, only shown. With no try, only where no field is drawn (the
+ * mobile app): shown, nothing graded.
  */
 async function showDrillAnswer($: EngineInterface, cfg: Config, id: string, surface?: RenderSurface): Promise<void> {
   const note = (await read($, notes)).find(one => one.id === id)
@@ -3185,6 +3245,16 @@ async function showDrillAnswer($: EngineInterface, cfg: Config, id: string, surf
   const now = await $.clock.now()
   if (state?.verdict !== undefined) await setNote($, id, { drill: { ...state, isAnswerSeen: true } })
   else if (state?.firstTry !== undefined) {
+    // Ended in another window meanwhile (endedDrill): its grade taken and the example shown, nothing counted again.
+    const ended = await endedDrill($, note)
+    if (ended) {
+      await setNote($, id, { drill: { ...ended, isAnswerSeen: true } })
+      dropDrillDrafts(id)
+      await update($, drillRun, run => ({ ...run, open: id, notice: run.notice?.id === id ? null : run.notice }))
+      void persist($)
+      if (surface !== 'mobile') focusInPane($, 'note-drill')
+      return
+    }
     const first = state.firstTry
     const grade = { mine: first.mine, verdict: first.verdict, feedback: first.feedback, ...(first.slip !== undefined ? { slip: first.slip, slipType: first.slipType } : {}) }
     await finishDrill($, cfg, note, drill, grade, { at: now, isSeen: true })
@@ -3768,12 +3838,19 @@ async function teamTermsLeft($: EngineInterface): Promise<number> {
 }
 
 /**
- * Where the pane sends the learner to practise this repository's team terms: s in the quiz view, unless the review
- * alone fills a quiz, as makeQuiz counts it (the concepts due and the slips to ask again, `open` the slips still open).
+ * The places of a new review quiz its review fills before any team term, as makeQuiz counts them: the concepts due
+ * and the slips to ask again (`open` the slips still open), each once.
  */
-function teamWay(index: Readonly<Record<string, LearnConcept>>, open: Readonly<Record<string, LearnSlip>>, now: number): TeamWay {
-  const filled = new Set([...dueConcepts(index, now).map(one => one.key), ...slipsToAsk(index, open, now)])
-  return filled.size >= 3 ? '/learn 퀴즈 팀' : '4에서 s'
+function reviewFilled(index: Readonly<Record<string, LearnConcept>>, open: Readonly<Record<string, LearnSlip>>, now: number): number {
+  return new Set([...dueConcepts(index, now).map(one => one.key), ...slipsToAsk(index, open, now)]).size
+}
+
+/**
+ * Where the pane sends the learner to practise this repository's team terms: s in the quiz view, unless the review
+ * alone fills a quiz (`filled`, reviewFilled).
+ */
+function teamWay(filled: number): TeamWay {
+  return filled >= 3 ? '/learn 퀴즈 팀' : '4에서 s'
 }
 
 /**
@@ -3800,7 +3877,7 @@ async function nudgeTeam($: EngineInterface): Promise<void> {
     const now = await $.clock.now()
     const last = await lastQuiz($)
     const isOpenQuiz = last !== null && last.items.some(item => isOpen(last, item))
-    const room = teamWay(index, await storedSlips($, await read($, aliases), now), now) === '4에서 s'
+    const room = teamWay(reviewFilled(index, await storedSlips($, await read($, aliases), now), now)) === '4에서 s'
     const way = room && !isOpenQuiz ? '/learn 퀴즈' : '/learn 퀴즈 팀'
     $.ui.toast(teamNudgeText(unmet, way), { timeoutMs: 8000 })
   } catch (error) {
@@ -4814,7 +4891,7 @@ export const register: Register = (on, options) => {
     if (opened.isPlaced && (await isCloudSession($))) {
       // Placed on the cloud computer's own terminal, which nobody sees: say so, and show the note here.
       return {
-        text: `이 세션은 클라우드 컴퓨터에서 돌아, 패널이 지금 보는 화면에 뜨지 않을 수 있습니다. 마지막 노트를 여기에 적습니다 (/learn으로 언제든 다시 봅니다).\n\n${last ? lastNoteText(last) : EMPTY_TEXT}`,
+        text: `이 세션은 클라우드 컴퓨터에서 돌아, 패널이 지금 보는 화면에 뜨지 않을 수 있습니다. 마지막 노트를 여기에 적습니다 (/learn으로 언제든 다시 봅니다).\n\n${last ? lastNoteText(last, true) : EMPTY_TEXT}`,
       }
     }
     const root = await $.session.root()
@@ -4871,10 +4948,13 @@ export const register: Register = (on, options) => {
     const teamFile = await teamHere($)
     const termsHere = distinctTerms(teamFile?.practice ?? [], map)
     const unmet = unmetTerms(termsHere, index, map)
-    const team: TeamProgress | undefined = termsHere.length > 0 ? { total: termsHere.length, unmet, way: teamWay(index, cleanSlips(slipRecord, map, now), now) } : undefined
+    const filled = reviewFilled(index, cleanSlips(slipRecord, map, now), now)
+    const team: TeamProgress | undefined = termsHere.length > 0 ? { total: termsHere.length, unmet, way: teamWay(filled) } : undefined
     // Merges followed: one made in this session moves a team term's mark to the concept it went into.
     const marks = cleanTeamTerms(await read($, teamTerms), map)
     const canQuiz = hasConcepts || unmet.length > 0
+    // What s asks before a quiz's first, as makeQuiz fills it: the places the review leaves free go to the terms not met.
+    const quizStart = quizStartText(teamSlots(unmet.length, filled), Object.values(index).filter(one => !isKnown(one)).length)
     const isAdded = (item: LearnQuizItem) => isTeamAdded(item, index, map)
 
     const at = shownAt(list, wanted)
@@ -4944,7 +5024,7 @@ export const register: Register = (on, options) => {
           {canQuiz && shown !== 'note' ? (
             <Box marginTop={1} flexDirection="column">
               {shown === 'quiz'
-                ? quizView($, cfg, current, run, canQuiz, now, review, list, isTerminalFocus, el, e.surface, slipOf, hasConcepts ? 0 : unmet.length, isAdded)
+                ? quizView($, cfg, current, run, canQuiz, now, review, list, isTerminalFocus, el, e.surface, slipOf, quizStart, isAdded)
                 : conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el, slipRecord, team, marks)}
             </Box>
           ) : (
@@ -4970,7 +5050,7 @@ export const register: Register = (on, options) => {
 
     const body =
       shown === 'quiz' ? (
-        quizView($, cfg, current, run, canQuiz, now, review, list, isTerminalFocus, el, e.surface, slipOf, hasConcepts ? 0 : unmet.length, isAdded)
+        quizView($, cfg, current, run, canQuiz, now, review, list, isTerminalFocus, el, e.surface, slipOf, quizStart, isAdded)
       ) : shown === 'concepts' ? (
         conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el, slipRecord, team, marks)
       ) : shown === 'note' ? (
@@ -6136,8 +6216,8 @@ type TeamProgress = { total: number; unmet: readonly TeamTerm[]; way: TeamWay }
  * week's progress, this repository's team terms met of all (`team`, 1.7.0 D6),
  * the ones worth a second look (q while today's review has questions `left`),
  * then all of them but the ones known, the most met first, each with the notes
- * in the pane that taught it (`· 팀 용어` on one that came in as a team term,
- * `marks`); the known ones folded into a line.
+ * in the pane that taught it (`· 팀 용어` right after the count on one that
+ * came in as a team term, `marks`); the known ones folded into a line.
  */
 function conceptsView(
   $: EngineInterface,
@@ -6195,9 +6275,10 @@ function conceptsView(
           </Text>
           <Text dimColor>
             {' '}
-            ×{one.count} · {reviewText(one, now)} · 최근 {dayWhen(one.lastAt, now)}
+            ×{one.count}
+            {/* Right after the count (1.7.0 D6), as the review is: a narrow pane cuts the dates at the end first. */}
+            {isTeamTerm(marks, one.key) ? ' · 팀 용어' : ''} · {reviewText(one, now)} · 최근 {dayWhen(one.lastAt, now)}
             {one.reviewedAt !== undefined ? ` · 퀴즈 ${dayWhen(one.reviewedAt, now)}` : ''}
-            {isTeamTerm(marks, one.key) ? ' · 팀 용어' : ''}
           </Text>
         </Text>
         {one.blurb !== '' && <Markdown text={one.blurb} dimColor />}
@@ -6274,8 +6355,9 @@ function conceptsView(
  * grade themselves (o, x). A wrong one comes first next time. The questions
  * already graded stay above as one line each, the last one Claude graded
  * opened up (unless a try again is on show), with the note that taught its
- * concept (n) when it was wrong and the pane holds that note. `teamOnly`
- * (1.7.0 D6): with no concept learned, the team terms not met yet that s asks.
+ * concept (n) when it was wrong and the pane holds that note. `start`: what
+ * s says it asks before a quiz's first (quizStartText, 1.7.0 D6: the team
+ * terms not met yet in the places the review leaves free).
  */
 function quizView(
   $: EngineInterface,
@@ -6290,7 +6372,7 @@ function quizView(
   el: ElementTable,
   surface: RenderSurface,
   slipOf: (key: string) => LearnSlip | undefined = () => undefined,
-  teamOnly = 0,
+  start = quizStartText(0, 0),
   isAdded: (item: LearnQuizItem) => boolean = () => false,
 ) {
   const { Box, Text, Markdown, Button } = el
@@ -6332,7 +6414,7 @@ function quizView(
       {!hasConcepts && <Text dimColor>{NO_CONCEPTS_FOR_QUIZ}</Text>}
       {hasConcepts && items.length === 0 && !run.isMaking && (
         <Text dimColor wrap="wrap">
-          {teamOnly > 0 ? `s를 누르면 이 저장소의 팀 용어로 ${Math.min(3, teamOnly)}문제를 냅니다` : 's를 누르면 복습할 개념으로 내 코드에서 3문제를 냅니다'} · 먼저 떠올려 적어 보세요. 틀린 답을 바로잡을 때 더 오래 남습니다
+          {start} · 먼저 떠올려 적어 보세요. 틀린 답을 바로잡을 때 더 오래 남습니다
           {Input ? " · 모르면 '모르겠어요'라고 적고 Enter" : ''}
         </Text>
       )}
@@ -6659,9 +6741,14 @@ function noteAsText(note: LearnNote): string {
 
 /**
  * The last note as /learn writes it where no pane shows it (noteAsText), and under a practice (1.7.0) how it is done
- * and, once the note is in its journal file, where its example is: neither t nor a is here. The record tool has no such line.
+ * and, once the note is in its journal file, where its example is: neither t nor a is here. In a cloud session
+ * (`isCloud`) its pane and journal are on the cloud computer, which nobody may see: the pane where one sees it, and no
+ * file. The record tool has no such line.
  */
-function lastNoteText(note: LearnNote): string {
+function lastNoteText(note: LearnNote, isCloud = false): string {
   if (note.status !== 'ready' || !drillOf(note.text, note.changes)) return noteAsText(note)
-  return `${noteAsText(note)}\n\n직접 해 보기: 패널에서 t로 고쳐 확인합니다${note.savedAs === 'ready' ? ' · 예시 답은 일지 파일에 있습니다' : ''}`
+  const tail = isCloud
+    ? '직접 해 보기: 터미널·데스크톱 앱의 패널에서 t로 고쳐 확인합니다'
+    : `직접 해 보기: 패널에서 t로 고쳐 확인합니다${note.savedAs === 'ready' ? ' · 예시 답은 일지 파일에 있습니다' : ''}`
+  return `${noteAsText(note)}\n\n${tail}`
 }
