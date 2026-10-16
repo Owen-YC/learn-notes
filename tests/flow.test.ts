@@ -5984,7 +5984,9 @@ describe('1.7.0: the version stamp, and the schema guard', () => {
   const MINUTE = 60_000
   const NOTICE = 'learn-notes 새 버전(1.7.1)이 다른 창에서 쓰이고 있습니다 · 이 창은 1.7.0입니다 · /reload-plugins로 바꿉니다'
   const TAIL = '다시 불러올 때까지 이 창은 개념 모음과 복습 단계를 고치지 않습니다(노트와 일지는 그대로)'
-  const BEHIND_TEXT = `learn-notes가 다른 창에서 더 새 버전으로 학습 기록을 썼습니다 · ${TAIL} · /reload-plugins로 바꿉니다`
+  // A reload may not end the guard (a newer build rolled back): the way on after it (교차 검토 4).
+  const STUCK = '다시 불러와도 계속되면 /learn 진단을 담당자에게 보내 주세요'
+  const BEHIND_TEXT = `learn-notes가 다른 창에서 더 새 버전으로 학습 기록을 썼습니다 · ${TAIL} · /reload-plugins로 바꿉니다 · ${STUCK}`
   const said = (lines: readonly string[]) => lines.filter(line => line.includes('/reload-plugins'))
   const stamps = (others: Record<string, { v: string; at: number }>, more: [string, unknown][] = []) => new Map<string, unknown>([['sessions', others], ...more])
 
@@ -6058,8 +6060,9 @@ describe('1.7.0: the version stamp, and the schema guard', () => {
     const store = new Map<string, unknown>([['schema', 4], ['concepts', THREE_CONCEPTS]])
     const w = world(on, 'ok', null, true, store)
     await start($)
-    // No newer window stamped: said all the same, since the concepts stop changing here.
-    expect(said(w.transcript)).toEqual([`learn-notes 새 버전이 다른 창에서 학습 기록을 새 구조로 썼습니다 · 이 창은 1.7.0입니다 · /reload-plugins로 바꿉니다 · ${TAIL}`])
+    // No newer window stamped: said all the same, since the concepts stop changing here; with the way on should a
+    // reload change nothing (a newer build rolled back).
+    expect(said(w.transcript)).toEqual([`learn-notes 새 버전이 다른 창에서 학습 기록을 새 구조로 썼습니다 · 이 창은 1.7.0입니다 · /reload-plugins로 바꿉니다 · ${TAIL} · ${STUCK}`])
     expect(said(w.toasts)).toHaveLength(1)
     w.answer = CONCEPT_NOTE(['클로저', '새 개념'])
     await turn($, () => $.tool.call(EDIT_A))
@@ -10079,6 +10082,65 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect(journal).toMatch(/직접 해 보기 \(\d\d:\d\d\)/)
     expect(journal).toContain('**할 일**: 이름이 비어 있으면 "«가림»"로')
     expect(journal).not.toContain(KEY)
+    await ui.unmount()
+  })
+
+  test('(교차 검토 4) partly right, then partly right again, is a step back: no miss, unlike wrong', async ($, on) => {
+    const known = { 'c:템플릿리터럴': { name: '템플릿 리터럴', count: 1, firstAt: NOW - 60 * DAY, lastAt: NOW - 60 * DAY, blurb: '', files: [], step: 2, reviewedAt: NOW - 30 * DAY } }
+    const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', known], ['steps', ownSteps(known)]])
+    const { w, ui, id } = await practiced($, on, store)
+    expect(concept(store).step).toBe(2)
+    await ui.press({ key: 'note-drill' })
+    w.answer = '판정: 거의\n피드백: 방향은 맞습니다.\n되묻기: 빈 문자열이면 무엇이 찍힐까요?'
+    await ui.input({ key: `drill-${id}`, text: 'return `안녕하세요, ${name ?? "손"}님!`' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: '△ 아직입니다 · 방향은 맞습니다' })).toBeDefined()
+    w.answer = '판정: 거의\n피드백: 아직 빈 문자열은 그대로입니다.'
+    await ui.input({ key: `drill-${id}-again`, text: 'return `안녕하세요, ${name ?? "손님"}님!`' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(3)
+    expect(await ui.find({ type: 'Text', text: '△ 거의 맞음' })).toBeDefined()
+    expect(noteOf(store).drill).toMatchObject({ verdict: 'partial' })
+    // A quiz's partly right: one step back, not back to the first nor first in the next quiz.
+    expect(concept(store).step).toBe(1)
+    expect(concept(store).missedAt).toBeUndefined()
+    expect(store.get('activity')).toMatchObject({ '2026-10-03': { right: 0, wrong: 1, drills: 1 } })
+    await ui.unmount()
+  })
+
+  test('(교차 검토 4) a practice on a concept marked known leaves the concept index as it was: only the day and the journal', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await learn($, '안다 템플릿 리터럴')
+    const before = JSON.stringify(concept(store))
+    expect((concept(store) as { knownAt?: number }).knownAt).toBeDefined()
+    await ui.press({ key: 'note-drill' })
+    await ui.input({ key: `drill-${id}`, text: '몰라요' })
+    await ui.input({ key: `drill-${id}-again`, text: '모르겠어요' })
+    expect(w.models).toHaveLength(1)
+    expect(await ui.find({ type: 'Text', text: '✗ 틀림' })).toBeDefined()
+    // Still known: no step, no miss, back in no review; no slip kept for the next quiz.
+    expect(JSON.stringify(concept(store))).toBe(before)
+    expect(store.get('slips')).toBeUndefined()
+    expect(store.get('activity')).toMatchObject({ '2026-10-03': { right: 0, wrong: 1, drills: 1 } })
+    await w.clock.settle()
+    expect(w.journal().at(-1)!.text).toMatch(/직접 해 보기 \(\d\d:\d\d\)/)
+    await ui.unmount()
+  })
+
+  test('(교차 검토 4) a question asked back holding the example line is dropped: graded at once, as a quiz\'s', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    w.answer = `판정: 틀림\n피드백: 아닙니다.\n되묻기: ${EXAMPLE} 처럼 쓰면 어떨까요?`
+    await ui.input({ key: `drill-${id}`, text: 'return 1' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(2)
+    expect(noteOf(store).drill?.firstTry).toBeUndefined()
+    expect(noteOf(store).drill?.verdict).toBe('wrong')
+    expect(await ui.find({ type: 'Markdown', text: /되묻기/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Input', key: `drill-${id}-again` })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: '✗ 틀림' })).toBeDefined()
     await ui.unmount()
   })
 

@@ -145,6 +145,40 @@ describe('1.7.0: a note copied for a mentor (c, /learn 공유)', () => {
     expect(withoutPaths('`open("C:\\\\Users\\\\kim\\\\secret.txt")` · `"\\\\\\\\server\\\\share\\\\a.txt"`', '/proj')).toBe('`open("secret.txt")` · `"a.txt"`')
   })
 
+  test('(교차 검토 4) a WSL share (\\\\wsl$\\…) is a path: under the project it goes on from there, else its last name', () => {
+    expect(withoutPaths('\\\\wsl$\\Ubuntu\\home\\alice\\proj\\src\\a.ts', '\\\\wsl$\\Ubuntu\\home\\alice\\proj')).toBe('src\\a.ts')
+    expect(withoutPaths('`\\\\wsl$\\Ubuntu\\home\\alice\\proj\\a.ts`', '/home/alice/proj')).toBe('`a.ts`')
+    // A project opened by its share's other spelling goes on from there too, either slash.
+    expect(withoutPaths('\\\\wsl.localhost\\Ubuntu\\home\\alice\\proj\\src\\a.ts · //wsl.localhost/Ubuntu/home/alice/proj/b.ts', '\\\\wsl.localhost\\Ubuntu\\home\\alice\\proj')).toBe('src\\a.ts · b.ts')
+    // Code with a backslash before `$` or `.` is still code.
+    const kept = '`"\\\\$\\\\d+"` · `re.sub("\\\\.\\\\w+", "", name)`'
+    expect(withoutPaths(kept, '/proj')).toBe(kept)
+  })
+
+  test("(교차 검토 4) a Windows long path (\\\\?\\C:\\…, \\\\.\\, \\\\?\\UNC\\…) keeps its last name, its owner's name never", () => {
+    const text = "open '\\\\?\\C:\\Users\\kim\\AppData\\Roaming\\acme-vpn\\token.json'"
+    expect(withoutPaths(text, 'D:\\work\\todo-app')).toBe("open 'token.json'")
+    expect(withoutPaths(text, 'C:\\Users\\kim\\Desktop\\todo-app')).toBe("open 'token.json'")
+    expect(withoutPaths(text)).toBe("open 'token.json'")
+    expect(withoutPaths('\\\\.\\C:\\x\\y.txt · \\\\?\\UNC\\fs01\\share\\고객사\\a.ts · `"\\\\\\\\?\\\\C:\\\\Users\\\\kim\\\\b.txt"`', '/proj')).toBe('y.txt · a.ts · `"b.txt"`')
+    // Under the project, from there.
+    expect(withoutPaths('\\\\?\\D:\\work\\todo-app\\src\\a.ts', 'D:\\work\\todo-app')).toBe('src\\a.ts')
+  })
+
+  test('(교차 검토 4) a path in quotes or backticks is whole up to the closing one, a space in its folders and all; out of quotes a sentence goes on', () => {
+    const quoted = '`E:\\고객사\\빅뱅크 차세대\\src\\a.ts` · \'D:\\고객사 빅뱅크\\차세대\\src\\a.ts\' · "C:\\Program Files (x86)\\Acme\\acme.exe"'
+    expect(withoutPaths(quoted, 'D:\\work\\todo-app')).toBe('`a.ts` · \'a.ts\' · "acme.exe"')
+    expect(withoutPaths("'/Users/kim/Library/Application Support/Code/settings.json' · `~/고객사 빅뱅크/a.ts` · `C:\\Users\\Lee Joon\\`", '/proj')).toBe("'settings.json' · `a.ts` · `~`")
+    // A bold file line's path too.
+    expect(withoutPaths('**D:\\work\\todo\\a.ts** · **C:\\Users\\kim\\x.ts**', '/proj')).toBe('**a.ts** · **x.ts**')
+    // Unquoted, a space ends a path: the Korean after it stays.
+    expect(withoutPaths('C:\\work\\a.ts와 src/b.ts를 고쳤습니다 · `D:\\x\\a.ts · D:\\y\\b.ts`', '/proj')).toBe('a.ts와 src/b.ts를 고쳤습니다 · `a.ts · b.ts`')
+    // In the copy, end to end.
+    const copied = shareText(note({ text: '### 한 줄 요약\n설정을 읽었습니다\n### 무엇이 바뀌었나\n- `E:\\고객사\\빅뱅크 차세대\\config.json`을 읽습니다' }), [])
+    expect(copied).toContain('- `config.json`을 읽습니다')
+    expect(copied).not.toContain('빅뱅크')
+  })
+
   test('(검토) a dim line too long for a terminal is cut at a paragraph, else a line, else anywhere but inside a character', () => {
     expect(logParts('짧은 글')).toEqual(['짧은 글'])
     expect(logParts('aaaa\n\nbbbb\ncccc', 10)).toEqual(['aaaa', 'bbbb\ncccc'])

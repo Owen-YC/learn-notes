@@ -76,9 +76,11 @@ describe('1.7.0: the version stamp and the schema guard', () => {
     expect(newerText('1.8.0', '1.7.0', true)).toBe(
       'learn-notes 새 버전(1.8.0)이 다른 창에서 쓰이고 있습니다 · 이 창은 1.7.0입니다 · /reload-plugins로 바꿉니다 · 다시 불러올 때까지 이 창은 개념 모음과 복습 단계를 고치지 않습니다(노트와 일지는 그대로)',
     )
-    // The store newer with no newer window stamped lately: said all the same, since the concepts stop changing here.
-    expect(newerText(undefined, '1.7.0', true)).toBe(`learn-notes 새 버전이 다른 창에서 학습 기록을 새 구조로 썼습니다 · 이 창은 1.7.0입니다 · /reload-plugins로 바꿉니다 · ${BEHIND_TAIL}`)
-    expect(newerText(undefined, undefined, true)).toBe(`learn-notes 새 버전이 다른 창에서 학습 기록을 새 구조로 썼습니다 · /reload-plugins로 바꿉니다 · ${BEHIND_TAIL}`)
+    // The store newer with no newer window stamped lately: said all the same, since the concepts stop changing here;
+    // and a way on (교차 검토 4), since a newer build rolled back leaves no newer one to load.
+    const stuck = '다시 불러와도 계속되면 /learn 진단을 담당자에게 보내 주세요'
+    expect(newerText(undefined, '1.7.0', true)).toBe(`learn-notes 새 버전이 다른 창에서 학습 기록을 새 구조로 썼습니다 · 이 창은 1.7.0입니다 · /reload-plugins로 바꿉니다 · ${BEHIND_TAIL} · ${stuck}`)
+    expect(newerText(undefined, undefined, true)).toBe(`learn-notes 새 버전이 다른 창에서 학습 기록을 새 구조로 썼습니다 · /reload-plugins로 바꿉니다 · ${BEHIND_TAIL} · ${stuck}`)
     expect(newerText(undefined, '1.7.0', false)).toBeUndefined()
     expect(newerText('1.7.1', undefined, false)).toBeUndefined()
   })

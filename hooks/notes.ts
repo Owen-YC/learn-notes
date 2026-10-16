@@ -5665,26 +5665,35 @@ export function agoText(at: number, now: number): string {
 
 /** What a session whose store is newer than its build (the schema guard) leaves alone until it is loaded again. */
 export const BEHIND_TAIL = '다시 불러올 때까지 이 창은 개념 모음과 복습 단계를 고치지 않습니다(노트와 일지는 그대로)'
+/**
+ * The way on while the guard is on and loading this build again does not end it: a newer build rolled back left
+ * its layout in the store, and no newer window is left to bring up to date. The diagnosis says why.
+ */
+export const BEHIND_STUCK = '다시 불러와도 계속되면 /learn 진단을 담당자에게 보내 주세요'
 
 /**
  * The line an older session shows once (a dim transcript line and a toast): a newer build (`newer`) is in use in
  * another window, this one runs `mine`, and /reload-plugins brings it up to date; with BEHIND_TAIL while the
- * store is newer than this build (`isBehind`), said even when no newer window stamped lately. Undefined when
- * there is nothing to say.
+ * store is newer than this build (`isBehind`), said even when no newer window stamped lately, then with
+ * BEHIND_STUCK too (a reload may not help). Undefined when there is nothing to say.
  */
 export function newerText(newer: string | undefined, mine: string | undefined, isBehind: boolean): string | undefined {
   const tail = isBehind ? ` · ${BEHIND_TAIL}` : ''
   if (newer !== undefined && mine !== undefined) return `learn-notes 새 버전(${newer})이 다른 창에서 쓰이고 있습니다 · 이 창은 ${mine}입니다 · /reload-plugins로 바꿉니다${tail}`
   if (!isBehind) return undefined
-  return `learn-notes 새 버전이 다른 창에서 학습 기록을 새 구조로 썼습니다${mine !== undefined ? ` · 이 창은 ${mine}입니다` : ''} · /reload-plugins로 바꿉니다${tail}`
+  return `learn-notes 새 버전이 다른 창에서 학습 기록을 새 구조로 썼습니다${mine !== undefined ? ` · 이 창은 ${mine}입니다` : ''} · /reload-plugins로 바꿉니다${tail} · ${BEHIND_STUCK}`
 }
 
 /** Where a Windows home lies however a shell spells it (`C:\Users\u`, Git Bash's `/c/Users/u`, WSL's `/mnt/c/Users/u`), a space in its owner's name allowed when a separator or a quote ends it. */
 const WINDOWS_HOME = /(?<![\w:/\\.~-])(?:[A-Za-z]:|\/(?:mnt\/|cygdrive\/)?[A-Za-z])[\\/]+Users[\\/]+(?:[^\s\\/`'"()<>*|]+(?: [^\s\\/`'"()<>*|]+){1,2}(?=[\\/`'"])[\\/]*)?/
 /** A home (`/home/u`, `/Users/u`, `/var/home/u`, `/root`, `~`), a mounted volume (`/Volumes/…`) or a drive as WSL or Cygwin mounts it (`/mnt/d/…`). */
 const HOME_OR_MOUNT = /(?<![\w:/\\.~-])(?:~|\/(?:home|Users|root|var\/home|Volumes|(?:mnt|cygdrive)\/[A-Za-z]))[\\/]+/
-/** A drive (`D:\…`, its backslashes doubled in a string literal too) or a network share (`\\server\…`), only where a word starts: `{a:/^x$/}` and `"\\d+"` are code. */
-const DRIVE_OR_SHARE = /(?<![^\s`'"([<=,])(?:[A-Za-z]:[\\/]+(?![\s^*?|<>`'")])|\\{2,}[\w.-]+[\\/]+)/
+/**
+ * A drive (`D:\…`, its backslashes doubled in a string literal too) or a network share (`\\server\…`, an admin or
+ * WSL share's `$` too: `\\wsl$\…`), only where a word or a bold name (`**D:\…**`) starts: `{a:/^x$/}`, `"\\d+"` and
+ * `"\\$\\d+"` are code.
+ */
+const DRIVE_OR_SHARE = /(?<![^\s`'"([<=,*])(?:[A-Za-z]:[\\/]+(?![\s^*?|<>`'")])|\\{2,}\w[\w.-]*\$?[\\/]+)/
 /** A `file://` URL, whatever folder it names. */
 const FILE_URL = /\bfile:\/\/[^\s\\/`'"()<>*|]*\/+(?:[A-Za-z]:[\\/]+)?/
 /**
@@ -5696,6 +5705,18 @@ const LOCAL_PATH = new RegExp(
   `(?:${[WINDOWS_HOME, HOME_OR_MOUNT, DRIVE_OR_SHARE, FILE_URL].map(one => one.source).join('|')})(?:[^\\s\\\\/\`'"()<>*|]+[\\\\/]+)*([^\\s\\\\/\`'"()<>*|]*)`,
   'g',
 )
+/** One name in a path a quote holds: words a single space apart (`새 폴더`, `Program Files (x86)`), no `·` (a list goes on). */
+const SPACED_NAME = `[^\\s\\\\/\`'"<>*|·]+(?: [^\\s\\\\/\`'"<>*|·]+)*`
+/**
+ * A local path (LOCAL_PATH's starts) a quote or backticks hold whole, a space in its names and all: the quote that
+ * closes it ends it, its last name caught. Out of quotes a space ends a path, as a Korean sentence goes on after one.
+ */
+const QUOTED_PATH = new RegExp(
+  `([\`'"])((?:${[WINDOWS_HOME, HOME_OR_MOUNT, DRIVE_OR_SHARE, FILE_URL].map(one => one.source).join('|')})(?:${SPACED_NAME}[\\\\/]+)*(${SPACED_NAME})?)(?=\\1)`,
+  'g',
+)
+/** Windows' long or device path prefix (`\\?\C:\…`, `\\.\C:\…`, `\\?\UNC\server\…`), which hides the path after it. */
+const LONG_PREFIX = /(\\{2,})[?.]\\+(?:(?=[A-Za-z]:[\\/])|(UNC)\\+(?=\w))/gi
 /** A home folder alone, which a path's last name would name by its owner; WINDOWS_HOME's spellings too. */
 const HOME_ONLY = /^(?:~|\/(?:home|Users|var\/home)[\\/]+[^\\/]+|\/root|\/?(?:[A-Za-z]:|\/(?:mnt\/|cygdrive\/)?[A-Za-z])[\\/]+Users[\\/]+[^\\/]+)[\\/]*$/i
 /** The home folder a path lies in, slashes forward: `/home/u`, `/Users/u`, `C:/Users/u` (or as Git Bash or WSL spell it). */
@@ -5715,7 +5736,8 @@ function folderPattern(folder: string): { source: string; flags: string } | unde
     .map(name => name.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&'))
   if (names.length === 0) return undefined
   const sep = '[\\\\/]+'
-  if (!drive) return { source: `/${names.join(sep)}`, flags: 'g' }
+  // A network share (`\\wsl$\Ubuntu\…`) as either slash spells it.
+  if (!drive) return { source: `${slashed.startsWith('//') ? '[\\\\/]{2,}' : '/'}${names.join(sep)}`, flags: 'g' }
   const letter = (drive[1] ?? drive[2])!
   return { source: `(?:${letter}:|/(?:mnt/|cygdrive/)?${letter})${sep}${names.join(sep)}`, flags: 'gi' }
 }
@@ -5733,19 +5755,23 @@ function withoutFolder(text: string, folder: string, bare: string, inside = ''):
 }
 
 /**
- * `text` with no word of where the project lies on this computer, however a shell spells it: under `root` (the note's
- * project) a path goes on from there (`src/a.ts`) and the root itself by its last name (`~` when it is the home
- * folder); its owner's home folder as `~`; any other local path (LOCAL_PATH) by its last name alone, a home folder
- * as `~`.
+ * `text` with no word of where the project lies on this computer, however a shell spells it (a long path's `\\?\`
+ * aside): under `root` (the note's project) a path goes on from there (`src/a.ts`) and the root itself by its last
+ * name (`~` when it is the home folder); its owner's home folder as `~`; any other local path (LOCAL_PATH, or
+ * QUOTED_PATH in quotes, a space in it) by its last name alone, a home folder as `~`.
  */
-export function withoutPaths(text: string, root = ''): string {
+export function withoutPaths(source: string, root = ''): string {
+  // A share's long spelling (`\\?\UNC\server\…`) as a share (`\\server\…`); a drive's as the drive.
+  const text = source.replace(LONG_PREFIX, (_whole: string, slashes: string, unc?: string) => (unc !== undefined ? slashes : ''))
   const base = root.replace(/[\\/]+$/, '')
   const isHome = HOME_ONLY.test(base)
   const inRoot = base.length < 2 ? text : withoutFolder(text, base, isHome ? '~' : baseName(base))
   // The owner's home, known from the project's folder: whole, a space in its name and all.
   const home = isHome ? undefined : HOME_OF.exec(base.replace(/\\/g, '/'))?.[0]
   const inHome = home === undefined ? inRoot : withoutFolder(inRoot, home, '~', '~/')
-  return inHome.replace(LOCAL_PATH, (whole: string, name: string) => (HOME_ONLY.test(whole.replace(/^file:\/\/[^/\\]*/, '')) ? '~' : name))
+  const lastName = (path: string, name: string) => (HOME_ONLY.test(path.replace(/^file:\/\/[^/\\]*/, '')) ? '~' : name)
+  const quoted = inHome.replace(QUOTED_PATH, (whole: string, quote: string, path: string, name = '') => (path.includes(' ') ? `${quote}${lastName(path, name)}` : whole))
+  return quoted.replace(LOCAL_PATH, (whole: string, name: string) => lastName(whole, name))
 }
 
 /** What a terminal draws of one transcript line ($.ui.log): its first 2000 characters (a remote surface, 10000). */

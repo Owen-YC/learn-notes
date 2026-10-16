@@ -242,6 +242,7 @@ import {
   modelCode,
   saveFailText,
   storeFailText,
+  BEHIND_STUCK,
   BEHIND_TAIL,
   STAMP_EVERY_MS,
   STORE_SCHEMA,
@@ -844,8 +845,8 @@ async function sayNewer($: EngineInterface, at?: number): Promise<void> {
   }
 }
 
-/** What a command that would change the concept index answers while the schema guard is on. */
-const BEHIND_TEXT = `learn-notes가 다른 창에서 더 새 버전으로 학습 기록을 썼습니다 · ${BEHIND_TAIL} · /reload-plugins로 바꿉니다`
+/** What a command that would change the concept index answers while the schema guard is on, and the way on if a reload does not help. */
+const BEHIND_TEXT = `learn-notes가 다른 창에서 더 새 버전으로 학습 기록을 썼습니다 · ${BEHIND_TAIL} · /reload-plugins로 바꿉니다 · ${BEHIND_STUCK}`
 
 /** A stored note read back by a newer build: the fields it may lack filled in, an unfinished one failed. */
 function fromHistory(raw: unknown, root: string): LearnNote | undefined {
