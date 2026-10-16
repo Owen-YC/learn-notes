@@ -273,6 +273,70 @@ describe('1.7.0: a note\'s practice, 직접 해 보기 (D8)', () => {
     expect(plain.changes[0]!.diff.length).toBeLessThanOrEqual(800)
   })
 
+  test('(교차 검토 6) a note is stored with no diff read line by line for its practice unless one is to be cut, and then only one that may hold its line', () => {
+    // Every persist stores every note in the pane (up to 40): what a diff costs there is paid at each turn's end.
+    let splits = 0
+    /** A diff that counts each time it is split into lines (parseDiff). */
+    const counted = (text: string): string => {
+      const diff = new String(text)
+      Object.defineProperty(diff, 'split', {
+        value: (by: string) => {
+          splits += 1
+          return text.split(by)
+        },
+      })
+      return diff as unknown as string
+    }
+    const filler = (from: number) => [`@@ -${from},2 +${from},2 @@`, ` // ${'설명 '.repeat(100)}`, `-let v${from} = ${from}`, `+const v${from} = ${from}`].join('\n')
+    const noteOf = (diffs: string[]): LearnNote => ({
+      id: 'n1', turnId: 't1', at: AT, prompt: '', answer: '', changes: diffs.map((diff, i) => change(counted(diff), `src/f${i}.js`)), moreFiles: 0,
+      status: 'ready', text: NOTE, savedAs: 'ready', isPast: false, root: '/proj', updatedAt: AT, concepts: [],
+    })
+    // Twelve files within the budget, the practice's line in none (a note a later session read back): none is read.
+    const small = Array.from({ length: 12 }, (_, i) => filler(i * 10 + 1))
+    expect(small.every(diff => diff.length <= 800)).toBe(true)
+    forHistory(noteOf(small))
+    expect(splits).toBe(0)
+    // Nor with the line in one of them: nothing is cut, so no hunk needs keeping.
+    const kept0 = forHistory(noteOf(small.map((diff, i) => (i === 5 ? HELLO_DIFF : diff))))
+    expect(splits).toBe(0)
+    expect(drillOf(kept0.text, kept0.changes)).toMatchObject({ file: 'src/f5.js', n: 12 })
+    // Twelve to cut, the line in none: each read once, to be cut.
+    const big = Array.from({ length: 12 }, (_, i) => [filler(i * 100 + 1), filler(i * 100 + 40), filler(i * 100 + 80)].join('\n'))
+    expect(big.every(diff => diff.length > 800)).toBe(true)
+    splits = 0
+    const cut = forHistory(noteOf(big))
+    expect(splits).toBe(12)
+    expect(cut.changes.every(one => one.isCut)).toBe(true)
+    // The line in the sixth: that one read once more, to find it, and its hunk kept for t as before.
+    const hello = HELLO_DIFF.replace('@@ -10,4 +10,4 @@', '@@ -620,4 +620,4 @@')
+    const withLine = big.map((diff, i) => (i === 5 ? `${diff}\n${hello}` : diff))
+    splits = 0
+    const kept = forHistory(noteOf(withLine))
+    expect(splits).toBe(13)
+    expect(kept.changes[5]!.isCut).toBe(false)
+    expect(kept.changes.filter(one => one.isCut)).toHaveLength(11)
+    expect(drillOf(kept.text, kept.changes)).toMatchObject({ file: 'src/f5.js', n: 622 })
+  })
+
+  test('(교차 검토 6) a note stored while w writes it again keeps what it was, cut as a ready note\'s text is, and its practice\'s hunk', () => {
+    const filler = (from: number) => [`@@ -${from},2 +${from},2 @@`, ` // ${'설명 '.repeat(100)}`, `-let v${from} = ${from}`, `+const v${from} = ${from}`].join('\n')
+    const diff = [filler(1), filler(40), filler(80), HELLO_DIFF.replace('@@ -10,4 +10,4 @@', '@@ -120,4 +120,4 @@')].join('\n')
+    const long = NOTE.replace('더 공손하게 인사하려고 바꿨습니다.', `더 공손하게 인사하려고 바꿨습니다.${'가'.repeat(HISTORY_TEXT_BUDGET)}`)
+    const note: LearnNote = {
+      id: 'n1', turnId: 't1', at: AT, prompt: '', answer: '', changes: [change(diff)], moreFiles: 0, status: 'writing', text: '',
+      savedAs: 'ready', isPast: false, root: '/proj', updatedAt: AT, concepts: [], previous: { status: 'ready', text: NOTE },
+    }
+    const kept = forHistory(note)
+    expect(kept).toMatchObject({ status: 'writing', text: '', previous: { status: 'ready', text: NOTE } })
+    // Its practice's line is in the last hunk: kept, so a later session's t finds it once the note reads back as it was.
+    expect(kept.changes[0]!.isCut).toBe(false)
+    expect(drillOf(kept.previous!.text, kept.changes)).toMatchObject({ n: 122 })
+    expect(forHistory({ ...note, previous: { status: 'ready', text: long } }).previous!.text).toHaveLength(HISTORY_TEXT_BUDGET)
+    // Whole while the journal is still to get it, as the text of such a note is.
+    expect(forHistory({ ...note, previous: { status: 'ready', text: long } }, true).previous!.text).toBe(long)
+  })
+
   test('a quiz has no note\'s own kind any more: every quiz asks with every kind', () => {
     const prompt = quizPrompt([{ name: '클로저', count: 1, firstAt: AT, lastAt: AT, blurb: '바깥 변수를 기억한다', files: [] }], 'beginner')
     expect(prompt).toContain('T1: (예측 · 왜 · 바꿔 보기 중 하나)')

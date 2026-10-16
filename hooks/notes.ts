@@ -1762,7 +1762,8 @@ function lineKey(text: string): string {
 
 /**
  * Where a practice's line is in the changed code: the change and hunk it is in, its number on the new side and its
- * text there, and the new side's lines around it in that hunk. An added line first, then one left as it was.
+ * text there, and the new side's lines around it in that hunk. An added line first, then one left as it was. A
+ * change whose diff, its spaces out, does not hold the line's key cannot hold the line: it is not read line by line.
  */
 function drillSpot(
   quote: string,
@@ -1770,8 +1771,10 @@ function drillSpot(
 ): { change: number; hunk: number; n: number; text: string; above?: string; below?: string } | undefined {
   const want = lineKey(quote)
   if (want === '') return undefined
+  const held = changes.map(change => squash(change.diff).includes(want))
   for (const mark of ['+', ' ']) {
     for (const [c, change] of changes.entries()) {
+      if (!held[c]) continue
       for (const [k, h] of parseDiff(change.diff).entries()) {
         const side: { text: string; mark: string; n: number }[] = []
         let n = h.newStart
@@ -3373,10 +3376,14 @@ export function forHistory(note: LearnNote, isWhole = note.isUnsaved === true): 
   }
   if (isWhole) return kept
   // The hunk its practice's line is in (1.7.0), kept with the ones before it: a later session's t finds the line there.
-  const practice = drillHunk(note)
+  // Looked for only where a diff is to be cut (every persist stores every note in the pane); a note being written
+  // again by its text before (`previous`), as a later session reads it back.
+  const isCutting = note.changes.some(change => change.diff.length > HISTORY_DIFF_BUDGET)
+  const practice = isCutting ? drillHunk(note.status === 'writing' && note.previous ? { ...note, ...note.previous } : note) : undefined
   return {
     ...kept,
     text: note.status === 'ready' ? closeTicks(cut(note.text, HISTORY_TEXT_BUDGET)) : note.text,
+    ...(note.previous ? { previous: { status: 'ready' as const, text: closeTicks(cut(note.previous.text, HISTORY_TEXT_BUDGET)) } } : {}),
     changes: note.changes.map((change, i) => {
       if (change.diff.length <= HISTORY_DIFF_BUDGET) return change
       const hunks = parseDiff(change.diff)

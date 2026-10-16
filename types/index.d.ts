@@ -94,6 +94,11 @@ export type LearnNote = {
    * its own try again included. A w starts the note over and clears it.
    */
   resumed?: true
+  /**
+   * While a ready note is written again (w): the note as it was, put back if the new version fails, and by the next
+   * load's session start if a reload cuts the call (resumeNotes), or read back so from the store (1.7.0).
+   */
+  previous?: { status: 'ready'; text: string }
   /** How the learner did at the note's practice (`### 직접 해 보기`, t under it, 1.7.0); absent while never tried. */
   drill?: LearnDrill
 }

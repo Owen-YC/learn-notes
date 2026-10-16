@@ -850,18 +850,23 @@ async function sayNewer($: EngineInterface, at?: number): Promise<void> {
 /** What a command that would change the concept index answers while the schema guard is on, and the way on if a reload does not help. */
 const BEHIND_TEXT = `learn-notes가 다른 창에서 더 새 버전으로 학습 기록을 썼습니다 · ${BEHIND_TAIL} · /reload-plugins로 바꿉니다 · ${BEHIND_STUCK}`
 
-/** A stored note read back by a newer build: the fields it may lack filled in, an unfinished one failed. */
+/**
+ * A stored note read back by a newer build: the fields it may lack filled in, an unfinished one failed, one a w was
+ * writing again read as it was before (its `previous`, 1.7.0).
+ */
 function fromHistory(raw: unknown, root: string): LearnNote | undefined {
   if (!isRecord(raw) || typeof raw.id !== 'string' || !Array.isArray(raw.changes) || typeof raw.at !== 'number') return undefined
   const note = raw as unknown as LearnNote
   const isUnfinished = note.status === 'writing'
+  const before = isUnfinished && isRecord(raw.previous) && raw.previous.status === 'ready' && typeof raw.previous.text === 'string' ? raw.previous.text : undefined
   return {
     ...note,
     prompt: typeof note.prompt === 'string' ? note.prompt : '',
     answer: typeof note.answer === 'string' ? note.answer : '',
     moreFiles: typeof note.moreFiles === 'number' ? note.moreFiles : 0,
-    text: isUnfinished ? '세션이 끝나 노트를 다 쓰지 못했습니다 · w로 다시 쓰기' : String(note.text ?? ''),
-    status: isUnfinished ? 'failed' : note.status,
+    text: before ?? (isUnfinished ? '세션이 끝나 노트를 다 쓰지 못했습니다 · w로 다시 쓰기' : String(note.text ?? '')),
+    status: before !== undefined ? 'ready' : isUnfinished ? 'failed' : note.status,
+    previous: undefined,
     savedAs: note.savedAs ?? null,
     isPast: true,
     concepts: Array.isArray(note.concepts) ? note.concepts.filter(key => typeof key === 'string') : [],
@@ -1161,7 +1166,11 @@ async function persistNow($: EngineInterface, forget: boolean, extra: readonly L
 
 /** The notes the store keeps for `root`, past its last clear. */
 async function storedNotes($: EngineInterface, root: string): Promise<LearnNote[]> {
-  const raw = await $.store.get(HISTORY_KEY)
+  return notesIn(await $.store.get(HISTORY_KEY), root)
+}
+
+/** The notes the store's history `raw` (as read under HISTORY_KEY) keeps for `root`, past its last clear. */
+function notesIn(raw: unknown, root: string): LearnNote[] {
   const entry = isRecord(raw) ? raw[root] : undefined
   if (!isRecord(entry) || !Array.isArray(entry.notes)) return []
   const clearedAt = typeof entry.clearedAt === 'number' ? entry.clearedAt : 0
@@ -1246,16 +1255,19 @@ async function welcome($: EngineInterface): Promise<void> {
 /**
  * Once a day, at an interactive session's start, a dim transcript line (never sent to the model) while a problem
  * remains: this project's notes the journal has not taken yet, with the cause the last failed save gave, or a
- * store that refused a write in the last day (checkLine). The day it showed is kept with the faults.
+ * store that refused a write in the last day (checkLine). The day it showed is kept with the faults. `history`: the
+ * store's notes as the session start read them for this and journalLeft (one read of up to 2MB, not two); read
+ * here when not given.
  */
-async function checkAtStart($: EngineInterface, cfg: Config): Promise<void> {
+async function checkAtStart($: EngineInterface, cfg: Config, history?: { raw: unknown }): Promise<void> {
   if (!isInteractive) return
   try {
     const now = await $.clock.now()
     const day = stamp(now).day
     const record = cleanFaults(await $.store.get(FAULTS_KEY), now)
     if (record.noticeDay === day) return
-    const unsaved = cfg.isAutoSave ? (await storedNotes($, await $.session.root())).filter(one => one.isUnsaved === true).length : 0
+    const raw = cfg.isAutoSave ? (history ? history.raw : await $.store.get(HISTORY_KEY)) : undefined
+    const unsaved = cfg.isAutoSave ? notesIn(raw, await $.session.root()).filter(one => one.isUnsaved === true).length : 0
     const open = (area: FaultArea, within: number) => record.list.filter(one => one.area === area && one.ok !== true && now - one.last < within).at(-1)?.code
     const line = checkLine(unsaved, open('save', Number.POSITIVE_INFINITY), open('store', 86_400_000))
     if (line === undefined) return
@@ -2981,6 +2993,8 @@ async function askInPane($: EngineInterface, cfg: Config, id: string, text: stri
 const drillDrafts = new Map<string, string>()
 /** The note whose practice line Claude is checking now: one at a time. */
 let drillChecking: string | null = null
+/** The notes whose practice's example a is showing now: a second a before the first lands is dropped (교차 검토 6). */
+const drillShowing = new Set<string>()
 /** The feedback of a practice ended by a second "모르겠어요": what to do next, with no model call. */
 const DRILL_BLANK_FEEDBACK = 'a로 예시 답을 읽어 보고, 다음에 이 개념이 나오면 다시 고쳐 보세요.'
 /** Under a first try waiting for its try again where no field is drawn (the mobile app): where it goes, and a here. */
@@ -3150,13 +3164,14 @@ async function keepDrillTry($: EngineInterface, id: string, first: LearnQuizFirs
  * At a session start: each practice a past day left waiting for its try again ended as Claude graded its first try,
  * on the day it was tried (finishDrill: its concept marked, its miss kept as a slip, the day's count), as a quiz's
  * first try is (settleFirstTries). A miss is never lost by leaving it. One the store holds over already (another
- * window ended it) or whose line is being checked now is left; so is one whose note no longer has its practice.
+ * window ended it) or whose line is being checked, or whose example is being shown (a), now is left; so is one whose
+ * note no longer has its practice.
  */
 async function settleDrillTries($: EngineInterface, cfg: Config, now: number): Promise<void> {
   const today = stamp(now).day
   const waiting = (await read($, notes)).filter(note => {
     const first = note.drill?.firstTry
-    return first !== undefined && !isDrillOver(note.drill) && stamp(first.at).day !== today && drillChecking !== note.id
+    return first !== undefined && !isDrillOver(note.drill) && stamp(first.at).day !== today && drillChecking !== note.id && !drillShowing.has(note.id)
   })
   if (waiting.length === 0) return
   try {
@@ -3234,9 +3249,21 @@ async function finishDrill(
  * The pane's a under a note's practice (1.7.0): its example answer shown. Once tried and waiting for its try again,
  * that ends it as its first try was graded, the example seen (finishDrill), unless another window ended it meanwhile
  * (endedDrill: its grade taken, only shown); once graded, only shown. With no try, only where no field is drawn (the
- * mobile app): shown, nothing graded.
+ * mobile app): shown, nothing graded. A second a before the first lands is dropped (drillShowing), as a quiz's
+ * second grading is: both would read the note before its example was seen, and end it twice.
  */
 async function showDrillAnswer($: EngineInterface, cfg: Config, id: string, surface?: RenderSurface): Promise<void> {
+  if (drillShowing.has(id)) return
+  drillShowing.add(id)
+  try {
+    await showDrillAnswerOnce($, cfg, id, surface)
+  } finally {
+    drillShowing.delete(id)
+  }
+}
+
+/** showDrillAnswer's work, one at a time for a note. */
+async function showDrillAnswerOnce($: EngineInterface, cfg: Config, id: string, surface?: RenderSurface): Promise<void> {
   const note = (await read($, notes)).find(one => one.id === id)
   const drill = note && note.status === 'ready' ? drillOf(note.text, note.changes) : undefined
   if (!note || !drill || drillChecking === id) return
@@ -3331,11 +3358,13 @@ async function writeNote(
     if (!prior) return
     // A note counts toward the day's learning the first time it is written, never on a rewrite.
     const isCounted = prior.isCounted === true || prior.status === 'ready'
-    const good = prior.status === 'ready' ? { status: prior.status, text: prior.text } : undefined
+    // The note it replaces: one being written again still that a reload cut and nothing put back holds it as `previous`.
+    const good: LearnNote['previous'] = prior.status === 'ready' ? { status: 'ready', text: prior.text } : prior.previous
     // Written now, it is no longer one a turn's end passed over. Its try again keeps its mark while the call runs,
     // so a reload that cuts it takes it up as that try, never a third call (resumeNotes); a reload's take-up stays
     // marked through its own try again. A w starts the note over: no try again waits any more, and a reload may
-    // take it up once.
+    // take it up once. A ready note keeps what it was while it is written again (`previous`): a reload that cuts the
+    // call, which leaves this load nothing it may write, has the next load put it back (resumeNotes).
     const start: Partial<LearnNote> = {
       status: 'writing',
       text: '',
@@ -3343,6 +3372,7 @@ async function writeNote(
       quota: undefined,
       retry: isRetry ? prior.retry : undefined,
       resumed: isResume || (isAuto && prior.resumed === true) ? true : undefined,
+      previous: good,
     }
     const note = (await setNote($, id, start)) ?? (copy ? { ...copy, ...start } : undefined)
     if (!note) return
@@ -3363,7 +3393,7 @@ async function writeNote(
     autoPending.delete(id)
     if ('error' in asked && good) {
       // Only the new version failed: the note it was to replace stays, in the pane, the store and the journal.
-      const kept = (await setNote($, id, good)) ?? { ...note, ...good }
+      const kept = (await setNote($, id, { ...good, previous: undefined })) ?? { ...note, ...good, previous: undefined }
       // A store write meanwhile (another turn, a question) may hold it as being written: store it as it is again.
       await persist($, false, [kept])
       $.ui.toast(`노트를 다시 쓰지 못했습니다: ${asked.error} · 원래 노트는 그대로입니다`, { timeoutMs: 8000 })
@@ -3382,7 +3412,7 @@ async function writeNote(
       const token = `${id}:${now}`
       // Armed first: the pane drawn from the write below shows the wait, not the call this write still counts as.
       if (armRetry($, cfg, id, token, wait, note.root)) {
-        const patch: Partial<LearnNote> = { status: 'writing', text: '', retry: { at: now + wait, token, why: asked.transient } }
+        const patch: Partial<LearnNote> = { status: 'writing', text: '', retry: { at: now + wait, token, why: asked.transient }, previous: undefined }
         // Not unsaved: nothing refused it. A session that ends while it waits leaves it to the next (journalLeft).
         // One a /cd took from the pane meanwhile waits in the store, under its own project (retryNote finds it there).
         const waiting = (await setNote($, id, patch)) ?? { ...note, ...patch, updatedAt: Math.max(now, note.updatedAt + 1) }
@@ -3392,8 +3422,8 @@ async function writeNote(
     }
     const patch: Partial<LearnNote> =
       'error' in asked
-        ? { status: 'failed', text: asked.fail ? noteFailText(asked.fail, cfg.model) : `${asked.error} · w로 다시 쓰기`, retry: undefined }
-        : { status: 'ready', text: closeConceptBold(cut(asked.text, 9000)), retry: undefined, drill: undefined }
+        ? { status: 'failed', text: asked.fail ? noteFailText(asked.fail, cfg.model) : `${asked.error} · w로 다시 쓰기`, retry: undefined, previous: undefined }
+        : { status: 'ready', text: closeConceptBold(cut(asked.text, 9000)), retry: undefined, drill: undefined, previous: undefined }
     // A note cleared from the pane meanwhile, or left behind by a /cd, is still saved and stored from this copy.
     let done = (await setNote($, id, patch)) ?? { ...note, ...patch }
     // Written again, its practice is a new one: what was typed for the old one goes.
@@ -3480,22 +3510,33 @@ async function waitingCopy($: EngineInterface, root: string, id: string, token: 
   return read && read.at > clearedAt ? { ...read, status: 'writing', text: '', isPast: false, retry: one.retry as LearnNote['retry'] } : undefined
 }
 
+/** What a reload's session start says when it put back a ready note whose rewrite (w) the reload cut (resumeNotes). */
+const REWRITE_CUT_TEXT = '다시 불러오는 사이 노트 다시 쓰기가 끊겼습니다 · 원래 노트는 그대로입니다 · w로 다시 쓰기'
+
 /**
  * At a session start that is a reload (`/reload-plugins`, a /config change): each note the last load left being
  * written (its call cut, or the timer of its try again cancelled) whose turn ended within RESUME_MS is written
  * again by itself, once (isResumable): one that waited for its try again, or whose try again the reload cut, as
  * that try (outside the day's limit), any other as a turn's end would (within it). Only with automatic notes on,
  * in an interactive session. Any other such note stopped for good: it fails, saying it was cut (w writes it), and
- * the journal gets it now if it never had it. A first session start finds none: the notes it brings back from the
- * store read as failed (fromHistory), and those a session left are journalLeft's.
+ * the journal gets it now if it never had it. A ready note the learner was writing again (w, `previous`) is put back
+ * as it was, never failed or written by itself: a toast says the rewrite was cut, for the next w. A first session
+ * start finds none: the notes it brings back from the store read as failed, or as they were before a w (fromHistory),
+ * and those a session left are journalLeft's.
  */
 async function resumeNotes($: EngineInterface, cfg: Config): Promise<void> {
   try {
     const now = await $.clock.now()
     const day = stamp(now).day
     const stopped: LearnNote[] = []
+    const restored: LearnNote[] = []
     for (const one of await read($, notes)) {
       if (one.status !== 'writing' || inFlight.has(one.id) || resuming.has(one.id)) continue
+      if (one.previous) {
+        const back = await setNote($, one.id, { ...one.previous, previous: undefined, retry: undefined })
+        if (back) restored.push(back)
+        continue
+      }
       const isRetry = one.retry !== undefined
       if (cfg.isAutoNote && isInteractive && isResumable(one, now) && (isRetry || !isLimitReached(cfg, day))) {
         resuming.add(one.id)
@@ -3513,11 +3554,12 @@ async function resumeNotes($: EngineInterface, cfg: Config): Promise<void> {
       const done = await setNote($, one.id, { status: 'failed', text: noteFailText({ reason: 'aborted' }, cfg.model), retry: undefined })
       if (done) stopped.push(done)
     }
-    if (stopped.length === 0) return
+    if (stopped.length === 0 && restored.length === 0) return
     if (cfg.isAutoSave) {
       for (const one of stopped) if (one.savedAs === null) await save($, cfg, one, false)
     }
     await persist($)
+    if (restored.length > 0) $.ui.toast(REWRITE_CUT_TEXT, { timeoutMs: 8000 })
   } catch (error) {
     void fault($, 'note', faultCode(error), '다시 불러온 뒤 노트를 이어 쓰지 못했습니다')
   }
@@ -3529,14 +3571,21 @@ async function resumeNotes($: EngineInterface, cfg: Config): Promise<void> {
  * journal as this session reads it back (failed, w writes it) and is stored so, quietly, as nothing refused it.
  * One whose copy changed within LEFT_MS may be another window's still, being written: looked at again once that
  * has passed (`seen`, its copy's time then), and journaled only if no window changed it meanwhile. This load's own
- * notes are resumeNotes'. Never rejects.
+ * notes are resumeNotes'. `history`: the store's notes as the session start read them (shared with checkAtStart),
+ * for the first look; a later look reads them anew. Never rejects.
  */
-async function journalLeft($: EngineInterface, cfg: Config, root?: string, seen?: ReadonlyMap<string, number>): Promise<void> {
+async function journalLeft(
+  $: EngineInterface,
+  cfg: Config,
+  root?: string,
+  seen?: ReadonlyMap<string, number>,
+  history?: { raw: unknown },
+): Promise<void> {
   if (!cfg.isAutoSave) return
   try {
     const where = root ?? (await $.session.root())
     const now = await $.clock.now()
-    const raw = await $.store.get(HISTORY_KEY)
+    const raw = seen === undefined && history ? history.raw : await $.store.get(HISTORY_KEY)
     const entry = isRecord(raw) ? raw[where] : undefined
     if (!isRecord(entry) || !Array.isArray(entry.notes)) return
     const clearedAt = typeof entry.clearedAt === 'number' ? entry.clearedAt : 0
@@ -4392,13 +4441,16 @@ export const register: Register = (on, options) => {
     await seedUsage($)
     // After a reload: a note it cut mid-write goes on by itself (the day's limit read just above), or says it stopped.
     await resumeNotes($, cfg)
+    // The store's notes (up to 2MB) read once for the two looks at them below: every reload and /config change
+    // starts here too. Read after resumeNotes, which may have stored what it did.
+    const history = cfg.isAutoSave ? await $.store.get(HISTORY_KEY).then(raw => ({ raw }), () => undefined) : undefined
     // A note a session that ended left being written goes into the journal, quietly; not waited for, as it writes files.
-    void journalLeft($, cfg)
+    void journalLeft($, cfg, undefined, undefined, history)
     await remind($, cfg)
     await welcome($)
     // A repository whose team file has terms to practise says so once (1.7.0 D6), never in the welcome's session.
     await nudgeTeam($)
-    await checkAtStart($, cfg)
+    await checkAtStart($, cfg, history)
     // A newer build open in another window, or a store it wrote in a newer layout: said once a session.
     await lookNewer($)
     // A quiz request a reload cut off is not coming back; the last quiz is there for the pane to draw.

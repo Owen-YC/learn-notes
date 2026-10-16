@@ -5847,6 +5847,36 @@ describe('1.7.0: /learn 진단, and failures that say their cause', () => {
     expect(w.transcript).toEqual(['learn-notes 점검: 저장소에 쓰지 못한 기록이 있음 (저장소 4MB 넘음) · /learn 진단'])
   })
 
+  test('(교차 검토 6) a reload reads the notes\' store (up to 2MB) once for the start check and the journal\'s look, not once each', async ($, on) => {
+    let reads = 0
+    on('store.get', { key: 'history' }, async (_$, e, next) => {
+      reads += 1
+      return next(e)
+    })
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    // A reload (or a /config change) on a day nothing was wrong: the pane holds the notes, the check line is unsaid.
+    reads = 0
+    await start($)
+    await w.clock.settle()
+    expect(reads).toBe(1)
+    expect(w.transcript.filter(line => line.startsWith('learn-notes 점검'))).toEqual([])
+    // What that one read holds still makes the check line: a note the journal refused is counted at the next start.
+    w.writeFails = true
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    w.writeFails = false
+    reads = 0
+    await start($)
+    await w.clock.settle()
+    expect(reads).toBe(1)
+    expect(w.transcript.filter(line => line.startsWith('learn-notes 점검'))).toEqual([
+      expect.stringContaining('learn-notes 점검: 일지에 아직 못 쓴 노트 1개'),
+    ])
+  })
+
   test('a store that refuses the history names its cause, once', async ($, on) => {
     const w = world(on)
     w.storeFails = true
@@ -7017,6 +7047,132 @@ describe('1.7.0: notes that do not get lost: one try again, a reload taken up, t
     expect(storedNotes(w)[0]).toMatchObject({ status: 'failed' })
     expect(journalFiles(w)).toEqual([])
     expect(w.writes).toEqual([])
+  })
+
+  const REWRITE_CUT = '다시 불러오는 사이 노트 다시 쓰기가 끊겼습니다 · 원래 노트는 그대로입니다 · w로 다시 쓰기'
+
+  /**
+   * The load a reload ends (교차 검토 6): once the call after `cutsNext` is set comes back, the host refuses that
+   * load's every word on the pane's notes, as it refuses an unloaded environment's ops. The kit's start($) keeps the
+   * module, whose rewrite would otherwise put the note back itself; `isGone` cleared stands for the next load.
+   */
+  function reloadCuts(on: On) {
+    const load = { isGone: false, cutsNext: false }
+    on('model.complete', { prompt: /[\s\S]/ }, async (_$, e, next) => {
+      const result = await next(e)
+      if (load.cutsNext) {
+        load.cutsNext = false
+        load.isGone = true
+      }
+      return result
+    })
+    on('state.set', { plugin: 'learn-notes', key: 'notes' }, async (_$, e, next) => (load.isGone ? { deny: 'this load is gone' } : next(e)))
+    return load
+  }
+
+  test('(교차 검토 6) a w on a ready note that a reload cuts: the next load puts the note back as it was, in the pane and the store, with no call', { options: { autoNote: false } }, async ($, on) => {
+    const load = reloadCuts(on)
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const ui = await pane($)
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    expect(storedNotes(w)[0]).toMatchObject({ status: 'ready', savedAs: 'ready' })
+    const text = storedNotes(w)[0]!.text as string
+    expect(text).toContain('let을 const로')
+    const journaled = w.journal().length
+    // w again; a reload cuts its call, and the load it ends writes nothing more.
+    w.replies = ['cut']
+    load.cutsNext = true
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    load.isGone = false
+    expect(w.models).toHaveLength(2)
+    // The reload's session start: the note as it was, never failed as cut, nor written again by itself.
+    await start($)
+    await w.clock.advance(60_000)
+    expect(w.models).toHaveLength(2)
+    expect(await ui.find({ type: 'Markdown', text: /let을 const로/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /노트를 쓰지 못했습니다|노트를 쓰다 멈췄습니다/ })).toBeUndefined()
+    expect(storedNotes(w)[0]).toMatchObject({ status: 'ready', text, savedAs: 'ready' })
+    expect(storedNotes(w)[0]!.previous).toBeUndefined()
+    expect(w.toasts.filter(one => one === REWRITE_CUT)).toHaveLength(1)
+    expect(w.journal()).toHaveLength(journaled)
+    // w writes it again as any rewrite does.
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(3)
+    await ui.unmount()
+  })
+
+  test('(교차 검토 6) the same within RESUME_MS with automatic notes on: the learner\'s w is put back, never written again as a turn\'s end would', async ($, on) => {
+    const load = reloadCuts(on)
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(usageOf(w)).toMatchObject({ calls: 1, auto: 1 })
+    w.replies = ['cut']
+    load.cutsNext = true
+    const ui = await pane($)
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    load.isGone = false
+    await ui.unmount()
+    await start($)
+    await w.clock.advance(60_000)
+    expect(w.models).toHaveLength(2)
+    expect(usageOf(w)).toMatchObject({ calls: 2, auto: 1 })
+    expect(storedNotes(w)[0]).toMatchObject({ status: 'ready', savedAs: 'ready' })
+    expect(storedNotes(w)[0]!.text).toContain('let을 const로')
+    expect((await learn($, '공유')).text).not.toContain('노트를 쓰지 못했습니다')
+    expect(w.toasts).toContain(REWRITE_CUT)
+  })
+
+  test('(교차 검토 6) a store write while w writes a note again keeps the note as it was, and a later session reads it back so', { options: { autoNote: false } }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const ui = await pane($)
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    const text = storedNotes(w)[0]!.text as string
+    w.model = 'hold'
+    await ui.press({ key: 'write' })
+    // Another turn's end stores the pane meanwhile: the note being written, with what it was.
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    expect(storedNotes(w)[0]).toMatchObject({ status: 'writing', text: '', previous: { status: 'ready', text } })
+    w.release()
+    await w.clock.settle()
+    expect(storedNotes(w)[0]).toMatchObject({ status: 'ready' })
+    expect(storedNotes(w)[0]!.previous).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('(교차 검토 6) a note a session left while w wrote it again comes back, in the next, as it was before: not failed', async ($, on) => {
+    const change = { file: 'src/a.ts', path: '/proj/src/a.ts', tool: 'Edit', kind: 'update', added: 1, removed: 1, diff: '@@ -1,1 +1,1 @@\n-let b = 2\n+const b = 2', isCut: false }
+    const left = {
+      id: 'n1', turnId: 'n1', at: NOW - 3_600_000, prompt: '요청', answer: '', changes: [change], moreFiles: 0, status: 'writing', text: '', savedAs: 'ready',
+      isPast: false, root: '/proj', updatedAt: NOW - 60_000, concepts: [], previous: { status: 'ready', text: NOTE_TEXT },
+    }
+    // One whose before is anything but a ready note's text reads back as before 1.7.0: failed.
+    const odd = { ...left, id: 'n0', turnId: 'n0', at: NOW - 7_200_000, previous: { status: 'ready', text: 5 } }
+    const w = world(on, 'ok', null, true, new Map<string, unknown>([['history', { '/proj': { at: NOW, notes: [odd, left] } }]]))
+    await start($)
+    await w.clock.advance(15 * 60_000)
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Markdown', text: /let을 const로/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /세션이 끝나 노트를 다 쓰지 못했습니다/ })).toBeUndefined()
+    expect((await learn($, '공유')).text).not.toContain('세션이 끝나')
+    await ui.press({ key: 'prev' })
+    expect(await ui.find({ type: 'Text', text: /세션이 끝나 노트를 다 쓰지 못했습니다/ })).toBeDefined()
+    await ui.unmount()
+    expect(w.models).toHaveLength(0)
+    expect(w.journal()).toHaveLength(0)
   })
 })
 
@@ -9515,6 +9671,31 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect(w.models).toHaveLength(3)
     expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 1, right: 0, wrong: 1, drills: 1 } })
     expect(noteOf(store).drill).toMatchObject({ verdict: 'wrong', isAnswerSeen: true })
+    await ui.unmount()
+  })
+
+  test('a pressed twice before the first lands (교차 검토 6): the practice is ended once, counted once, journaled once', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    w.answer = WRONG
+    await ui.input({ key: `drill-${id}`, text: 'return `안녕하세요, ${name}님!!`' })
+    await w.clock.settle()
+    expect(noteOf(store).drill).toMatchObject({ firstTry: { verdict: 'wrong' } })
+    const before = w.journal().length
+    // Two a's that come in together, as a busy terminal hands a held or batched key on: the second reads the note
+    // before the first has stored its example seen.
+    await Promise.all([ui.press({ key: 'note-drill-answer' }), ui.press({ key: 'note-drill-answer' })])
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: '✗ 틀림 · 예시 답 봄' })).toBeDefined()
+    expect(noteOf(store).drill).toMatchObject({ verdict: 'wrong', isAnswerSeen: true })
+    expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 1, right: 0, wrong: 1, drills: 1 } })
+    expect(Object.values(store.get('slips') as Record<string, { times: number }>)).toEqual([expect.objectContaining({ times: 1 })])
+    expect(w.journal().length - before).toBe(1)
+    expect(w.journal().at(-1)!.text.match(/직접 해 보기 \(\d\d:\d\d\)/g)).toHaveLength(1)
+    expect(w.models).toHaveLength(2)
+    // Once it has landed, a is no longer there to press.
+    expect(await ui.find({ type: 'Button', key: 'note-drill-answer' })).toBeUndefined()
     await ui.unmount()
   })
 
