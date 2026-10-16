@@ -1836,6 +1836,8 @@ function quizItemOf(one: unknown): LearnQuizItem | undefined {
     ...(verdict === 'right' || verdict === 'partial' || verdict === 'wrong' ? { verdict } : {}),
     ...(typeof feedback === 'string' ? { feedback } : {}),
     ...(before ? { before } : {}),
+    // The learner's own grade over Claude's: a grade turned stays fully right or wrong once read back (as every write is).
+    ...(one.isLearnerGraded === true ? { isLearnerGraded: true } : {}),
     ...(kind === 'predict' || kind === 'why' || kind === 'modify' ? { kind } : {}),
     ...(typeof noteId === 'string' && noteId !== '' ? { noteId } : {}),
     ...(firstTry ? { firstTry } : {}),
@@ -1878,6 +1880,24 @@ async function storedQuiz($: EngineInterface): Promise<Quiz | null | undefined> 
   if (!isRecord(raw) || typeof raw.at !== 'number' || !Array.isArray(raw.items)) return null
   const items = raw.items.map(quizItemOf).filter(one => one !== undefined)
   return items.length > 0 ? { at: raw.at, items, isRevealed: raw.isRevealed === true } : null
+}
+
+/**
+ * The quiz a change is made on and written back over (1.7.0): the one the store holds, every window's, so what
+ * another window kept on it meanwhile (a first try waiting for its try again, a hint seen, a grade) stays. This
+ * window's own when the store holds none, or an older one (this window's write of a newer quiz failed, or a window
+ * of an older build wrote its quiz back), or cannot be read.
+ */
+async function sharedQuiz($: EngineInterface): Promise<Quiz | null> {
+  const here = await read($, quiz)
+  const stored = await storedQuiz($)
+  if (!stored || (here !== null && here.at > stored.at)) return here
+  return stored
+}
+
+/** This window shows the quiz every window shares from now on: another window replaced this window's, or changed it. */
+async function showShared($: EngineInterface, shared: Quiz): Promise<void> {
+  if ((await read($, quiz)) !== shared) await update($, quiz, () => shared)
 }
 
 /** Whether the learner has seen a question's answer: shown in the pane or by /learn quiz 정답, or all of them in a quiz kept before 1.6.0. */
@@ -2065,6 +2085,10 @@ const NO_CONCEPTS_FOR_QUIZ = '아직 모인 개념이 없어 퀴즈를 낼 수 �
 const ALL_KNOWN_TEXT = '모든 개념이 아는 개념이라 퀴즈에 낼 개념이 없습니다. 되돌리려면 /learn 모른다 개념 이름.'
 const CHECKING_TEXT = '답을 채점하고 있습니다. 채점이 끝난 뒤 새 문제를 받으세요.'
 const MOVED_TEXT = '그사이 새 퀴즈가 나와 이 답은 채점하지 않았습니다.'
+/** An answer to a question another window took a first try at meanwhile (1.7.0): this window now shows that try's question asked back. */
+const TRIED_ELSEWHERE = '이 문제는 그사이 다른 창에서 먼저 답했습니다. 한 번 더 적어 보세요.'
+/** /learn quiz 힌트 or 정답 once another window's new quiz took the place of the one this window had. */
+const NEW_QUIZ_ELSEWHERE = '그사이 다른 창에서 새 퀴즈가 나왔습니다. 지금 문제: /learn 퀴즈'
 const GRADE_NOT_KEPT = '채점을 적지 못했습니다(저장소에 쓰지 못함). 잠시 뒤 다시 해 보세요.'
 /** The feedback kept on a question graded wrong for "모르겠어요" with no model call (its hint seen, or none to see). */
 const BLANK_FEEDBACK = '정답을 읽어 보고, 다음에 이 개념이 나오면 다시 떠올려 보세요.'
@@ -2303,9 +2327,24 @@ async function disarm($: EngineInterface): Promise<void> {
 async function showHint($: EngineInterface, i: number): Promise<void> {
   await disarm($)
   const current = await lastQuiz($)
-  const item = current?.items[i]
-  if (!current || !item?.hint || item.isHinted || item.result !== undefined) return
-  await keepQuiz($, { ...current, items: current.items.map((one, j) => (j === i ? { ...one, isHinted: true } : one)) })
+  if (current) await keepHint($, current, i)
+}
+
+/**
+ * Question `i`'s hint marked seen, on the quiz every window shares (sharedQuiz): 'moved' once another window's
+ * new quiz took `current`'s place, 'busy' once the question is graded (or it has no hint); this window then shows
+ * the shared quiz.
+ */
+async function keepHint($: EngineInterface, current: Quiz, i: number): Promise<'kept' | 'busy' | 'moved'> {
+  const shared = (await sharedQuiz($)) ?? current
+  const item = shared.items[i]
+  if (shared.at !== current.at || !item?.hint || item.result !== undefined) {
+    await showShared($, shared)
+    return shared.at !== current.at ? 'moved' : 'busy'
+  }
+  if (item.isHinted !== true) await keepQuiz($, { ...shared, items: shared.items.map((one, j) => (j === i ? { ...one, isHinted: true } : one)) })
+  else await showShared($, shared)
+  return 'kept'
 }
 
 /**
@@ -2317,9 +2356,15 @@ async function showHint($: EngineInterface, i: number): Promise<void> {
  */
 async function showAnswer($: EngineInterface, cfg: Config, i: number): Promise<'graded' | undefined> {
   await disarm($)
-  const current = await lastQuiz($)
-  const item = current?.items[i]
-  if (!current || !item || isAnswerShown(current, item)) return undefined
+  const here = await lastQuiz($)
+  if (!here) return undefined
+  // On the quiz every window shares: another window's first try at it is graded by this answer, its quiz kept.
+  const current = (await sharedQuiz($)) ?? here
+  const item = current.items[i]
+  if (current.at !== here.at || !item || isAnswerShown(current, item)) {
+    await showShared($, current)
+    return undefined
+  }
   if (item.firstTry !== undefined && item.result === undefined) {
     const kept = await gradeFirstTry($, cfg, current, i, 'wrong')
     if (kept === 'failed') await update($, quizRun, run => ({ ...run, error: GRADE_NOT_KEPT }))
@@ -2368,11 +2413,18 @@ async function applyGrade(
   if (grading.has(mark)) return 'busy'
   grading.add(mark)
   try {
-    // As it stands now: a new quiz may have replaced this one, or the question been graded meanwhile.
-    const fresh = (await lastQuiz($)) ?? current
-    if (fresh.at !== current.at) return 'moved'
-    const item = fresh.items[i]
-    if (!item || item.result !== undefined) return 'busy'
+    // As it stands now in every window (sharedQuiz): a new quiz may have replaced this one, or the question been
+    // graded meanwhile, or tried in another window where this grade knows of no first try. This window then shows it.
+    const fresh = (await sharedQuiz($)) ?? current
+    const kept = fresh.items[i]
+    const ours = current.items[i]?.firstTry
+    if (fresh.at !== current.at || !kept || kept.result !== undefined || (kept.firstTry !== undefined && ours === undefined)) {
+      await showShared($, fresh)
+      return fresh.at !== current.at ? 'moved' : 'busy'
+    }
+    // A first try this window kept that a window of an older build wrote the quiz back without is still this question's.
+    const withOurs = (one: LearnQuizItem): LearnQuizItem => (one.firstTry === undefined && ours !== undefined ? { ...one, firstTry: ours } : one)
+    const item = withOurs(kept)
     // A first try graded when it was tried (a quiz left behind), else now.
     const now = how.at ?? (await $.clock.now())
     // A first try graded with no try again is kept as a typed answer graded at once: no first try then.
@@ -2395,13 +2447,13 @@ async function applyGrade(
     const isGraduated = conceptAt(await read($, concepts), resolveKey(await read($, aliases), item.key))?.knownAt === now
     const slipBefore = await recordSlip($, item.key, slipChange({ ...graded(item), result }, { isHelped, isGraduated }), now)
     // Read again: the quiz may have moved on while the concepts were written.
-    const latest = (await lastQuiz($)) ?? fresh
+    const latest = (await sharedQuiz($)) ?? fresh
     if (latest.at !== current.at) return 'kept'
     const prior = before[0]
     await keepQuiz($, {
       ...latest,
       items: latest.items.map((one, j) =>
-        j === i ? { ...graded(one), isShown: true, result, gradedAt: now, ...(prior ? { before: prior } : {}), ...(slipBefore !== undefined ? { slipBefore } : {}) } : one,
+        j === i ? { ...graded(withOurs(one)), isShown: true, result, gradedAt: now, ...(prior ? { before: prior } : {}), ...(slipBefore !== undefined ? { slipBefore } : {}) } : one,
       ),
     })
     // Graded (from the conversation too): an answer a failed grade left in its field is not sent again.
@@ -2427,10 +2479,13 @@ async function regradeQuiz($: EngineInterface, cfg: Config, current: Quiz, i: nu
   if (grading.has(guard)) return 'busy'
   grading.add(guard)
   try {
-    const fresh = (await lastQuiz($)) ?? current
-    if (fresh.at !== current.at) return 'moved'
+    // As every window has it (sharedQuiz): a new quiz, or this grade turned already, shows here instead.
+    const fresh = (await sharedQuiz($)) ?? current
     const item = fresh.items[i]
-    if (!item || item.result === undefined || (item.result === result && !isPartly(item))) return 'busy'
+    if (fresh.at !== current.at || !item || item.result === undefined || (item.result === result && !isPartly(item))) {
+      await showShared($, fresh)
+      return fresh.at !== current.at ? 'moved' : 'busy'
+    }
     const at = item.gradedAt ?? (await $.clock.now())
     // The learner's own word: fully right or fully wrong, never "partly"; right after help keeps the step.
     const right = isHelpedGrade(item) ? markHelped : markReviewed
@@ -2443,7 +2498,7 @@ async function regradeQuiz($: EngineInterface, cfg: Config, current: Quiz, i: nu
     const isGraduated = conceptAt(await read($, concepts), resolveKey(await read($, aliases), item.key))?.knownAt === at
     const change = slipChange(turned, { isHelped: isHelpedGrade(item), isGraduated, isTurned: true })
     const slipBefore = await recordSlip($, item.key, change, at, item.slipBefore)
-    const latest = (await lastQuiz($)) ?? fresh
+    const latest = (await sharedQuiz($)) ?? fresh
     if (latest.at === current.at) {
       const kept = item.slipBefore !== undefined ? {} : slipBefore !== undefined ? { slipBefore } : {}
       await keepQuiz($, { ...latest, items: latest.items.map((one, j) => (j === i ? { ...one, result, isLearnerGraded: true, ...kept } : one)) })
@@ -2559,7 +2614,12 @@ async function keptGrade(
 ): Promise<{ item: LearnQuizItem } | { error: string }> {
   const kept = await applyGrade($, cfg, current, i, result, extra)
   if (kept === 'failed') return { error: GRADE_NOT_KEPT }
-  if (kept === 'busy') return { error: '이 문제는 그사이 이미 채점했습니다.' }
+  if (kept === 'busy') {
+    // Tried in another window meanwhile (a first try this answer knew nothing of): its try again shows here now.
+    const shown = await lastQuiz($)
+    const there = shown?.at === current.at ? shown.items[i] : undefined
+    return { error: there && isTryWaiting(there) && current.items[i]?.firstTry === undefined ? TRIED_ELSEWHERE : '이 문제는 그사이 이미 채점했습니다.' }
+  }
   const latest = (await lastQuiz($)) ?? current
   if (kept === 'moved' || latest.at !== current.at) return { error: MOVED_TEXT }
   return { item: latest.items[i] ?? { ...current.items[i]!, ...extra, result } }
@@ -2575,10 +2635,14 @@ async function keepFirstTry($: EngineInterface, current: Quiz, i: number, first:
   if (grading.has(mark)) return { error: '이 문제는 그사이 이미 채점했습니다.' }
   grading.add(mark)
   try {
-    const latest = (await lastQuiz($)) ?? current
-    if (latest.at !== current.at) return { error: MOVED_TEXT }
+    // On the quiz every window shares (sharedQuiz): one another window replaced, graded or tried meanwhile shows here instead.
+    const latest = (await sharedQuiz($)) ?? current
     const item = latest.items[i]
-    if (!item || item.result !== undefined || item.firstTry !== undefined) return { error: '이 문제는 그사이 이미 채점했습니다.' }
+    if (latest.at !== current.at || !item || item.result !== undefined || item.firstTry !== undefined) {
+      await showShared($, latest)
+      if (latest.at !== current.at) return { error: MOVED_TEXT }
+      return { error: item && isTryWaiting(item) ? TRIED_ELSEWHERE : '이 문제는 그사이 이미 채점했습니다.' }
+    }
     const isHint = isBlankAnswer(first.mine)
     const tried: LearnQuizItem = { ...item, firstTry: first, ...(isHint ? { isHinted: true } : {}) }
     await keepQuiz($, { ...latest, items: latest.items.map((one, j) => (j === i ? tried : one)) })
@@ -2623,22 +2687,22 @@ function isTryWaiting(item: LearnQuizItem): boolean {
  * Every first try still waiting for its try again, graded as Claude graded
  * it, on the day it was tried: once a new quiz replaces its quiz
  * (`isReplaced`), or a later day has come. A miss is never lost by leaving it.
- * The quiz is the one the store holds, every window's (this window's own when
- * the store holds none or cannot be read): a window open since a past day
- * grades nothing another window graded or replaced, and the try again it still
- * shows gives way to the store's quiz. Never while Claude grades an answer: a
- * try again being graded is the learner's own, and stands. What it graded:
- * each question's number and mark.
+ * The quiz is the one every window shares (sharedQuiz: the store's, this
+ * window's own when the store holds none or an older one, or cannot be read):
+ * a window open since a past day grades nothing another window graded or
+ * replaced, and the try again it still shows gives way to the store's quiz.
+ * Never while Claude grades an answer: a try again being graded is the
+ * learner's own, and stands. What it graded: each question's number and mark.
  */
 async function settleFirstTries($: EngineInterface, cfg: Config, now: number, isReplaced: boolean): Promise<{ n: number; mark: string }[]> {
   if (isQuizChecking) return []
   const here = await read($, quiz)
-  const shared = (await storedQuiz($)) ?? here
+  const shared = await sharedQuiz($)
   if (!shared) return []
   const due = shared.items.flatMap((item, i) => (isTryWaiting(item) && (isReplaced || stamp(item.firstTry!.at).day !== stamp(now).day) ? [i] : []))
   // A try again this window shows that the store waits on no more (graded, or its quiz replaced, in another window).
   const isBehind = here !== null && here !== shared && here.items.some((item, i) => isTryWaiting(item) && (shared.at !== here.at || shared.items[i]?.result !== undefined))
-  // Graded on the store's quiz: applyGrade reads this window's, and writes the grade over the store's.
+  // Graded on the store's quiz, which this window shows from now on (the grades below read it back from here).
   if (here !== shared && (due.length > 0 || isBehind)) await update($, quiz, () => shared)
   const settled: { n: number; mark: string }[] = []
   for (const i of due) {
@@ -2877,6 +2941,8 @@ let drillChecking: string | null = null
 const DRILL_BLANK_FEEDBACK = 'a로 예시 답을 읽어 보고, 다음에 이 개념이 나오면 다시 고쳐 보세요.'
 /** Under a first try waiting for its try again where no field is drawn (the mobile app): where it goes, and a here. */
 const DRILL_AGAIN_ELSEWHERE = '한 번 더는 터미널·데스크톱 패널에서 고칩니다 · a: 예시 답'
+/** After the line under a practice's field while the terminal's pane does not hold the keys: they go to the field first, as a quiz's. */
+const DRILL_KEYS_TAIL = ' · ctrl+x tab: 고칠 줄 칸으로'
 
 /** A note's practice field: the first try's, and the try again's (a new element, holding the first try's line). */
 function drillFieldKey(id: string, isAgain = false): string {
@@ -3961,6 +4027,8 @@ async function answerText($: EngineInterface, cfg: Config, current: Quiz, said: 
   // After a first try, seeing the answer grades it (as Claude graded the first try): no grade left to give.
   if (item.result === undefined) await showAnswer($, cfg, n - 1)
   const after = (await lastQuiz($)) ?? current
+  // Another window's new quiz took this one's place: its question n is another, graded by none of the words below.
+  if (after.at !== current.at) return NEW_QUIZ_ELSEWHERE
   const shown = after.at === current.at ? (after.items[n - 1] ?? item) : item
   const next = firstOpen(after, checking)
   const steps = [
@@ -4057,7 +4125,10 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
     if (checking === n - 1) return `${n}번은 지금 Claude가 채점하고 있습니다. 채점이 끝난 뒤 다시 보세요.`
     if (!isOpen(current, item)) return `${n}번은 이미 채점했거나 정답을 봤습니다. 지금 문제: /learn 퀴즈`
     if (item.hint === undefined) return `${n}번에는 힌트가 없습니다. 정답 보기: /learn 퀴즈 정답 ${n}`
-    if (item.isHinted !== true) await keepQuiz($, { ...current, items: current.items.map((one, i) => (i === n - 1 ? { ...one, isHinted: true } : one)) })
+    // Marked seen on the quiz every window shares, what another window kept on it meanwhile kept too.
+    const kept = await keepHint($, current, n - 1)
+    if (kept === 'moved') return NEW_QUIZ_ELSEWHERE
+    if (kept === 'busy') return `${n}번은 이미 채점했거나 정답을 봤습니다. 지금 문제: /learn 퀴즈`
     return `${n}번 힌트\n\n${item.hint}\n\n답을 적어 채점받기: /learn 퀴즈 ${n} 내 답 · 정답 보기: /learn 퀴즈 정답 ${n}`
   }
   // Only numbers may follow the word (said plainly or politely: 맞았어요): "틀린 것 같은데…" is no grade.
@@ -5240,8 +5311,11 @@ function drillView($: EngineInterface, cfg: Config, note: LearnNote, drill: Dril
               {shownText(drill.above)}
             </Text>
           )}
+          {/* The keys go to the field first whenever the pane takes them (ctrl+x tab, a click, the next session), as a
+              quiz's answer field: a line typed in the English input mode presses none of the note's letter keys. */}
           <Input
             key={fieldKey}
+            autoFocus
             label={num(drill.n)}
             placeholder="고친 줄"
             submitLabel="확인"
@@ -5266,8 +5340,9 @@ function drillView($: EngineInterface, cfg: Config, note: LearnNote, drill: Dril
       )}
       {Input && !isOver && !isChecking && (
         <Text dimColor wrap="wrap">
-          {/* While the field holds the keys every letter and number is typed into it: how to reach the buttons. */}
-          {`${first ? 'Enter: 다시 확인' : 'Enter: 확인'} · 코드는 영문 상태에서${isFocused ? ` · Tab: 버튼으로 (${first ? 'a 예시 답' : '1~4 보기'})` : ''}`}
+          {/* While the field holds the keys every letter and number is typed into it: how to reach the buttons. Not
+              holding them, the terminal's pane says how the keys get to the field (it takes them first, autoFocus). */}
+          {`${first ? 'Enter: 다시 확인' : 'Enter: 확인'} · 코드는 영문 상태에서${isFocused ? ` · Tab: 버튼으로 (${first ? 'a 예시 답' : '1~4 보기'})` : surface === 'terminal' ? DRILL_KEYS_TAIL : ''}`}
         </Text>
       )}
       {isOver && state!.verdict === undefined && example}

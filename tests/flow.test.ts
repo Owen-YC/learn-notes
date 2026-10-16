@@ -6918,6 +6918,41 @@ describe('1.7.0: notes that do not get lost: one try again, a reload taken up, t
     w.release()
     await w.clock.settle()
   })
+
+  /** The journal files written: none at all with autoSave off (a company may turn it off to keep requests and diffs off the disk). */
+  const journalFiles = (w: World) => [...w.files.keys()].filter(path => path.startsWith(`${NOTES_DIR}/`))
+
+  test('(교차 검토) with autoSave off a note a session left being written goes in no journal, at the first look or the second', { options: { autoSave: false } }, async ($, on) => {
+    const change = { file: 'src/a.ts', path: '/proj/src/a.ts', tool: 'Edit', kind: 'update', added: 1, removed: 1, diff: '@@ -1,1 +1,1 @@\n-let b = 2\n+const b = 2', isCut: false }
+    const left = (id: string, at: number) => ({
+      id, turnId: id, at, prompt: `요청 ${id}`, answer: '', changes: [change], moreFiles: 0, status: 'writing', text: '', savedAs: null, isPast: false, root: '/proj', updatedAt: at, concepts: [],
+    })
+    // Half an hour ago (the first look), and a minute ago (looked at again once LEFT_MS has passed).
+    const history = { '/proj': { at: NOW, notes: [left('waited', NOW - 30 * 60_000), left('fresh', NOW - 60_000)] } }
+    const w = world(on, 'ok', null, true, new Map<string, unknown>([['history', history]]))
+    await start($)
+    await w.clock.advance(15 * 60_000)
+    expect(journalFiles(w)).toEqual([])
+    expect(w.writes).toEqual([])
+  })
+
+  test('(교차 검토) with autoSave off a note a reload cut and does not take up fails as cut, in no journal', { options: { autoSave: false, autoNote: false } }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    w.replies = ['cut']
+    const ui = await pane($)
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    await ui.unmount()
+    await start($)
+    await w.clock.advance(60_000)
+    // resumeNotes went through it: failed as cut, as with autoSave on, but kept in the store alone.
+    expect(storedNotes(w)[0]).toMatchObject({ status: 'failed' })
+    expect(journalFiles(w)).toEqual([])
+    expect(w.writes).toEqual([])
+  })
 })
 
 describe('1.7.0: a question asked back, and one try again (D4)', () => {
@@ -7563,6 +7598,262 @@ describe('1.7.0: a question asked back, and one try again (D4)', () => {
     await ui.unmount()
     // o and x are still keys (the mobile app, an answer seen with /learn 퀴즈 정답, a grade that did not come back).
     expect((await learn($, '도움말')).text).toContain('`o`·`x`')
+  })
+
+  /** Another window's first try, asked back (its slip named), as that window keeps it on the quiz every window shares. */
+  const THEIRS = {
+    mine: '전역 변수',
+    verdict: 'wrong',
+    feedback: '그 값은 바깥 변수가 아닙니다.',
+    nudge: '안쪽 함수가 다시 불릴 때 값은 어디에 남아 있을까요?',
+    at: NOW,
+    slip: '바깥 변수를 전역으로 봄',
+    slipType: 'scope',
+  }
+  /** The quiz the store holds, with another window's first try at question `i` on it: this window, which read it before, never saw it. */
+  function triedThere(store: Map<string, unknown>, i: number, first: Record<string, unknown> = THEIRS) {
+    const kept = JSON.parse(JSON.stringify(store.get('quiz'))) as { items: Record<string, unknown>[] }
+    kept.items[i] = { ...kept.items[i], firstTry: first }
+    store.set('quiz', kept)
+  }
+  const missedNames = (store: Map<string, unknown>) =>
+    Object.values(store.get('concepts') as Record<string, { name: string; missedAt?: number }>).flatMap(one => (one.missedAt !== undefined ? [one.name] : [])).sort()
+
+  test('(교차 검토) a first try another window kept stays when this window shows a hint: the next quiz grades it, its miss and slip kept', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const at = (store.get('quiz') as { at: number }).at
+    const second = quizItems(store)[1]!.name as string
+    triedThere(store, 1)
+    // h on question 1 here writes the quiz back as every window has it, not as this window read it.
+    await ui.press({ key: 'quiz-hint' })
+    expect(quizItems(store)[0]).toMatchObject({ isHinted: true })
+    expect(quizItems(store)[1]).toMatchObject({ firstTry: THEIRS })
+    // A new quiz grades it as Claude graded it: a miss on the day it was tried, its slip kept, counted wrong.
+    w.answer = HINTED
+    await w.clock.advance(60_000)
+    await ui.press({ key: 'quiz-new' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect((store.get('quiz') as { at: number }).at).not.toBe(at)
+    expect(concept(store, second)).toMatchObject({ step: 0, missedAt: NOW })
+    expect(Object.values(store.get('slips') as Record<string, { what: string }>).map(one => one.what)).toEqual([THEIRS.slip])
+    expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 0, wrong: 1 } })
+    await ui.unmount()
+  })
+
+  test('(교차 검토) first tries another window kept stay when this window grades another question, by /learn 퀴즈 힌트 or an answer typed in the pane', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const names = quizItems(store).map(one => one.name as string)
+    // Another window tried question 2: this window's hint by command keeps that try.
+    triedThere(store, 1)
+    expect((await learn($, '퀴즈 힌트 1')).text).toContain('1번 힌트\n\n바깥을 떠올려 보세요')
+    expect(quizItems(store)[0]).toMatchObject({ isHinted: true })
+    expect(quizItems(store)[1]).toMatchObject({ firstTry: THEIRS })
+    // Then question 3, partly right with no slip named: this window's answer to question 1, right, keeps that try too.
+    const third = { ...THEIRS, mine: '0 1 2 3', verdict: 'partial', nudge: 'i가 3이 되면 i < 3은 참일까요?', slip: undefined, slipType: undefined }
+    triedThere(store, 2, JSON.parse(JSON.stringify(third)))
+    w.answer = RIGHT
+    await ui.input({ key: mineKey(store, 0), text: '답 하나' })
+    await w.clock.settle()
+    expect(quizItems(store)[0]).toMatchObject({ result: 'right', isHinted: true })
+    expect(quizItems(store)[1]).toMatchObject({ firstTry: THEIRS })
+    expect(quizItems(store)[2]).toMatchObject({ firstTry: { mine: '0 1 2 3', verdict: 'partial' } })
+    expect(quizItems(store).slice(1).every(one => one.result === undefined)).toBe(true)
+    // A new quiz grades both as Claude graded them, wrong and partly right: each counted once.
+    w.answer = HINTED
+    await w.clock.advance(60_000)
+    await ui.press({ key: 'quiz-new' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(missedNames(store)).toEqual([names[1]!])
+    expect(concept(store, names[2]!)).toMatchObject({ step: 1, reviewedAt: NOW })
+    expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 1, wrong: 2 } })
+    await ui.unmount()
+  })
+
+  test('(교차 검토) a try again after another window settled it and made a new quiz is not graded here: that quiz, the marks and the day\'s count stay as that window left them', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const oldAt = (store.get('quiz') as { at: number }).at
+    const first = quizItems(store)[0]!.name as string
+    w.answer = WRONG
+    await ui.input({ key: mineKey(store, 0), text: '전역 변수' })
+    await w.clock.settle()
+    // Another window, minutes later: two s graded the first try as Claude did, and kept a quiz of its own.
+    await w.clock.advance(3 * 60_000)
+    const index = store.get('concepts') as Record<string, Record<string, unknown>>
+    const key = Object.keys(index).find(one => index[one]!.name === first)!
+    index[key] = { ...index[key], step: 0, reviewedAt: NOW, missedAt: NOW }
+    store.set('concepts', index)
+    const newer = { at: w.clock.now(), isRevealed: false, items: [{ key, name: first, question: 'B의 새 문제', answer: 'B의 답', hint: 'B의 힌트' }] }
+    store.set('quiz', newer)
+    store.set('activity', { '2026-10-03': { notes: 0, right: 0, wrong: 1 } })
+    const marks = JSON.stringify(store.get('concepts'))
+    // Here the try again is still on show: right, it is graded over nothing.
+    w.answer = RIGHT
+    await ui.input({ key: `quiz-mine-${oldAt}-0-again`, text: '답 하나' })
+    await w.clock.settle()
+    expect(store.get('quiz')).toEqual(newer)
+    expect(JSON.stringify(store.get('concepts'))).toBe(marks)
+    expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 0, wrong: 1 } })
+    expect(await ui.find({ type: 'Text', text: '그사이 새 퀴즈가 나와 이 답은 채점하지 않았습니다.' })).toBeDefined()
+    // The quiz every window has is the one on show now.
+    expect(await ui.find({ type: 'Input', key: `quiz-mine-${oldAt}-0-again` })).toBeUndefined()
+    expect(await ui.find({ type: 'Markdown', text: 'B의 새 문제' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('(교차 검토) h, /learn 퀴즈 힌트 or 정답 in a window still showing a quiz another window replaced: that quiz shows, kept as it is', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const [key, one] = Object.entries(store.get('concepts') as Record<string, { name: string }>)[0]!
+    const theirs = (question: string) => ({ at: w.clock.now(), isRevealed: false, items: [{ key, name: one.name, question, answer: 'B의 답', hint: 'B의 힌트' }] })
+    await w.clock.advance(60_000)
+    const newer = theirs('B의 새 문제')
+    store.set('quiz', newer)
+    await ui.press({ key: 'quiz-hint' })
+    expect(store.get('quiz')).toEqual(newer)
+    expect(await ui.find({ type: 'Markdown', text: 'B의 새 문제' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/1/ })).toBeDefined()
+    // Once more, with nothing waiting for a try again here: the conversation says a new quiz came, and keeps it.
+    await w.clock.advance(60_000)
+    const newest = theirs('B의 또 다른 문제')
+    store.set('quiz', newest)
+    expect((await learn($, '퀴즈 힌트 1')).text).toBe('그사이 다른 창에서 새 퀴즈가 나왔습니다. 지금 문제: /learn 퀴즈')
+    expect(store.get('quiz')).toEqual(newest)
+    // And the answer asked for: none shown, no grade offered for a question that is another now.
+    await w.clock.advance(60_000)
+    const last = theirs('B의 마지막 문제')
+    store.set('quiz', last)
+    expect((await learn($, '퀴즈 정답 1')).text).toBe('그사이 다른 창에서 새 퀴즈가 나왔습니다. 지금 문제: /learn 퀴즈')
+    expect(store.get('quiz')).toEqual(last)
+    await ui.unmount()
+  })
+
+  test('(교차 검토) an answer here to a question another window tried meanwhile is not kept over that try: its try again shows, nothing graded', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const at = (store.get('quiz') as { at: number }).at
+    const marks = JSON.stringify(store.get('concepts'))
+    triedThere(store, 0)
+    // A first answer short of right here: not kept over theirs.
+    w.answer = PARTLY
+    await ui.input({ key: mineKey(store, 0), text: '0 1 2 3' })
+    await w.clock.settle()
+    expect(quizItems(store)[0]!.firstTry).toEqual(THEIRS)
+    expect(await ui.find({ type: 'Text', text: '이 문제는 그사이 다른 창에서 먼저 답했습니다. 한 번 더 적어 보세요.' })).toBeDefined()
+    expect(await ui.find({ type: 'Markdown', text: `**되묻기:** ${THEIRS.nudge}` })).toBeDefined()
+    expect(await ui.find({ type: 'Input', key: `quiz-mine-${at}-0-again` })).toBeDefined()
+    // A first answer right, sent in the conversation, to a question tried there since: not graded as a first answer.
+    triedThere(store, 1)
+    w.answer = RIGHT
+    expect((await learn($, '퀴즈 2 답 둘')).text).toBe('이 문제는 그사이 다른 창에서 먼저 답했습니다. 한 번 더 적어 보세요.')
+    expect(quizItems(store)[1]).toMatchObject({ firstTry: THEIRS })
+    expect(quizItems(store)[1]!.result).toBeUndefined()
+    expect(JSON.stringify(store.get('concepts'))).toBe(marks)
+    expect(store.get('activity')).toEqual({})
+    await ui.unmount()
+  })
+
+  test('(교차 검토) f here keeps another window\'s first try, and a grade turned stays turned once the quiz is written back from the store', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const at = (store.get('quiz') as { at: number }).at
+    w.answer = RIGHT
+    await ui.input({ key: mineKey(store, 0), text: '답 하나' })
+    await w.clock.settle()
+    triedThere(store, 1)
+    await ui.press({ key: 'quiz-flip' })
+    expect(quizItems(store)[0]).toMatchObject({ result: 'wrong', verdict: 'right', isLearnerGraded: true })
+    expect(quizItems(store)[1]).toMatchObject({ firstTry: THEIRS })
+    // That try's try again here, right: graded on the quiz read back from the store, the grade turned as it was.
+    await ui.input({ key: `quiz-mine-${at}-1-again`, text: '답 둘' })
+    await w.clock.settle()
+    expect(quizItems(store)[1]).toMatchObject({ result: 'right', firstTry: THEIRS })
+    expect(quizItems(store)[0]).toMatchObject({ result: 'wrong', verdict: 'right', isLearnerGraded: true })
+    await ui.unmount()
+  })
+
+  test('(교차 검토) a first try a window of an older build wrote the quiz back without is still this window\'s: right on its try again, 되짚어 맞힘', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const at = (store.get('quiz') as { at: number }).at
+    const before = JSON.parse(JSON.stringify(store.get('quiz')))
+    w.answer = PARTLY
+    await ui.input({ key: mineKey(store, 0), text: '0 1 2 3' })
+    await w.clock.settle()
+    // A 1.6 window (which reads no first try) writes its copy back: question 1 is open there, and still waits here.
+    store.set('quiz', before)
+    w.answer = RIGHT
+    await ui.input({ key: `quiz-mine-${at}-0-again`, text: '0 1 2' })
+    await w.clock.settle()
+    expect(quizItems(store)[0]).toMatchObject({ result: 'right', firstTry: { mine: '0 1 2 3', verdict: 'partial' } })
+    expect(concept(store, '클로저')).toMatchObject({ step: 2, reviewedAt: NOW })
+    expect(await ui.find({ type: 'Text', text: /^✓ 맞힘 1\. 클로저 · 되짚어 맞힘/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('(교차 검토) /learn 퀴즈 정답 for another question keeps another window\'s first try too', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    triedThere(store, 0)
+    expect((await learn($, '퀴즈 정답 2')).text).toContain('답 둘')
+    expect(quizItems(store)[1]).toMatchObject({ isShown: true })
+    expect(quizItems(store)[0]).toMatchObject({ firstTry: THEIRS })
+    await ui.unmount()
+  })
+
+  test('(교차 검토) a quiz older than this window\'s, written back by a window of an older build, gives way to this window\'s at the next grade', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w)
+    const older = JSON.parse(JSON.stringify(store.get('quiz')))
+    w.answer = HINTED
+    await w.clock.advance(60_000)
+    await ui.press({ key: 'quiz-new' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    const at = (store.get('quiz') as { at: number }).at
+    expect(at).not.toBe(older.at)
+    store.set('quiz', older)
+    w.answer = RIGHT
+    await ui.input({ key: `quiz-mine-${at}-0`, text: '답 하나' })
+    await w.clock.settle()
+    expect(store.get('quiz')).toMatchObject({ at })
+    expect(quizItems(store)[0]).toMatchObject({ result: 'right' })
+    expect(await ui.find({ type: 'Text', text: '그사이 새 퀴즈가 나와 이 답은 채점하지 않았습니다.' })).toBeUndefined()
+    // A first try here, the older quiz written back again: the next quiz still grades this window's try.
+    const second = quizItems(store)[1]!.name as string
+    w.answer = WRONG
+    await ui.input({ key: `quiz-mine-${at}-1`, text: '전역 변수' })
+    await w.clock.settle()
+    store.set('quiz', older)
+    w.answer = HINTED
+    await w.clock.advance(60_000)
+    await ui.press({ key: 'quiz-new' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(concept(store, second)).toMatchObject({ step: 0, missedAt: at })
+    await ui.unmount()
   })
 })
 
@@ -8758,7 +9049,9 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     const field = await ui.find({ type: 'Input', key: `drill-${id}` })
     // The line as the code has it, its indent outside the field; numbered as the file is.
     expect(field?.props).toMatchObject({ label: '3', value: LINE, placeholder: '고친 줄', submitLabel: '확인' })
-    expect(field?.props.autoFocus).toBeUndefined()
+    // The keys go to it first whenever the pane takes them (교차 검토), as to a quiz's answer field: the line is
+    // typed into it, never into the note's letter keys.
+    expect(field?.props.autoFocus).toBe(true)
     const { label, placeholder, submitLabel } = field!.props as { label: string; placeholder: string; submitLabel: string }
     expect(cells(`${label}: ${placeholder} ⏎ ${submitLabel}`)).toBeLessThanOrEqual(FIELD_CELLS)
     expect(await ui.find({ type: 'Text', text: '4  }' })).toBeDefined()
@@ -9052,12 +9345,13 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     await ui.unmount()
   })
 
-  test('(검토) the pane not holding the keys says no Tab: the spec\'s words alone', async ($, on) => {
+  test('(검토) the pane not holding the keys says no Tab: the spec\'s words, then how the keys reach the field (교차 검토)', async ($, on) => {
     const { ui } = await practiced($, on)
     await ui.unmount()
     const unfocused = await pane($, 'terminal', { ...PANE_PROPS, isFocused: false })
     await unfocused.press({ key: 'note-drill' })
-    expect(await unfocused.find({ type: 'Text', text: 'Enter: 확인 · 코드는 영문 상태에서' })).toBeDefined()
+    expect(await unfocused.find({ type: 'Text', text: 'Enter: 확인 · 코드는 영문 상태에서 · ctrl+x tab: 고칠 줄 칸으로' })).toBeDefined()
+    expect(await unfocused.find({ type: 'Text', text: /Tab: 버튼으로/ })).toBeUndefined()
     await unfocused.unmount()
   })
 
@@ -9410,5 +9704,102 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
       expect(words).toContain(`\`${hotkey}\``)
       expect(lines.find(line => line.startsWith(head)) ?? `${head} (no such line)`).toContain(words)
     }
+  })
+
+  test('(교차 검토) a first try waiting, drawn again with no t pressed: its field takes the keys as the pane does, and the line under it says how', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    w.answer = WRONG
+    await ui.input({ key: `drill-${id}`, text: 'return `안녕하세요, ${name}님!!`' })
+    await w.clock.settle()
+    await ui.unmount()
+    // The pane opened again (ctrl+x tab back, /learn, the next session): the try again's field takes the keys first,
+    // so a line typed in the English input mode presses none of r, e, w, a, n or p.
+    const focused = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    expect((await focused.find({ type: 'Input', key: `drill-${id}-again` }))?.props.autoFocus).toBe(true)
+    expect(await focused.find({ type: 'Text', text: 'Enter: 다시 확인 · 코드는 영문 상태에서 · Tab: 버튼으로 (a 예시 답)' })).toBeDefined()
+    await focused.unmount()
+    const unfocused = await pane($, 'terminal', { ...PANE_PROPS, isFocused: false })
+    expect(await unfocused.find({ type: 'Text', text: 'Enter: 다시 확인 · 코드는 영문 상태에서 · ctrl+x tab: 고칠 줄 칸으로' })).toBeDefined()
+    await unfocused.unmount()
+    // The desktop app has no ctrl+x tab: the spec's words alone.
+    const desk = await pane($, 'desktop')
+    expect(await desk.find({ type: 'Text', text: 'Enter: 다시 확인 · 코드는 영문 상태에서' })).toBeDefined()
+    await desk.unmount()
+  })
+
+  test('(교차 검토) with autoSave off a practice graded writes no journal file: its grade is kept on the note alone', { options: { autoSave: false } }, async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    w.answer = '판정: 틀림\n피드백: 그대로면 1이 나옵니다.'
+    await ui.input({ key: `drill-${id}`, text: 'return 1' })
+    await w.clock.settle()
+    expect(noteOf(store).drill).toMatchObject({ verdict: 'wrong' })
+    expect([...w.files.keys()].filter(path => path.startsWith(`${NOTES_DIR}/`))).toEqual([])
+    expect(w.writes).toEqual([])
+    await ui.unmount()
+  })
+
+  /** A key pasted into a practice's line, or into its task: masked wherever the practice is kept. */
+  const KEY = 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAA'
+  const KEYED_LINE = `return \`안녕하세요, \${name || "${KEY}"}님!\``
+  const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length
+
+  test('(교차 검토) a line with a secret graded at once is masked in the note, the store, the slips and the journal; the practice 1KB at most', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    w.answer = '판정: 틀림\n피드백: 그대로면 키가 이름이 됩니다.\n헷갈린 점: 키를 기본값으로 씀\n유형: 없는 값'
+    await ui.input({ key: `drill-${id}`, text: KEYED_LINE })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(2)
+    const drill = noteOf(store).drill
+    expect(drill).toMatchObject({ verdict: 'wrong' })
+    expect(JSON.stringify(drill)).not.toContain(KEY)
+    expect(bytes(drill)).toBeLessThanOrEqual(1024)
+    expect(JSON.stringify(store.get('history'))).not.toContain(KEY)
+    expect(Object.keys(store.get('slips') as Record<string, unknown>)).toHaveLength(1)
+    expect(JSON.stringify(store.get('slips'))).not.toContain(KEY)
+    const journal = w.journal().at(-1)!.text
+    expect(journal).toMatch(/직접 해 보기 \(\d\d:\d\d\)/)
+    expect(journal).not.toContain(KEY)
+    await ui.unmount()
+  })
+
+  test('(교차 검토) a first try with a secret, asked back, is masked on the note and in the store; the practice 1KB at most', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    await ui.press({ key: 'note-drill' })
+    w.answer = WRONG
+    await ui.input({ key: `drill-${id}`, text: KEYED_LINE })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(2)
+    const drill = noteOf(store).drill
+    expect(drill).toMatchObject({ firstTry: { verdict: 'wrong' } })
+    expect(JSON.stringify(drill)).not.toContain(KEY)
+    expect(bytes(drill)).toBeLessThanOrEqual(1024)
+    expect(JSON.stringify(store.get('history'))).not.toContain(KEY)
+    await ui.unmount()
+  })
+
+  test('(교차 검토) a task with a secret is masked in the journal\'s practice section', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = PRACTICE_NOTE.replace('- 할 일: 이름이 비어 있으면 "손님"에게 인사하게 바꿔 보세요', `- 할 일: 이름이 비어 있으면 "${KEY}"로 인사하게 바꿔 보세요`)
+    await turn($, () => $.tool.call(WRITE_HELLO))
+    await finish(w)
+    const id = noteOf(store).id
+    const ui = await pane($)
+    await ui.press({ key: 'note-drill' })
+    await ui.input({ key: `drill-${id}`, text: "return `안녕하세요, ${name||'손'}님!`;" })
+    await w.clock.settle()
+    const journal = w.journal().at(-1)!.text
+    expect(journal).toMatch(/직접 해 보기 \(\d\d:\d\d\)/)
+    expect(journal).toContain('**할 일**: 이름이 비어 있으면 "«가림»"로')
+    expect(journal).not.toContain(KEY)
+    await ui.unmount()
   })
 })
