@@ -258,6 +258,17 @@ describe('1.7.0: a quiz that asks a team term (D6)', () => {
     expect(teamCodeHead(items[1]!.teamCode!)).toBe('팀 코드 (fetcher.ts 12~30줄)')
     expect(teamCodeHead({ file: 'a.ts', from: 4, to: 4 })).toBe('팀 코드 (a.ts 4줄)')
   })
+
+  test('a team term asked again over its slip names no team lines: the question is in other code', () => {
+    const slip = { what: '실패해도 예외를 던지지 않는다고 봄', question: '지난 문제', mine: '지난 답' }
+    const again = parseQuiz('Q1: 다른 코드로 묻는 문제\nA1: 답', [{ ...term, slip }])
+    expect(again[0]).toMatchObject({ key: 'c:fetcher', team: true, isRetry: true })
+    expect(again[0]!.teamCode).toBeUndefined()
+    // A question that says the slip itself is a question as any other, and keeps where the team's lines are.
+    const said = parseQuiz(`Q1: fetcher는 ${slip.what}. 맞을까요?\nA1: 답`, [{ ...term, slip }])
+    expect(said[0]!.isRetry).toBeUndefined()
+    expect(said[0]!.teamCode).toMatchObject({ file: 'fetcher.ts', from: 12, to: 30 })
+  })
 })
 
 describe('1.7.0: what the team terms say (D6)', () => {

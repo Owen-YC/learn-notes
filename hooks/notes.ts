@@ -4722,7 +4722,8 @@ function quizItems(parts: Map<string, string[]>, picks: readonly QuizPick[]): Le
         ...(one.noteId ? { noteId: one.noteId } : {}),
         ...(isRetry ? { isRetry: true as const } : {}),
         ...(one.team ? { team: true as const } : {}),
-        ...(one.team && one.teamCode
+        // A slip asked again is asked in other code than the team's lines (quizPrompt): the head would name lines it is not on.
+        ...(one.team && one.teamCode && !isRetry
           ? { teamCode: { file: one.teamCode.file, from: one.teamCode.from, to: one.teamCode.to, ...(one.teamCode.isDoc ? { isDoc: true as const } : {}) } }
           : {}),
         ...(one.team && one.teamTag !== undefined ? { teamTag: one.teamTag } : {}),
