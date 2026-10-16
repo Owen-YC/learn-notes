@@ -182,6 +182,9 @@ describe('1.7.0: the lines a team term is asked from (D6)', () => {
     expect(termLines(code, '캐시 키')).toBeUndefined()
     // A doc is read from its top then.
     expect(termLines('# 온보딩\n\n캐시는 하루 둡니다\n', '캐시 키', {}, true)).toEqual({ text: '# 온보딩\n\n캐시는 하루 둡니다', from: 1, to: 3 })
+    // Forty lines of a doc at most, where code has sixteen (교차 검토 7).
+    expect(termLines(FILE, '없는 이름', {}, true)).toMatchObject({ from: 1, to: 40 })
+    expect(termLines(FILE, 'line 30', {}, true)).toMatchObject({ from: 25, to: 60 })
   })
 
   test('700 characters at most, a single line too long shown by its start', () => {

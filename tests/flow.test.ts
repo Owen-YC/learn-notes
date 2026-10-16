@@ -6595,6 +6595,23 @@ describe('1.7.0: notes that do not get lost: one try again, a reload taken up, t
     expect(usageOf(w)).toMatchObject({ calls: 2 })
   })
 
+  test('(교차 검토 7) a reload more than ten minutes after the turn ended takes up nothing: the cut note fails as cut', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.replies = ['cut']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.models).toHaveLength(1)
+    // Only a note being written up to ten minutes ago is taken up (isResumable with the reload's now).
+    await w.clock.advance(11 * 60_000)
+    await start($)
+    await w.clock.advance(60_000)
+    expect(w.models).toHaveLength(1)
+    expect((await learn($, '공유')).text).toBe(`${NO_TEXT}노트를 쓰지 못했습니다: 중간에 끊겨 멈췄습니다 · w로 다시 쓰기`)
+    expect(w.journal()).toHaveLength(1)
+    expect(w.journal()[0]!.text).toContain('_노트를 쓰지 못했다: 중간에 끊겨 멈췄습니다 · w로 다시 쓰기_')
+  })
+
   test('a reload takes up a note only while the day has room: it is written as a turn\'s end would write it', { options: { dailyAutoNotes: 1 } }, async ($, on) => {
     const w = world(on)
     await start($)
@@ -9098,6 +9115,26 @@ describe('1.7.0: team-term practice from the team file\'s ## 용어 (D6)', () =>
     expect(w.models[0]).not.toContain('AAAAAAAAAAAAAAAAAAAA')
   })
 
+  test('(교차 검토 7) a term naming a committed note (.md, D7) is asked by it as the team note: from its top when the name is not in it, 40 lines at most', async ($, on) => {
+    const w = world(on, 'ok', null, true, storeWith())
+    withTeam(w, '## 용어\n- **fetcher**: 우리 팀의 API 호출 함수입니다 · `docs/learn/fetcher.md`\n')
+    // A note copied with c and committed: its head is the note's summary, the term's name nowhere in it.
+    const note = [
+      '**[학습 노트] 응답이 401이면 토큰을 새로 받아 다시 부릅니다**',
+      '10-13 · 파일 2개 · 개념: async/await · try/catch',
+      ...Array.from({ length: 43 }, (_, i) => `- 줄 ${i + 3}`),
+    ]
+    w.files.set('/proj/docs/learn/fetcher.md', note.join('\n'))
+    await start($)
+    w.answer = QUESTIONS
+    await learn($, 'quiz 팀')
+    expect(w.models[0]).toContain('\n   팀 노트 (fetcher.md 1~40줄):\n```\n**[학습 노트] 응답이 401이면')
+    expect(w.models[0]).toContain('- 줄 20\n')
+    expect(w.models[0]).toContain('- 줄 40\n')
+    expect(w.models[0]).not.toContain('- 줄 41')
+    expect(w.models[0]).not.toContain('팀 코드 (')
+  })
+
   test('(교차 검토) a term naming a local settings file (wp-config.php, appsettings.*.json) is asked by its words: no line of it goes anywhere', async ($, on) => {
     const store = storeWith()
     const w = world(on, 'ok', null, true, store)
@@ -9668,6 +9705,8 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect(await ui.find({ type: 'Text', text: '✗ 틀림 · 예시 답 봄' })).toBeDefined()
     expect(await ui.find({ type: 'Markdown', text: `**예시 답:** \`\` ${EXAMPLE} \`\`` })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'note-drill-answer' })).toBeUndefined()
+    // a was where the keys went, and it is gone: they go to the practice's own place (교차 검토 7).
+    expect(focusesOf(w).at(-1)).toBe('note-drill')
     expect(w.models).toHaveLength(3)
     expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 1, right: 0, wrong: 1, drills: 1 } })
     expect(noteOf(store).drill).toMatchObject({ verdict: 'wrong', isAnswerSeen: true })
@@ -9722,6 +9761,8 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect(concept(store).missedAt).toBeUndefined()
     expect(store.get('activity')).toMatchObject({ '2026-10-03': { right: 0, wrong: 1, drills: 1 } })
     expect(w.journal().at(-1)!.text).toContain('**판정**: ✗ 틀림 · 예시 답 봄')
+    // The field and a are gone with it: the keys go to the practice's own place, never nowhere (교차 검토 7).
+    expect(focusesOf(w).at(-1)).toBe('note-drill')
     await ui.unmount()
   })
 
@@ -10138,6 +10179,22 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect(w.journal().map(one => one.text)).toEqual(journal)
     expect(await ui.find({ type: 'Markdown', text: /^\*\*예시 답:\*\* / })).toBeDefined()
     await ui.unmount()
+  })
+
+  test('(교차 검토 7) a session start in this window leaves a past day\'s first try another window ended: nothing counted again', async ($, on) => {
+    const { store, w, ui, ended, activity, concepts, journal } = await endedElsewhere($, on)
+    const slips = JSON.stringify(store.get('slips') ?? null)
+    const calls = w.models.length
+    await ui.unmount()
+    // This window's own copy still waits for the try again (settleDrillTries picks it); the store's is over.
+    await start($)
+    await w.clock.settle()
+    expect(w.models).toHaveLength(calls)
+    expect(store.get('activity')).toEqual(activity)
+    expect(JSON.stringify(store.get('concepts'))).toBe(concepts)
+    expect(JSON.stringify(store.get('slips') ?? null)).toBe(slips)
+    expect(noteOf(store).drill).toMatchObject(ended)
+    expect(w.journal().map(one => one.text)).toEqual(journal)
   })
 
   test('(검토) a practice whose change is the quotes, in a language that reads them apart: the example is done with no call', async ($, on) => {
