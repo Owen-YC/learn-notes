@@ -769,6 +769,28 @@ export function isSecretFile(path: string): boolean {
   )
 }
 
+/**
+ * Names of a project's own settings files that commonly hold a database
+ * password, salts or a storage key written as code writes them, in forms the
+ * masking rules do not all catch (`define('DB_PASSWORD', '…')`, `'password'
+ * => '…'`, `Password=…;` inside a JSON string): WordPress's `wp-config.php`
+ * (and `wp-config-local.php`), Drupal's `settings.php` and
+ * `settings.local.php`, a `dbconfig.php`, .NET's `appsettings*.json`, an Azure
+ * Function's `local.settings.json`, `secrets.json`, `.htpasswd`.
+ */
+export const TERM_SECRET_NAME = /^(?:wp-config(?:[.-][\w-]+)?\.php|settings(?:\.local)?\.php|dbconfig\.php|(?:appsettings(?:\.[\w-]+)?|local\.settings|secrets)\.json|\.htpasswd)$/i
+
+/**
+ * True for a file a team term's lines are never read from (1.7.0 D6): a secret
+ * file every note leaves out (isSecretFile), or a local settings file
+ * (TERM_SECRET_NAME). The team file names it; nobody asked Claude to open it,
+ * and every teammate's quiz would quote it. A note's diff of one still goes in
+ * masked, as before.
+ */
+export function isTermSecretFile(path: string): boolean {
+  return isSecretFile(path) || TERM_SECRET_NAME.test(baseName(path))
+}
+
 /** Lock files: written by a package manager, never by hand. */
 const LOCK_NAMES = new Set([
   'package-lock.json',
@@ -2197,6 +2219,17 @@ const RETRY_WHY: Record<Transient, string> = {
 /** The note's line while its automatic call waits for the try again; `act` how to write it at once, where this line is read. */
 export function retryText(why: Transient, act = 'w로 바로 쓰기'): string {
   return `${RETRY_WHY[why] ?? RETRY_WHY.overloaded} 30초 뒤 한 번 더 씁니다… · ${act}`
+}
+
+/**
+ * The failure a note waiting for its try again for `why` stands for once it will not get one (a /learn 비우기
+ * meanwhile): the one its call met, as far as `why` tells it, so the journal says what it would have said before
+ * 1.7.0 (noteFailText).
+ */
+export function transientFail(why: Transient): ModelFail {
+  if (why === 'timeout') return { reason: 'aborted', isTimeout: true }
+  if (why === 'network') return { reason: 'api-error', status: null }
+  return { reason: 'api-error', error: why === 'server' ? 'server_error' : 'overloaded' }
 }
 
 /**

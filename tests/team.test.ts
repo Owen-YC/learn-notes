@@ -13,6 +13,7 @@ import {
   distinctTerms,
   fitTeamTerms,
   isTeamTerm,
+  isTermSecretFile,
   isVcsPath,
   jsonBytes,
   parseQuiz,
@@ -116,6 +117,32 @@ describe('1.7.0: where a team term\'s code is (D6)', () => {
     // A name that only starts so is no record of the repository's.
     for (const token of ['.github/workflows/ci.yml', 'src/.gitkeep.txt']) expect(termSource(`\`${token}\``)).toBeDefined()
     for (const path of ['.github/workflows/ci.yml', '.gitignore', 'src/git/a.ts']) expect(isVcsPath(path)).toBe(false)
+  })
+
+  test('(교차 검토) a local settings file is never a term\'s code, nor any secret file; source files of the same kinds are', () => {
+    const settings = [
+      'wp-config.php',
+      'site/wp-config-local.php',
+      'WP-CONFIG.PHP',
+      'sites/default/settings.php',
+      'sites/default/settings.local.php',
+      'data/dbconfig.php',
+      'appsettings.json',
+      'src/Api/appsettings.Development.json',
+      'local.settings.json',
+      'secrets.json',
+      'public/.htpasswd',
+      '.env',
+      'config/credentials.json',
+    ]
+    for (const path of settings) expect(isTermSecretFile(path)).toBe(true)
+    // Each would be read as a term's file: a source extension, or lines and a folder.
+    for (const path of ['wp-config.php', 'sites/default/settings.php', 'src/Api/appsettings.Development.json', 'local.settings.json']) {
+      expect(termSource(`\`${path}:1-6\``)?.path).toBe(path)
+    }
+    for (const path of ['src/settings.ts', 'src/settings.py', 'config/app.php', 'package.json', 'tsconfig.json', 'src/appsettings.ts', 'wp-content/themes/a/functions.php']) {
+      expect(isTermSecretFile(path)).toBe(false)
+    }
   })
 
   test('a Basic authorization header\'s credential is masked, as a Bearer token is', () => {

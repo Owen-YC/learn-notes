@@ -17,6 +17,7 @@ import {
   quotaOver,
   quotaWhy,
   retryText,
+  transientFail,
   transientOf,
 } from '../hooks/notes'
 import type { LearnNote } from '../types'
@@ -53,6 +54,14 @@ describe('1.7.0: notes that do not get lost (D3)', () => {
     expect(retryText('timeout')).toBe('시간이 너무 걸려 30초 뒤 한 번 더 씁니다… · w로 바로 쓰기')
     expect(RETRY_MS).toBe(30_000)
     expect(RETRY_JITTER_MS).toBeLessThanOrEqual(5_000)
+  })
+
+  test('(교차 검토) a note that waited for its try again and will not get one says what its call met', () => {
+    for (const why of ['overloaded', 'server', 'network', 'timeout'] as const) expect(transientOf(transientFail(why))).toBe(why)
+    expect(noteFailText(transientFail('overloaded'), 'haiku')).toBe('서버가 붐빕니다 · w로 다시 쓰기')
+    expect(noteFailText(transientFail('server'), 'haiku')).toBe('서버 오류입니다 · w로 다시 쓰기')
+    expect(noteFailText(transientFail('network'), 'haiku')).toBe('인터넷 연결을 확인하세요 · 연결되면 w로 다시 쓰기')
+    expect(noteFailText(transientFail('timeout'), 'haiku')).toBe('시간이 너무 걸려 멈췄습니다 · w로 다시 쓰기')
   })
 
   test('a note that failed for good says its cause and what to do next', () => {

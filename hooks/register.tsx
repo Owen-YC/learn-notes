@@ -95,6 +95,7 @@ import {
   rootTag,
   isRootTag,
   isVcsPath,
+  isTermSecretFile,
   redactLines,
   isConfigFile,
   addToBank,
@@ -156,6 +157,7 @@ import {
   RETRY_MS,
   type Transient,
   transientOf,
+  transientFail,
   focus,
   isUnder,
   isSystemFolder,
@@ -2717,7 +2719,10 @@ async function settleFirstTries($: EngineInterface, cfg: Config, now: number, is
   return settled
 }
 
-/** What the conversation is told before its reply once a day gone by graded first tries left waiting (settleFirstTries). */
+/**
+ * What the conversation is told before its reply once a day gone by graded first tries left waiting (settleFirstTries),
+ * and the transcript once a session start graded them.
+ */
 function settledText(settled: readonly { n: number; mark: string }[]): string {
   return `날이 바뀌어 한 번 더를 기다리던 ${settled.map(one => `${one.n}번 (${one.mark})`).join(' · ')}은 첫 답의 판정대로 매겼습니다.`
 }
@@ -3661,8 +3666,9 @@ const TERM_SEED_TEXT = 160
  * The lines of the repository file a team term's words name (termSource), as a quiz carries them (1.7.0 D6): read
  * only when the file, every link followed, lies inside the repository, is a file of TERM_READ_MAX bytes at most,
  * neither excludePaths nor the team file's `## 빼기` leave it out (nor where a link leads), it is no secret, lock or
- * generated file, and the permission rules let it be read; then cut (termLines) and its secrets masked. Undefined
- * when any of that fails or the lines hold nothing to ask from: the term is asked from its words alone. Never rejects.
+ * generated file nor a local settings file (isTermSecretFile), and the permission rules let it be read; then cut
+ * (termLines) and its secrets masked. Undefined when any of that fails or the lines hold nothing to ask from: the term
+ * is asked from its words alone. Never rejects.
  */
 async function readTermCode($: EngineInterface, cfg: Config, file: TeamFile, term: TeamTerm): Promise<TeamCode | undefined> {
   const source = termSource(term.blurb)
@@ -3681,6 +3687,8 @@ async function readTermCode($: EngineInterface, cfg: Config, file: TeamFile, ter
     const inner = real.replace(/\\/g, '/').slice(top.replace(/\\/g, '/').replace(/\/+$/, '').length + 1)
     // Nor where it leads into the repository's own record (.git): a link's name says nothing of that.
     if (isVcsPath(inner) || withheldOf(source.path, path, patterns) !== undefined || withheldOf(inner, real, patterns) !== undefined) return undefined
+    // Nor a local settings file (wp-config.php, appsettings.json): its passwords are written in forms no rule masks.
+    if (isTermSecretFile(source.path) || isTermSecretFile(inner)) return undefined
     if ((await isReadDenied($, path)) || (real !== path && (await isReadDenied($, real)))) return undefined
     const text = String(await $.fs.read(path))
     // Not text: nothing a question could quote.
@@ -4315,7 +4323,10 @@ export const register: Register = (on, options) => {
       if (last) await update($, quiz, () => last)
     }
     // A first try a past day left waiting for its try again is graded as Claude graded it, on that day; a practice's too.
-    await settleFirstTries($, cfg, await $.clock.now(), false)
+    // Said once, a dim line in the transcript (never sent to the model): neither the pane nor a try again sent later
+    // says why it was graded so.
+    const settled = await settleFirstTries($, cfg, await $.clock.now(), false)
+    if (settled.length > 0 && isInteractive) $.ui.log(settledText(settled))
     await settleDrillTries($, cfg, await $.clock.now())
     return next(e)
   })
@@ -4763,6 +4774,17 @@ export const register: Register = (on, options) => {
               : `이 프로젝트의 노트 ${list.length}개를 패널에서 비웁니다(일지 파일과 개념 모음은 그대로). 정말 비우려면 /learn 비우기 확인`,
         }
       }
+      // A note waiting for its try again (1.7.0 D3) is in no journal yet, and its timer would find it cleared: it
+      // goes in now as the failed note it was before 1.7.0, with no call, as one cleared mid-write still does.
+      for (const one of list) {
+        const timer = retryTimers.get(one.id)
+        if (one.status !== 'writing' || one.retry === undefined || !timer) continue
+        timer.cancel()
+        retryTimers.delete(one.id)
+        if (cfg.isAutoSave && one.savedAs === null) {
+          await save($, cfg, { ...one, status: 'failed', text: noteFailText(transientFail(one.retry.why), cfg.model), retry: undefined }, false)
+        }
+      }
       await update($, notes, () => [])
       await update($, selectedId, () => null)
       await persist($, true)
@@ -5181,10 +5203,11 @@ function fieldOf(el: ElementTable, surface: RenderSurface): ElementConstructor<I
  * drawn, a shows its example), the note explained again in plainer words under
  * it, the note kept (e), its code followed step by step on one example (r), a
  * question about it (i, the field below), and last and dim the note copied for
- * a mentor (c) and written again (w), with the practice once opened or tried,
- * then the latest questions and their answers. A note with no practice (one
- * before 1.7.0, a change with no line to change) has no t: q goes over its
- * concepts with the rest.
+ * a mentor (c) and written again (w); then the latest questions and their
+ * answers, the question field, and last the practice once opened or tried (its
+ * field the ring's last stop, see drillView's Tab line). A note with no
+ * practice (one before 1.7.0, a change with no line to change) has no t: q
+ * goes over its concepts with the rest.
  */
 function noteTools(
   $: EngineInterface,
@@ -5227,7 +5250,6 @@ function noteTools(
         <Button key="share" hotkey="c" plain dimColor label="복사" onPress={press => void shareNote($, cfg, note.id, press.surface)} />
         <Button key="write" hotkey="w" plain dimColor label={writeLabel} onPress={() => void writeNote($, cfg, note.id, { isRewrite: note.savedAs !== null })} />
       </Box>
-      {isPractice && drillView($, cfg, note, drill, practice, isFocused, el, surface)}
       {(note.asks ?? []).map((one, i, all) => ({ one, key: askedKey(note.id, all, i) })).slice(-2).map(({ one, key }) => (
         <Box key={key} flexDirection="column" marginTop={1}>
           <Text color="cyan" wrap="wrap">
@@ -5255,6 +5277,9 @@ function noteTools(
           </Text>
         </Box>
       )}
+      {/* Last, so Tab from its field goes where its line says: before a try back round to the row of keys (p, n,
+          1~4), after one to a, never into the question field, where a number typed would be a question. */}
+      {isPractice && drillView($, cfg, note, drill, practice, isFocused, el, surface)}
     </Box>
   )
 }

@@ -6429,6 +6429,28 @@ describe('1.7.0: notes that do not get lost: one try again, a reload taken up, t
     expect(await diag($)).toContain('노트 쓰기 · 서버 붐빔(529) ×2')
   })
 
+  test('(교차 검토) a note cleared while it waits for its try again reaches the journal, failed as before 1.7.0, with no more calls', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.replies = [BUSY, 'ok']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.journal()).toHaveLength(0)
+    expect((await learn($, 'clear 확인')).text).toContain('일지 파일과 배운 개념 모음은 그대로입니다')
+    expect(w.journal()).toHaveLength(1)
+    expect(w.journal()[0]!.text).toContain('+const b = 2')
+    expect(w.journal()[0]!.text).toContain('_노트를 쓰지 못했다: 서버가 붐빕니다 · w로 다시 쓰기_')
+    // Its timer went with it: no try again for a note no pane shows, and the journal has it once.
+    await w.clock.advance(40_000)
+    expect(w.models).toHaveLength(1)
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 's1', resume: { id: 's1' } })
+    await start($)
+    await w.clock.advance(10 * 60_000)
+    expect(w.models).toHaveLength(1)
+    expect(w.journal()).toHaveLength(1)
+    expect((await learn($, 'clear')).text).toBe('패널에 비울 노트가 없습니다.')
+  })
+
   test('a server error, a dropped connection and the time limit wait too, each saying why; a second drop asks for the connection', async ($, on) => {
     const w = world(on)
     await start($)
@@ -7381,6 +7403,33 @@ describe('1.7.0: a question asked back, and one try again (D4)', () => {
     const calls = w.models.length
     expect((await learn($, 'quiz 1 바깥 함수의 변수')).text).toBe(`${SETTLED}\n\n1번은 이미 채점했습니다 (✗ 틀림). 새 문제: /learn 퀴즈 새로`)
     expect(w.models).toHaveLength(calls)
+  })
+
+  test('(교차 검토) a first try left yesterday, settled at the next session start, is said once in the transcript', async ($, on) => {
+    const store = dueStore()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = HINTED
+    await learn($, 'quiz')
+    w.answer = WRONG
+    await learn($, 'quiz 1 전역 변수')
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 's1', resume: { id: 's1' } })
+    // The same day, a new session: it waits still, and nothing is said.
+    await start($)
+    expect(w.transcript.filter(line => line.includes('날이 바뀌어'))).toEqual([])
+    await w.clock.advance(DAY)
+    // The next day's session (or yesterday's resumed) grades it as Claude did, and says so, dim, before anything is asked.
+    await start($)
+    expect(quizItems(store)[0]).toMatchObject({ result: 'wrong', mine: '전역 변수' })
+    expect(w.transcript.filter(line => line.includes('날이 바뀌어'))).toEqual([SETTLED])
+    // The try again sent then is answered as before; the reason was said above.
+    w.answer = RIGHT
+    const calls = w.models.length
+    expect((await learn($, 'quiz 1 바깥 함수의 변수')).text).toBe('1번은 이미 채점했습니다 (✗ 틀림). 새 문제: /learn 퀴즈 새로')
+    expect(w.models).toHaveLength(calls)
+    // Once: a later start has nothing more to say.
+    await start($)
+    expect(w.transcript.filter(line => line.includes('날이 바뀌어'))).toEqual([SETTLED])
   })
 
   test('a try again Claude is grading is not settled meanwhile by 4, q or /learn 복습: its grade stands (review)', async ($, on) => {
@@ -8693,6 +8742,40 @@ describe('1.7.0: team-term practice from the team file\'s ## 용어 (D6)', () =>
     expect(w.models[0]).not.toContain('AAAAAAAAAAAAAAAAAAAA')
   })
 
+  test('(교차 검토) a term naming a local settings file (wp-config.php, appsettings.*.json) is asked by its words: no line of it goes anywhere', async ($, on) => {
+    const store = storeWith()
+    const w = world(on, 'ok', null, true, store)
+    withTeam(
+      w,
+      [
+        '## 용어',
+        '- **DB 설정**: 사이트가 DB에 붙는 곳 · `wp-config.php:1-6`',
+        '- **연결 문자열**: 앱이 DB를 찾는 곳 · `appsettings.Development.json:1-5`',
+        '- **DB 링크**: 설정을 다시 부르는 곳 · `src/db.php:1-5`',
+      ].join('\n'),
+    )
+    // Forms no masking rule catches: PHP's define and a password inside a JSON string.
+    const wp = ['<?php', "define( 'DB_NAME', 'site' );", "define( 'DB_PASSWORD', 'Sup3r-S3cret-pw' );", "define( 'AUTH_KEY', 'q8#Lx@1!zZ-salt' );", "$table_prefix = 'wp_';", ''].join('\n')
+    w.files.set('/proj/wp-config.php', wp)
+    w.files.set('/proj/appsettings.Development.json', ['{', '  "ConnectionStrings": {', '    "Default": "Server=db;Database=app;User Id=sa;Password=P@ssw0rd2024;"', '  }', '}', ''].join('\n'))
+    // A link under another name is judged by where it leads.
+    w.files.set('/proj/src/db.php', wp)
+    w.links.set('/proj/src/db.php', '/proj/wp-config.php')
+    await start($)
+    w.answer = QUESTIONS
+    const reply = (await learn($, 'quiz 팀')).text ?? ''
+    expect(w.models).toHaveLength(1)
+    expect(w.models[0]).toContain('(팀 용어) DB 설정 — 사이트가 DB에 붙는 곳')
+    expect(w.models[0]).toContain('(팀 용어) 연결 문자열 — 앱이 DB를 찾는 곳')
+    expect(w.models[0]).toContain('(팀 용어) DB 링크 — 설정을 다시 부르는 곳')
+    expect(w.models[0]).not.toContain('팀 코드 (')
+    for (const secret of ['Sup3r-S3cret-pw', 'q8#Lx@1!zZ-salt', 'P@ssw0rd2024', 'DB_PASSWORD']) {
+      expect(w.models[0]).not.toContain(secret)
+      expect(reply).not.toContain(secret)
+      expect(JSON.stringify(store.get('quiz'))).not.toContain(secret)
+    }
+  })
+
   test('a concept that came in as a team term elsewhere is asked as any concept, its words said to be data; here, by the team\'s code', async ($, on) => {
     const store = storeWith({ 'c:fetcher': due('fetcher') }, [['teamTerms', { 'c:fetcher': [rootTag('/other')] }]])
     const w = world(on, 'ok', null, true, store)
@@ -9575,6 +9658,37 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect(w.models).toHaveLength(1)
     expect(await ui.find({ type: 'Text', text: '아직 바꾼 곳이 없습니다 · 줄을 고친 뒤 Enter' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: '✓ 해냈습니다' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('(교차 검토) Tab from the practice field goes where its line says: to the keys, never into the question field', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const { w, ui, id } = await practiced($, on, store)
+    /** The pane's focus ring as the engine walks it: its Buttons, Inputs and Selects in document order; Tab the next, round. */
+    const ring = async () => (await ui.findAll({})).filter(one => ['Button', 'Input', 'Select'].includes(one.type)).map(one => `${one.type}:${one.key}`)
+    const tabFrom = (stops: string[], stop: string) => stops[(stops.indexOf(stop) + 1) % stops.length]
+    // A question asked about the note first: its answer is drawn, and the question field stays.
+    w.answer = '바뀌지 않는 값이라 const입니다.'
+    await ui.input({ key: `ask-${id}`, text: '왜 이렇게 했나요?' })
+    await w.clock.settle()
+    await ui.press({ key: 'note-drill' })
+    expect(await ui.find({ type: 'Text', text: 'Enter: 확인 · 코드는 영문 상태에서 · Tab: 버튼으로 (1~4 보기)' })).toBeDefined()
+    const before = await ring()
+    expect(before).toContain(`Input:ask-${id}`)
+    expect(before).toContain(`Input:drill-${id}`)
+    // Back round to the first keys, the row where 1~4 work: a number typed is never a question asked.
+    expect(tabFrom(before, `Input:drill-${id}`)).toBe(before[0])
+    expect(before[0]).toMatch(/^Button:/)
+    expect(before).toContain('Button:view-concepts')
+    // The practice still opens under the note's keys, the question's answer and field above it.
+    const keys = (await ui.findAll({})).map(one => one.key ?? '')
+    expect(keys.indexOf(`ask-${id}`)).toBeLessThan(keys.indexOf(`drill-${id}`))
+    // A first try short of right: Tab goes to a, as its line says.
+    w.answer = WRONG
+    await ui.input({ key: `drill-${id}`, text: 'return `안녕하세요, ${name}님!!`' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: 'Enter: 다시 확인 · 코드는 영문 상태에서 · Tab: 버튼으로 (a 예시 답)' })).toBeDefined()
+    expect(tabFrom(await ring(), `Input:drill-${id}-again`)).toBe('Button:note-drill-answer')
     await ui.unmount()
   })
 
