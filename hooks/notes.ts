@@ -4825,8 +4825,9 @@ export function noteSlipName(
 
 /**
  * The slips the store keeps, counted for /learn 진단 (1.8.0), with no name and no words: all, open and mended, of
- * kind 기타, with no words (`blank`), and open after two misses or more, not set right on the try again (the ones the
- * next review quiz shows a worked example first for, as rungOf has it while WORKED_AFTER_TIMES is 2).
+ * kind 기타, with no words (`blank`), and open after two misses or more (`againOpen`, 열린 채 두 번 이상: what the
+ * name says, a right answer after being asked back included, and not the worked examples the next quiz will show,
+ * which rungOf picks by more than the slip).
  */
 export type SlipCounts = { all: number; open: number; mended: number; other: number; blank: number; againOpen: number }
 
@@ -4839,7 +4840,7 @@ export function slipCounts(slips: Readonly<Record<string, LearnSlip>>): SlipCoun
     mended: list.length - open.length,
     other: list.filter(one => one.type === 'other').length,
     blank: list.filter(one => one.type === 'blank').length,
-    againOpen: open.filter(one => one.times >= 2 && one.isRight !== true).length,
+    againOpen: open.filter(one => one.times >= 2).length,
   }
 }
 

@@ -1453,6 +1453,8 @@ async function learnConceptsNow($: EngineInterface, cfg: Config, note: LearnNote
   // A name merged away (/learn merge, here or in another session) counts under the concept it went into;
   // the note's own keys from before a merge are read the same way, so a rewrite never counts one twice.
   const map = await currentAliases($).catch(() => read($, aliases))
+  // The line under this note names a slip still open (1.8.0): another window may have mended or kept one since.
+  await currentSlips($, map)
   // Files are matched on the whole explanation line: a cut one can lose the code it quotes.
   const lines = new Map(conceptsOf(note.text, Number.POSITIVE_INFINITY).map(one => [one.key, one.blurb]))
   const found = conceptsOf(note.text)
@@ -2745,6 +2747,20 @@ async function storedSlips($: EngineInterface, map: Readonly<Record<string, stri
     return cleanSlips(await $.store.get(SLIPS_KEY), map, now)
   } catch {
     return read($, slips)
+  }
+}
+
+/**
+ * The pane's copy of the slips made the store's again (merges followed) where they differ, as loadHistory makes it:
+ * read only, the store is not written. Left as it was when the store cannot be read. Run in the storing lane, where
+ * this window's own slip writes go (changeSlipsNow), so an older read never lands over a newer write.
+ */
+async function currentSlips($: EngineInterface, map: Readonly<Record<string, string>>): Promise<void> {
+  try {
+    const kept = cleanSlips(await $.store.get(SLIPS_KEY), map, await $.clock.now())
+    if (JSON.stringify(kept) !== JSON.stringify(await read($, slips))) await update($, slips, () => kept)
+  } catch {
+    // The copy from before stays: the note is counted all the same.
   }
 }
 

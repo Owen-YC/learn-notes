@@ -11885,6 +11885,32 @@ describe('1.8.0: slipped concepts shown by name under a note, on /learn 기록 a
     await ui.unmount()
   })
 
+  test('another window mends a slip, or keeps a new one, after this one started: the next note\'s line goes by the store', async ($, on) => {
+    const store = storeOf([old('클로저'), old('map')], { 클로저: slipRow(2 * DAY) })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    await noteOn($, w, ['클로저'], 't1')
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Text', text: LINE('클로저') })).toBeDefined()
+    // Another window's try again, on another day, right with no hint: mended in the store, not in this pane's copy.
+    store.set('slips', { [conceptKey('클로저')]: { ...slipRow(2 * DAY), fixedAt: NOW } })
+    await w.clock.advance(60_000)
+    w.sets.length = 0
+    await noteOn($, w, ['클로저'], 't2')
+    // The next quiz asks it with no slip (the store's), so no line promises a try again.
+    expect(await ui.find({ type: 'Text', text: /^다시 만난 개념 클로저 ×4$/ })).toBeDefined()
+    expect(await slipLine(ui)).toBeUndefined()
+    // Another window keeps a slip on map: the next note meeting map names it.
+    store.set('slips', { ...(store.get('slips') as object), [conceptKey('map')]: slipRow(60_000, { what: '원래 배열을 바꾼다고 봄', type: 'other' }) })
+    await w.clock.advance(60_000)
+    await noteOn($, w, ['map'], 't3')
+    expect(await ui.find({ type: 'Text', text: LINE('map') })).toBeDefined()
+    // Read, never written: the store's slips are as the other window left them.
+    expect(w.sets).not.toContain('slips')
+    expect(w.models.filter(text => text.includes('바깥 변수'))).toEqual([])
+    await ui.unmount()
+  })
+
   test('after /learn 합치기 in this very window, the line names the concept it went into', async ($, on) => {
     const store = storeOf([old('Closure'), old('클로저')], { Closure: slipRow(2 * DAY) })
     const w = world(on, 'ok', null, true, store)
@@ -11905,10 +11931,13 @@ describe('1.8.0: slipped concepts shown by name under a note, on /learn 기록 a
       '객체 비교': reference(3 * DAY),
       'const 선언': reference(DAY),
       '얕은 비교': reference(31 * DAY),
-      '배열 복사': reference(2 * DAY),
     })
     const w = world(on, 'ok', null, true, store)
     await start($)
+    // Two of the kind in 30 days: no line yet.
+    expect((await learn($, '기록')).text).not.toContain('같은 종류로')
+    // The third kept by another window since this one started: read from the store, not this pane's copy.
+    store.set('slips', { ...(store.get('slips') as object), [conceptKey('배열 복사')]: reference(2 * DAY) })
     const lines = ((await learn($, '기록')).text ?? '').split('\n')
     const review = lines.findIndex(line => line.startsWith('- 복습할 개념'))
     expect(review).toBeGreaterThan(-1)
@@ -11928,12 +11957,15 @@ describe('1.8.0: slipped concepts shown by name under a note, on /learn 기록 a
   test('/learn 진단: the slips counted under the journal\'s line, its head saying no concept name and no slip\'s words are in it', async ($, on) => {
     let isUnread = false
     on('store.get', { key: 'slips' }, (_$, e, next) => (isUnread ? { deny: 'learn-notes: $.store.get: the store could not be read' } : next(e)))
+    // 클로저: missed on the try again, then right when asked back (still open, missed twice). Closure was merged into
+    // it (/learn 합치기), each with a slip kept before the merge: one concept, one slip counted.
     const store = storeOf([old('클로저'), old('map'), old('구조 분해'), old('비동기')], {
-      클로저: slipRow(DAY, { times: 2 }),
+      클로저: slipRow(DAY, { times: 2, isRight: true }),
+      Closure: slipRow(3 * DAY, { what: '바깥 변수를 복사해 둔다고 봄', times: 2 }),
       map: slipRow(DAY, { what: '원래 배열을 바꾼다고 봄', type: 'other' }),
       '구조 분해': slipRow(DAY, { what: '', type: 'blank', mine: '모르겠어요' }),
       비동기: slipRow(5 * DAY, { what: 'await 없이도 기다린다고 봄', type: 'order', fixedAt: NOW - DAY }),
-    })
+    }, [['aliases', { [conceptKey('Closure')]: conceptKey('클로저') }]])
     const w = world(on, 'ok', null, true, store)
     await start($)
     const reply = await diag($)
@@ -11941,7 +11973,7 @@ describe('1.8.0: slipped concepts shown by name under a note, on /learn 기록 a
     expect(lines[1]).toBe('코드 · 요청 · 파일 이름 · 경로 · 개념 이름 · 헷갈린 점 문장은 들어 있지 않습니다 (오답 노트는 개수만)')
     const journal = lines.findIndex(line => line.startsWith('- 일지: '))
     expect(lines[journal + 1]).toBe('- 오답 노트 4개 (열림 3 · 바로잡음 1) · 유형 기타 1 · 문장 없음 1 · 열린 채 두 번 이상 1')
-    for (const word of ['클로저', 'map', '구조', '비동기', '사라진다고', '배열', 'await', '전역 변수', '지난 문제', '모르겠어요']) expect(reply).not.toContain(word)
+    for (const word of ['클로저', 'Closure', 'closure', 'map', '구조', '비동기', '사라진다고', '복사해', '배열', 'await', '전역 변수', '지난 문제', '모르겠어요']) expect(reply).not.toContain(word)
     expect(w.copied.at(-1)).toContain('\n- 오답 노트 4개 (열림 3 · ')
     isUnread = true
     expect((await diag($)).split('\n')).toContain('- 오답 노트: 읽지 못함')
