@@ -228,6 +228,9 @@ import {
   EASIER_LABEL,
   EASIER_QUESTION,
   KEYED_LABELS,
+  isThinkFollow,
+  openThink,
+  THINK_OPEN_MS,
   type RankedConcept,
   shortPath,
   stamp,
@@ -303,6 +306,26 @@ const FOCUSED_HINT = 'Esc: 대화로 돌아가기 · 글자 키는 영문 상태
  */
 const ANSWER_KEYS_HINT = 'ctrl+x tab: 답 칸으로 · 보기를 바꾸려면 그 뒤 Tab · 글자 키는 영문 상태에서'
 const ANSWER_FOCUSED_HINT = 'Esc: 대화로 돌아가기 · 답은 한/영 상관없이, 버튼의 글자 키는 영문 상태에서'
+
+/**
+ * The dim line under r's walk-through while its 생각해 보기 is open (1.8.0, openThink), by where the answer goes from
+ * here: i into the question field while the terminal's pane holds the keys (FOCUSED_HINT under the pane names the
+ * input mode); ctrl+x tab first while they are in the prompt, so `i0이요` never reaches the main Claude; a click in
+ * the desktop app; /learn 질문 where no field is drawn (the mobile app). Never a move of the focus: the walk-through
+ * is read first, and in the field p, n and 1~4 would be typed as words.
+ */
+const THINK_HINT_FOCUSED = 'i: 질문 칸에 답 적기 · 넘어가도 됩니다'
+const THINK_HINT_KEYS = 'ctrl+x tab 뒤 i: 질문 칸에 답 적기 · 넘어가도 됩니다'
+const THINK_HINT_CLICK = '질문 칸을 눌러 답을 적어 보세요 · 넘어가도 됩니다'
+const THINK_HINT_ELSEWHERE = '답해 보려면 /learn 질문 뒤에 내 생각을 적습니다 (예: /learn 질문 0이 나와요) · 넘어가도 됩니다'
+/**
+ * The question field's placeholder, as 1.7.0's, and while a walk-through's 생각해 보기 is open: no particle on 점, so
+ * the field's row (`질문: … ⏎ 묻기`) stays in the 40 cells a narrow dock gives it.
+ */
+const ASK_PLACEHOLDER = '궁금한 것을 적고 Enter'
+const THINK_PLACEHOLDER = '답이나 궁금한 점 적고 Enter'
+/** The head of a question typed while a walk-through was open (isThinkFollow), for `질문`: an answer or a question, both follow on. */
+const THINK_FOLLOW = '이어서'
 
 const notes = atom({ plugin: 'learn-notes', key: 'notes' } as const, [])
 const live = atom({ plugin: 'learn-notes', key: 'live' } as const, null)
@@ -1171,12 +1194,15 @@ async function announceNote($: EngineInterface, note: LearnNote): Promise<void> 
   else if (!(await isPaneVisible($))) $.ui.toast(`학습 노트: ${about} · /learn으로 보기`, { timeoutMs: 6000 })
 }
 
-/** Appends a /learn ask question and answer to the journal the note is in, after any save still running. */
-function saveAsk($: EngineInterface, cfg: Config, note: LearnNote, question: string, answer: string, at: number): Promise<string | undefined> {
+/**
+ * Appends a /learn ask question and answer to the journal the note is in, after any save still running; one sent
+ * while a walk-through was open (`isThink`, 1.8.0) marked so on its question's line.
+ */
+function saveAsk($: EngineInterface, cfg: Config, note: LearnNote, question: string, answer: string, at: number, isThink = false): Promise<string | undefined> {
   return enqueue('saving', async () => {
     try {
       // Into the journal of the note's own day: asking never makes a journal day with no notes.
-      return await appendJournal($, cfg, note.root || (await $.session.root()), note.at, askSection(note, question, answer, at))
+      return await appendJournal($, cfg, note.root || (await $.session.root()), note.at, askSection(note, question, answer, at, isThink))
     } catch (error) {
       void fault($, 'save', faultCode(error), '질문과 답을 파일에 쓰지 못했습니다')
       return undefined
@@ -3013,14 +3039,18 @@ async function askNote(
   const rules = await teamOf($, note.root)
   // A note kept before 1.6.0 may hold a .env diff or a key: neither goes to the model or the journal.
   const shown = await screened($, cfg, note)
-  const asked = await askModel($, cfg, 'ask', { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules), maxTokens: 900 })
+  // A question typed (in the field or by /learn 질문, never r's or e's) while r's walk-through is open (1.8.0): sent
+  // with the walk-through in full and its 생각해 보기, to be checked as an answer or answered as a question.
+  const askedAt = await $.clock.now()
+  const think = label === question ? openThink(shown.asks, askedAt) : undefined
+  const asked = await askModel($, cfg, 'ask', { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules, think), maxTokens: 900 })
   if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
   const answer = cut(asked.text, 4000)
   const now = await $.clock.now()
   const latest = (await read($, notes)).find(one => one.id === id) ?? note
   await setNote($, id, { asks: [...(latest.asks ?? []), { question: cut(kept, 1000), answer, at: now }].slice(-ASKS_KEPT) })
   await persist($)
-  const path = cfg.isAutoSave ? await saveAsk($, cfg, shown, kept, answer, now) : undefined
+  const path = cfg.isAutoSave ? await saveAsk($, cfg, shown, kept, answer, now, think !== undefined) : undefined
   return { answer, note, path, at: now }
 }
 
@@ -5293,7 +5323,7 @@ export const register: Register = (on, options) => {
           {noteBody(note, isBusy, offText(note, cfg, now), el, drill)}
           {note.status === 'ready' && note.concepts.length > 0 && conceptLine(note, index, map, el, slipsNow)}
           {note.status === 'ready' &&
-            noteTools($, cfg, note, writeLabel, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el, e.surface, drill, practice, isTerminalFocus)}
+            noteTools($, cfg, note, writeLabel, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el, e.surface, drill, practice, isTerminalFocus, now)}
         </Box>
       ) : (
         <Box flexDirection="column">
@@ -5515,6 +5545,33 @@ function focusShown($: EngineInterface, current: Quiz): void {
   if (at !== -1 && isOpen(current, current.items[at]!)) focusInPane($, answerKey(current, at))
 }
 
+/** The walk-through whose 생각해 보기 the pane drew open last (when its answer came), and the timer drawing the pane again as it closes. */
+let thinkShut: { at: number; timer: { cancel: () => void } } | undefined
+
+/**
+ * Draws the pane again just past THINK_OPEN_MS after the walk-through answered at `at` (1.8.0), so its dim line,
+ * the field's placeholder and `이어서` go on time in a pane left as it is: time alone draws nothing again. One timer,
+ * for the walk-through drawn open last; a timer refused leaves them to the next drawing.
+ */
+function shutThinkLater($: EngineInterface, at: number, now: number): void {
+  if (thinkShut?.at === at) return
+  thinkShut?.timer.cancel()
+  thinkShut = undefined
+  try {
+    const timer = $.clock.after(Math.max(1, at + THINK_OPEN_MS + 1 - now), () => {
+      if (thinkShut?.timer === timer) thinkShut = undefined
+      try {
+        $.ui.invalidate('ui.render')
+      } catch {
+        // A module unloaded meanwhile draws nothing more; the next drawing reads the time itself.
+      }
+    })
+    thinkShut = { at, timer }
+  } catch {
+    thinkShut = undefined
+  }
+}
+
 /**
  * The text field `el` draws, or undefined on a surface that draws none (the mobile app, where a question goes
  * through /learn ask and a quiz through a, o and x). The engine completes every surface's table with every
@@ -5534,7 +5591,11 @@ function fieldOf(el: ElementTable, surface: RenderSurface): ElementConstructor<I
  * answers, the question field, and last the practice once opened or tried (its
  * field the ring's last stop, see drillView's Tab line). A note with no
  * practice (one before 1.7.0, a change with no line to change) has no t: q
- * goes over its concepts with the rest.
+ * goes over its concepts with the rest. While r's walk-through ends on an open
+ * 생각해 보기 (1.8.0, openThink at `now`) and no answer is being written, a dim
+ * line under it says where to answer, by surface and by where the keys are,
+ * and the field's placeholder says an answer goes there too; a question typed
+ * while it was open is headed `이어서`.
  */
 function noteTools(
   $: EngineInterface,
@@ -5547,12 +5608,16 @@ function noteTools(
   drill: Drill | undefined,
   practice: LearnDrillRun,
   isFocused: boolean,
+  now: number,
 ) {
   const { Box, Text, Button, Markdown } = el
   // The mobile app draws no text field yet: there a question goes through /learn ask.
   const Input = fieldOf(el, surface)
   const fieldKey = `ask-${note.id}`
   const isPractice = drill !== undefined && (practice.open === note.id || note.drill !== undefined)
+  const think = ask.isAsking ? undefined : openThink(note.asks, now)
+  if (think) shutThinkLater($, note.asks!.at(-1)!.at, now)
+  const thinkHint = !Input ? THINK_HINT_ELSEWHERE : surface !== 'terminal' ? THINK_HINT_CLICK : isFocused ? THINK_HINT_FOCUSED : THINK_HINT_KEYS
   return (
     <Box flexDirection="column" marginTop={1}>
       <Box flexWrap="wrap" columnGap={2}>
@@ -5577,21 +5642,29 @@ function noteTools(
         <Button key="share" hotkey="c" plain dimColor label="복사" onPress={press => void shareNote($, cfg, note.id, press.surface)} />
         <Button key="write" hotkey="w" plain dimColor label={writeLabel} onPress={() => void writeNote($, cfg, note.id, { isRewrite: note.savedAs !== null })} />
       </Box>
-      {(note.asks ?? []).map((one, i, all) => ({ one, key: askedKey(note.id, all, i) })).slice(-2).map(({ one, key }) => (
-        <Box key={key} flexDirection="column" marginTop={1}>
-          <Text color="cyan" wrap="wrap">
-            {KEYED_LABELS.includes(one.question) ? `▶ ${one.question}` : `질문 · ${one.question}`}
-          </Text>
-          <Markdown text={one.answer} />
-        </Box>
-      ))}
+      {(note.asks ?? [])
+        .map((one, i, all) => ({ one, key: askedKey(note.id, all, i), isFollow: isThinkFollow(all, i), isLast: i === all.length - 1 }))
+        .slice(-2)
+        .map(({ one, key, isFollow, isLast }) => (
+          <Box key={key} flexDirection="column" marginTop={1}>
+            <Text color="cyan" wrap="wrap">
+              {KEYED_LABELS.includes(one.question) ? `▶ ${one.question}` : `${isFollow ? THINK_FOLLOW : '질문'} · ${one.question}`}
+            </Text>
+            <Markdown text={one.answer} />
+            {isLast && think && (
+              <Text dimColor wrap="wrap">
+                {thinkHint}
+              </Text>
+            )}
+          </Box>
+        ))}
       {ask.isAsking ? (
         <Text color="cyan">답을 쓰는 중입니다…</Text>
       ) : Input ? (
         <Input
           key={fieldKey}
           label="질문"
-          placeholder="궁금한 것을 적고 Enter"
+          placeholder={think ? THINK_PLACEHOLDER : ASK_PLACEHOLDER}
           submitLabel="묻기"
           value={ask.draft ?? ''}
           onSubmit={value => void askInPane($, cfg, note.id, value)}
@@ -6914,7 +6987,7 @@ const HELP = [
   '- `/learn`: 패널 열기 · 패널의 키를 쓰려면 터미널은 `ctrl+x tab`(또는 패널 클릭), 데스크톱 앱은 패널 클릭, Esc로 대화로 돌아갑니다 (숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다)',
   '- `/learn 복습`: 오늘 복습을 패널 퀴즈로 바로 시작 · 답 칸에 바로 적고 Enter (패널이 없는 화면에서는 대화창에 문제를 냅니다)',
   '- 패널: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작 · `p`·`n` 이전·다음 노트 · `w` 노트 쓰기, 다시 쓰기',
-  '- 노트 아래: `t` 직접 해 보기(한 번 고친 뒤 `a` 예시 답) · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기 · `c` 복사',
+  '- 노트 아래: `t` 직접 해 보기(한 번 고친 뒤 `a` 예시 답) · `e` 더 쉽게 · `r` 예시로 따라가기(끝의 생각해 보기는 `i`로 답하기) · `i` 질문하기 · `c` 복사',
   '- 퀴즈(`4`): 답을 적고 Enter로 채점 · 틀리면 되묻기를 보고 한 번 더 (모르면 `모르겠어요`) · Tab으로 버튼에 가서 `h` 힌트 · `i` 답 적기 · `a` 정답(한 번 적은 뒤 · 첫 판정대로 매김) · `f` 채점 바꾸기 · `s` 새 문제(남은 문제가 있으면 두 번) · `n` 틀린 개념을 배운 노트 · 정답을 채점 전에 봤으면(입력칸이 없는 화면 · 채점 실패 · `/learn 퀴즈 정답`) `o`·`x`로 채점',
   '- `/learn 퀴즈`: 대화창에서 풀기 · 풀던 퀴즈, 없으면 복습할 개념으로 새 퀴즈 · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트`(`힌트 2`) · `정답`',
   '- `/learn 정리`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',

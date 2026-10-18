@@ -1599,12 +1599,84 @@ export const ASK_SYSTEM = [
 
 /** What `r` under a note asks: its changed code followed step by step on one example, kept under the note as this label. */
 export const TRACE_LABEL = '예시로 따라가기'
+/**
+ * What r's walk-through is asked to end with (1.8.0, 생각해 보기): one question on the example just followed, one
+ * input changed, for the learner to answer in the question field under the note (openThink). Said by values and
+ * names, not step numbers, so the question reads on its own. Left out of TRACE_QUESTION, no reply ends on one and
+ * the rest reads as 1.7.0 (thinkOf finds nothing).
+ */
+export const THINK_ASK =
+  '마지막 줄에는 번호 없이 `**생각해 보기:**`로 시작하는 질문 한 문장을 더해 주세요. 방금 따라간 예시에서 입력 값 하나를 바꾸면 결과가 어떻게 달라지는지, 단계 번호 대신 입력 값과 변수·줄 이름으로 묻고 그 답은 쓰지 마세요. 따라갈 실행 흐름이 없는 변경이면 이 줄은 빼 주세요.'
 export const TRACE_QUESTION = [
   '바뀐 코드를 구체적인 예시 입력 하나로 한 단계씩 따라가 주세요.',
   '번호 목록으로, 단계마다 어느 줄이 실행되고 변수 값이 어떻게 바뀌는지 적고 마지막에 결과를 적어 주세요.',
   '바뀌기 전 코드였다면 어느 단계에서 결과가 달라지는지 한 줄로 짚어 주세요.',
   '따라갈 실행 흐름이 없는 변경(설정, 스타일, 문서 등)이면 그렇다고 한 줄로 말하고, 바뀐 결과가 화면이나 동작에서 어떻게 보이는지 설명해 주세요.',
+  THINK_ASK,
 ].join(' ')
+
+/**
+ * How long a walk-through's 생각해 보기 stays open after its answer came (1.8.0): the dim line under it, the field's
+ * other placeholder, the question's head `이어서` and the walk-through sent with it. A cautious bound until there is
+ * real use to go by; past it the note reads as 1.7.0, so a question put days later is never taken for its answer.
+ */
+export const THINK_OPEN_MS = 30 * 60_000
+
+/** A line naming the walk-through's question (생각해 보기), on a bullet, a quote, a number or a heading, bold or not; what follows it. */
+const THINK_LINE = /^[^\p{L}\p{N}]*(?:\d+[.)]\s*)?[^\p{L}\p{N}]*생각해\s*보기\s*(?:\*\*)?\s*[:：]?\s*(?:\*\*)?\s*(.*)$/u
+/** A question that carries its answer: an `답:` in it, or the word 정답. */
+const THINK_GIVEN = /답\s*[:：]|정답/
+/** Characters that may close a question after its last `?`: bold's stars, a bracket, spaces. */
+const THINK_CLOSE = /^[\s*)）]*$/
+
+/**
+ * The question a walk-through ends on (생각해 보기, THINK_ASK), or undefined: its last line that is not blank, or
+ * the line after a label alone (`**생각해 보기**` with the question on the next line, the last). None when the
+ * question is empty, says its answer (`답:`, 정답) or goes on past its last `?`: such a line stays in the answer as
+ * written, but nothing opens for it. Cut to 300 characters.
+ */
+export function thinkOf(answer: string): string | undefined {
+  const lines = clean(answer)
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line !== '')
+  const last = lines.at(-1)
+  if (last === undefined) return undefined
+  const label = (line: string | undefined) => (line === undefined ? undefined : THINK_LINE.exec(line)?.[1]?.replace(/\*\*$/, '').trim())
+  const own = label(last)
+  // A label alone on the last line asks nothing; one alone on the line before gives that line its question.
+  const said = own !== undefined ? own : label(lines.at(-2)) === '' ? last.replace(/^(?:[-*+•]\s+|>\s*)+/, '').replace(/\*\*$/, '').trim() : undefined
+  if (said === undefined || said === '' || THINK_GIVEN.test(said)) return undefined
+  const asked = Math.max(said.lastIndexOf('?'), said.lastIndexOf('？'))
+  if (asked !== -1 && !THINK_CLOSE.test(said.slice(asked + 1))) return undefined
+  return cut(said, 300)
+}
+
+/**
+ * A walk-through's question still open (1.8.0, 생각해 보기): the note's last question is r's (TRACE_LABEL), its answer
+ * ends on a question (thinkOf), and that answer came THINK_OPEN_MS ago at most. With it, the walk-through in full as
+ * far as 2000 characters, for the call that checks an answer to it (askPrompt).
+ */
+export function openThink(asks: readonly LearnAsk[] | undefined, now: number): { question: string; trace: string } | undefined {
+  const last = asks?.at(-1)
+  if (last === undefined || last.question !== TRACE_LABEL || now - last.at > THINK_OPEN_MS) return undefined
+  const question = thinkOf(last.answer)
+  return question === undefined ? undefined : { question, trace: cut(last.answer, 2000) }
+}
+
+/**
+ * Whether the question at `i` came while the walk-through just before it was open (openThink): typed, not a key's,
+ * right after r's answer ending on a question, THINK_OPEN_MS after it at most. Its head says `이어서`. Both times
+ * are when the answers came (all a note keeps), so every window reads it alike; a question put in the bound's last
+ * seconds whose answer came past it is headed 질문, though it went with the walk-through (askNote reads the bound
+ * when the question is put).
+ */
+export function isThinkFollow(asks: readonly LearnAsk[], i: number): boolean {
+  const one = asks[i]
+  const before = asks[i - 1]
+  if (one === undefined || before === undefined || KEYED_LABELS.includes(one.question)) return false
+  return before.question === TRACE_LABEL && one.at - before.at <= THINK_OPEN_MS && thinkOf(before.answer) !== undefined
+}
 
 /**
  * What `e` under a note asks: the note explained again in the plainest words,
@@ -1625,21 +1697,28 @@ export const ASKS_KEPT = 3
  * The one user message the model reads for a question about a note: the
  * question, the note's last questions and answers (so a follow-up reads in
  * context), the team's rules and terms when the repository has them, then the
- * note and its code.
+ * note and its code. A question typed while r's walk-through is open (`think`,
+ * openThink: 1.8.0) has that walk-through in full and its question right after
+ * it, the field's words read as an answer to check or a question to answer;
+ * the walk-through is then left out of the questions before. Without `think`
+ * the prompt is 1.7.0's, to the byte.
  */
 export function askPrompt(
   note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles' | 'asks' | 'withheld'>,
   question: string,
   level: Level,
   team?: TeamFile,
+  think?: { question: string; trace: string },
 ): string {
-  const earlier = (note.asks ?? []).slice(-2)
+  const recent = (note.asks ?? []).slice(-2)
+  const earlier = think ? recent.slice(0, -1) : recent
   return [
     LEVEL_TEXT[level],
     '',
     '## 학습자의 질문',
     cut(question, 1000),
     '',
+    ...(think ? ["## 바로 앞 '예시로 따라가기'의 답과, 그 끝에 학습자에게 던진 생각해 보기", think.trace, '', `생각해 보기: ${think.question}`, THINK_RULE, ''] : []),
     ...(earlier.length > 0
       ? ['## 앞서 이 노트에 대해 나눈 질문과 답 (이어지는 질문일 수 있다)', ...earlier.flatMap(one => [`- 질문: ${cut(one.question, 300)}`, `  답: ${cut(one.answer.replace(/\s+/g, ' '), 600)}`]), '']
       : []),
@@ -1656,14 +1735,25 @@ export function askPrompt(
   ].join('\n')
 }
 
-/** A /learn ask question and its answer as a journal section; not a note, so day contents and recaps pass over it. */
-export function askSection(note: Pick<LearnNote, 'at' | 'prompt'>, question: string, answer: string, at: number): string {
+/**
+ * How the field's words are read when sent with an open walk-through (askPrompt's `think`): an answer or a question,
+ * never a new 생각해 보기. A guess at the result is an answer, `오류가 나요` too (the 1.8.0 sample: without it, that
+ * answer was taken for a bug report); an answer is told right or wrong first.
+ */
+const THINK_RULE =
+  '학습자의 질문 칸 글은 이 물음에 대한 답일 수도, 새 질문일 수도 있다. 결과를 짐작한 말(값, "오류가 나요", "그대로예요" 같은 말)이면 이 물음에 대한 답으로 읽는다. 답이면 맞았는지 틀렸는지부터 말하고 맞은 점을 짚는다. 틀린 데가 있으면 학습자의 답대로라면 무엇이 되는지 한 문장, 바른 결과와 그 까닭을 한두 문장으로 쓴다. 다섯 문장을 넘기지 않는다. 새 질문이면 평소처럼 답한다. 어느 쪽이든 생각해 보기를 새로 쓰지 않는다.'
+
+/**
+ * A /learn ask question and its answer as a journal section; not a note, so day contents and recaps pass over it.
+ * One sent while a walk-through was open (`isThink`, 1.8.0) says so on its question's line, its head as before.
+ */
+export function askSection(note: Pick<LearnNote, 'at' | 'prompt'>, question: string, answer: string, at: number, isThink = false): string {
   return [
     `## ${stamp(at).day} 질문 (${stamp(at).time})`,
     '',
     `**노트**: ${stamp(note.at).day} ${stamp(note.at).time} · ${note.prompt === '' ? '(요청 없음)' : cut(note.prompt.replace(/\s+/g, ' '), 120)}`,
     '',
-    `**물음**: ${cut(question.replace(/\s+/g, ' '), 400)}`,
+    `**물음**${isThink ? ' (생각해 보기 뒤)' : ''}: ${cut(question.replace(/\s+/g, ' '), 400)}`,
     '',
     answer,
     '',

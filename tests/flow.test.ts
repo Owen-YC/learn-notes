@@ -2343,7 +2343,14 @@ test('the text fields fit a narrow pane in one row: a label with no trailing spa
   await ui.press({ key: 'quiz-new' })
   await w.clock.settle()
   fields.push(await ui.find({ type: 'Input', key: mineKey(store, 0) }))
-  expect(fields.map(field => field?.props.label)).toEqual(['질문', '내 답'])
+  // The question field while r's walk-through ends on an open 생각해 보기 (1.8.0): its other placeholder.
+  await ui.press({ key: 'view-note' })
+  w.answer = '1. a는 1입니다.\n\n**생각해 보기:** a가 2이면요?'
+  await ui.press({ key: 'trace' })
+  await w.clock.settle()
+  fields.push(await ui.find({ type: 'Input' }))
+  expect(fields.map(field => field?.props.label)).toEqual(['질문', '내 답', '질문'])
+  expect(fields[2]!.props.placeholder).toBe('답이나 궁금한 점 적고 Enter')
   for (const field of fields) {
     const { label, placeholder, submitLabel } = field!.props as { label: string; placeholder: string; submitLabel: string }
     // The terminal draws `${label}: ` before the field and ` ⏎ ${submitLabel}` after it while focused; a row wider
@@ -10464,7 +10471,7 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
       'note-drill': [NOTE, '`t` 직접 해 보기'],
       'note-drill-answer': [NOTE, '`a` 예시 답'],
       easier: [NOTE, '`e` 더 쉽게'],
-      trace: [NOTE, '`r` 예시로 따라가기'],
+      trace: [NOTE, '`r` 예시로 따라가기(끝의 생각해 보기는 `i`로 답하기)'],
       'ask-type': [NOTE, '`i` 질문하기'],
       share: [NOTE, '`c` 복사'],
       'quiz-new': [QUIZ, '`s` 새 문제'],
@@ -12015,5 +12022,292 @@ describe('1.8.0: slipped concepts shown by name under a note, on /learn 기록 a
     expect(w.sets).toEqual([])
     expect([...store.keys()].sort()).toEqual(keys)
     expect(w.models).toHaveLength(0)
+  })
+})
+
+describe('1.8.0: 생각해 보기 at the end of r\'s walk-through, answered in the question field (E4)', () => {
+  const MIN = 60_000
+  const THOUGHT = '`b`를 3으로 바꾸면 마지막에 `b`는 얼마일까요?'
+  const TRACED = ['1. `const a = 1`: `a`는 1입니다.', '2. `const b = 2`: `b`는 2입니다.', '', `**생각해 보기:** ${THOUGHT}`].join('\n')
+  const HINT = {
+    focused: 'i: 질문 칸에 답 적기 · 넘어가도 됩니다',
+    keys: 'ctrl+x tab 뒤 i: 질문 칸에 답 적기 · 넘어가도 됩니다',
+    click: '질문 칸을 눌러 답을 적어 보세요 · 넘어가도 됩니다',
+    elsewhere: '답해 보려면 /learn 질문 뒤에 내 생각을 적습니다 (예: /learn 질문 0이 나와요) · 넘어가도 됩니다',
+  }
+  const OPEN = '답이나 궁금한 점 적고 Enter'
+  const SHUT = '궁금한 것을 적고 Enter'
+  const SECTION = "## 바로 앞 '예시로 따라가기'의 답과, 그 끝에 학습자에게 던진 생각해 보기"
+  type Ui = Awaited<ReturnType<typeof pane>>
+  /** Which of the four dim lines the pane draws, if any (each one, so a second never hides behind the first). */
+  const hintsOf = async (ui: Pick<Ui, 'findAll'>) => (await ui.findAll({ type: 'Text' })).filter(one => Object.values(HINT).includes(one.text)).map(one => one.text)
+  const fieldOf = async (ui: Pick<Ui, 'find'>) => (await ui.find({ type: 'Input' }))!
+  const asksOf = (store: Map<string, unknown>) => (store.get('history') as Record<string, { notes: { asks?: Record<string, unknown>[] }[] }>)['/proj']!.notes[0]!.asks ?? []
+
+  /** A written note, nothing asked under it yet. */
+  async function noted($: Engine, on: On, store = new Map<string, unknown>()) {
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A), 't1', 'b를 상수로 바꿔줘')
+    await finish(w)
+    return w
+  }
+  /** r pressed under it, the walk-through `answer`. */
+  async function trace(ui: Pick<Ui, 'press'>, w: World, answer = TRACED) {
+    w.answer = answer
+    await ui.press({ key: 'trace' })
+    await w.clock.settle()
+  }
+
+  test('in the terminal with the keys in the pane: the dim line under the walk-through, the field\'s other placeholder, the focus left where it is', async ($, on) => {
+    const w = await noted($, on)
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    const field = await fieldOf(ui)
+    expect(field.props.placeholder).toBe(SHUT)
+    expect(await hintsOf(ui)).toEqual([])
+    const keys = [...w.store.keys()].sort()
+    const index = JSON.stringify(w.store.get('concepts'))
+    await trace(ui, w)
+    expect(await ui.find({ type: 'Markdown', text: TRACED })).toBeDefined()
+    expect(await hintsOf(ui)).toEqual([HINT.focused])
+    expect((await ui.find({ type: 'Text', text: HINT.focused }))?.props.dimColor).toBe(true)
+    // Right under the walk-through it ends, in the same block as its head.
+    const block = (await ui.findAll({ type: 'Box' })).filter(one => one.text.includes('▶ 예시로 따라가기')).at(-1)!
+    expect(block.text.endsWith(HINT.focused)).toBe(true)
+    expect((await fieldOf(ui)).props).toMatchObject({ key: field.props.key, label: '질문', placeholder: OPEN, submitLabel: '묻기', value: '' })
+    // No move of the focus: i is still the way to the field, named `ask-<id>`.
+    expect(focusesOf(w)).toEqual([])
+    expect(await ui.find({ type: 'Button', key: 'ask-type' })).toMatchObject({ props: { hotkey: 'i' } })
+    expect(String(field.props.key)).toMatch(/^ask-/)
+    // The pane's own line under it names the input mode the letter keys need.
+    expect(await ui.find({ type: 'Text', text: 'Esc: 대화로 돌아가기 · 글자 키는 영문 상태에서' })).toBeDefined()
+    // Nothing graded or counted: the walk-through and its line ask nothing more of the model, the store holds no new key.
+    expect(w.models).toHaveLength(2)
+    // (faults aside: nothing in this kit answers the scroll to r's answer, kept as the pane's.)
+    expect([...w.store.keys()].filter(k => k !== 'faults').sort()).toEqual(keys)
+    expect(JSON.stringify(w.store.get('concepts'))).toBe(index)
+    await ui.unmount()
+  })
+
+  test('with the keys in the prompt, ctrl+x tab first; the desktop app\'s click; the mobile app\'s /learn 질문, which sends the walk-through too', async ($, on) => {
+    const w = await noted($, on)
+    const idle = await pane($, 'terminal', { ...PANE_PROPS, isFocused: false })
+    await trace(idle, w)
+    expect(await hintsOf(idle)).toEqual([HINT.keys])
+    expect((await fieldOf(idle)).props.placeholder).toBe(OPEN)
+    await idle.unmount()
+
+    const desktop = await pane($, 'desktop', { ...PANE_PROPS, isFocused: false })
+    expect(await hintsOf(desktop)).toEqual([HINT.click])
+    expect((await fieldOf(desktop)).props.placeholder).toBe(OPEN)
+    await desktop.unmount()
+
+    const phone = await $.ui.mount({ plugin: 'learn-notes', surface: 'mobile', component: 'Pane', requestId: 'learn-notes', props: PANE_PROPS })
+    expect(await hintsOf(phone)).toEqual([HINT.elsewhere])
+    expect(await phone.find({ type: 'Input' })).toBeUndefined()
+    await phone.unmount()
+
+    w.answer = '맞습니다. `b`가 3이면 마지막에 3입니다.'
+    const asked = (await learn($, '질문 3이 나와요')).text ?? ''
+    expect(asked).toContain('맞습니다.')
+    const prompt = w.models.at(-1)!
+    expect(prompt).toContain(`## 학습자의 질문\n3이 나와요\n\n${SECTION}\n${TRACED}\n\n생각해 보기: ${THOUGHT}\n`)
+    expect(prompt).not.toContain('- 질문: 예시로 따라가기')
+    expect(w.files.get(JOURNAL)).toContain('**물음** (생각해 보기 뒤): 3이 나와요')
+    // Answered, the line is gone everywhere.
+    const after = await $.ui.mount({ plugin: 'learn-notes', surface: 'mobile', component: 'Pane', requestId: 'learn-notes', props: PANE_PROPS })
+    expect(await hintsOf(after)).toEqual([])
+    expect(await after.find({ type: 'Text', text: '이어서 · 3이 나와요' })).toBeDefined()
+    await after.unmount()
+  })
+
+  test('an answer typed in the field: sent with the walk-through in full and its question, headed 이어서, the line and placeholder gone, one call', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const w = await noted($, on, store)
+    const ui = await pane($)
+    const key = String((await fieldOf(ui)).props.key)
+    // One question before it, to show it stays among the questions before.
+    w.answer = '`const`는 다시 대입할 수 없습니다.'
+    await ui.input({ key, text: '왜 const야?' })
+    await w.clock.settle()
+    await trace(ui, w)
+    const calls = w.models.length
+    await w.clock.advance(5 * MIN)
+    // The reply ends on a 생각해 보기 of its own, against the rule: no line opens for it, as it is no walk-through.
+    w.answer = '거의 맞습니다. `b`는 3이 됩니다.\n\n**생각해 보기:** 그럼 `a`를 0으로 바꾸면요?'
+    await ui.input({ key, text: '0이요' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(calls + 1)
+    expect(w.budgets.at(-1)).toBe(900)
+    const prompt = w.models.at(-1)!
+    expect(prompt).toContain(`## 학습자의 질문\n0이요\n\n${SECTION}\n${TRACED}\n\n생각해 보기: ${THOUGHT}\n`)
+    expect(prompt).toContain('어느 쪽이든 생각해 보기를 새로 쓰지 않는다.')
+    expect(prompt).toContain('## 앞서 이 노트에 대해 나눈 질문과 답 (이어지는 질문일 수 있다)\n- 질문: 왜 const야?\n')
+    expect(prompt).not.toContain('- 질문: 예시로 따라가기')
+    expect(await ui.find({ type: 'Text', text: '이어서 · 0이요' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '질문 · 0이요' })).toBeUndefined()
+    expect(await ui.find({ type: 'Markdown', text: /거의 맞습니다/ })).toBeDefined()
+    expect(await hintsOf(ui)).toEqual([])
+    expect((await fieldOf(ui)).props).toMatchObject({ placeholder: SHUT, value: '' })
+    // The walk-through above it keeps its head; the journal marks the question that followed it, its head as before.
+    expect(await ui.find({ type: 'Text', text: '▶ 예시로 따라가기' })).toBeDefined()
+    const journal = w.files.get(JOURNAL) ?? ''
+    expect(journal).toContain('**물음** (생각해 보기 뒤): 0이요')
+    expect(journal).toContain('**물음**: 왜 const야?')
+    expect(journal).toContain('**물음**: 예시로 따라가기')
+    expect(journal.match(/^## \d{4}-\d{2}-\d{2} 질문 \(\d{2}:\d{2}\)$/gm)).toHaveLength(3)
+    // A question after that answer is a question again, sent with no walk-through.
+    w.answer = '네.'
+    await ui.input({ key, text: '그럼 let은?' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: '질문 · 그럼 let은?' })).toBeDefined()
+    expect(w.models.at(-1)).not.toContain(SECTION)
+    await ui.unmount()
+    // Kept as 1.7.0 keeps a question: the same three fields, nothing graded, no new store key.
+    for (const one of asksOf(store)) expect(Object.keys(one).sort()).toEqual(['answer', 'at', 'question'])
+    expect(asksOf(store).map(one => one.question)).toEqual(['예시로 따라가기', '0이요', '그럼 let은?'])
+    expect([...store.keys()].filter(k => /think/i.test(k))).toEqual([])
+    expect(store.get('slips')).toBeUndefined()
+    const day = (store.get('activity') as Record<string, Record<string, number>> | undefined)?.['2026-10-03'] ?? {}
+    expect([day.right ?? 0, day.wrong ?? 0, day.drills ?? 0]).toEqual([0, 0, 0])
+  })
+
+  test('the line goes while an answer is written; one that did not come back stays in the field, the line and the placeholder with it', async ($, on) => {
+    const w = await noted($, on)
+    const ui = await pane($)
+    const key = String((await fieldOf(ui)).props.key)
+    await trace(ui, w)
+    // While it is being answered, the line goes with the field.
+    w.model = 'hold'
+    await ui.input({ key, text: '0이요' })
+    expect(await ui.find({ type: 'Text', text: '답을 쓰는 중입니다…' })).toBeDefined()
+    expect(await hintsOf(ui)).toEqual([])
+    expect(await ui.find({ type: 'Input' })).toBeUndefined()
+    w.model = 'error'
+    w.release()
+    await w.clock.settle()
+    await ui.input({ key, text: '0이요' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: /답하지 못했습니다: 서버가 붐빕니다/ })).toBeDefined()
+    expect((await fieldOf(ui)).props).toMatchObject({ value: '0이요', placeholder: OPEN })
+    expect(await hintsOf(ui)).toEqual([HINT.focused])
+    expect(w.models.at(-1)).toContain(SECTION)
+    // Sent again once the model answers: still the walk-through's answer.
+    w.model = 'ok'
+    w.answer = '맞습니다.'
+    await ui.input({ key, text: '0이요' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: '이어서 · 0이요' })).toBeDefined()
+    expect(await hintsOf(ui)).toEqual([])
+    await ui.unmount()
+  })
+
+  test('half an hour on, all of it is 1.7.0\'s again: no line, the first placeholder, 질문, nothing more sent', async ($, on) => {
+    const w = await noted($, on)
+    const ui = await pane($)
+    const key = String((await fieldOf(ui)).props.key)
+    await trace(ui, w)
+    await w.clock.advance(30 * MIN)
+    await ui.redraw()
+    expect(await hintsOf(ui)).toEqual([HINT.focused])
+    expect((await fieldOf(ui)).props.placeholder).toBe(OPEN)
+    // A pane left as it is: drawn again as it closes, with nothing else drawing it.
+    await w.clock.advance(MIN)
+    await w.clock.settle()
+    expect(await hintsOf(ui)).toEqual([])
+    expect((await fieldOf(ui)).props.placeholder).toBe(SHUT)
+    w.answer = '네.'
+    await ui.input({ key, text: '0이요' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: '질문 · 0이요' })).toBeDefined()
+    const prompt = w.models.at(-1)!
+    expect(prompt).not.toContain(SECTION)
+    expect(prompt).toContain('- 질문: 예시로 따라가기')
+    expect(w.files.get(JOURNAL)).toContain('**물음**: 0이요')
+    expect(w.files.get(JOURNAL)).not.toContain('(생각해 보기 뒤)')
+    await ui.unmount()
+  })
+
+  test('a walk-through with no question, or one giving its answer, opens nothing; e after r closes it, r again opens the new one', async ($, on) => {
+    const w = await noted($, on)
+    const ui = await pane($)
+    const key = String((await fieldOf(ui)).props.key)
+    // 1.7.0's walk-through, and one whose question says its answer: both drawn as written, nothing under them.
+    for (const answer of ['1. a는 1입니다.', `1. a는 1입니다.\n**생각해 보기:** ${THOUGHT} (답: 3)`]) {
+      await trace(ui, w, answer)
+      expect(await ui.find({ type: 'Markdown', text: answer })).toBeDefined()
+      expect(await hintsOf(ui)).toEqual([])
+      expect((await fieldOf(ui)).props.placeholder).toBe(SHUT)
+    }
+    w.answer = '네.'
+    await ui.input({ key, text: '2단계를 더 자세히' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: '질문 · 2단계를 더 자세히' })).toBeDefined()
+    expect(w.models.at(-1)).not.toContain(SECTION)
+
+    // r, then e: e's prompt has no walk-through section, and its answer closes the line.
+    await trace(ui, w)
+    expect(await hintsOf(ui)).toEqual([HINT.focused])
+    w.answer = `쉽게 말하면 상자에 이름표를 붙입니다.\n\n**생각해 보기:** ${THOUGHT}`
+    await ui.press({ key: 'easier' })
+    await w.clock.settle()
+    expect(w.models.at(-1)).toContain('이 노트를 더 쉬운 말로')
+    expect(w.models.at(-1)).not.toContain(SECTION)
+    expect(await ui.find({ type: 'Text', text: '▶ 더 쉽게' })).toBeDefined()
+    expect(await hintsOf(ui)).toEqual([])
+    expect((await fieldOf(ui)).props.placeholder).toBe(SHUT)
+
+    // r again: its own new question is the one an answer goes with; r's own prompt never carries a walk-through.
+    const next = '`a`를 5로 바꾸면 `a`는 얼마일까요?'
+    await trace(ui, w, `1. a는 1입니다.\n\n**생각해 보기:** ${next}`)
+    expect(w.models.at(-1)).toContain('구체적인 예시 입력 하나로 한 단계씩 따라가')
+    expect(w.models.at(-1)).toContain('`**생각해 보기:**`로 시작하는 질문 한 문장')
+    expect(w.models.at(-1)).not.toContain(SECTION)
+    expect(await hintsOf(ui)).toEqual([HINT.focused])
+    w.answer = '맞습니다.'
+    await ui.input({ key, text: '5요' })
+    await w.clock.settle()
+    expect(w.models.at(-1)).toContain(`생각해 보기: ${next}\n`)
+    // e's answer, its own 생각해 보기 line with it, stays among the questions before: never sent as the open one.
+    expect(w.models.at(-1)).not.toContain(`생각해 보기: ${THOUGHT}`)
+    expect(w.models.at(-1)).toContain('- 질문: 더 쉽게\n')
+    expect(await ui.find({ type: 'Text', text: '이어서 · 5요' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a store 1.7.0 or 1.6 wrote loads as it is: a walk-through kept there opens while young, a note with no questions draws as before', async ($, on) => {
+    const note = (id: string, at: number, asks?: { question: string; answer: string; at: number }[]) => ({
+      id,
+      turnId: id,
+      at,
+      prompt: `요청 ${id}`,
+      answer: '',
+      changes: [{ file: 'src/a.ts', path: '/proj/src/a.ts', tool: 'Edit', kind: 'update', added: 1, removed: 1, diff: '@@ -1,1 +1,1 @@\n-a\n+b', isCut: false }],
+      moreFiles: 0,
+      status: 'ready',
+      text: NOTE_TEXT,
+      savedAs: 'ready',
+      ...(asks ? { asks } : {}),
+    })
+    const store = new Map<string, unknown>([
+      ['history', { '/proj': { at: NOW, notes: [note('old', NOW - 86_400_000), note('kept', NOW - 20 * MIN, [{ question: '예시로 따라가기', answer: TRACED, at: NOW - 10 * MIN }])] } }],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Markdown', text: TRACED })).toBeDefined()
+    expect(await hintsOf(ui)).toEqual([HINT.focused])
+    const key = String((await fieldOf(ui)).props.key)
+    w.answer = '맞습니다.'
+    await ui.input({ key, text: '3이요' })
+    await w.clock.settle()
+    expect(w.models.at(-1)).toContain(`${SECTION}\n${TRACED}\n`)
+    expect(await ui.find({ type: 'Text', text: '이어서 · 3이요' })).toBeDefined()
+    // The note before, with no questions at all, as 1.6 kept it.
+    await ui.press({ key: 'prev' })
+    expect(await ui.find({ type: 'Markdown', text: /let을 const로/ })).toBeDefined()
+    expect(await hintsOf(ui)).toEqual([])
+    expect((await fieldOf(ui)).props.placeholder).toBe(SHUT)
+    await ui.unmount()
   })
 })
