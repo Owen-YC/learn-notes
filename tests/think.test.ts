@@ -187,7 +187,7 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
     expect(thinkOf('1. a\n**생각해 보기:** 입력이 0이면 무엇이 찍힐지 떠올려 보세요.')).toBe('입력이 0이면 무엇이 찍힐지 떠올려 보세요.')
   })
 
-  test('thinkOf takes a question only once its sentence ends: a reply cut inside the line (the r call\'s token cap) opens nothing', () => {
+  test('thinkOf takes a question only once its sentence ends: a reply cut inside the line (the r call\'s token cap) opens nothing, unless the cut stops on a sentence\'s end', () => {
     const steps = '1. `sum([2, 3])`을 부르면 `total`은 0입니다.\n2. `n`이 2일 때 `total`은 2입니다.\n\n'
     // $.model.complete says nothing of a reply cut at maxTokens: its text so far comes back answered.
     for (const cutOff of ['**생각해 보기:** 배열이 `[]`이면 `tot', '**생각해 보기:** 배열이 `[]`이면 `total`은', '**생각해 보기:** `b`를 3으로 바꾸면 마지막에', '**생각해 보기**\n배열이 `[]`이면 `total`은 얼마', '**생각해 보기:** 입력이 `[1, 2]`가 아니라 `[3]`이면'])
@@ -206,6 +206,14 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
       ['생각해 보기: (입력이 0이면 무엇이 찍힐지 떠올려 보세요!)', '(입력이 0이면 무엇이 찍힐지 떠올려 보세요!)'],
     ]
     for (const [last, said] of ended) expect([last, thinkOf(`${steps}${last}`)]).toEqual([last, said])
+    // Only the last character is read (docs/qa/견본.md says so): a cut that stops on one of these reads as ended and
+    // opens, a statement's piece too (`된다면` at `된다`, a cut just past the line's first full stop).
+    const stoppedOn: [string, string][] = [
+      ['**생각해 보기:** 두 번째 항목의 `qty`가 0이 된다', '두 번째 항목의 `qty`가 0이 된다'],
+      ['**생각해 보기:** 두 번째 항목의 `qty`를 0으로 바꿉니다.', '두 번째 항목의 `qty`를 0으로 바꿉니다.'],
+    ]
+    for (const [last, said] of stoppedOn) expect([last, thinkOf(`${steps}${last}`)]).toEqual([last, said])
+    expect(openThink([{ question: TRACE_LABEL, answer: `${steps}${stoppedOn[0]![0]}`, at: 1 }], 2)?.question).toBe(stoppedOn[0]![1])
   })
 
   test('openThink: only r\'s walk-through last, ending on a question, THINK_OPEN_MS after it came at most', () => {

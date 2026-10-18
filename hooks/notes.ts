@@ -1638,7 +1638,8 @@ const THINK_CLOSE = /^[\s*)）]*$/
 /**
  * How a question's sentence ends: a question mark or a full stop, or 요, 까, 다 or 죠 with none, closed as THINK_CLOSE
  * lets. A line ending on none was cut, not asked: by the r call's maxTokens (of which $.model.complete says nothing,
- * the text so far coming back answered), or by askNote's own cut and its ellipsis.
+ * the text so far coming back answered), or by askNote's own cut and its ellipsis. Only the last character is read:
+ * a cut that stops on one of these (`된다면` at `된다`, `될까요?` at `될까`, just past a full stop) reads as ended.
  */
 const THINK_END = /(?:[?？.!！。]|[요까다죠])[\s*)）]*$/u
 
@@ -1646,7 +1647,8 @@ const THINK_END = /(?:[?？.!！。]|[요까다죠])[\s*)）]*$/u
  * The question a walk-through ends on (생각해 보기, THINK_ASK), or undefined: its last line that is not blank, or
  * the line after a label alone (`**생각해 보기**` with the question on the next line, the last). None when the
  * question is empty, says its answer (`답:`, 정답), goes on past its last `?` or stops short of its sentence's end
- * (THINK_END, a reply cut inside the line): such a line stays in the answer as written, but nothing opens for it.
+ * (THINK_END, a reply cut inside the line, unless it stops on a sentence mark, 요, 까, 다 or 죠): such a line stays in the
+ * answer as written, but nothing opens for it.
  * Cut to 300 characters.
  */
 export function thinkOf(answer: string): string | undefined {
