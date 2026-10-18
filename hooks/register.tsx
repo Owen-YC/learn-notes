@@ -6395,7 +6395,8 @@ function gatherFailText(code: string): string {
  * /learn 보고서 모으기 파일 (1.8.0): a leader's team learning map (teamMapText) of the /learn 보고서 the team sent them,
  * gathered in one .md or .txt file, with no line per person. One file and no folder: one person's weekly reports in a
  * journal folder would make up three. The permission rules are asked before anything is read (where the path lands,
- * too); a network location is never read; a file past GATHER_READ_MAX is not. Reports read to the same values count
+ * too); a network location is never read; a file past GATHER_READ_MAX is not. The help's word `파일` typed before the
+ * path is taken off where nothing is at the whole (교차 검토 3). Reports read to the same values count
  * once and only those holding one day together count (overlapReports), TEAM_MAP_REPORTS at most; fewer than
  * TEAM_MAP_MIN make no map. The map goes on the clipboard as /learn 보고서 does (deliver), else in the reply. No model
  * call, no store write, no file written, and no fault kept: a path mistyped is no failure of the plugin's for /learn 진단.
@@ -6413,7 +6414,13 @@ async function gatherCommand($: EngineInterface, raw: string, isAway: boolean): 
   try {
     stat = await $.fs.stat(path, { resolve: true })
   } catch (error) {
-    return gatherFailText(faultCode(error))
+    // The help's word for the file typed before the path (`/learn 보고서 모으기 파일 ~/팀.md`), where nothing is at the
+    // whole (none there, or no such name: Windows' `C:\proj/파일 C:\…`): the path after it, asked of every check again.
+    // A folder `파일 모음` that is there is read as typed.
+    const code = faultCode(error)
+    const after = /^(?:파일|file)\s+(\S[\s\S]*)$/i.exec(raw.trim())
+    if (after && (code === 'ENOENT' || code === 'EINVAL')) return gatherCommand($, after[1]!, isAway)
+    return gatherFailText(code)
   }
   // Where the path lands is judged too, a link or a file in a linked folder, as a team term's file is. With no landing it
   // leads nowhere (`other`) or a hook above withheld it, and a guard denies without it.

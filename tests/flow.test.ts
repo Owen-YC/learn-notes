@@ -12334,6 +12334,8 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through, answered in t
     await ui.input({ key, text: '그럼 let은?' })
     await w.clock.settle()
     expect(await ui.find({ type: 'Text', text: '질문 · 그럼 let은?' })).toBeDefined()
+    // The answer before it keeps its head: a question follows the walk-through by its place, not by being the last (교차 검토 3).
+    expect(await ui.find({ type: 'Text', text: '이어서 · 0이요' })).toBeDefined()
     expect(w.models.at(-1)).not.toContain(SECTION)
     await ui.unmount()
     // Kept as 1.7.0 keeps a question: the same three fields, nothing graded, no new store key.
@@ -12679,11 +12681,17 @@ describe('1.8.0: /learn 보고서 모으기, a team map of the reports gathered 
     expect(await ask('보고서 모으기 둘.md')).toBe('보고서가 3개 이상 있어야 팀 학습 지도를 만듭니다 · 지금 센 보고서 2개\n같은 보고서 1개는 한 번만 셌습니다')
     w.files.set('/proj/메모.txt', '이번 주 회의 메모\n- 학습 노트 3개\n')
     expect(await ask('보고서 모으기 메모.txt')).toBe("learn-notes 보고서를 찾지 못했습니다 · '# 학습 보고 ·'로 시작하는 글을 .md나 .txt(UTF-8)로 저장해 주세요")
+    // Heads whose notes line a chat dropped: none read, and the second line says why (교차 검토 3).
+    const cut = report(['클로저']).replace(/^- 학습 노트 3개\n/m, '')
+    w.files.set('/proj/잘린.md', [cut, cut].join('\n\n'))
+    expect(await ask('보고서 모으기 잘린.md')).toBe(
+      "learn-notes 보고서를 찾지 못했습니다 · '# 학습 보고 ·'로 시작하는 글을 .md나 .txt(UTF-8)로 저장해 주세요\n형식이 맞지 않는 보고서 2개는 뺐습니다",
+    )
     expect(w.copied).toEqual([])
     // A path mistyped is no fault of the plugin's: nothing for /learn 진단, no debug line.
     expect(JSON.stringify(w.store.get('faults') ?? null)).toBe(faults)
     expect(w.logs.slice(logs).filter(line => line.startsWith('learn-notes: '))).toEqual([])
-    for (const text of said) for (const typed of ['없음.md', 'server', '팀.md', '팀공유', '비밀', '링크', '둘.md', '메모']) expect(text).not.toContain(typed)
+    for (const text of said) for (const typed of ['없음.md', 'server', '팀.md', '팀공유', '비밀', '링크', '둘.md', '메모', '잘린']) expect(text).not.toContain(typed)
   })
 
   test('a path typed as Explorer or Finder shows it (a Korean folder name, no .txt, no folder) finds nothing: the line says why and how to copy the real one (교차 검토)', async ($, on) => {
@@ -12711,6 +12719,57 @@ describe('1.8.0: /learn 보고서 모으기, a team map of the reports gathered 
     expect((await learn($, '보고서 모으기 @팀.md')).text).toBe(`${COPIED}\n${LEFT}`)
     expect((await learn($, '보고서 모으기 @"팀 보고서.md"')).text).toBe(`${COPIED}\n${LEFT}`)
     expect(w.copied).toHaveLength(2)
+  })
+
+  test('the help\'s word for the file typed before the path: where nothing is at the whole, the path after it is read, its rules asked again (교차 검토 3)', async ($, on) => {
+    const reads: string[] = []
+    const checks: string[] = []
+    on('fs.read', { path: /\.(?:md|txt)$/ }, (_$, e, next) => {
+      reads.push(e.path)
+      return next(e)
+    })
+    const w = world(on)
+    on('tool.check', { tool: 'Read' }, (_$, e) => {
+      const path = String((e.input as { file_path?: string }).file_path)
+      checks.push(path)
+      return { decision: path.startsWith('/home/u/secret/') ? 'deny' : 'allow' }
+    })
+    await start($)
+    w.files.set(FILE, GATHERED)
+    w.files.set('/home/u/Downloads/팀보고서.txt', GATHERED)
+    w.files.set('/home/u/secret/팀.md', GATHERED)
+    // On a disk, the whole as typed leads nowhere: the folder `파일 ` is not there.
+    const typed = {
+      '보고서 모으기 파일 /proj/팀.md': '/proj/파일 /proj/팀.md',
+      '보고서 모으기 파일 팀.md': '/proj/파일 팀.md',
+      '보고서 모으기 파일 ~/Downloads/팀보고서.txt': '/proj/파일 ~/Downloads/팀보고서.txt',
+      'report collect File ~/Downloads/팀보고서.txt': '/proj/File ~/Downloads/팀보고서.txt',
+      '보고서 모으기 파일 "~/Downloads/팀보고서.txt"': '/proj/파일 "~/Downloads/팀보고서.txt"',
+      '보고서 모으기 파일 /home/u/secret/팀.md': '/proj/파일 /home/u/secret/팀.md',
+    }
+    w.statFails = new Map(Object.values(typed).map(path => [path, 'ENOENT']))
+    const read = reads.length
+    for (const args of Object.keys(typed).slice(0, 5)) expect((await learn($, args)).text).toBe(`${COPIED}\n${LEFT}`)
+    expect(w.copied).toHaveLength(5)
+    expect(reads.slice(read)).toEqual([FILE, FILE, '/home/u/Downloads/팀보고서.txt', '/home/u/Downloads/팀보고서.txt', '/home/u/Downloads/팀보고서.txt'])
+    // The path after the word is asked of the permission rules as any is, and not read where they forbid it.
+    expect((await learn($, '보고서 모으기 파일 /home/u/secret/팀.md')).text).toBe('권한 설정이 이 파일 읽기를 막습니다')
+    expect(checks).toContain('/home/u/secret/팀.md')
+    expect(reads.slice(read)).not.toContain('/home/u/secret/팀.md')
+    // A folder of that name in the project is read as typed.
+    w.files.set('/proj/파일 모음/팀.md', GATHERED)
+    expect((await learn($, '보고서 모으기 파일 모음/팀.md')).text).toBe(`${COPIED}\n${LEFT}`)
+    expect(reads.at(-1)).toBe('/proj/파일 모음/팀.md')
+    // No such name (Windows, where the drive's `:` lands mid-path) is nothing there too.
+    w.statFails = new Map([['/proj/파일 팀.md', 'EINVAL']])
+    expect((await learn($, '보고서 모으기 파일 팀.md')).text).toBe(`${COPIED}\n${LEFT}`)
+    // Another cause at the whole is said as before.
+    w.statFails = new Map([['/proj/파일 팀.md', 'EACCES']])
+    expect((await learn($, '보고서 모으기 파일 팀.md')).text).toBe('그 파일을 읽지 못했습니다: 이 파일을 읽을 권한이 없습니다')
+    // Nothing at the path after it either: nothing found, the path never said.
+    w.statFails = new Map([['/proj/파일 없음.md', 'ENOENT'], ['/proj/없음.md', 'ENOENT']])
+    expect((await learn($, '보고서 모으기 파일 없음.md')).text).toBe(MISSING)
+    expect(w.copied).toHaveLength(7)
   })
 
   test('where the path lands is judged too: a file in a linked folder, a landing withheld; a pipe and a link to nowhere are not read', async ($, on) => {

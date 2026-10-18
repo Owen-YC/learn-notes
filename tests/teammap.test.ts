@@ -236,6 +236,32 @@ describe('1.8.0: /learn 보고서 모으기 reads the reports back (E5)', () => 
     expect(read.reports[0]!.notes).toBe(3)
     // Another count is another report.
     expect(readReports([text, text.replace('- 학습 노트 3개', '- 학습 노트 4개')].join('\n')).reports).toHaveLength(2)
+    // So are two whose calls line alone differs (교차 검토 3).
+    const more = report({ fresh: ['클로저'], calls: { calls: 21, auto: 12, input: 46_000, output: 10_000 } })
+    expect(more.split('\n').filter((line, i) => line !== text.split('\n')[i])).toEqual([expect.stringMatching(/^- 학습 노트의 모델 호출 21번/)])
+    const calls = readReports([text, more].join('\n'))
+    expect(calls.reports.map(one => one.calls?.calls)).toEqual([20, 21])
+    expect(calls.repeated).toBe(0)
+  })
+
+  test('a names line read to its bounds, a whole line in Slack\'s bold, and a head with its days backwards (교차 검토 3)', () => {
+    const one = report({ fresh: ['x'] })
+    expect(one).toMatch(/^- 새로 배운 개념 1개: x$/m)
+    const names = (list: string) => readOne(one.replace(/^- 새로 배운 개념 1개: x$/m, list)).fresh
+    // A name past 80 characters is cut there; a line of more than 30 names reads 30.
+    expect(names(`- 새로 배운 개념 1개: ${'ㄱ'.repeat(100)}`)).toEqual(['ㄱ'.repeat(80)])
+    const forty = Array.from({ length: 40 }, (_, i) => `n${i}`)
+    expect(names(`- 새로 배운 개념 40개: ${forty.join(' · ')}`)).toEqual(forty.slice(0, 30))
+    // Slack's bold around a whole names line: off it, with no `*` left on the last name.
+    const text = report({ fresh: ['클로저', 'map'] })
+    const slack = text.replace(/^- (새로 배운 개념 .*)$/m, '• *$1*')
+    expect(slack).toMatch(/^• \*새로 배운 개념 2개: .*\*$/m)
+    expect(readOne(slack).fresh).toEqual(['map', '클로저'])
+    expect(readOne(slack)).toEqual(readOne(text))
+    // A head with its days the wrong way round (written by hand) reads them in order.
+    const backwards = text.replace(/^# 학습 보고 · (\d{4}-\d{2}-\d{2}) ~ (\d{4}-\d{2}-\d{2})/m, '# 학습 보고 · $2 ~ $1')
+    expect(backwards).not.toBe(text)
+    expect(readOne(backwards)).toEqual(readOne(text))
   })
 
   test('only reports holding one day together count: one person\'s three weeks are one, three last-7-days on different days are three', () => {
@@ -322,6 +348,10 @@ describe('1.8.0: the team learning map, with no line per person (E5)', () => {
     const three = teamMapText(read({ fresh: ['클로저'] }, { fresh: ['클로저'] }, { fresh: ['클로저'] }), undefined, {})
     expect(three).toContain('- 여럿이 새로 배운 개념: 클로저 (3)')
     expect(three).not.toContain('미만에 나온 개념')
+    // New in two reports and missed in two others: the concepts hidden are counted, not their rows, so one (교차 검토 3).
+    const both = teamMapText(read({ fresh: ['클로저'] }, { fresh: ['클로저'] }, { missed: ['클로저'] }, { missed: ['클로저'] }), undefined, {})
+    expect(both).toContain('- 보고서 3개 미만에 나온 개념 1개는 이름을 적지 않았습니다\n')
+    expect(both).not.toContain('클로저')
     // Its spelling the one written most.
     const cased = teamMapText(read({ fresh: ['Async/Await'] }, { fresh: ['async/await'] }, { fresh: ['async/await'] }), undefined, {})
     expect(cased).toContain('- 여럿이 새로 배운 개념: async/await (3)')
@@ -340,6 +370,21 @@ describe('1.8.0: the team learning map, with no line per person (E5)', () => {
     const quiet = read({ fresh: ['b', '나'], right: 0, wrong: 0 }, { fresh: ['나', 'b'], right: 0, wrong: 0 }, { fresh: ['b', '나'], right: 0, wrong: 0 })
     expect(teamMapText(quiet, undefined, {})).toContain('- 퀴즈: 채점한 문제가 없습니다\n- 여럿이 새로 배운 개념: 나 (3) · b (3)\n')
     expect(teamMapText([...quiet].reverse(), undefined, {})).toBe(teamMapText(quiet, undefined, {}))
+  })
+
+  test('fifteen new concepts named at most, and a name written as reportMarkdown writes one: its table bar escaped, no backtick (교차 검토 3)', () => {
+    const [base] = read({})
+    const sixteen = Array.from({ length: 16 }, (_, i) => `개념 ${String(i).padStart(2, '0')}`)
+    const wide = teamMapText([1, 2, 3].map(notes => ({ ...base!, notes, fresh: sixteen })), undefined, {})
+    expect(wide).toContain(`\n- 여럿이 새로 배운 개념: ${sixteen.slice(0, 15).map(name => `${name} (3)`).join(' · ')} 외 1개\n`)
+    // A bar a report escaped is read unescaped, and written escaped again; a backtick is dropped.
+    const bar = read({ fresh: ['타입 | 유니언'] }, { fresh: ['타입 | 유니언'] }, { fresh: ['타입 | 유니언'] })
+    expect(bar[0]!.fresh).toEqual(['타입 | 유니언'])
+    expect(teamMapText(bar, undefined, {})).toContain('\n- 여럿이 새로 배운 개념: 타입 \\| 유니언 (3)\n')
+    const ticked = teamMapText([1, 2, 3].map(notes => ({ ...base!, notes, fresh: ['`a`b'], missed: ['`a`b'] })), undefined, {})
+    expect(ticked).toContain('\n- 여럿이 새로 배운 개념: ab (3)\n- 여럿이 다시 볼 개념(퀴즈에서 틀림): ab (3)\n')
+    expect(ticked).toContain('\n- **ab**: \n')
+    expect(ticked).not.toContain('`a')
   })
 
   test('the team terms count only the reports made with this repository\'s terms', () => {
