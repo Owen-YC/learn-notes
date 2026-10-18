@@ -4001,6 +4001,9 @@ export type QuizPick = RankedConcept & {
   teamTag?: string
   teamBlurb?: string
   isTeamMarked?: true
+  /** Which code it is asked in (1.8.0, rungOf), and for a question in code of the quiz's own making the language its note's code was in. */
+  rung?: QuizRung
+  lang?: string
 }
 
 /** What a quiz question asks: the output or value of some code, why a line is there, or how to change it. */
@@ -4008,6 +4011,149 @@ export type QuizKind = NonNullable<LearnQuizItem['kind']>
 
 /** Each kind of question as the pane names it after the question's number. */
 export const KIND_LABEL: Readonly<Record<QuizKind, string>> = { predict: '예측', why: '왜', modify: '바꿔 보기' }
+
+/**
+ * Which code a quiz question asks in (1.8.0, the question ladder), set by the concept's review step and never chosen
+ * by the learner: its own code as the note met it, that code with one value, condition or order changed so the answer
+ * remembered no longer fits, code never seen (off in 1.8.0), or a worked example first once it was missed twice running.
+ */
+export type QuizRung = NonNullable<LearnQuizItem['rung']>
+
+/** Each rung as the quiz prompt names it; the pane's title and the conversation name only 비슷한 코드, 풀이 보고 풀기 (and 처음 보는 코드). */
+export const RUNG_LABEL: Readonly<Record<QuizRung, string>> = { worked: '풀이 보고 풀기', mine: '내 코드', changed: '비슷한 코드', new: '처음 보는 코드' }
+
+/** The review step from which a concept is asked in its code changed (비슷한 코드): the third, a week after the last. */
+export const RUNG_CHANGED_STEP = 2
+/**
+ * The review step from which a concept due is asked in code never seen (처음 보는 코드). Off in 1.8.0: that question's
+ * answer is the model's too, and a wrong one would cost a concept weeks of steps; on (4) once a sample shows it right.
+ */
+export const RUNG_NEW_STEP = Infinity
+/** Misses running on one concept (its open slip's `times`) after which the next review quiz shows a worked example first. */
+export const WORKED_AFTER_TIMES = 2
+/** The languages a question in code never seen may be written in: the ones its samples could run. */
+const RUNG_NEW_EXTS: readonly string[] = ['js', 'mjs', 'cjs', 'ts', 'py']
+
+/** What each rung asks of the quiz, said only for the rungs the quiz has, in this order. */
+const RUNG_ASK: readonly [QuizRung, string][] = [
+  ['mine', '내 코드: 학습자가 만든 코드를 그대로 보여 주고 묻는다.'],
+  ['changed', '비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 보여 주고 묻는다. 원래 코드의 답으로는 맞힐 수 없게 바꾼다.'],
+  ['new', '처음 보는 코드: 학습자 코드와 다른 상황에서 그 개념을 쓰는 8줄 이하 코드를 새로 써서 묻는다. 괄호 안 언어로, 기본 기능만 쓰고 결과가 하나로 정해지게 쓴다.'],
+  [
+    'worked',
+    '풀이 보고 풀기: 문제를 "풀이:"로 시작해, "지난번" 줄의 헷갈림이 드러나는 4줄 이하 예와 그 결과, 까닭 한 문장을 먼저 보인다. 여기서는 까닭에 헷갈린 점을 풀어 써도 된다. 헷갈린 점이 없으면(떠올리지 못함) 그 개념의 기본 쓰임을 풀이로 보인다. 이어서 "이제 풀어 보세요:" 뒤에 같은 원리를 다른 값으로 묻는다. 풀이의 결과와 문제의 답이 같지 않게 한다. 힌트에서 풀이를 되풀이하지 않는다.',
+  ],
+]
+
+/** Said when a quiz has a rung whose code the quiz writes itself, over QUIZ_SYSTEM's "only in the words and code given". */
+const RUNG_WRITES = "'처음 보는 코드'·'풀이 보고 풀기' 칸은 그 개념을 쓰는 짧은 코드를 새로 쓴다. 그 밖에는 주어진 설명과 코드 안에서만 묻는다."
+
+/** Where a worked example's question shows its example (풀이:) and where the question it asks begins (이제 풀어 보세요:). */
+const WORKED_SHOWN = /풀이\s*(?:\*\*|__)?\s*[:：]/
+const WORKED_ASKS = /이제\s*풀어\s*보세요\s*(?:\*\*|__)?\s*[:：]\s*(?:\*\*|__)?/
+
+/** A file's extension, lower case (`src/A.JS` → `js`); none for a name without one, a dot file, or one past 8 characters. */
+export function extOf(file: string): string | undefined {
+  const name = file.split(/[\\/]/).at(-1) ?? ''
+  const dot = name.lastIndexOf('.')
+  if (dot <= 0) return undefined
+  const ext = name.slice(dot + 1).toLowerCase()
+  return ext !== '' && ext.length <= 8 ? ext : undefined
+}
+
+/**
+ * Which code a picked concept is asked in, the first that fits: none for a team term of this repository (asked by the
+ * team's words and lines, as in 1.7); a worked example once its open slip, asked again, was missed WORKED_AFTER_TIMES
+ * times running and not set right on the try again (`isRight`); none for any other open slip (다시 도전, as in 1.7) or
+ * a concept with no code (asked why); code never seen from `newStep` on, for a concept due whose code a sample could
+ * run; its code changed from RUNG_CHANGED_STEP on (any language, a concept filling the quiz before it is due too);
+ * else its own code.
+ */
+export function rungOf(
+  one: LearnConcept,
+  how: { code?: { file: string }; slip?: Pick<LearnSlip, 'times' | 'isRight'>; isAsking: boolean; isTeam: boolean; isDue: boolean },
+  newStep = RUNG_NEW_STEP,
+): QuizRung | undefined {
+  if (how.isTeam) return undefined
+  if (how.slip) return how.isAsking && how.slip.times >= WORKED_AFTER_TIMES && how.slip.isRight !== true ? 'worked' : undefined
+  if (!how.code) return undefined
+  const step = stepOf(one)
+  const ext = extOf(how.code.file)
+  if (step >= newStep && how.isDue && ext !== undefined && RUNG_NEW_EXTS.includes(ext)) return 'new'
+  return step >= RUNG_CHANGED_STEP ? 'changed' : 'mine'
+}
+
+/**
+ * A pick as its rung asks it: a question in code of the quiz's own making (a worked example, code never seen) is sent
+ * the language of the learner's code, not the code; code never seen, the concept's words without the lines they
+ * quote too, so the line remembered is not seen again.
+ */
+export function pickForRung<T extends QuizPick>(pick: T, rung: QuizRung | undefined): T {
+  if (rung === undefined) return pick
+  if (rung !== 'worked' && rung !== 'new') return { ...pick, rung }
+  const { code, ...rest } = pick
+  const lang = code ? extOf(code.file) : undefined
+  const blurb = rung === 'new' ? unquoted(pick.blurb) : pick.blurb
+  return { ...rest, blurb, rung, ...(lang !== undefined ? { lang } : {}) } as T
+}
+
+/** Words with the code they quote in backticks taken out, and a dash or colon left hanging after them. */
+function unquoted(text: string): string {
+  return text
+    .replace(/``(.+?)``|`([^`]+)`/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\s*[—–:,·-]\s*$/, '')
+    .trim()
+}
+
+/** The code a question shows: each fenced block's lines, and each span in backticks outside them. */
+function shownCode(question: string): string[] {
+  const shown: string[] = []
+  const prose: string[] = []
+  let fence: string | null = null
+  let lines: string[] = []
+  for (const raw of question.split('\n')) {
+    const bare = BARE_FENCE.exec(raw)
+    if (fence === null && bare) {
+      fence = bare[1]!
+      lines = []
+    } else if (fence !== null && bare && bare[1]!.startsWith(fence[0]!) && bare[1]!.length >= fence.length) {
+      shown.push(lines.join('\n'))
+      fence = null
+    } else if (fence !== null) {
+      lines.push(raw)
+    } else {
+      prose.push(raw)
+    }
+  }
+  for (const m of prose.join('\n').matchAll(/``(.+?)``|`([^`\n]+)`/g)) shown.push(m[1] ?? m[2]!)
+  return shown
+}
+
+/**
+ * The rung a question keeps, read against what the model wrote: a worked example with no example shown (no 풀이:)
+ * keeps none, nor code meant changed that is shown as it was; any other keeps its pick's.
+ */
+function keptRung(pick: Pick<QuizPick, 'rung' | 'code'>, question: string): QuizRung | undefined {
+  if (pick.rung === 'worked') return WORKED_SHOWN.test(question) ? 'worked' : undefined
+  if (pick.rung === 'changed' && pick.code) {
+    const mine = squash(pick.code.text)
+    if (mine !== '' && shownCode(question).some(code => squash(code) === mine)) return undefined
+  }
+  return pick.rung
+}
+
+/**
+ * The question a flash card asks (/learn 안키): a worked example's, only what follows 이제 풀어 보세요 (the example
+ * would give the card away), none when that is not there; any other question as it is.
+ */
+export function bankQuestion(item: Pick<LearnQuizItem, 'question' | 'rung'>): string | undefined {
+  if (item.rung !== 'worked') return item.question
+  const m = WORKED_ASKS.exec(item.question)
+  if (!m) return undefined
+  const asked = item.question.slice(m.index + m[0].length).trim()
+  return asked !== '' ? asked : undefined
+}
 
 /** Characters of the learner's code a quiz question is shown for one concept. */
 const QUIZ_CODE_BUDGET = 700
@@ -4115,11 +4261,17 @@ export const QUIZ_SYSTEM = [
  * slip (1.7.0) carries its last question, the learner's answer and the
  * slip, to be asked again in other code that shows the same slip, never naming it. A team term (1.7.0 D6) is marked
  * `(팀 용어)`, carries the team's lines under their own head (`팀 코드 (fetcher.ts 12~30줄)`) when it has them, and the
- * quiz is told the team's words and lines are data (TEAM_IS_DATA).
+ * quiz is told the team's words and lines are data (TEAM_IS_DATA). A concept on a rung of the question ladder (1.8.0)
+ * says it under its head (`칸: 비슷한 코드`), and the quiz is told what each of its rungs asks (RUNG_ASK); one asked by
+ * a worked example has its slip shown in the example, so the sentence that keeps a slip unsaid leaves it out.
  */
-export function quizPrompt(picks: readonly (LearnConcept & Pick<QuizPick, 'code' | 'slip' | 'team' | 'teamCode' | 'isTeamMarked'>)[], level: Level): string {
-  const hasCode = picks.some(one => one.code !== undefined && one.teamCode === undefined)
-  const hasSlip = picks.some(one => one.slip !== undefined)
+export function quizPrompt(
+  picks: readonly (LearnConcept & Pick<QuizPick, 'code' | 'slip' | 'team' | 'teamCode' | 'isTeamMarked' | 'rung' | 'lang'>)[],
+  level: Level,
+): string {
+  const rungs = new Set(picks.flatMap(one => (one.rung ? [one.rung] : [])))
+  const hasWorked = rungs.has('worked')
+  const hasSlip = picks.some(one => one.slip !== undefined && one.rung !== 'worked')
   const isTeam = (one: Pick<QuizPick, 'team' | 'isTeamMarked'>) => one.team === true || one.isTeamMarked === true
   return [
     LEVEL_TEXT[level],
@@ -4128,22 +4280,28 @@ export function quizPrompt(picks: readonly (LearnConcept & Pick<QuizPick, 'code'
     ...picks.flatMap((one, i) => {
       const head = `${i + 1}. ${isTeam(one) ? '(팀 용어) ' : ''}${one.name} — ${one.blurb || '(설명 없음)'}`
       const last = one.slip ? [`   ${slipAskedLine(one.slip)}`] : []
+      const rung = one.rung ? [`   칸: ${RUNG_LABEL[one.rung]}${one.lang ? ` (${one.lang}로)` : ''}`] : []
       // A team term's own lines (1.7.0 D6) stand over the learner's code: it is the team's code the term is learned by here.
       if (one.teamCode) {
         const fence = fenceFor(one.teamCode.text)
-        return [head, ...last, `   ${teamCodeHead(one.teamCode)}:`, fence, one.teamCode.text, fence]
+        return [head, ...last, ...rung, `   ${teamCodeHead(one.teamCode)}:`, fence, one.teamCode.text, fence]
       }
-      if (!one.code) return [head, ...last]
+      if (!one.code) return [head, ...last, ...rung]
       const fence = fenceFor(one.code.text)
-      return [head, ...last, `   학습자가 만든 코드 (${one.code.file}):`, fence, one.code.text, fence]
+      return [head, ...last, ...rung, `   학습자가 만든 코드 (${one.code.file}):`, fence, one.code.text, fence]
     }),
     '',
     `개념마다 문제 하나씩, 위 순서대로 ${picks.length}개를 낸다. 문제에 개념 이름을 그대로 쓰지 말고, 코드나 상황을 보여 주고 묻는다.`,
-    ...(hasCode ? ['학습자가 만든 코드가 붙은 개념은 그 코드를 그대로, 또는 조금 바꿔 보여 주고 묻는다. 자기 코드로 다시 떠올리게 하는 것이 목적이다.'] : []),
-    ...(hasSlip ? ['"지난번" 줄이 붙은 개념은 같은 헷갈림이 드러나는 다른 코드나 값으로 묻는다. 지난 문제를 되풀이하지 않는다. 헷갈린 점을 문제나 힌트에 쓰지 않는다.'] : []),
+    ...RUNG_ASK.filter(([rung]) => rungs.has(rung)).map(([, ask]) => ask),
+    ...(hasWorked || rungs.has('new') ? [RUNG_WRITES] : []),
+    ...(hasSlip
+      ? [
+          `"지난번" 줄이 붙은 개념${hasWorked ? ' 가운데 칸이 "풀이 보고 풀기"가 아닌 것' : ''}은 같은 헷갈림이 드러나는 다른 코드나 값으로 묻는다. 지난 문제를 되풀이하지 않는다. 헷갈린 점을 문제나 힌트에 쓰지 않는다.`,
+        ]
+      : []),
     ...(picks.some(isTeam) ? [TEAM_FOR_QUIZ] : []),
     '문제 유형: 예측은 코드를 보여 주고 출력이나 값을 맞히게 한다. 바꿔 보기는 바라는 동작을 말하고 어느 줄을 어떻게 바꿀지 묻는다. 왜는 어떤 줄을 빼거나 바꾸면 어떻게 되는지, 왜 그렇게 썼는지 묻는다.',
-    '학습자 코드가 붙은 개념은 예측(코드만으로 출력이나 값이 하나로 정해질 때만) 또는 바꿔 보기로, 코드가 없는 개념은 왜로 낸다. 한 퀴즈 안에서는 되도록 서로 다른 유형으로 낸다.',
+    '코드가 붙었거나 칸이 붙은 개념은 예측(코드만으로 출력이나 값이 하나로 정해질 때만) 또는 바꿔 보기로, 칸도 코드도 없는 개념은 왜로 낸다. 한 퀴즈 안에서는 되도록 서로 다른 유형으로 낸다.',
     '답은 예측이면 출력이나 값을, 바꿔 보기면 바꾼 코드와 그 까닭을, 왜면 무엇이 달라지는지를 쓴다.',
     '힌트는 막힌 학습자가 답을 떠올리게 돕는 실마리 한 문장이다. 답이나 개념 이름을 그대로 말하지 않는다.',
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
@@ -4577,15 +4735,29 @@ export type SlipNotice = { kind: 'slip' | 'blank' | 'mended' | 'again' | 'fixed'
 /** Said of a question asked again and missed again; the pane and the conversation each add where to look next. */
 export const SLIP_AGAIN = '같은 곳을 또 헷갈렸습니다'
 
+/** Said of a miss after which the next review quiz shows a worked example first (isWorkedNext, 1.8.0). */
+export const WORKED_NEXT = '다음 복습 퀴즈는 풀이부터 보여 줍니다'
+
+/**
+ * True when a graded question's concept is asked by a worked example in the next review quiz (rungOf): its slip
+ * (`record`, as the store has it after the grade) open, missed WORKED_AFTER_TIMES times running, not set right on a
+ * try again, and the question no team term's (asked by the team's words, as in 1.7).
+ */
+export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuizItem, 'team'>): boolean {
+  return record !== undefined && record.fixedAt === undefined && record.times >= WORKED_AFTER_TIMES && record.isRight !== true && item.team !== true
+}
+
 /**
  * The line a graded question shows under its feedback about its concept's slip (`record`, as the store has it now):
  * the slip this grade kept and that the next quiz asks it again, an answer with nothing in it (by what it was: none
  * recalled, or a real one too short to read a slip from), a slip mended right after a question asked back, a question
  * asked again missed again, mended on another day, or right again the same day (only with no hint and no question
  * asked back, `isHelped` false). Nothing when the grade kept none (the schema guard on, a store that refused it).
+ * A worked example missed (1.8.0) is a question asked again missed again; a miss that makes the next review quiz show
+ * a worked example (isWorkedNext) says so in place of the next quiz's other code (the callers add it to `again`).
  */
 export function slipNotice(
-  item: Pick<LearnQuizItem, 'result' | 'gradedAt' | 'isRetry' | 'mine' | 'slip' | 'slipType' | 'firstTry'>,
+  item: Pick<LearnQuizItem, 'result' | 'gradedAt' | 'isRetry' | 'mine' | 'slip' | 'slipType' | 'firstTry' | 'rung' | 'team'>,
   record: LearnSlip | undefined,
   isHelped: boolean,
 ): SlipNotice | undefined {
@@ -4595,16 +4767,18 @@ export function slipNotice(
   const isNow = open !== undefined && open.at === at
   if (item.result === 'wrong') {
     // Missed again where it was asked again: the same slip once more, unless this answer showed another in its place.
-    if (item.isRetry && open && !(isNow && open.times === 1)) return { kind: 'again', text: SLIP_AGAIN }
+    if ((item.isRetry || item.rung === 'worked') && open && !(isNow && open.times === 1)) return { kind: 'again', text: SLIP_AGAIN }
     if (!isNow) return undefined
+    const isWorked = isWorkedNext(open, item)
     // An answer with nothing to read a slip from is said as such, though a slip with words stays open (nextSlip).
     const found = slipFrom(item)
     if (open.type === 'blank' || found?.type === 'blank') {
+      const next = isWorked ? WORKED_NEXT : '다음 퀴즈에서 다시 풉니다'
       return isNothingSaid(found?.mine ?? open.mine)
-        ? { kind: 'blank', text: '떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다' }
-        : { kind: 'blank', text: '답이 짧아 헷갈린 점은 적지 않았습니다 · 다음 퀴즈에서 다시 풉니다' }
+        ? { kind: 'blank', text: `떠오르지 않았습니다 · ${next}` }
+        : { kind: 'blank', text: `답이 짧아 헷갈린 점은 적지 않았습니다 · ${next}` }
     }
-    return { kind: 'slip', text: `헷갈린 점: ${open.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` }
+    return { kind: 'slip', text: `헷갈린 점: ${open.what} · ${isWorked ? WORKED_NEXT : '다음 퀴즈에서 다른 코드로 다시 묻습니다'}` }
   }
   if (item.isRetry && record?.fixedAt === at) return { kind: 'fixed', text: '✓ 지난번 헷갈린 점을 바로잡았습니다' }
   if (isNow) return { kind: 'mended', text: '헷갈린 점을 바로 고쳤습니다 · 다른 날 다른 코드로 한 번 더 확인합니다' }
@@ -4711,8 +4885,12 @@ function quizItems(parts: Map<string, string[]>, picks: readonly QuizPick[]): Le
     // A hint that is the answer itself helps no one.
     const isHelpful = hint !== '' && squash(hint) !== squash(answer)
     const kind = kindOf(parts.get(`T${i + 1}`))
-    // Asked again over an open slip, unless the question says the slip itself: then it is a question as any other.
-    const isRetry = one.slip !== undefined && !isSlipSaid(question, one.slip.what)
+    // Its rung (1.8.0) as the model kept to it: a worked example with none shown, or code meant changed shown as it was, keeps none.
+    const rung = keptRung(one, question)
+    // Asked again over an open slip, unless the question says the slip itself: then it is a question as any other. A
+    // worked example shows the slip on purpose and is no retry either: right after the example mends nothing, in a
+    // window of an older build too, which knows no rung.
+    const isRetry = one.slip !== undefined && !isSlipSaid(question, one.slip.what) && rung !== 'worked'
     if (question && answer) {
       items.push({
         key: one.key,
@@ -4723,6 +4901,7 @@ function quizItems(parts: Map<string, string[]>, picks: readonly QuizPick[]): Le
         ...(kind ? { kind } : {}),
         ...(one.noteId ? { noteId: one.noteId } : {}),
         ...(isRetry ? { isRetry: true as const } : {}),
+        ...(rung ? { rung } : {}),
         ...(one.team ? { team: true as const } : {}),
         // A slip asked again is asked in other code than the team's lines (quizPrompt): the head would name lines it is not on.
         ...(one.team && one.teamCode && !isRetry
@@ -4809,6 +4988,19 @@ export function marksOf(one: LearnConcept): LearnQuizMarks {
 
 /** How a grade marks a concept: markReviewed, markHelped, markPartial, markMissed or a mix. */
 export type Mark = (index: Readonly<Record<string, LearnConcept>>, keys: readonly string[], at: number) => Record<string, LearnConcept>
+
+/** A wrong answer: gone over now, back to the first step, and first in the next quiz. */
+export const markWrong: Mark = (index, keys, at) => markMissed(markReviewed(index, keys, at), keys, at)
+
+/**
+ * How a grade marks its concept: right a step on (after a hint or the answer seen, the step kept), partly right a
+ * step back, wrong back to the first. A miss in code never seen (`rung` new, 1.8.x) steps back one only: that
+ * question's answer is the model's too, and one wrong would cost the concept the weeks its steps took.
+ */
+export function markFor(result: 'right' | 'wrong', verdict: LearnQuizItem['verdict'], isHelped: boolean, rung?: LearnQuizItem['rung']): Mark {
+  if (result === 'right') return isHelped ? markHelped : markReviewed
+  return verdict === 'partial' || rung === 'new' ? markPartial : markWrong
+}
 
 /**
  * The index with one concept graded again at `at`: its marks from before the

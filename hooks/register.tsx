@@ -32,9 +32,17 @@ import {
   ASKS_KEPT,
   CHECK_SYSTEM,
   codeFor,
+  markFor,
   markHelped,
   markPartial,
+  markWrong,
   marksOf,
+  bankQuestion,
+  isWorkedNext,
+  pickForRung,
+  rungOf,
+  RUNG_LABEL,
+  WORKED_NEXT,
   regrade,
   type Mark,
   type QuizPick,
@@ -183,7 +191,6 @@ import {
   dueAt,
   dueConcepts,
   dueText,
-  markMissed,
   markReviewed,
   merge,
   mergeConcepts,
@@ -1655,7 +1662,12 @@ function bankQuestions($: EngineInterface, items: readonly LearnQuizItem[], at: 
   return enqueue('storing', async () => {
     try {
       if (await isStoreAhead($)) return
-      const bank = addToBank(cleanBank(await $.store.get(BANK_KEY)), items.map(({ key, name, question, answer }) => ({ key, name, question, answer })), at)
+      // A worked example's card asks only the question after its example (1.8.0); one with no such question is left out.
+      const cards = items.flatMap(({ key, name, answer, ...item }) => {
+        const question = bankQuestion(item)
+        return question === undefined ? [] : [{ key, name, question, answer }]
+      })
+      const bank = addToBank(cleanBank(await $.store.get(BANK_KEY)), cards, at)
       await $.store.set(BANK_KEY, bank)
     } catch (error) {
       void fault($, 'store', faultCode(error, 'store'), '퀴즈 문제를 모아 두지 못했습니다')
@@ -1969,6 +1981,7 @@ function quizItemOf(one: unknown): LearnQuizItem | undefined {
     ...(typeof noteId === 'string' && noteId !== '' ? { noteId } : {}),
     ...(firstTry ? { firstTry } : {}),
     ...(one.isRetry === true ? { isRetry: true as const } : {}),
+    ...(one.rung === 'worked' || one.rung === 'mine' || one.rung === 'changed' || one.rung === 'new' ? { rung: one.rung } : {}),
     ...slipOfItem(one.slip, one.slipType),
     ...(one.slipBefore === null ? { slipBefore: null } : slipRecordOf(one.slipBefore) ? { slipBefore: slipRecordOf(one.slipBefore)! } : {}),
     ...(one.team === true ? { team: true as const } : {}),
@@ -2063,35 +2076,26 @@ function answerKey(current: Quiz, i: number): string {
   return `${quizFieldKey(current.at, i)}${current.items[i]?.firstTry !== undefined ? '-again' : ''}`
 }
 
-/** A wrong answer: gone over now, back to the first step, and first in the next quiz. */
-const markWrong: Mark = (index, keys, at) => markMissed(markReviewed(index, keys, at), keys, at)
-
-/**
- * How a grade marks its concept: right a step on (after a hint or the answer
- * seen, the step kept), partly right a step back, wrong back to the first.
- */
-function markFor(result: 'right' | 'wrong', verdict: LearnQuizItem['verdict'], isHelped: boolean): Mark {
-  if (result === 'right') return isHelped ? markHelped : markReviewed
-  return verdict === 'partial' ? markPartial : markWrong
-}
-
 /**
  * True when a graded question's answer leaned on help: its hint was seen, it
  * was right only on a try again (after the question asked back), or the
- * learner graded it themselves, which they do only once its answer is seen.
+ * learner graded it themselves, which they do only once its answer is seen;
+ * or it came after a worked example (1.8.0, 풀이 보고 풀기).
  */
 function isHelpedGrade(item: LearnQuizItem): boolean {
   // A first try stays on a question only once a try again graded it (one graded with none drops it).
-  return item.isHinted === true || item.mine === undefined || item.firstTry !== undefined
+  return item.isHinted === true || item.mine === undefined || item.firstTry !== undefined || item.rung === 'worked'
 }
 
 /**
- * A graded question's help, after its mark: · 힌트 봄, · 되짚어 맞힘 for one right on a try again after the
- * question asked back, and · 정답 봄 for one graded right after seeing its answer.
+ * A graded question's help, after its mark: · 힌트 봄, · 풀이 봄 for one right after a worked example (1.8.0),
+ * · 되짚어 맞힘 for one right on a try again after the question asked back, and · 정답 봄 for one graded right
+ * after seeing its answer.
  */
 function helpText(item: LearnQuizItem): string {
   const isRetried = item.result === 'right' && item.firstTry !== undefined && !isBlankAnswer(item.firstTry.mine)
-  return `${item.isHinted === true ? ' · 힌트 봄' : ''}${isRetried ? ' · 되짚어 맞힘' : ''}${item.result === 'right' && item.mine === undefined ? ' · 정답 봄' : ''}`
+  const isWorked = item.result === 'right' && item.rung === 'worked'
+  return `${item.isHinted === true ? ' · 힌트 봄' : ''}${isWorked ? ' · 풀이 봄' : ''}${isRetried ? ' · 되짚어 맞힘' : ''}${item.result === 'right' && item.mine === undefined ? ' · 정답 봄' : ''}`
 }
 
 /**
@@ -2204,7 +2208,11 @@ function missesText(items: readonly LearnQuizItem[], separator = ' · '): string
   const parts: string[] = []
   if (items.some(item => item.result === 'wrong' && !isPartly(item))) parts.push('틀린 개념은 다음 퀴즈에 먼저 나옵니다')
   else if (items.some(isPartly)) parts.push('거의 맞힌 개념은 조금 일찍 다시 나옵니다')
-  if (items.some(item => item.result === 'right' && isHelpedGrade(item))) parts.push('힌트·되묻기·정답을 보고 맞힌 개념은 같은 간격 뒤 다시 나옵니다')
+  if (items.some(item => item.result === 'right' && isHelpedGrade(item))) {
+    // A worked example (1.8.0) is named among the help only when a question right after one is there.
+    const isWorked = items.some(item => item.result === 'right' && item.rung === 'worked')
+    parts.push(`힌트·${isWorked ? '풀이·' : ''}되묻기·정답을 보고 맞힌 개념은 같은 간격 뒤 다시 나옵니다`)
+  }
   return parts.join(separator)
 }
 
@@ -2404,9 +2412,22 @@ async function makeQuiz(
     const teamCode = term && file ? await readTermCode($, cfg, file, term) : undefined
     const origin = term && root ? { teamTag: rootTag(root), teamBlurb: termBlurb(term.blurb, TERM_SEED_TEXT) } : {}
     const slip = openSlip(open, one.key)
-    picks.push({ ...one, ...(teamCode ? { teamCode } : {}), ...origin, ...(slip ? { slip: { what: slip.what, question: slip.question, mine: slip.mine } } : {}) })
+    // Which code it is asked in (1.8.0, the question ladder): by its review step, or by a worked example first once
+    // its slip, asked again, was missed twice running.
+    const rung = rungOf(one, {
+      ...(one.code ? { code: one.code } : {}),
+      ...(slip ? { slip } : {}),
+      isAsking: asking.has(one.key),
+      isTeam: one.team === true,
+      isDue: isDue(one, now),
+    })
+    picks.push(
+      pickForRung({ ...one, ...(teamCode ? { teamCode } : {}), ...origin, ...(slip ? { slip: { what: slip.what, question: slip.question, mine: slip.mine } } : {}) }, rung),
+    )
   }
-  const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: 1400 })
+  // A worked example (and code never seen) writes code of its own: room for it, spent only as far as it is used.
+  const isLong = picks.some(one => one.rung === 'worked' || one.rung === 'new')
+  const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: isLong ? 1600 : 1400 })
   if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
   const items = parseQuiz(asked.text, picks)
   if (items.length === 0) {
@@ -2567,7 +2588,7 @@ async function applyGrade(
     // A team term not met yet goes in the concept index with its grade (1.7.0 D6).
     const seed = item.team ? await teamSeed($, item) : undefined
     // The learner's own word is fully right or fully wrong, never "partly", whatever Claude's verdict was.
-    const before = await markConcepts($, cfg, markFor(result, extra.isLearnerGraded === true ? undefined : extra.verdict, isHelped), [item.key], now, seed)
+    const before = await markConcepts($, cfg, markFor(result, extra.isLearnerGraded === true ? undefined : extra.verdict, isHelped, item.rung), [item.key], now, seed)
     if (!before) return 'failed'
     // A team term graded is one of its repository's from now on (the one the quiz was made in, wherever it is graded):
     // its quizzes there ask it by the team's code.
@@ -4110,9 +4131,21 @@ function quizItemState(current: Quiz, item: LearnQuizItem, isChecking: boolean):
   return isAnswerShown(current, item) ? '정답 봄 · ' : ''
 }
 
-/** What stands before a question asked again over a slip still open (1.7.0) in the conversation; its slip is not said before an answer. */
-function retryMark(item: LearnQuizItem): string {
-  return item.isRetry ? '(다시 도전) ' : ''
+/**
+ * The one place a question's title gives to how it is asked, after its number: a worked example first (1.8.0, 풀이
+ * 보고 풀기), a slip still open asked again (1.7.0, 다시 도전), or its code changed (비슷한 코드) or never seen (처음
+ * 보는 코드); none for the learner's own code, as in 1.7. Its slip is not said before an answer.
+ */
+function rungName(item: LearnQuizItem): string | undefined {
+  if (item.rung === 'worked') return RUNG_LABEL.worked
+  if (item.isRetry) return '다시 도전'
+  return item.rung === 'changed' || item.rung === 'new' ? RUNG_LABEL[item.rung] : undefined
+}
+
+/** What stands before a question in the conversation for how it is asked (rungName). */
+function rungMark(item: LearnQuizItem): string {
+  const name = rungName(item)
+  return name ? `(${name}) ` : ''
 }
 
 /** What stands before a team term's question in the conversation (1.7.0 D6): that it is one, and where its lines are. */
@@ -4127,9 +4160,13 @@ function teamMark(item: LearnQuizItem): string {
  * one): a team term no note taught (1.7.0 D6), or a concept whose notes are gone, has none to find.
  */
 async function slipLineText($: EngineInterface, item: LearnQuizItem): Promise<string | undefined> {
-  const notice: SlipNotice | undefined = slipNotice(item, slipAt(await read($, slips), resolveKey(await read($, aliases), item.key)), isHelpedGrade(item))
+  const record = slipAt(await read($, slips), resolveKey(await read($, aliases), item.key))
+  const notice: SlipNotice | undefined = slipNotice(item, record, isHelpedGrade(item))
   if (!notice) return undefined
-  return notice.kind === 'again' && item.noteId !== undefined ? `${notice.text} · 이 개념을 배운 노트: /learn 찾기 ${item.name}` : notice.text
+  if (notice.kind !== 'again') return notice.text
+  const taught = item.noteId !== undefined ? ` · 이 개념을 배운 노트: /learn 찾기 ${item.name}` : ''
+  // Missed twice running (1.8.0): the next review quiz shows a worked example first, said before where the note is.
+  return `${notice.text}${isWorkedNext(record, item) ? ` · ${WORKED_NEXT}` : ''}${taught}`
 }
 
 /**
@@ -4161,7 +4198,7 @@ function nextText(current: Quiz, i: number, withHint = false): string {
  * first and the question asked back (or, after "모르겠어요", the hint), seen again where no pane shows them.
  */
 function listedQuestion(current: Quiz, item: LearnQuizItem, isChecking: boolean): string {
-  const head = `${quizItemState(current, item, isChecking)}${retryMark(item)}${teamMark(item)}${item.question}`
+  const head = `${quizItemState(current, item, isChecking)}${rungMark(item)}${teamMark(item)}${item.question}`
   const first = item.firstTry
   if (first === undefined || item.result !== undefined || isChecking) return head
   const mine = isBlankAnswer(first.mine) ? [] : [`내 답: ${cut(first.mine.replace(/\s+/g, ' '), 80)}`]
@@ -4425,8 +4462,9 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
       if (done === 'kept') {
         changed.push(`${n}. ${item.name}`)
         changedAt.push(n - 1)
-        // Right over a first try, as the learner says it was: recalled by themselves unless its hint was seen.
-        if (tried ? item.isHinted === true : isHelpedGrade(item)) helped += 1
+        // Right over a first try, as the learner says it was: recalled by themselves unless its hint was seen, or it
+        // came after a worked example (1.8.0), whose step stays all the same.
+        if (tried ? item.isHinted === true || item.rung === 'worked' : isHelpedGrade(item)) helped += 1
       }
     }
     if (changed.length === 0) return `이미 ${word}으로 적혀 있습니다.`
@@ -4510,7 +4548,7 @@ async function freshQuiz($: EngineInterface, cfg: Config, now: number, mode: 're
   return [
     `${isTeamOnlyQuiz(made.items) ? '팀 용어 퀴즈' : '복습 퀴즈'} · ${made.items.length}문제`,
     '',
-    made.items.map((item, i) => listItem(i + 1, `${retryMark(item)}${teamMark(item)}${item.question}`)).join('\n\n'),
+    made.items.map((item, i) => listItem(i + 1, `${rungMark(item)}${teamMark(item)}${item.question}`)).join('\n\n'),
     '',
     '먼저 스스로 답해 보세요.',
     '- 답을 적어 채점받기: /learn 퀴즈 1 내 답 (번호 없이 적으면 1번부터)',
@@ -6612,7 +6650,8 @@ function quizView(
           const taught = taughtOf(item)
           const isElsewhere = item.result === 'wrong' && item.noteId !== undefined && taught === undefined
           // What the grade did with its concept's slip (1.7.0), dim under the feedback; green once one asked again is mended.
-          const notice = slipNotice(item, slipOf(item.key), isHelpedGrade(item))
+          const record = slipOf(item.key)
+          const notice = slipNotice(item, record, isHelpedGrade(item))
           // A team term this grade put in the concept index (1.7.0 D6); a miss's place in the next quiz unless the notice says it.
           const added = isAdded(item) ? teamAddedText(isFullMiss(item) && !notice) : undefined
           return (
@@ -6633,7 +6672,11 @@ function quizView(
               )}
               {notice && (
                 <Text color={notice.kind === 'fixed' ? 'green' : undefined} dimColor={notice.kind !== 'fixed'} wrap="wrap">
-                  {notice.kind === 'again' && taught ? `${notice.text} · n: 이 개념을 배운 노트 · 거기서 r로 따라가기` : notice.text}
+                  {notice.kind === 'again' && isWorkedNext(record, item)
+                    ? `${notice.text}${taught ? ' · n: 이 개념을 배운 노트' : ''} · ${WORKED_NEXT}`
+                    : notice.kind === 'again' && taught
+                      ? `${notice.text} · n: 이 개념을 배운 노트 · 거기서 r로 따라가기`
+                      : notice.text}
                 </Text>
               )}
               {item.mine !== undefined && (
@@ -6671,7 +6714,7 @@ function quizView(
           <Box key={`quiz-${i}`} flexDirection="column" marginTop={1}>
             <Text bold>
               문제 {i + 1}/{items.length}
-              {item.isRetry ? ' · 다시 도전' : ''}
+              {rungName(item) ? ` · ${rungName(item)}` : ''}
               {item.team ? ' · 팀 용어' : ''}
               {item.kind !== undefined ? ` · ${KIND_LABEL[item.kind]}` : ''}
             </Text>

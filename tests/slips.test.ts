@@ -283,7 +283,8 @@ describe('1.7.0: a slip kept, asked again and mended (D5)', () => {
     expect(slipNotice({ ...wrong, mine: '7', firstTry: { mine: '10', verdict: 'wrong', feedback: '', nudge: '?', at, slip: '곱셈을 덧셈으로 봄', slipType: 'other' } }, { ...SLIP, what: '', type: 'blank', mine: '10', at }, false)).toEqual(short)
     expect(slipNotice(wrong, { ...SLIP, what: '', type: 'blank', mine: '[]', at }, false)).toEqual(short)
     // "모르겠어요" where a slip with words stays open (not asked again): said as nothing recalled, its words kept for the next quiz.
-    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, { ...SLIP, at, times: 2 }, false)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다' })
+    // Counted twice on it by now: 1.8.0 (E3) says the next review quiz shows a worked example first.
+    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, { ...SLIP, at, times: 2 }, false)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 복습 퀴즈는 풀이부터 보여 줍니다' })
     expect(slipNotice({ ...wrong, mine: '모르겠어요', isRetry: true }, { ...SLIP, at, times: 2 }, false)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
     // Kept by no grade (the schema guard on, a store that refused it): nothing promised.
     expect(slipNotice(wrong, SLIP, false)).toBeUndefined()
@@ -468,6 +469,8 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
       noteId: 'n'.repeat(30),
       firstTry: { mine: mixed(1500), verdict: 'wrong', feedback: hangul(600), nudge: hangul(300), at: NOW, slip: hangul(80), slipType: 'reference' },
       isRetry: true,
+      // Its rung (1.8.0, E3): the longest of the four names.
+      rung: 'changed',
       slip: hangul(80),
       slipType: 'reference',
       slipBefore: { what: hangul(80), type: 'reference', question: mixed(240), mine: mixed(160), at: NOW, times: 99, fixedAt: NOW },

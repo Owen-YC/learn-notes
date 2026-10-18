@@ -1167,7 +1167,8 @@ describe('1.4.0', () => {
   test('the quiz prompt shows the learner their own code and asks for a hint', () => {
     const prompt = quizPrompt([{ ...picks[0]!, code: { file: 'cart.js', text: 'const total = 0' } }, picks[1]!], 'beginner')
     expect(prompt).toContain('1. A — (설명 없음)\n   학습자가 만든 코드 (cart.js):\n```\nconst total = 0\n```\n2. B')
-    expect(prompt).toContain('그 코드를 그대로, 또는 조금 바꿔')
+    // 1.8.0 (E3): which code to ask in is said by the rung a pick is on; a pick with none (as here) is told nothing of it.
+    expect(prompt).not.toContain('그 코드를 그대로, 또는 조금 바꿔')
     expect(prompt).toContain('H1: (힌트 한 문장)')
     expect(quizPrompt(picks, 'beginner')).not.toContain('학습자가 만든 코드')
   })
