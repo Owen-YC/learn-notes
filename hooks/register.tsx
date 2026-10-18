@@ -348,7 +348,10 @@ const LIMIT_TOAST_KEY = 'limitToast'
 const QUOTA_TOAST_KEY = 'quotaToast'
 /** Set once a new install's first session said hello (welcome), or one found notes or concepts there already. */
 const WELCOMED_KEY = 'welcomed'
-/** The concepts' known marks by key (knownMarks), written with the index: a 1.5 session still open writes the index without them. */
+/**
+ * The concepts' known marks by key (knownMarks), equal to the index's at every index write (written when they differ):
+ * a 1.5 session still open writes the index without them.
+ */
 const KNOWN_KEY = 'known'
 /**
  * When a session of 1.6.0 or later first started on this store: a quiz step
@@ -358,9 +361,10 @@ const KNOWN_KEY = 'known'
  */
 const STEPS_FROM_KEY = 'stepsFrom'
 /**
- * The steps past the first 1.6.0 gave, by key (stepMarks), written with the
- * index: any other step the index holds is 1.5's, a 1.5 session still open
- * having given it since the update too (recallSteps).
+ * The steps past the first 1.6.0 gave, by key (stepMarks), equal to the
+ * index's at every index write (written when they differ): any other step the
+ * index holds is 1.5's, a 1.5 session still open having given it since the
+ * update too (recallSteps).
  */
 const STEPS_KEY = 'steps'
 /**
@@ -1312,13 +1316,27 @@ async function storedIndex($: EngineInterface, map: Readonly<Record<string, stri
 
 /**
  * Writes the concept index: its known marks and steps first, apart
- * (KNOWN_KEY, STEPS_KEY), then the index with each name as it was stored
- * (storedConcepts). Every caller asks the schema guard (isStoreAhead) first.
+ * (KNOWN_KEY, STEPS_KEY), each written only when the store does not hold
+ * the same already (setChanged), then the index with each name as it was
+ * stored (storedConcepts), every time. Every caller asks the schema guard
+ * (isStoreAhead) first.
  */
 async function storeIndex($: EngineInterface, index: Readonly<Record<string, LearnConcept>>): Promise<void> {
-  await $.store.set(KNOWN_KEY, knownMarks(index))
-  await $.store.set(STEPS_KEY, stepMarks(index))
+  await setChanged($, KNOWN_KEY, knownMarks(index))
+  await setChanged($, STEPS_KEY, stepMarks(index))
   await $.store.set(CONCEPTS_KEY, storedConcepts(index))
+}
+
+/**
+ * `value` under `key` unless the store holds the same JSON already, read again just before: no wider a gap to
+ * another window's write than writing it each time. A read that fails writes.
+ */
+async function setChanged($: EngineInterface, key: string, value: unknown): Promise<void> {
+  const held = await $.store.get(key).then(
+    raw => (raw === undefined ? undefined : JSON.stringify(raw)),
+    () => undefined,
+  )
+  if (held !== JSON.stringify(value)) await $.store.set(key, value)
 }
 
 /**

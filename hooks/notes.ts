@@ -3094,7 +3094,8 @@ export function knownMarks(index: Readonly<Record<string, LearnConcept>>): Recor
  * The index with the known marks kept apart (knownMarks) put back on the
  * concepts that lost theirs: a 1.5 session still open wrote the index without
  * them. Never on one missed since, and never one 1.6.0 took off: the marks
- * kept apart are written with the index each time.
+ * kept apart are equal to the index's at every index write (written when
+ * they differ).
  */
 export function withKnownMarks(
   index: Readonly<Record<string, LearnConcept>>,
@@ -3123,9 +3124,10 @@ export function recallMarks<T extends LearnQuizMarks>(marks: T, since: number): 
 
 /**
  * The steps past the first that 1.6.0 gave, by key, each with when it was
- * given (`[step, reviewedAt]`), kept under a store key of their own and
- * written with the index: a step a 1.5 session still open gave after the
- * update (begun at the notes met, as before it) has no such record.
+ * given (`[step, reviewedAt]`), kept under a store key of their own, equal
+ * to the index's at every index write (written when they differ): a step a
+ * 1.5 session still open gave after the update (begun at the notes met, as
+ * before it) has no such record.
  */
 export function stepMarks(index: Readonly<Record<string, LearnConcept>>): Record<string, [number, number]> {
   return Object.fromEntries(
@@ -5263,13 +5265,19 @@ function errorWords(error: unknown): { code?: string; text: string } {
  * `ENOSPC: …`), `network` for a network location the engine does not reach, `too-big` past the 4 MiB a read or
  * write takes; for the store (`kind` store) `store-full` past its 4 MiB and `store-reject` for any other refusal;
  * else `error`. Only the code is kept: the message, and any path in it, are not.
+ *
+ * A size refusal in Claude Code 2.1.302's words is `over the N limit` (`$.store.set: the store would be N characters,
+ * over the 4194304 limit`, or `the value is N characters, …`) or `over the N-byte limit` (`$.fs.read: … refused: the
+ * file is over the 4194304-byte limit`, `$.fs.write: … refused: N bytes is over the 4194304-byte limit`); the
+ * looser words before them are kept. A model call's `over the 32 MiB limit` is none of them. The store's refusal of
+ * a key too long (`the key is N characters, over the 256 limit`) reads as full too: every key written is a constant.
  */
 export function faultCode(error: unknown, kind: 'fs' | 'store' = 'fs'): string {
   const { code, text } = errorWords(error)
   if (code !== undefined && ERRNOS.has(code)) return code
   if (/network location/i.test(text)) return 'network'
   for (const found of text.matchAll(/\b(E[A-Z]{2,11})\b/g)) if (ERRNOS.has(found[1]!)) return found[1]!
-  if (/\b4\s?MiB\b|too large|exceed|over \d/i.test(text)) return kind === 'store' ? 'store-full' : 'too-big'
+  if (/\b4\s?MiB\b|too large|exceed|over \d|over the \d+(?:-byte)? limit/i.test(text)) return kind === 'store' ? 'store-full' : 'too-big'
   return kind === 'store' ? 'store-reject' : 'error'
 }
 

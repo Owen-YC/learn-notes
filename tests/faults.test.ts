@@ -344,3 +344,45 @@ describe('1.7.0: faults kept as codes, and /learn 진단 made of them', () => {
     expect(lines({})[1]).toMatch(/^- 화면: /)
   })
 })
+
+describe('1.8.0: a refusal for size in Claude Code\'s own words (E1)', () => {
+  // Claude Code 2.1.302's words, as its `$.store.set`, `$.fs.read` and `$.fs.write` refuse a size past the limit.
+  const STORE_FULL = 'learn-notes: $.store.set: the store would be 4194400 characters, over the 4194304 limit'
+  const VALUE_FULL = 'learn-notes: $.store.set: the value is 4194400 characters, over the 4194304 limit'
+  const READ_BIG = 'learn-notes: $.fs.read: C:\\x refused: the file is over the 4194304-byte limit'
+  const WRITE_BIG = 'learn-notes: $.fs.write: C:\\x refused: 4200000 bytes is over the 4194304-byte limit'
+
+  test('the store past its limit is full, in either of its words; a file past it is too big', () => {
+    expect(faultCode(new Error(STORE_FULL), 'store')).toBe('store-full')
+    expect(faultCode(new Error(VALUE_FULL), 'store')).toBe('store-full')
+    expect(faultCode(new Error(READ_BIG))).toBe('too-big')
+    expect(faultCode(new Error(WRITE_BIG))).toBe('too-big')
+    expect(faultCode(new Error(READ_BIG), 'fs')).toBe('too-big')
+    // As a hook's refusal reaches the plugin: the words alone, no Error.
+    expect(faultCode(STORE_FULL, 'store')).toBe('store-full')
+    // A key too long reads as full too: every key the plugin writes is a constant.
+    expect(faultCode(new Error('learn-notes: $.store.set: the key is 300 characters, over the 256 limit'), 'store')).toBe('store-full')
+  })
+
+  test('no other limit is taken for 4MB, the words before the engine\'s still are, and an errno goes first', () => {
+    // A model call's input limit is no file and no store.
+    expect(faultCode(new Error('request over the 32 MiB limit'))).toBe('error')
+    expect(faultCode(new Error('request over the 32 MiB limit'), 'store')).toBe('store-reject')
+    expect(faultCode(new Error('store over 4 MiB'), 'store')).toBe('store-full')
+    expect(faultCode(new Error('read over 4 MiB'))).toBe('too-big')
+    expect(faultCode(new Error('EACCES: permission denied'), 'store')).toBe('EACCES')
+    expect(faultCode(new Error('learn-notes: $.fs.write: /home/u/x.md refused: a network location is not reached from here'))).toBe('network')
+    expect(faultCode(new Error('refused'), 'store')).toBe('store-reject')
+  })
+
+  test('what the person reads for it: the toast, the start\'s check line and /learn 진단 name the cause', () => {
+    const code = faultCode(new Error(STORE_FULL), 'store')
+    expect(storeFailText(code)).toBe('학습 노트 이력을 저장하지 못했습니다: 저장소가 4MB를 넘었습니다 · 다음 세션에 지난 노트가 빠질 수 있습니다 (일지 파일은 그대로) · /learn 진단')
+    expect(checkLine(0, undefined, code)).toBe('learn-notes 점검: 저장소에 쓰지 못한 기록이 있음 (저장소 4MB 넘음) · /learn 진단')
+    expect(faultLine({ at: AT, last: AT, area: 'store', code, n: 2 })).toBe('10-13 13:57 저장소 · 저장소 4MB 넘음 ×2')
+    // A journal past the limit: /learn 진단 says so; its toast is 1.7.0's, with no cause to name.
+    const big = faultCode(new Error(WRITE_BIG))
+    expect(faultLine({ at: AT, last: AT, area: 'save', code: big, n: 1 })).toBe('10-13 13:57 일지 저장 · 4MB 넘음')
+    expect(saveFailText(big)).toBe('학습 노트를 파일에 쓰지 못했습니다 · 다음 노트 때 다시 씁니다 · /learn 진단')
+  })
+})

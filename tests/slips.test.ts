@@ -393,8 +393,10 @@ describe('1.7.0: asked again in other code (다시 도전, D5)', () => {
  * 1.7.0 (7/8, a day's practices counted in the activity record, a practice's state on each note inside the history's
  * cap) it comes to 3,671,247 bytes: past the plan's 3.5MB budget by 1.6's keys alone (history 2MB, quizBank 0.81MB,
  * concepts 0.43MB, which this release does not cut); 1.7.0's own keys (slips, faults, sessions, schema, quotaToast,
- * and D6's teamTerms and teamNudged) take about 0.18MB of it. The store refuses every write past 4 MiB (4,194,304
- * bytes) in all: about 0.52MB is left, and STORE_WORST holds the line so no key grows into it unseen.
+ * and D6's teamTerms and teamNudged) take about 0.18MB of it. The store refuses a write that would take it past
+ * 4,194,304 in all (4 MiB): Claude Code counts the UTF-16 characters of its compact JSON, never more than the UTF-8
+ * bytes counted here, so this byte test is the stricter one. About 0.52MB is left, and STORE_WORST holds the line so
+ * no key grows into it unseen.
  */
 const STORE_LIMIT = 4 * 1024 * 1024
 const STORE_WORST = 3_672_000

@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { conceptKey, journalPath, rootTag, stamp } from '../hooks/notes'
+import { cleanConcepts, conceptKey, journalPath, recallSteps, rootTag, stamp, withKnownMarks } from '../hooks/notes'
 
 const NOW = Date.UTC(2026, 9, 3, 1)
 const NOTES_DIR = '/home/u/.claude/learning-notes'
@@ -202,7 +202,8 @@ function world(
   on('store.get', (_$, e) => ({ value: w.store.has(e.key) ? JSON.parse(JSON.stringify(w.store.get(e.key))) : undefined }))
   on('store.set', async (_$, e) => {
     if (e.key === 'history' && w.historyHold) await w.historyHold
-    if (w.storeFails) return { deny: 'store over 4 MiB' }
+    // Refused in Claude Code 2.1.302's own words for a store past its limit (1.8.0: 1.7's harness said `store over 4 MiB`).
+    if (w.storeFails) return { deny: 'learn-notes: $.store.set: the store would be 4194400 characters, over the 4194304 limit' }
     w.sets.push(e.key)
     w.store.set(e.key, JSON.parse(JSON.stringify(e.value)))
     return { value: undefined }
@@ -11002,5 +11003,159 @@ describe('1.7.1: a pane the desktop app seats a moment late, and where a pane ca
     expect(shown.tookMs).toBeGreaterThanOrEqual(1500)
     expect(shown.text).toContain('문제 하나')
     expect(w.focused).toEqual([true])
+  })
+})
+
+describe('1.8.0: the store\'s own words for a full store, and the known and step copies written when they differ (E1)', () => {
+  const DAY = 86_400_000
+  /** Claude Code 2.1.302's refusal of a store write past its limit. */
+  const STORE_FULL = 'learn-notes: $.store.set: the store would be 4194400 characters, over the 4194304 limit'
+  const diag = async ($: Engine) => (await learn($, '진단')).text ?? ''
+  const KNOWN = { name: '클로저', count: 2, firstAt: NOW - 9 * DAY, lastAt: NOW - 9 * DAY, blurb: '바깥 변수를 기억한다', files: [], knownAt: NOW - 5 * DAY }
+  const STEPPED = { name: 'map', count: 3, firstAt: NOW - 30 * DAY, lastAt: NOW - 20 * DAY, blurb: '새 배열', files: [], step: 3, reviewedAt: NOW - DAY }
+  /** A 1.6 or later store whose known and step copies match its index already. */
+  const matched = () =>
+    new Map<string, unknown>([
+      ['stepsFrom', 0],
+      ['concepts', { [conceptKey('클로저')]: KNOWN, [conceptKey('map')]: STEPPED }],
+      ['known', { [conceptKey('클로저')]: KNOWN.knownAt }],
+      ['steps', { [conceptKey('map')]: [STEPPED.step, STEPPED.reviewedAt] }],
+    ])
+  /** The index as a 1.6 session reads it: cleanConcepts, then the copies put back. */
+  const as16 = (store: Map<string, unknown>) => recallSteps(withKnownMarks(cleanConcepts(store.get('concepts')), store.get('known')), store.get('steps'))
+
+  test('a store refusing the notes in its own words: the toast, the next start\'s check line and /learn 진단 name the full store', async ($, on) => {
+    let isFull = true
+    on('store.set', { key: 'history' }, async (_$, e, next) => (isFull ? { deny: STORE_FULL } : next(e)))
+    const w = world(on)
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A), 't1')
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    expect(w.toasts.filter(text => text.includes('이력을 저장하지 못했습니다'))).toEqual([
+      '학습 노트 이력을 저장하지 못했습니다: 저장소가 4MB를 넘었습니다 · 다음 세션에 지난 노트가 빠질 수 있습니다 (일지 파일은 그대로) · /learn 진단',
+    ])
+    // Each note is stored as soon as it exists and again once written: four refusals, one line.
+    expect(await diag($)).toMatch(/^ {2}- \d{2}-\d{2} \d{2}:\d{2} 저장소 · 저장소 4MB 넘음 ×4$/m)
+    // Kept with the faults, it is the next start's check line, with its cause (1.7.0 said 저장소가 받지 않음).
+    await w.clock.advance(61_000)
+    await w.clock.settle()
+    w.transcript.length = 0
+    await start($)
+    await w.clock.settle()
+    expect(w.transcript.filter(line => line.startsWith('learn-notes 점검'))).toEqual(['learn-notes 점검: 저장소에 쓰지 못한 기록이 있음 (저장소 4MB 넘음) · /learn 진단'])
+    isFull = false
+  })
+
+  test('a journal past the engine\'s 4MB: /learn 진단 says 4MB 넘음, the toast is 1.7.0\'s', async ($, on) => {
+    const w = world(on)
+    w.writeFails = true
+    w.writeError = `learn-notes: $.fs.write: ${JOURNAL} refused: 4200000 bytes is over the 4194304-byte limit`
+    await start($)
+    await turn($, () => $.tool.call(EDIT_A), 't1')
+    await finish(w)
+    expect(w.toasts.filter(text => text.startsWith('학습 노트를 파일에 쓰지 못했습니다'))).toEqual(['학습 노트를 파일에 쓰지 못했습니다 · 다음 노트 때 다시 씁니다 · /learn 진단'])
+    const reply = await diag($)
+    expect(reply).toMatch(/ 일지 저장 · 4MB 넘음$/m)
+    expect(reply).not.toContain('알 수 없는 오류')
+  })
+
+  test('a note teaching a new concept writes the index alone when the known and step copies match it already', async ($, on) => {
+    const store = matched()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.sets.length = 0
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.sets).toContain('concepts')
+    expect(w.sets).not.toContain('known')
+    expect(w.sets).not.toContain('steps')
+    // Read as a 1.6 session reads it, every mark is where it was, the new concept beside them.
+    const read = as16(store)
+    expect(read[conceptKey('for...of 반복문')]).toMatchObject({ name: 'for...of 반복문', count: 1 })
+    expect(read[conceptKey('클로저')]!.knownAt).toBe(KNOWN.knownAt)
+    expect(read[conceptKey('map')]).toMatchObject({ step: 3, reviewedAt: STEPPED.reviewedAt })
+  })
+
+  test('a known mark taken off is written off its copy: a 1.6 session reading the store does not put it back', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', { [conceptKey('클로저')]: { ...KNOWN, knownAt: undefined } }]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    await learn($, '안다 클로저')
+    expect(store.get('known')).toEqual({ [conceptKey('클로저')]: NOW })
+    expect(as16(store)[conceptKey('클로저')]!.knownAt).toBe(NOW)
+    w.sets.length = 0
+    expect((await learn($, '모른다 클로저')).text).toBe('아는 개념 표시를 지웠습니다: 클로저. 다시 복습과 퀴즈에 나옵니다.')
+    expect(w.sets).toContain('known')
+    expect(store.get('known')).toEqual({})
+    // No step changed: its copy is left as it is.
+    expect(w.sets).not.toContain('steps')
+    expect(as16(store)[conceptKey('클로저')]!.knownAt).toBeUndefined()
+    // A 1.5 session writing the index without the field changes nothing either.
+    store.set('concepts', { [conceptKey('클로저')]: { ...KNOWN, knownAt: undefined } })
+    expect(as16(store)[conceptKey('클로저')]!.knownAt).toBeUndefined()
+  })
+
+  test('a right answer that steps a concept past the first writes its step copy, as the index has it, and leaves the known copy', async ($, on) => {
+    const due = { ...STEPPED, step: 1, reviewedAt: NOW - 3 * DAY }
+    const store = new Map<string, unknown>([
+      ['stepsFrom', 0],
+      ['concepts', { [conceptKey('map')]: due }],
+      ['known', {}],
+      ['steps', {}],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    await learn($, 'quiz')
+    await w.clock.settle()
+    w.sets.length = 0
+    w.answer = '판정: 맞음\n피드백: 정확합니다.'
+    await learn($, 'quiz 1 새 배열을 만들어요')
+    await w.clock.settle()
+    const stored = (store.get('concepts') as Record<string, { step?: number; reviewedAt?: number }>)[conceptKey('map')]!
+    expect(stored.step).toBe(2)
+    expect(w.sets).toContain('steps')
+    expect(w.sets).not.toContain('known')
+    expect(store.get('steps')).toEqual({ [conceptKey('map')]: [2, stored.reviewedAt] })
+    // Read as a 1.6 session reads it: the step is its own, not one a 1.5 session gave.
+    expect(as16(store)[conceptKey('map')]).toMatchObject({ step: 2, reviewedAt: stored.reviewedAt })
+  })
+
+  test('a 1.5 store with no known or step copies gets both at its first index write', async ($, on) => {
+    const store = new Map<string, unknown>([['concepts', { [conceptKey('map')]: { ...STEPPED, step: 1, reviewedAt: NOW - DAY } }]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.sets).toEqual(expect.arrayContaining(['known', 'steps', 'concepts']))
+    expect(store.get('known')).toEqual({})
+    expect(store.get('steps')).toEqual({})
+  })
+
+  test('a copy that cannot be read again just before its write is written all the same', async ($, on) => {
+    // The note's count reads the known copy twice: with the index (indexOf), then again just before writing it.
+    let reads = 0
+    let failing = 0
+    on('store.get', { key: 'known' }, async (_$, e, next) => {
+      reads += 1
+      return reads === failing ? { deny: 'unreadable' } : next(e)
+    })
+    const store = matched()
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    reads = 0
+    failing = 2
+    w.sets.length = 0
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(reads).toBeGreaterThanOrEqual(2)
+    expect(w.sets).toEqual(expect.arrayContaining(['known', 'concepts']))
+    expect(w.sets).not.toContain('steps')
+    expect(store.get('known')).toEqual({ [conceptKey('클로저')]: KNOWN.knownAt })
+    expect(as16(store)[conceptKey('for...of 반복문')]).toMatchObject({ count: 1 })
   })
 })
