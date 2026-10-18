@@ -55,7 +55,11 @@ import {
   cutCells,
   fitSlips,
   nextSlip,
+  noteSlipName,
+  oftenRecordLine,
+  oftenSlip,
   openSlip,
+  slipCounts,
   slipsToAsk,
   slipAt,
   slipChange,
@@ -5160,7 +5164,10 @@ export const register: Register = (on, options) => {
     const teamFile = await teamHere($)
     const termsHere = distinctTerms(teamFile?.practice ?? [], map)
     const unmet = unmetTerms(termsHere, index, map)
-    const filled = reviewFilled(index, cleanSlips(slipRecord, map, now), now)
+    // The slips under the keys their concepts count under now (a merge made in this window too): the review's
+    // places, and the line under a note on a concept slipped on before (1.8.0).
+    const slipsNow = cleanSlips(slipRecord, map, now)
+    const filled = reviewFilled(index, slipsNow, now)
     const team: TeamProgress | undefined = termsHere.length > 0 ? { total: termsHere.length, unmet, way: teamWay(filled) } : undefined
     // Merges followed: one made in this session moves a team term's mark to the concept it went into.
     const marks = cleanTeamTerms(await read($, teamTerms), map)
@@ -5268,7 +5275,7 @@ export const register: Register = (on, options) => {
       ) : shown === 'note' ? (
         <Box flexDirection="column">
           {noteBody(note, isBusy, offText(note, cfg, now), el, drill)}
-          {note.status === 'ready' && note.concepts.length > 0 && conceptLine(note, index, map, el)}
+          {note.status === 'ready' && note.concepts.length > 0 && conceptLine(note, index, map, el, slipsNow)}
           {note.status === 'ready' &&
             noteTools($, cfg, note, writeLabel, asks[note.id] ?? { isAsking: false, error: null, draft: null }, el, e.surface, drill, practice, isTerminalFocus)}
         </Box>
@@ -5932,13 +5939,17 @@ function sideLines(change: LearnChange, lines: readonly ShownLine[], color: 'red
 
 /**
  * Under a note: its concepts split into the ones it taught first and the ones
- * it went over again (met before this note), with how often they have come up so far.
+ * it went over again (met before this note), with how often they have come up so far;
+ * then (1.8.0) the one met again that was slipped on before and is still open, by its
+ * name alone (noteSlipName; `slips` as cleanSlips gives them). Drawn only: the note's
+ * text, the journal, its copy and the prompts never hold it.
  */
 function conceptLine(
   note: LearnNote,
   index: Readonly<Record<string, LearnConcept>>,
   map: Readonly<Record<string, string>>,
   el: ElementTable,
+  slips: Readonly<Record<string, LearnSlip>>,
 ) {
   const { Box, Text } = el
   const met = note.concepts
@@ -5949,6 +5960,7 @@ function conceptLine(
   const fresh = met.filter(one => one.firstAt >= note.at)
   const again = met.filter(one => one.firstAt < note.at)
   if (met.length === 0) return null
+  const slipped = noteSlipName(note, index, map, slips)
   return (
     <Box flexDirection="column" marginTop={1}>
       {fresh.length > 0 && (
@@ -5961,6 +5973,12 @@ function conceptLine(
         <Text wrap="wrap">
           <Text color="cyan">다시 만난 개념</Text>
           <Text dimColor> {again.map(one => `${one.name} ×${one.count}`).join(' · ')}</Text>
+        </Text>
+      )}
+      {slipped !== undefined && (
+        <Text wrap="wrap">
+          <Text color="yellow">지난번 헷갈린 개념</Text>
+          <Text dimColor> {slipped} · 복습 퀴즈에서 다시 묻습니다</Text>
         </Text>
       )}
     </Box>
@@ -5994,13 +6012,16 @@ const RECORD_CONCEPTS = 20
  * the week's notes day by day on one line, then the concepts learned but the
  * known ones (the most met first), those folded into a line, and what the
  * plugin's model calls came to. `isForTool`: for the record's tool, the
- * concepts without what they are (see conceptForTool).
+ * concepts without what they are (see conceptForTool), and no line on a
+ * kind slipped on often (1.8.0, oftenSlip: the person's own /learn 기록 alone
+ * has it, whose reply the main Claude reads too).
  */
 async function recordText($: EngineInterface, cfg: Config, isForTool = false): Promise<string> {
   const now = await $.clock.now()
   const record = await storedActivity($)
   const stats = statsOf(record, now)
   const index = await read($, concepts)
+  const map = await read($, aliases)
   const { fresh, again } = progressOf(index, now)
   const due = dueConcepts(index, now)
   const today = todayReview(index, record, now)
@@ -6010,11 +6031,12 @@ async function recordText($: EngineInterface, cfg: Config, isForTool = false): P
     due.length > 0
       ? `- 복습할 개념 ${due.length}개: ${queue.map(one => (isMissed(one) ? `${one.name} (퀴즈 틀림 ${dayWhen(one.missedAt ?? now, now)})` : one.name)).join(', ')}${due.length > queue.length ? ' …' : ''} · ${todayText(today)} · ${reviewWay(today.left)}`
       : '- 복습할 개념: 지금은 없습니다'
+  const often = isForTool ? undefined : oftenSlip(await storedSlips($, map, now), index, map, now)
   // Today first, as the run of days counts back.
   const week = [...stats.days].reverse().map(({ weekday, one }) => `${weekday} ${one.notes}`)
   // This repository's team terms (1.7.0 D6): met of all, and the quiz of the ones left.
-  const terms = distinctTerms((await teamOf($, ''))?.practice ?? [], await read($, aliases))
-  const teamLine = terms.length > 0 ? [teamRecordLine(terms.length, unmetTerms(terms, index, await read($, aliases)).length)] : []
+  const terms = distinctTerms((await teamOf($, ''))?.practice ?? [], map)
+  const teamLine = terms.length > 0 ? [teamRecordLine(terms.length, unmetTerms(terms, index, map).length)] : []
   const total = Object.keys(index).length
   const ranked = rankConcepts(index).filter(one => !isKnown(one))
   const known = knownLine(index)
@@ -6035,6 +6057,7 @@ async function recordText($: EngineInterface, cfg: Config, isForTool = false): P
     `- 최근 7일: 노트 ${stats.week.notes}개 · 새 개념 ${fresh}개 · 다시 만난 개념 ${again}개${stats.week.right + stats.week.wrong > 0 ? ` · 퀴즈 ${stats.week.right}/${stats.week.right + stats.week.wrong} 맞힘` : ''}`,
     `- 최근 30일 퀴즈 정답률: ${graded > 0 ? `${Math.round((stats.month.right / graded) * 100)}% (${stats.month.right}/${graded})` : '아직 채점한 문제가 없습니다'}`,
     review,
+    ...(often ? [oftenRecordLine(often)] : []),
     `- 최근 7일 노트: ${week.join(' · ')}`,
     ...teamLine,
     '',
@@ -6279,7 +6302,7 @@ async function shareNote($: EngineInterface, cfg: Config, id: string, surface?: 
 /** /learn 진단's first two lines: where the text went, and what it does not hold. */
 const DIAG_COPIED = '진단 내용을 클립보드에 복사했습니다 · 팀 채널이나 담당자에게 그대로 붙여 주세요'
 const DIAG_HERE = '이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다'
-const DIAG_PRIVATE = '코드 · 요청 · 파일 이름 · 경로 · 개념 이름은 들어 있지 않습니다'
+const DIAG_PRIVATE = '코드 · 요청 · 파일 이름 · 경로 · 개념 이름 · 헷갈린 점 문장은 들어 있지 않습니다 (오답 노트는 개수만)'
 /** Store keys /learn 진단 names with their size, the biggest first. */
 const DIAG_KEYS = 3
 /** The settings /learn 진단 says an administrator locked, by their userConfig field. */
@@ -6288,8 +6311,9 @@ const SETTING_FIELDS = ['autoNote', 'model', 'dailyAutoNotes', 'level', 'autoSav
 /**
  * /learn 진단: a page to paste to whoever looks after the plugin, made with no model call (diagText): the
  * versions, the screen, the settings and which an administrator locked, today's counts, the store's size, notes
- * the journal has not taken, the last week's faults. Copied as /learn 보고서 is (deliver), and always in the reply
- * too. Each piece that cannot be read is left out or said unknown: it is what is asked for when things fail.
+ * the journal has not taken, the slips counted (1.8.0), the last week's faults. Copied as /learn 보고서 is
+ * (deliver), and always in the reply too. Each piece that cannot be read is left out or said unknown: it is what
+ * is asked for when things fail.
  */
 async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Promise<string> {
   const now = await $.clock.now().catch(() => Date.now())
@@ -6336,6 +6360,12 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
   const has = (record: object) => Object.prototype.hasOwnProperty.call(record, day)
   const root = (await read($, paneRoot)) ?? (await quiet($.session.root(), undefined))
   const unsaved = root === undefined ? undefined : (await quiet(allNotes($), [])).filter(note => (note.root || root) === root && note.isUnsaved === true).length
+  // The slips counted (1.8.0), merges followed: no name, no words.
+  const map = await quiet(read($, aliases), {})
+  const slipped = await $.store.get(SLIPS_KEY).then(
+    raw => slipCounts(cleanSlips(raw, map, now)),
+    () => 'unread' as const,
+  )
   const text = diagText({
     now,
     ...(version !== undefined ? { version } : {}),
@@ -6362,6 +6392,7 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
     today: { notes: has(activityToday) ? activityToday[day]!.notes : 0, calls: has(usageToday) ? usageToday[day]!.calls : 0 },
     ...(store ? { store } : {}),
     ...(unsaved !== undefined ? { unsaved } : {}),
+    slips: slipped,
     faults: list,
   })
   const isCopied = await deliver($, text, isAway)

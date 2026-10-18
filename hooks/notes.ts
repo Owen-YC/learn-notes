@@ -4522,7 +4522,10 @@ export const SLIPS_MAX_BYTES = 150_000
 /** Days a mended slip is kept after it was mended: past them it is let go. */
 const SLIP_MENDED_DAYS = 60
 
-/** The nine kinds a grade names a slip by (유형), each as the grade is asked to write it; kept, not shown in 1.7.0. */
+/**
+ * The nine kinds a grade names a slip by (유형), each as the grade is asked to write it; not shown in 1.7.0, and since
+ * 1.8.0 only on /learn 기록's line for a kind slipped on often (oftenSlip).
+ */
 export const SLIP_TYPE_LABEL: Readonly<Record<Exclude<LearnSlipType, 'blank'>, string>> = {
   order: '실행 순서·비동기',
   reference: '값과 참조',
@@ -4727,6 +4730,117 @@ export function fitSlips(slips: Readonly<Record<string, LearnSlip>>): Record<str
   kept = kept.slice(from)
   while (kept.length > 0 && jsonBytes(Object.fromEntries(kept)) > SLIPS_MAX_BYTES) kept = kept.slice(1)
   return Object.fromEntries(kept)
+}
+
+/**
+ * How far back /learn 기록's line on concepts slipped the same way looks (1.8.0), and how many concepts of one kind it
+ * takes: cautious values until real use shows better. A slip's `times` is no measure of it: a "모르겠어요" on an open
+ * slip counts on it too, and a miss of another kind starts it over at 1.
+ */
+export const OFTEN_DAYS = 30
+export const OFTEN_CONCEPTS = 3
+/** Concept names that line gives at most, the latest slipped first; the rest are counted. */
+const OFTEN_NAMES = 3
+
+/** Each kind but 기타 in plain words, after its name on /learn 기록's line (1.8.0): fixed, no model call. */
+export const SLIP_TYPE_PLAIN: Readonly<Record<Exclude<LearnSlipType, 'blank' | 'other'>, string>> = {
+  order: '무엇이 먼저 실행되고 무엇을 기다리는지',
+  reference: '복사본인지, 같은 것을 가리키는지',
+  scope: '변수가 어디서 보이고 언제 사라지는지',
+  coercion: '숫자·글자 같은 종류가 바뀌는 때',
+  boundary: '처음·끝, 같음과 큼이 갈리는 곳',
+  nullish: 'null·undefined·빈 값을 다룰 때',
+  output: '함수가 돌려주는 값과 화면에 찍히는 값',
+  state: '값이 언제 바뀌고 화면이 언제 다시 그려지는지',
+}
+
+/** One kind the learner slipped on with several concepts (oftenSlip): its names, the latest slipped first. */
+export type OftenSlip = { type: Exclude<LearnSlipType, 'blank' | 'other'>; label: string; names: string[]; concepts: number; lastAt: number }
+
+/**
+ * The kind of slip /learn 기록 says the learner slipped on with OFTEN_CONCEPTS concepts or more (1.8.0): each slip's
+ * concept as it counts now (merges followed; of two, the one missed last), in the index and not marked known (a 1.5 or
+ * 1.6 window's /learn 안다 and graduating set knownAt alone, never the slip's fixedAt), last missed in the last
+ * OFTEN_DAYS days, with words and a kind other than 기타. Mended ones count: they were slipped on all the same. Of two
+ * kinds, the one with more concepts, then the one slipped on last, then the first in SLIP_TYPE_LABEL's order.
+ */
+export function oftenSlip(
+  slips: Readonly<Record<string, LearnSlip>>,
+  index: Readonly<Record<string, LearnConcept>>,
+  aliases: Readonly<Record<string, string>>,
+  now: number,
+): OftenSlip | undefined {
+  const latest = new Map<string, LearnSlip>()
+  for (const [stored, slip] of Object.entries(slips)) {
+    const key = resolveKey(aliases, stored)
+    const prior = latest.get(key)
+    if (!prior || slip.at > prior.at) latest.set(key, slip)
+  }
+  const kinds = new Map<OftenSlip['type'], { name: string; at: number }[]>()
+  for (const [key, slip] of latest) {
+    if (slip.type === 'blank' || slip.type === 'other' || slip.what === '' || slip.at < now - OFTEN_DAYS * DAY) continue
+    const one = conceptAt(index, key)
+    if (!one || isKnown(one)) continue
+    kinds.set(slip.type, [...(kinds.get(slip.type) ?? []), { name: one.name, at: slip.at }])
+  }
+  const order = Object.keys(SLIP_TYPE_LABEL)
+  const found = [...kinds]
+    .filter(([, list]) => list.length >= OFTEN_CONCEPTS)
+    .map(([type, list]): OftenSlip => {
+      const latestFirst = [...list].sort((a, b) => b.at - a.at)
+      return { type, label: SLIP_TYPE_LABEL[type], names: latestFirst.map(one => one.name), concepts: list.length, lastAt: latestFirst[0]!.at }
+    })
+    .sort((a, b) => b.concepts - a.concepts || b.lastAt - a.lastAt || order.indexOf(a.type) - order.indexOf(b.type))
+  return found[0]
+}
+
+/** /learn 기록's line for a kind slipped on often (oftenSlip): how many concepts, the latest names, the kind in plain words. */
+export function oftenRecordLine(often: OftenSlip): string {
+  const more = often.concepts > OFTEN_NAMES ? ` 외 ${often.concepts - OFTEN_NAMES}개` : ''
+  return `- 최근 ${OFTEN_DAYS}일 같은 종류로 헷갈린 개념 ${often.concepts}개: ${often.names.slice(0, OFTEN_NAMES).join(', ')}${more} · ${often.label}(${SLIP_TYPE_PLAIN[often.type]})`
+}
+
+/**
+ * The concept the line under a note names as slipped on before (1.8.0, 지난번 헷갈린 개념), if any: of the concepts the
+ * note met again (first met before it), not marked known, whose slip (`slips` by the keys concepts count under now,
+ * as cleanSlips gives them) is still open, has words and was kept before the note, the one slipped on last. Its name
+ * alone: the slip's words would tell the next try again its answer.
+ */
+export function noteSlipName(
+  note: Pick<LearnNote, 'at' | 'concepts'>,
+  index: Readonly<Record<string, LearnConcept>>,
+  aliases: Readonly<Record<string, string>>,
+  slips: Readonly<Record<string, LearnSlip>>,
+): string | undefined {
+  let best: { name: string; at: number } | undefined
+  const keys = note.concepts.map(key => resolveKey(aliases, key)).filter((key, i, all) => all.indexOf(key) === i)
+  for (const key of keys) {
+    const one = conceptAt(index, key)
+    const slip = openSlip(slips, key)
+    if (!one || one.firstAt >= note.at || isKnown(one) || !slip || slip.what === '' || slip.at >= note.at) continue
+    if (!best || slip.at > best.at) best = { name: one.name, at: slip.at }
+  }
+  return best?.name
+}
+
+/**
+ * The slips the store keeps, counted for /learn 진단 (1.8.0), with no name and no words: all, open and mended, of
+ * kind 기타, with no words (`blank`), and open after two misses or more, not set right on the try again (the ones the
+ * next review quiz shows a worked example first for, as rungOf has it while WORKED_AFTER_TIMES is 2).
+ */
+export type SlipCounts = { all: number; open: number; mended: number; other: number; blank: number; againOpen: number }
+
+export function slipCounts(slips: Readonly<Record<string, LearnSlip>>): SlipCounts {
+  const list = Object.values(slips)
+  const open = list.filter(one => one.fixedAt === undefined)
+  return {
+    all: list.length,
+    open: open.length,
+    mended: list.length - open.length,
+    other: list.filter(one => one.type === 'other').length,
+    blank: list.filter(one => one.type === 'blank').length,
+    againOpen: open.filter(one => one.times >= 2 && one.isRight !== true).length,
+  }
 }
 
 /** What a graded question's line under its feedback says of its concept's slip (slipNotice): the kind, and its words. */
@@ -5736,6 +5850,8 @@ export type DiagInput = {
   store?: { bytes: number; keys: readonly { key: string; bytes: number }[] }
   /** This project's notes the journal has not taken; undefined when the project could not be read. */
   unsaved?: number
+  /** The slips the store keeps, counted (1.8.0, slipCounts: no name, no words); `unread` when it could not be read. */
+  slips?: SlipCounts | 'unread'
   faults: readonly Fault[]
 }
 
@@ -5747,9 +5863,10 @@ export function appName(raw: string | undefined): string | undefined {
 
 /**
  * /learn 진단's text, to paste to whoever looks after the plugin: versions, the screen, the settings, today's
- * counts, the store's size, the journal, and the last FAULT_DAYS days' faults (newest first). The pane's refused
- * focus is no failure: it is summed on a line of its own, never in today's failures nor among the listed ones,
- * where a week of quizzes would push a journal that failed out of sight. No path, request, code or concept name.
+ * counts, the store's size, the journal, the slips counted (1.8.0), and the last FAULT_DAYS days' faults (newest
+ * first). The pane's refused focus is no failure: it is summed on a line of its own, never in today's failures nor
+ * among the listed ones, where a week of quizzes would push a journal that failed out of sight. No path, request,
+ * code, concept name or slip's words.
  */
 export function diagText(input: DiagInput): string {
   const { now, settings: s } = input
@@ -5812,6 +5929,17 @@ export function diagText(input: DiagInput): string {
             .map(one => `${one.v} (${agoText(one.at, now)})`)
             .join(' · ')}${seen.length > DIAG_OTHERS ? ` 외 ${seen.length - DIAG_OTHERS}개` : ''}`
   const others = seen === undefined && guard === '' ? [] : [`- 다른 창: ${windows}${guard}`]
+  const counted = input.slips
+  const slipLine =
+    counted === undefined
+      ? []
+      : [
+          counted === 'unread'
+            ? '- 오답 노트: 읽지 못함'
+            : counted.all === 0
+              ? '- 오답 노트: 아직 없습니다'
+              : `- 오답 노트 ${counted.all}개 (열림 ${counted.open} · 바로잡음 ${counted.mended}) · 유형 기타 ${counted.other} · 문장 없음 ${counted.blank} · 열린 채 두 번 이상 ${counted.againOpen}`,
+        ]
   return [
     `learn-notes 진단 · ${day} ${time}`,
     `- 버전: learn-notes ${input.version ?? '알 수 없음'} · Claude Code ${input.engine ?? '알 수 없음'}`,
@@ -5821,6 +5949,7 @@ export function diagText(input: DiagInput): string {
     `- 오늘: 노트 ${input.today.notes}개 · 모델 호출 ${input.today.calls}번 · 실패 ${failures}번`,
     `- 저장소: ${store}`,
     `- 일지: ${journal}`,
+    ...slipLine,
     recent.length === 0 ? `- 최근 ${FAULT_DAYS}일 문제: 없습니다` : `- 최근 ${FAULT_DAYS}일 문제 ${recent.length}건 (최근 것부터)`,
     ...listed,
     ...(recent.length > listed.length ? [`  - 그 밖에 ${recent.length - listed.length}건`] : []),

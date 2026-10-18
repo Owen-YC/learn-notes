@@ -1,3 +1,4 @@
+import type { LearnSlip } from '../types'
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
@@ -26,6 +27,7 @@ import {
   modelCode,
   saveFailText,
   sizeText,
+  slipCounts,
   storeFailText,
 } from '../hooks/notes'
 
@@ -384,5 +386,26 @@ describe('1.8.0: a refusal for size in Claude Code\'s own words (E1)', () => {
     const big = faultCode(new Error(WRITE_BIG))
     expect(faultLine({ at: AT, last: AT, area: 'save', code: big, n: 1 })).toBe('10-13 13:57 일지 저장 · 4MB 넘음')
     expect(saveFailText(big)).toBe('학습 노트를 파일에 쓰지 못했습니다 · 다음 노트 때 다시 씁니다 · /learn 진단')
+  })
+})
+
+describe('1.8.0: /learn 진단 counts the slips, with no name and no words (E2)', () => {
+  test('one line under the journal\'s: all, open and mended, 기타, no words, open after two misses; none yet; unread', () => {
+    const slip = (what: string, type: LearnSlip['type'], more: Partial<LearnSlip> = {}): LearnSlip => ({ what, type, question: '클로저 문제', mine: '전역 변수', at: AT, times: 1, ...more })
+    const slips = {
+      'c:클로저': slip('함수가 끝나면 바깥 변수도 사라진다고 봄', 'scope', { times: 2 }),
+      'c:map': slip('원래 배열을 바꾼다고 봄', 'other'),
+      'c:구조분해': slip('', 'blank'),
+      'c:비동기': slip('await 없이도 기다린다고 봄', 'order', { fixedAt: AT + DAY }),
+    }
+    const text = diagText(input({ slips: slipCounts(slips) }))
+    const lines = text.split('\n')
+    expect(lines[lines.indexOf('- 일지: 못 쓴 노트 없음') + 1]).toBe('- 오답 노트 4개 (열림 3 · 바로잡음 1) · 유형 기타 1 · 문장 없음 1 · 열린 채 두 번 이상 1')
+    // Nothing of a concept's name, a slip's words, its question or answer.
+    for (const word of ['클로저', 'map', '구조', '비동기', '사라진다고', '배열', 'await', '전역']) expect(text).not.toContain(word)
+    expect(diagText(input({ slips: slipCounts({}) }))).toContain('\n- 일지: 못 쓴 노트 없음\n- 오답 노트: 아직 없습니다\n')
+    expect(diagText(input({ slips: 'unread' }))).toContain('\n- 일지: 못 쓴 노트 없음\n- 오답 노트: 읽지 못함\n')
+    // Not given (as before 1.8.0): no line.
+    expect(diagText(input())).not.toContain('오답 노트')
   })
 })

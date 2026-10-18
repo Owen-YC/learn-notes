@@ -281,7 +281,7 @@ export type LearnQuizFirstTry = {
 /**
  * A slip's kind (1.7.0): one of the nine a grade names (유형: 실행 순서·비동기, 값과 참조, 변수 범위, 자료형·형 변환,
  * 경계와 조건, 없는 값, 반환과 출력, 상태가 바뀌는 때, 기타), or `blank` for an answer with nothing to read one from
- * ("모르겠어요", two characters or fewer). Kept, not shown yet.
+ * ("모르겠어요", two characters or fewer). Shown since 1.8.0 only on /learn 기록's line for a kind slipped on often.
  */
 export type LearnSlipType = 'order' | 'reference' | 'scope' | 'coercion' | 'boundary' | 'nullish' | 'output' | 'state' | 'other' | 'blank'
 
