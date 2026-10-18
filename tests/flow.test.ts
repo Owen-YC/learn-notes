@@ -59,6 +59,10 @@ type World = {
   failNextWrites: number
   /** True while the session's root cannot be read: a hook that needs it throws. */
   rootFails: boolean
+  /** The surfaces attached, as `$.session.surfaces()` says (1.7.1: the desktop app seats a pane a moment late). */
+  surfaces: ('terminal' | 'desktop' | 'vscode' | 'mobile')[]
+  /** Why an undrawn open waits, as the engine says it (`no-surface …` while none is attached). */
+  openReason: string
   /** While set, a write of the notes (the store's `history`) waits for it: a slow disk under the store. */
   historyHold: Promise<void> | null
   /** The settings an administrator locked, as /config lists them (`learn-notes.dailyAutoNotes`). */
@@ -133,6 +137,8 @@ function world(
     writeFails: false,
     writeError: "EACCES: permission denied, open '/home/u/.claude/learning-notes/2026-10-03_proj.md'",
     rootFails: false,
+    surfaces: ['terminal'],
+    openReason: 'no surface places panes',
     historyHold: null,
     failNextWrites: 0,
     locked: [],
@@ -169,7 +175,7 @@ function world(
   })
   on('session.version', () => ({ value: { version: '2.1.296', base: '2.1.296' } }))
   on('session.id', () => ({ value: w.sessionId }))
-  on('session.surfaces', () => ({ value: ['terminal' as const] }))
+  on('session.surfaces', () => ({ value: [...w.surfaces] }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200_000 }, rateLimits: w.limits } }))
   on('config.list', () => ({
     value: ['autoNote', 'model', 'dailyAutoNotes', 'level', 'autoSave', 'saveDir'].map(field => ({
@@ -262,7 +268,7 @@ function world(
   on('ui.open', (_$, e) => {
     w.opened.push(e.id)
     w.focused.push(e.focus === true)
-    return { value: isPlaced ? { isPlaced: true } : { isPlaced: false, reason: 'no surface places panes' } }
+    return { value: isPlaced ? { isPlaced: true } : { isPlaced: false, reason: w.openReason } }
   })
   on('model.complete', async (_$, e) => {
     w.models.push(e.prompt)
@@ -4828,6 +4834,21 @@ describe('1.6.0: e under the note, a line where no pane shows, the record Claude
     await finish(w)
     expect(noteLines(w)).toEqual([READY_LINE])
     expect(w.toasts).toEqual([])
+  })
+
+  test('(1.7.1 검토) a cloud session whose pane the desktop app seats: the note is in the pane, no dim line; hidden, the toast', async ($, on) => {
+    const seat = { isShown: true }
+    const w = world(on, 'ok', seat, true, new Map(), { CLAUDE_CODE_REMOTE: 'true' })
+    w.surfaces = ['desktop']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(noteLines(w)).toEqual([])
+    expect(w.toasts).toEqual([])
+    seat.isShown = false
+    await turn($, () => $.tool.call(EDIT_A), 't2')
+    await finish(w)
+    expect(noteLines(w)).toEqual([])
+    expect(w.toasts).toEqual(['학습 노트: let을 const로 바꿔 값이 다시 바뀌지 않게 했다 · /learn으로 보기'])
   })
 
   test('a pane hidden behind another, or closed on a screen that seats one, still gets the toast', { options: { autoOpen: false } }, async ($, on) => {
@@ -9669,6 +9690,10 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect(await ui.find({ type: 'Text', text: '4  }' })).toBeDefined()
     // The field holds every letter and number key: how to get back to the buttons (the spec's words first).
     expect(await ui.find({ type: 'Text', text: 'Enter: 확인 · 코드는 영문 상태에서 · Tab: 버튼으로 (1~4 보기)' })).toBeDefined()
+    // Over the field (1.7.1): the pane scrolls to the field that holds the keys, and a line under its bottom row is cut off.
+    const drawn = JSON.stringify(await ui.drawn())
+    expect(drawn.indexOf('코드는 영문 상태에서')).toBeGreaterThan(-1)
+    expect(drawn.indexOf('코드는 영문 상태에서')).toBeLessThan(drawn.indexOf('"placeholder":"고친 줄"'))
     expect(focusesOf(w).at(-1)).toBe(`drill-${id}`)
     // Before one try there is no example to see.
     expect(await ui.find({ type: 'Button', key: 'note-drill-answer' })).toBeUndefined()
@@ -9687,8 +9712,17 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect((await ui.find({ type: 'Input', key: `drill-${id}` }))?.props.value).toBe('return 1')
     await ui.input({ key: `drill-${id}`, text: `  ${LINE};  ` })
     expect((await ui.find({ type: 'Text', text: '아직 바꾼 곳이 없습니다 · 줄을 고친 뒤 Enter' }))?.props.color).toBe('yellow')
+    // Over the field too (1.7.1), with the line saying what Enter does: under a field on the pane's bottom row it was cut off.
+    const told = JSON.stringify(await ui.drawn())
+    expect(told.indexOf('아직 바꾼 곳이 없습니다')).toBeGreaterThan(-1)
+    expect(told.indexOf('아직 바꾼 곳이 없습니다')).toBeLessThan(told.indexOf('"placeholder":"고친 줄"'))
+    // The line is there while a notice shows, not left out for it.
+    expect(told.indexOf('Enter: 확인 · 코드는 영문 상태에서')).toBeGreaterThan(-1)
+    expect(told.indexOf('Enter: 확인 · 코드는 영문 상태에서')).toBeLessThan(told.indexOf('"placeholder":"고친 줄"'))
     await ui.input({ key: `drill-${id}`, text: 'ㄱㄷ셔구 ㅜ믇' })
     expect(await ui.find({ type: 'Text', text: '코드는 영문 상태에서 적습니다' })).toBeDefined()
+    // Typed in a Korean input mode, the very case the line is for: it is still over the field.
+    expect(await ui.find({ type: 'Text', text: 'Enter: 확인 · 코드는 영문 상태에서 · Tab: 버튼으로 (1~4 보기)' })).toBeDefined()
     expect((await ui.find({ type: 'Input', key: `drill-${id}` }))?.props.value).toBe('ㄱㄷ셔구 ㅜ믇')
     await ui.input({ key: `drill-${id}`, text: '  ' })
     expect(await ui.find({ type: 'Text', text: "줄이 비었습니다 · 고친 줄을 적고 Enter · 모르겠으면 '모르겠어요'" })).toBeDefined()
@@ -10201,7 +10235,27 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     await start($)
     const shown = (await learn($, '')).text ?? ''
     expect(shown).toContain('이 세션은 클라우드 컴퓨터에서 돌아, 패널이 지금 보는 화면에 뜨지 않을 수 있습니다.')
-    expect(shown).toContain('- 확인: `greet("")` → "안녕하세요, 손님!"\n\n직접 해 보기: 터미널·데스크톱 앱의 패널에서 t로 고쳐 확인합니다')
+    // (1.7.1 검토) Not the person's own terminal: the cloud's notes are not on their computer.
+    expect(shown).toContain('- 확인: `greet("")` → "안녕하세요, 손님!"\n\n직접 해 보기: 데스크톱 앱에서 이 세션을 열면 패널에서 t로 고쳐 확인합니다')
+    expect(shown).not.toContain('터미널')
+    expect(shown).not.toContain('일지 파일')
+    expect(shown).not.toContain('name || "손"')
+  })
+
+  test('(1.7.1 검토) /learn in a cloud session no surface draws a pane for: the cloud\'s practice line, no journal file named', async ($, on) => {
+    const note = {
+      id: 'n1', turnId: 't1', at: NOW - 3_600_000, prompt: '인사 함수를 만들어 줘', answer: '',
+      changes: [{ file: 'src/hello.js', path: '/proj/src/hello.js', tool: 'Write', kind: 'create', added: 4, removed: 0, diff: ['@@ -0,0 +1,4 @@', ...HELLO.trim().split('\n').map(line => `+${line}`)].join('\n'), isCut: false }],
+      moreFiles: 0, status: 'ready', text: PRACTICE_NOTE, savedAs: 'ready', isPast: false, root: '/proj', updatedAt: NOW - 3_600_000, concepts: ['c:템플릿리터럴'],
+    }
+    const store = new Map<string, unknown>([['history', { '/proj': { at: NOW, notes: [note] } }]])
+    const w = world(on, 'ok', null, false, store, { CLAUDE_CODE_REMOTE: 'true' })
+    w.surfaces = []
+    await start($)
+    const shown = (await learn($, '')).text ?? ''
+    expect(shown).toContain('이 세션은 클라우드 컴퓨터에서 돌아 지금 보는 화면에는 패널이 없습니다')
+    expect(shown).toContain('- 확인: `greet("")` → "안녕하세요, 손님!"\n\n직접 해 보기: 데스크톱 앱에서 이 세션을 열면 패널에서 t로 고쳐 확인합니다')
+    expect(shown).not.toContain('터미널')
     expect(shown).not.toContain('일지 파일')
     expect(shown).not.toContain('name || "손"')
   })
@@ -10642,4 +10696,311 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
       await ui.unmount()
     })
   }
+})
+
+describe('1.7.1: a pane the desktop app seats a moment late, and where a pane can be opened', () => {
+  const DAY = 86_400_000
+  const DUE = { 'c:클로저': { name: '클로저', count: 1, firstAt: NOW - 3 * DAY, lastAt: NOW - 3 * DAY, blurb: '', files: [] } }
+  const DESKTOP_WAIT = '학습 노트 패널을 여는 중입니다 · 잠시 뒤 오른쪽에 뜹니다. 뜨지 않으면 /learn을 한 번 더 칩니다. 마지막 노트를 여기에도 적습니다.'
+  /** The engine's word while no surface is attached at all: VS Code's extension, or before the desktop app's first drawing. */
+  const NO_SURFACE = 'no-surface: no client attached'
+  /** /learn's first line where no surface is attached even after the wait: the desktop app late, or one that draws none. */
+  const NO_SURFACE_TEXT =
+    '패널을 그리는 화면이 아직 붙지 않아 마지막 노트를 여기에 적습니다. 데스크톱 앱이면 잠시 뒤 오른쪽에 뜹니다(뜨지 않으면 /learn을 한 번 더) · VS Code 확장처럼 패널을 그리지 않는 화면이면 같은 폴더의 터미널에서 claude를 켜거나 데스크톱 앱에서 이 폴더를 연 뒤 /learn을 칩니다.'
+  const UNPLACED = 'learn-notes: 패널을 열지 못했습니다 (unplaced)'
+  const KEYS_HERE = '학습 노트 패널을 열었습니다 · 패널의 키를 쓰려면 ctrl+x tab(또는 패널 클릭)'
+
+  /** Lets the plugin's short waits pass, a quarter of a second at a time. */
+  async function wait(w: World, ms: number) {
+    for (let spent = 0; spent < ms; spent += 250) await w.clock.advance(250)
+  }
+
+  /** Asks `/learn args` and lets `ms` of the clock pass: the reply, and how long after the ask it came. */
+  async function timed($: Engine, w: World, args: string, ms: number) {
+    const t0 = w.clock.now()
+    let tookMs = -1
+    const asked = learn($, args).then(reply => {
+      tookMs = w.clock.now() - t0
+      return reply
+    })
+    await wait(w, ms)
+    const reply = await asked
+    return { text: reply.text ?? '', tookMs }
+  }
+
+  /** Seats the pane `ms` into the clock, as the desktop app does a moment after the open answered undrawn. */
+  function seatLater(w: World, seat: { isPlaced: boolean }, ms: number, then: () => void = () => {}) {
+    void w.clock.sleep(ms).then(() => {
+      seat.isPlaced = true
+      then()
+    })
+  }
+
+  /**
+   * Starts the session as the engine starts it under a host with no terminal (the desktop app, VS Code's extension,
+   * the SDK and a -p run alike): drawing nowhere yet, no one at a REPL (SessionStartInput).
+   */
+  function startHost($: Engine) {
+    return $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+  }
+
+  /** `/learn` sent from afar: a phone over Remote Control. */
+  function learnAway($: Engine) {
+    return $.command.run({ command: 'learn', args: '', origin: { kind: 'bridge' }, presentation: { isFullscreen: true, columns: 160 } })
+  }
+
+  test('/learn on the desktop app waits for the pane it asked for: seated 200 ms later, it says the pane is open at the first look a quarter second on, and how to give it the keys there', async ($, on) => {
+    const seat = { isShown: true, isPlaced: false }
+    const w = world(on, 'ok', seat, false)
+    w.surfaces = ['desktop']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    // Not seated when the plugin first looks: only a wait finds it, a quarter second at a time.
+    seatLater(w, seat, 200)
+    const shown = await timed($, w, '', 2000)
+    expect(shown.text).toBe('학습 노트 패널을 열었습니다 · 패널을 클릭하면 키가 패널로 갑니다')
+    expect(shown.tookMs).toBe(250)
+    // No ctrl+x tab: the terminal's key.
+    expect(shown.text).not.toContain('ctrl+x')
+    expect(w.logs.join('\n')).not.toContain('패널을 열지 못했습니다')
+  })
+
+  test('never seated in the wait on the desktop app: it says the pane is coming and what to do if not, after 1.5 s, the last note here', async ($, on) => {
+    const seat = { isShown: false, isPlaced: false }
+    const w = world(on, 'ok', seat, false)
+    w.surfaces = ['desktop']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const shown = await timed($, w, '', 2000)
+    expect(shown.tookMs).toBe(1500)
+    expect(shown.text.startsWith(`${DESKTOP_WAIT}\n\n`)).toBe(true)
+    expect(shown.text).toContain('let을 const로')
+    expect(shown.text).not.toContain('/tui')
+    expect(shown.text).not.toContain('띄울 수 없어')
+    // A fault of the pane only once it is still undrawn 10 s after the answer (1.5 s): none at 11.25 s, one by 11.75 s.
+    expect(w.logs.join('\n')).not.toContain('패널을 열지 못했습니다')
+    await wait(w, 9_250)
+    expect(w.logs.join('\n')).not.toContain('패널을 열지 못했습니다')
+    await wait(w, 500)
+    expect(w.logs.join('\n')).toContain(UNPLACED)
+  })
+
+  test('seated later than the wait, near the end of the 10 s after the answer: no fault of the pane is kept', async ($, on) => {
+    const seat = { isShown: true, isPlaced: false }
+    const w = world(on, 'ok', seat, false)
+    w.surfaces = ['desktop']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    // 9.5 s after the answer at 1.5 s: a look at the pane sooner than 10 s after would find it undrawn.
+    seatLater(w, seat, 11_000)
+    expect((await timed($, w, '', 2000)).text.startsWith(DESKTOP_WAIT)).toBe(true)
+    await wait(w, 12_000)
+    expect(w.logs.join('\n')).not.toContain('패널을 열지 못했습니다')
+  })
+
+  test('no surface attached yet when the pane is asked for (the desktop app before its first drawing, started as a host with no terminal): it waits, and the pane seated is open', async ($, on) => {
+    const seat = { isShown: true, isPlaced: false }
+    const w = world(on, 'ok', seat, false)
+    w.surfaces = []
+    w.openReason = NO_SURFACE
+    // As the engine starts the desktop app's session: no terminal, isInteractive false.
+    await startHost($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    seatLater(w, seat, 300, () => {
+      w.surfaces = ['desktop']
+    })
+    const shown = await timed($, w, '', 2000)
+    expect(shown.text).toBe('학습 노트 패널을 열었습니다 · 패널을 클릭하면 키가 패널로 갑니다')
+    expect(shown.tookMs).toBe(500)
+    expect(shown.text).not.toContain('VS Code')
+  })
+
+  test('no surface attached even after the wait (the desktop app attaching 2 s in): no word that the pane cannot show, and no fault of a pane seated in the end', async ($, on) => {
+    const seat = { isShown: true, isPlaced: false }
+    const w = world(on, 'ok', seat, false)
+    w.surfaces = []
+    w.openReason = NO_SURFACE
+    await startHost($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    seatLater(w, seat, 2000, () => {
+      w.surfaces = ['desktop']
+    })
+    const shown = await timed($, w, '', 2000)
+    expect(shown.tookMs).toBe(1500)
+    // Which host it is, nothing says yet: what to do on each, the desktop app's first.
+    expect(shown.text.startsWith(`${NO_SURFACE_TEXT}\n\n`)).toBe(true)
+    expect(shown.text).toContain('let을 const로')
+    expect(shown.text).not.toContain('띄울 수 없어')
+    expect(shown.text).not.toContain('/tui')
+    // Kept as a fault only if still undrawn 10 s after: this one was seated half a second after the answer.
+    expect(w.logs.join('\n')).not.toContain('패널을 열지 못했습니다')
+    await wait(w, 12_000)
+    expect(w.logs.join('\n')).not.toContain('패널을 열지 못했습니다')
+  })
+
+  test('a host with no surface ever (VS Code\'s extension, a -p run alike): after the wait, where a pane opens and how; a fault of the pane 10 s on', async ($, on) => {
+    const seat = { isShown: false, isPlaced: false }
+    const w = world(on, 'ok', seat, false)
+    w.surfaces = []
+    w.openReason = NO_SURFACE
+    await startHost($)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const shown = await timed($, w, '', 2000)
+    expect(shown.tookMs).toBe(1500)
+    expect(shown.text.startsWith(`${NO_SURFACE_TEXT}\n\n`)).toBe(true)
+    expect(shown.text).toContain('let을 const로')
+    expect(shown.text).not.toContain('/tui')
+    expect(w.logs.join('\n')).not.toContain('패널을 열지 못했습니다')
+    await wait(w, 10_000)
+    expect(w.logs.join('\n')).toContain(UNPLACED)
+  })
+
+  test('the terminal answers at once: no wait for a pane it did not seat, no fullscreen advice, and the fault kept at once', async ($, on) => {
+    const w = world(on, 'ok', { isShown: false, isPlaced: false }, false)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const shown = (await learn($, '')).text ?? ''
+    expect(shown.startsWith('이 화면에는 패널을 띄울 수 없어 마지막 노트를 여기에 적습니다.\n\n')).toBe(true)
+    expect(shown).not.toContain('/tui')
+    await w.clock.settle()
+    expect(w.logs.join('\n')).toContain(UNPLACED)
+  })
+
+  test('a phone beside the terminal (Remote Control) seating the pane 300 ms late: waited for as any surface but the terminal', async ($, on) => {
+    const seat = { isShown: true, isPlaced: false }
+    const w = world(on, 'ok', seat, false)
+    w.surfaces = ['terminal', 'mobile']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    seatLater(w, seat, 300)
+    const shown = await timed($, w, '', 2000)
+    expect(shown.tookMs).toBe(500)
+    // Typed at the terminal (composer): its key.
+    expect(shown.text).toBe(KEYS_HERE)
+    expect(w.logs.join('\n')).not.toContain('패널을 열지 못했습니다')
+  })
+
+  test('a phone beside the terminal that never seats it: the answer after 1.5 s, the fault only 10 s on', async ($, on) => {
+    const w = world(on, 'ok', { isShown: false, isPlaced: false }, false)
+    w.surfaces = ['terminal', 'mobile']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const shown = await timed($, w, '', 2000)
+    expect(shown.tookMs).toBe(1500)
+    expect(shown.text.startsWith('이 화면에는 패널을 띄울 수 없어 마지막 노트를 여기에 적습니다.\n\n')).toBe(true)
+    expect(w.logs.join('\n')).not.toContain('패널을 열지 못했습니다')
+    await wait(w, 10_000)
+    expect(w.logs.join('\n')).toContain(UNPLACED)
+  })
+
+  test('the terminal\'s open pane: ctrl+x tab gives it the keys', async ($, on) => {
+    const w = world(on, 'ok', { isShown: true }, true)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect((await learn($, '')).text).toBe(KEYS_HERE)
+  })
+
+  test('the keys as each screen hands them over: a phone has none, one asked from afar is not at the terminal, the terminal\'s Enter is the terminal\'s', async ($, on) => {
+    const w = world(on, 'ok', { isShown: true }, true)
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    // Asked over Remote Control from the phone beside the person's own terminal: no ctrl+x tab to press there.
+    w.surfaces = ['terminal', 'mobile']
+    expect((await learnAway($)).text).toBe('학습 노트 패널을 열었습니다')
+    // The same screens, typed at the terminal: its key.
+    expect((await learn($, '')).text).toBe(KEYS_HERE)
+    // The terminal and the desktop app both drawing: typed at the terminal (composer), the terminal's key.
+    w.surfaces = ['terminal', 'desktop']
+    expect((await learn($, '')).text).toBe(KEYS_HERE)
+    // Asked from afar with the desktop app drawing too: the click, never the terminal's key.
+    expect((await learnAway($)).text).toBe('학습 노트 패널을 열었습니다 · 패널을 클릭하면 키가 패널로 갑니다')
+    // A phone alone: no key and no click to name.
+    w.surfaces = ['mobile']
+    expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다')
+  })
+
+  test('a cloud session no surface draws a pane for: what works here, never the person\'s own computer where these notes are not', async ($, on) => {
+    const w = world(on, 'ok', null, false, new Map(), { CLAUDE_CODE_REMOTE: 'true' })
+    w.surfaces = []
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const shown = (await learn($, '')).text ?? ''
+    expect(shown).toContain(
+      '이 화면에는 패널을 띄울 수 없어 마지막 노트를 여기에 적습니다. 이 세션은 클라우드 컴퓨터에서 돌아 지금 보는 화면에는 패널이 없습니다 · 여기서는 /learn 복습 · /learn 퀴즈 1 내 답 · /learn 질문으로 대화창에서 배웁니다.',
+    )
+    expect(shown).not.toContain('내 컴퓨터')
+    expect(shown).not.toContain('/tui')
+  })
+
+  test('a cloud session on the desktop app, the pane not seated in the wait: as on the desktop app, never that it does not attach', async ($, on) => {
+    const seat = { isShown: false, isPlaced: false }
+    const w = world(on, 'ok', seat, false, new Map(), { CLAUDE_CODE_REMOTE: 'true' })
+    w.surfaces = ['desktop']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const shown = await timed($, w, '', 2000)
+    expect(shown.text.startsWith(`${DESKTOP_WAIT}\n\n`)).toBe(true)
+    expect(shown.text).not.toContain('붙지 않습니다')
+    expect(shown.text).not.toContain('클라우드 컴퓨터')
+  })
+
+  test('a cloud session whose pane the desktop app seats is told the pane is open, not that no one sees it', async ($, on) => {
+    const w = world(on, 'ok', { isShown: true, isPlaced: true }, true, new Map(), { CLAUDE_CODE_REMOTE: 'true' })
+    w.surfaces = ['desktop']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다 · 패널을 클릭하면 키가 패널로 갑니다')
+    // Seen on a phone beside the cloud computer's own terminal: open, with no key of the terminal's to give it.
+    w.surfaces = ['terminal', 'mobile']
+    expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다')
+    // A phone alone (the mobile app seats panes, isFullscreen false): open, no key and no click to name.
+    w.surfaces = ['mobile']
+    expect((await learn($, '')).text).toBe('학습 노트 패널을 열었습니다')
+    // Its own terminal alone, drawn for no one: as before.
+    w.surfaces = ['terminal']
+    expect((await learn($, '')).text).toContain('이 세션은 클라우드 컴퓨터에서 돌아, 패널이 지금 보는 화면에 뜨지 않을 수 있습니다.')
+  })
+
+  test('/learn 복습 on the desktop app, the pane seated 300 ms late: today\'s review in the pane, the keys asked for again of the drawn pane', async ($, on) => {
+    const seat = { isShown: true, isPlaced: false }
+    const w = world(on, 'ok', seat, false, new Map<string, unknown>([['concepts', DUE]]))
+    w.surfaces = ['desktop']
+    await start($)
+    w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    seatLater(w, seat, 300)
+    const shown = await timed($, w, '복습', 2000)
+    expect(shown.text).toBe('학습 노트 패널에서 오늘 복습을 엽니다 · 답을 적고 Enter로 채점받고, Esc로 대화로 돌아갑니다.')
+    // The first ask for the keys found an undrawn pane: asked once more once it is drawn.
+    expect(w.focused).toEqual([true, true])
+    // A new quiz for the pane, not one written into the reply.
+    await w.clock.settle()
+    expect(w.models).toHaveLength(1)
+    expect(shown.text).not.toContain('문제 하나')
+  })
+
+  test('/learn 복습 with nothing left today, the desktop app seating the pane late: s in the pane is named', async ($, on) => {
+    const seat = { isShown: true, isPlaced: false }
+    const done = { 'c:클로저': { ...DUE['c:클로저'], firstAt: NOW, lastAt: NOW } }
+    const w = world(on, 'ok', seat, false, new Map<string, unknown>([['concepts', done]]))
+    w.surfaces = ['desktop']
+    await start($)
+    seatLater(w, seat, 300)
+    const shown = await timed($, w, '복습', 2000)
+    expect(shown.text).toBe('지금 복습할 개념이 없습니다 · 더 풀려면 패널에서 s, 또는 /learn 퀴즈 새로')
+    expect(w.focused).toEqual([false])
+  })
+
+  test('/learn 복습 on the desktop app with the pane never seated: the quiz in the reply, after the wait', async ($, on) => {
+    const w = world(on, 'ok', { isShown: false, isPlaced: false }, false, new Map<string, unknown>([['concepts', DUE]]))
+    w.surfaces = ['desktop']
+    await start($)
+    w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    const shown = await timed($, w, '복습', 2000)
+    expect(shown.tookMs).toBeGreaterThanOrEqual(1500)
+    expect(shown.text).toContain('문제 하나')
+    expect(w.focused).toEqual([true])
+  })
 })

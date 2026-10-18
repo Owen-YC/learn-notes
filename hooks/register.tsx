@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { ElementConstructor, ElementTable, EngineInterface, HookFailure, InputProps, ModelUsage, Register, RenderSurface } from 'claude-code'
+import type { ElementConstructor, ElementTable, EngineInterface, HookFailure, InputProps, ModelUsage, Register, RenderSurface, UiOpenResult } from 'claude-code'
 
 import type {
   LearnAsk,
@@ -752,7 +752,8 @@ function warnOnce($: EngineInterface, key: string, text: string): void {
  * past its budget) in `area`. Re-entry is no failure: the engine asked the handler in the hook's place.
  */
 function hookFailed($: EngineInterface, failure: HookFailure, area: FaultArea, event: string): void {
-  if (failure.kind === 're-entry') return
+  // Claude Code before 2.1.302 also named a re-entry this way; later ones never raise it.
+  if ((failure.kind as string) === 're-entry') return
   void fault($, area, `hook:${event}${failure.kind === 'timeout' ? ':timeout' : ''}`, `${event} 훅이 멈췄습니다`)
 }
 
@@ -926,6 +927,95 @@ async function isCloudSession($: EngineInterface): Promise<boolean> {
   return (await $.env.get('CLAUDE_CODE_REMOTE')) === 'true'
 }
 
+/** The surfaces the session draws on now, as `$.session.surfaces()` lists them; none where they cannot be read. */
+async function surfacesNow($: EngineInterface): Promise<readonly RenderSurface[]> {
+  return $.session.surfaces().catch(() => [] as RenderSurface[])
+}
+
+/**
+ * Whether the pane `$.ui.open` answered for is drawn, waiting a moment where it may yet be seated (1.7.1): the
+ * desktop app draws an asked pane just after the open resolves undrawn, so that first answer is no reason to say no
+ * pane can show. So too with no surface attached yet (`no-surface`): a remote client joins the roster with its first
+ * drawing. The desktop app is a host with no terminal, as a `-p` run is (`isInteractive` false for both), so that
+ * wait is a `-p` run's too. The terminal answers at once.
+ */
+async function isPlacedSoon($: EngineInterface, opened: UiOpenResult): Promise<boolean> {
+  if (opened.isPlaced) return true
+  const surfaces = await surfacesNow($)
+  const mayAttach = surfaces.length === 0 && opened.reason.startsWith('no-surface')
+  if (!mayAttach && !surfaces.some(one => one !== 'terminal')) return false
+  for (let waited = 0; waited < PLACE_WAIT_MS; waited += PLACE_STEP_MS) {
+    try {
+      await $.clock.sleep(PLACE_STEP_MS)
+    } catch {
+      return false
+    }
+    if ((await $.ui.panes().catch(() => [])).some(pane => pane.id === PANE && pane.isPlaced)) return true
+  }
+  return false
+}
+const PLACE_WAIT_MS = 1500
+const PLACE_STEP_MS = 250
+
+/**
+ * Opens the pane for `/learn` and `/learn 복습` and says whether it is drawn (isPlacedSoon). Seated late, the keys
+ * asked for (`focus`) are asked again of the drawn pane: the first ask found only an undrawn one to give them to.
+ */
+async function openPane($: EngineInterface, focus: boolean): Promise<boolean> {
+  const args = { id: PANE, title: TITLE, ...(focus ? { focus: true as const } : {}) }
+  const opened = await $.ui.open(args)
+  if (opened.isPlaced) return true
+  if (!(await isPlacedSoon($, opened))) return false
+  if (focus) await $.ui.open(args).catch(() => undefined)
+  return true
+}
+
+/**
+ * The first line of `/learn` where no pane was drawn, saying what to do there (1.7.1: no terminal advice off the
+ * terminal). The desktop app may seat it later still, in a cloud session too; a cloud session's notes are on the
+ * cloud computer, so its commands are the way there. No surface attached even after the wait is the desktop app
+ * attaching later still or a host that draws none (VS Code's extension): which, nothing says, so both are told.
+ */
+function noPaneText(surfaces: readonly RenderSurface[], isCloud: boolean): string {
+  if (surfaces.includes('desktop')) return DESKTOP_WAIT_TEXT
+  if (isCloud) {
+    return `${NO_PANE_TEXT} 이 세션은 클라우드 컴퓨터에서 돌아 지금 보는 화면에는 패널이 없습니다 · 여기서는 /learn 복습 · /learn 퀴즈 1 내 답 · /learn 질문으로 대화창에서 배웁니다.`
+  }
+  if (surfaces.length === 0) return NO_SURFACE_TEXT
+  return NO_PANE_TEXT
+}
+const NO_PANE_TEXT = '이 화면에는 패널을 띄울 수 없어 마지막 노트를 여기에 적습니다.'
+const DESKTOP_WAIT_TEXT = '학습 노트 패널을 여는 중입니다 · 잠시 뒤 오른쪽에 뜹니다. 뜨지 않으면 /learn을 한 번 더 칩니다. 마지막 노트를 여기에도 적습니다.'
+const NO_SURFACE_TEXT =
+  '패널을 그리는 화면이 아직 붙지 않아 마지막 노트를 여기에 적습니다. 데스크톱 앱이면 잠시 뒤 오른쪽에 뜹니다(뜨지 않으면 /learn을 한 번 더) · VS Code 확장처럼 패널을 그리지 않는 화면이면 같은 폴더의 터미널에서 claude를 켜거나 데스크톱 앱에서 이 폴더를 연 뒤 /learn을 칩니다.'
+
+/**
+ * How the keys reach the open pane, as `/learn` says it: `ctrl+x tab` is the person's own terminal's (a cloud
+ * computer's is nobody's, and one asked from afar, a phone over Remote Control, is read away from it), a click the
+ * desktop app's; a phone has no keys to hand over.
+ */
+function paneKeysText(surfaces: readonly RenderSurface[], isCloud: boolean, isAway: boolean): string {
+  if (surfaces.includes('terminal') && !isCloud && !isAway) return ' · 패널의 키를 쓰려면 ctrl+x tab(또는 패널 클릭)'
+  if (surfaces.includes('desktop')) return ' · 패널을 클릭하면 키가 패널로 갑니다'
+  return ''
+}
+
+/**
+ * A pane a surface may still seat when `/learn` answered (the desktop app's, DESKTOP_WAIT_TEXT; any but the
+ * terminal's; one before any surface attached) is a fault of the pane only if it is still undrawn a while after:
+ * one seated late is no failure for /learn 진단 to show.
+ */
+async function faultIfStillUnplaced($: EngineInterface): Promise<void> {
+  try {
+    await $.clock.sleep(PLACE_LATE_MS)
+  } catch {
+    return
+  }
+  const mine = (await $.ui.panes().catch(() => [])).find(pane => pane.id === PANE)
+  if (mine && !mine.isPlaced) void fault($, 'pane', 'unplaced', '패널을 열지 못했습니다')
+}
+const PLACE_LATE_MS = 10_000
+
 async function journalDir($: EngineInterface, cfg: Config): Promise<string> {
   const home = await homeDir($)
   if (cfg.saveDir !== '') return expandHome(cfg.saveDir, home)
@@ -1040,15 +1130,17 @@ async function isPaneVisible($: EngineInterface): Promise<boolean> {
 }
 
 /**
- * True where the pane cannot show: a cloud session (its screen is drawn for
- * no one), or no pane placed on a screen that seats none (the terminal not
- * fullscreen, as the spinner last said; unknown counts as none). A toast there
- * is gone in seconds with nothing to open, so a written note says so in the
- * transcript instead.
+ * True where the pane cannot show: a cloud session with no pane another
+ * surface than its own terminal seats (that screen is drawn for no one; the
+ * desktop app opening the session seats one, 1.7.1), or no pane placed on a
+ * screen that seats none (the terminal not fullscreen, as the spinner last
+ * said; unknown counts as none). A toast there is gone in seconds with
+ * nothing to open, so a written note says so in the transcript instead.
  */
 async function isPaneless($: EngineInterface): Promise<boolean> {
-  if (await isCloudSession($)) return true
-  if ((await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)) return false
+  const isPlaced = async () => (await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)
+  if (await isCloudSession($)) return !(await surfacesNow($)).some(one => one !== 'terminal') || !(await isPlaced())
+  if (await isPlaced()) return false
   return canDock !== true
 }
 
@@ -4756,13 +4848,12 @@ export const register: Register = (on, options) => {
         if (isAway) return told(`${why} · 더 풀려면 /learn 퀴즈 새로`)
         await update($, autoOpened, () => true)
         await update($, view, () => 'quiz')
-        const shown = await $.ui.open({ id: PANE, title: TITLE })
-        return told(`${why} · 더 풀려면 ${shown.isPlaced ? '패널에서 s, 또는 ' : ''}/learn 퀴즈 새로`)
+        // The desktop app seats an asked pane a moment after the open answers undrawn (1.7.1).
+        return told(`${why} · 더 풀려면 ${(await openPane($, false)) ? '패널에서 s, 또는 ' : ''}/learn 퀴즈 새로`)
       }
       if (isAway) return told(await quizCommand($, cfg, ''))
       await update($, autoOpened, () => true)
-      const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true })
-      if (!opened.isPlaced) return told(await quizCommand($, cfg, ''))
+      if (!(await openPane($, true))) return told(await quizCommand($, cfg, ''))
       await reviewNow($, cfg)
       return told('학습 노트 패널에서 오늘 복습을 엽니다 · 답을 적고 Enter로 채점받고, Esc로 대화로 돌아갑니다.')
     }
@@ -4938,9 +5029,12 @@ export const register: Register = (on, options) => {
     // The keys stay in the prompt: what is typed next is a request, never one of the pane's keys (w · e · r call the model).
     // ctrl+x tab or a click hands them to the pane; /learn 복습 opens it holding them.
     const hasKeys = list.length > 0 || Object.keys(await read($, concepts)).length > 0 || (await teamTermsLeft($)) > 0
-    const opened = await $.ui.open({ id: PANE, title: TITLE })
+    // The desktop app seats an asked pane a moment after the open answers undrawn (1.7.1).
+    const isPlaced = await openPane($, false)
     const last = list.at(-1)
-    if (opened.isPlaced && (await isCloudSession($))) {
+    const surfaces = await surfacesNow($)
+    const isCloud = await isCloudSession($)
+    if (isPlaced && isCloud && !surfaces.some(one => one !== 'terminal')) {
       // Placed on the cloud computer's own terminal, which nobody sees: say so, and show the note here.
       return {
         text: `이 세션은 클라우드 컴퓨터에서 돌아, 패널이 지금 보는 화면에 뜨지 않을 수 있습니다. 마지막 노트를 여기에 적습니다 (/learn으로 언제든 다시 봅니다).\n\n${last ? lastNoteText(last, true) : EMPTY_TEXT}`,
@@ -4948,15 +5042,18 @@ export const register: Register = (on, options) => {
     }
     const root = await $.session.root()
     const hint = isSystemFolder(root) ? `\n\n${systemFolderHint(root)}` : ''
-    if (opened.isPlaced && !hasKeys) return { text: `학습 노트 패널을 열었습니다 · Claude에게 파일을 만들거나 고쳐 달라고 하면, 턴이 끝난 뒤 여기에 노트가 생깁니다.${hint}` }
-    if (opened.isPlaced) {
+    if (isPlaced && !hasKeys) return { text: `학습 노트 패널을 열었습니다 · Claude에게 파일을 만들거나 고쳐 달라고 하면, 턴이 끝난 뒤 여기에 노트가 생깁니다.${hint}` }
+    if (isPlaced) {
       const left = todayReview(await read($, concepts), await read($, activity), await $.clock.now()).left
       const review = left > 0 ? ` · 오늘 복습 ${left}개: /learn 복습` : ''
-      return { text: `학습 노트 패널을 열었습니다 · 패널의 키를 쓰려면 ctrl+x tab(또는 패널 클릭)${review}${hint}` }
+      return { text: `학습 노트 패널을 열었습니다${paneKeysText(surfaces, isCloud, isAwayOrigin(e.origin))}${review}${hint}` }
     }
-    void fault($, 'pane', 'unplaced', '패널을 열지 못했습니다')
+    // A surface isPlacedSoon waited for (or one not attached yet) may seat it later still: kept as a fault only if
+    // it never does (1.7.1).
+    if (surfaces.length === 0 || surfaces.some(one => one !== 'terminal')) void faultIfStillUnplaced($)
+    else void fault($, 'pane', 'unplaced', '패널을 열지 못했습니다')
     return {
-      text: `이 화면에는 패널을 띄울 수 없어 마지막 노트를 여기에 적습니다. 터미널을 전체 화면(/tui fullscreen)으로 쓰면 오른쪽에 패널이 붙습니다.\n\n${last ? lastNoteText(last) : EMPTY_TEXT}`,
+      text: `${noPaneText(surfaces, isCloud)}\n\n${last ? lastNoteText(last, isCloud) : EMPTY_TEXT}`,
     }
   }).catch(($, e, next) => {
     // Not asked while the masking hook above holds this chain (its handler answers for it); kept for an engine that asks each.
@@ -5202,7 +5299,7 @@ export const register: Register = (on, options) => {
     )
   }).catch(($, e, next) => {
     // Two lines in place of an empty pane: what to send, and what still works in the conversation.
-    if (next.error.kind !== 're-entry') void fault($, 'pane', 'render', '패널을 그리지 못했습니다')
+    if ((next.error.kind as string) !== 're-entry') void fault($, 'pane', 'render', '패널을 그리지 못했습니다')
     const { Box, Text } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
@@ -5470,6 +5567,20 @@ function drillView($: EngineInterface, cfg: Config, note: LearnNote, drill: Dril
           )}
         </Box>
       )}
+      {/* Over the field, not under it (1.7.1): the pane scrolls to the field that holds the keys, so a line under a field
+          on its bottom row is cut off, and these say what Enter did and which input mode the code needs. */}
+      {notice && (
+        <Text color={notice.isError ? 'red' : 'yellow'} wrap="wrap">
+          {notice.text}
+        </Text>
+      )}
+      {Input && !isOver && !isChecking && (
+        <Text dimColor wrap="wrap">
+          {/* While the field holds the keys every letter and number is typed into it: how to reach the buttons. Not
+              holding them, the terminal's pane says how the keys get to the field (it takes them first, autoFocus). */}
+          {`${first ? 'Enter: 다시 확인' : 'Enter: 확인'} · 코드는 영문 상태에서${isFocused ? ` · Tab: 버튼으로 (${first ? 'a 예시 답' : '1~4 보기'})` : surface === 'terminal' ? DRILL_KEYS_TAIL : ''}`}
+        </Text>
+      )}
       {Input && !isOver && isChecking && <Text color="cyan">확인하는 중입니다…</Text>}
       {Input && !isOver && !isChecking && (
         <Box flexDirection="column">
@@ -5501,18 +5612,6 @@ function drillView($: EngineInterface, cfg: Config, note: LearnNote, drill: Dril
           )}
           {first && <Box>{answer}</Box>}
         </Box>
-      )}
-      {notice && (
-        <Text color={notice.isError ? 'red' : 'yellow'} wrap="wrap">
-          {notice.text}
-        </Text>
-      )}
-      {Input && !isOver && !isChecking && (
-        <Text dimColor wrap="wrap">
-          {/* While the field holds the keys every letter and number is typed into it: how to reach the buttons. Not
-              holding them, the terminal's pane says how the keys get to the field (it takes them first, autoFocus). */}
-          {`${first ? 'Enter: 다시 확인' : 'Enter: 확인'} · 코드는 영문 상태에서${isFocused ? ` · Tab: 버튼으로 (${first ? 'a 예시 답' : '1~4 보기'})` : surface === 'terminal' ? DRILL_KEYS_TAIL : ''}`}
-        </Text>
       )}
       {isOver && state!.verdict === undefined && example}
       {isOver && state!.verdict !== undefined && (
@@ -6697,7 +6796,7 @@ function taughtBy(list: readonly LearnNote[], map: Readonly<Record<string, strin
 const HELP = [
   'learn-notes 명령',
   '',
-  '- `/learn`: 패널 열기 · 패널의 키를 쓰려면 `ctrl+x tab`(또는 패널 클릭), Esc로 대화로 돌아갑니다 (숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다)',
+  '- `/learn`: 패널 열기 · 패널의 키를 쓰려면 터미널은 `ctrl+x tab`(또는 패널 클릭), 데스크톱 앱은 패널 클릭, Esc로 대화로 돌아갑니다 (숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다)',
   '- `/learn 복습`: 오늘 복습을 패널 퀴즈로 바로 시작 · 답 칸에 바로 적고 Enter (패널이 없는 화면에서는 대화창에 문제를 냅니다)',
   '- 패널: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작 · `p`·`n` 이전·다음 노트 · `w` 노트 쓰기, 다시 쓰기',
   '- 노트 아래: `t` 직접 해 보기(한 번 고친 뒤 `a` 예시 답) · `e` 더 쉽게 · `r` 예시로 따라가기 · `i` 질문하기 · `c` 복사',
@@ -6806,7 +6905,7 @@ function noteAsText(note: LearnNote): string {
 function lastNoteText(note: LearnNote, isCloud = false): string {
   if (note.status !== 'ready' || !drillOf(note.text, note.changes)) return noteAsText(note)
   const tail = isCloud
-    ? '직접 해 보기: 터미널·데스크톱 앱의 패널에서 t로 고쳐 확인합니다'
+    ? '직접 해 보기: 데스크톱 앱에서 이 세션을 열면 패널에서 t로 고쳐 확인합니다'
     : `직접 해 보기: 패널에서 t로 고쳐 확인합니다${note.savedAs === 'ready' ? ' · 예시 답은 일지 파일에 있습니다' : ''}`
   return `${noteAsText(note)}\n\n${tail}`
 }
