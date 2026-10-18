@@ -11158,4 +11158,74 @@ describe('1.8.0: the store\'s own words for a full store, and the known and step
     expect(store.get('known')).toEqual({ [conceptKey('클로저')]: KNOWN.knownAt })
     expect(as16(store)[conceptKey('for...of 반복문')]).toMatchObject({ count: 1 })
   })
+
+  /**
+   * A store whose one concept, `map`, is at `step` since `reviewedAt` and due, its step copy matching:
+   * a grade then changes the copy's value under the same key, which a key-only comparison would not write.
+   */
+  const stepped = (step: number, reviewedAt: number) =>
+    new Map<string, unknown>([
+      ['stepsFrom', 0],
+      ['concepts', { [conceptKey('map')]: { ...STEPPED, step, reviewedAt } }],
+      ['known', {}],
+      ['steps', { [conceptKey('map')]: [step, reviewedAt] }],
+    ])
+  /** Quizzes `map` and grades the answer with the model's `verdict` word; the concept as the index then holds it. */
+  const graded = async ($: Engine, w: ReturnType<typeof world>, store: Map<string, unknown>, verdict: string) => {
+    w.answer = 'Q1: 문제 하나\nA1: 답 하나'
+    await learn($, 'quiz')
+    await w.clock.settle()
+    w.sets.length = 0
+    w.answer = `판정: ${verdict}\n피드백: 정확합니다.`
+    await learn($, 'quiz 1 새 배열을 만들어요')
+    await w.clock.settle()
+    return (store.get('concepts') as Record<string, { step: number; reviewedAt: number }>)[conceptKey('map')]!
+  }
+  /**
+   * A later note teaching another concept, whose count reads the index from the store again as this version does
+   * (indexOf, the step copy followed) and writes it back: `map` as the store then holds it, and `/learn 기록`.
+   */
+  const afterNote = async ($: Engine, w: ReturnType<typeof world>, store: Map<string, unknown>) => {
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const one = (store.get('concepts') as Record<string, { step: number }>)[conceptKey('map')]!
+    return { step: one.step, record: (await learn($, '기록')).text ?? '' }
+  }
+
+  test('a right answer from step 2 rewrites its step copy, the same key with new values: every read keeps step 3', async ($, on) => {
+    const before = NOW - 8 * DAY
+    const store = stepped(2, before)
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const one = await graded($, w, store, '맞음')
+    expect(one.step).toBe(3)
+    expect(one.reviewedAt).toBeGreaterThan(before)
+    expect(w.sets).toContain('steps')
+    expect(w.sets).not.toContain('known')
+    expect(store.get('steps')).toEqual({ [conceptKey('map')]: [3, one.reviewedAt] })
+    // Read as a 1.6 session reads it, and as this one does at the next note's count: step 3, 14 days on (1.5's step 1 says 3).
+    expect(as16(store)[conceptKey('map')]).toMatchObject({ step: 3, reviewedAt: one.reviewedAt })
+    const later = await afterNote($, w, store)
+    expect(later.step).toBe(3)
+    expect(later.record).toContain('- **map** ×3 · 최근 ')
+    expect(later.record).toContain('· 다음 복습 14일 뒤: 새 배열')
+  })
+
+  test('a partly right answer from step 3 rewrites its step copy too, a step back under the same key: every read keeps step 2', async ($, on) => {
+    const before = NOW - 15 * DAY
+    const store = stepped(3, before)
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const one = await graded($, w, store, '거의')
+    expect(one.step).toBe(2)
+    expect(one.reviewedAt).toBeGreaterThan(before)
+    expect(w.sets).toContain('steps')
+    expect(w.sets).not.toContain('known')
+    expect(store.get('steps')).toEqual({ [conceptKey('map')]: [2, one.reviewedAt] })
+    expect(as16(store)[conceptKey('map')]).toMatchObject({ step: 2, reviewedAt: one.reviewedAt })
+    const later = await afterNote($, w, store)
+    expect(later.step).toBe(2)
+    expect(later.record).toContain('· 다음 복습 7일 뒤: 새 배열')
+  })
 })
