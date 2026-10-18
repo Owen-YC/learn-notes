@@ -216,6 +216,67 @@ describe('1.8.0: a question keeps its rung as the model kept to it (E3)', () => 
     expect(rung('조건을 반대로 바꾸면 무엇이 남을까요?')).toBe('changed')
   })
 
+  test('a sign, number or name the code is said to become keeps the rung though it reads as a part of the code; a line with more on it, cut short, or lines beside it doing more are not the code as it was (교차 검토 6)', () => {
+    const code = (text: string, file = 'a.js') => [pickForRung(pick('A', { code: { file, text } }), 'changed')]
+    const rung = (question: string, picks: QuizPick[]) => parseQuiz(`T1: 바꿔 보기\nQ1: ${question}\nA1: 답`, picks)[0]!.rung
+    // A sign that is a part of the sign it stands for is another sign: `>` is not in `>=`, nor `==` in `===`.
+    const qty = code('items.filter(item => item.qty >= 0)')
+    expect(rung('`>=`를 `>`로 바꾸면 무엇이 남을까요?', qty)).toBe('changed')
+    expect(rung('`items.filter(item => item.qty >= 0)`에서 `>=`를 `>`로 바꾸면 무엇이 남을까요?', qty)).toBe('changed')
+    expect(rung('아래 코드에서 `>=`를 `>`로 바꾸면?\n```js\nitems.filter(item => item.qty >= 0)\n```', qty)).toBe('changed')
+    expect(rung('`items.filter(item => item.qty >= 0)`에서 `>=`는 무엇을 뜻할까요?', qty)).toBeUndefined()
+    expect(rung('`===` 대신 `==`를 쓰면 출력은?', code('if (a === b) console.log("same")'))).toBe('changed')
+    expect(rung('`!==`를 `!=`로 바꾸면 `x`가 `undefined`일 때는?', code('if (x !== null) use(x)'))).toBe('changed')
+    expect(rung('`if (x !== null)`에서 `!==`를 `!=`로 바꾸면?', code('if (x !== null) use(x)'))).toBe('changed')
+    expect(rung('`+=`를 `=`로 바꾸면 출력은?', [pickForRung(pick('A', { code: CODE }), 'changed')])).toBe('changed')
+    expect(rung('`**`를 `*`로 바꾸면 출력은?', code('print(3 ** 2)', 'a.py'))).toBe('changed')
+    // A number is read with its decimal point and its sign: 1 is not in 1.5, nor 5 in -5.
+    const price = code('const total = price * 1.5')
+    expect(rung('`const total = price * 1` 이면 total은?', price)).toBe('changed')
+    expect(rung('`price * 1.5`는 무엇을 계산할까요?', price)).toBeUndefined()
+    expect(rung('`const limit = 1.5` 뒤 limit은?', code('const limit = 1'))).toBe('changed')
+    expect(rung('`price = 2.5`를 `price = 2`로 바꾸면 출력은?', code('price = 2.5\nprint(price * 2)', 'a.py'))).toBe('changed')
+    expect(rung('`-5`를 `5`로 바꾸면 출력은?', code('const x = -5\nconsole.log(Math.abs(x))'))).toBe('changed')
+    expect(rung('`const total = price * 1.5`에서 배율이 `1`일 때 total은?', price)).toBe('changed')
+    expect(rung('`const x = -5`에서 `x`가 `5`일 때 출력은?', code('const x = -5\nconsole.log(Math.abs(x))'))).toBe('changed')
+    // A name, or a value the code holds elsewhere, said to be what a part becomes is the code changed.
+    const filter = code('items.filter(item => item.qty > 0)')
+    expect(rung('`item.qty > 0`에서 `qty`를 `price`로 바꾸면 무엇이 남을까요?', filter)).toBe('changed')
+    expect(rung('`0`을 `limit`으로 바꾸면 무엇이 남을까요?', filter)).toBe('changed')
+    expect(rung('`let total = 0`에서 `0`을 `1`로 바꾸면 출력은?', [pickForRung(pick('A', { code: CODE }), 'changed')])).toBe('changed')
+    expect(rung('`items.filter(item => item.qty > 0)`에서 `item`은 무엇을 가리킬까요?', filter)).toBeUndefined()
+    expect(rung('`items.filter(item => item.qty > 0)`에서 `item.qty`가 0이면?', filter)).toBeUndefined()
+    // The code with more on its line, or a line of it cut short, is another line; so are lines beside it doing more
+    // than call a function it defines (a line that runs it, kept as it was by 교차 검토 5's test above).
+    expect(rung('`const b = 2 * 3` 다음 줄에서 b는?', code('const b = 2'))).toBe('changed')
+    expect(rung('`const name = user.name.toUpperCase()` 뒤 name은?', code('const name = user.name'))).toBe('changed')
+    expect(rung('`const b = 2` 다음 줄에서 b는?', code('const b = 2 * 3'))).toBe('changed')
+    expect(rung('`const total = price`이면 total은?', code('const total = price * qty'))).toBe('changed')
+    expect(rung('`item => item.qty`를 넘기면?', filter)).toBe('changed')
+    expect(rung('아래 코드는?\n```js\nconst b = 2\nconsole.log(b)\n```', code('const b = 2'))).toBe('changed')
+    const shout = code('const shout = text => text.toUpperCase()')
+    expect(rung('아래 코드는?\n```js\nconst shout = text => text.toUpperCase()\nconsole.log(shout("hi"))\n```', shout)).toBeUndefined()
+    expect(rung('```js\nreturn items.filter(item => item.qty > 0);\n```\n결과는?', filter)).toBeUndefined()
+    expect(rung('`console.log(items.filter(item => item.qty > 0))`의 출력은?', filter)).toBeUndefined()
+    expect(rung('`items.filter(item => item.qty > 0) + 1`은?', filter)).toBe('changed')
+    expect(rung('`items.filter(item => item.qty > 0).length`는?', filter)).toBe('changed')
+    // A member named as a keyword is a value (`map.delete`); a keyword the code is said to become is the code changed.
+    expect(rung('`map.delete("a")`는 무엇을 돌려줄까요?', code('const isGone = map.delete("a") && map.size === 0'))).toBeUndefined()
+    expect(rung('`if i == 2:` 아래 `break`를 `continue`로 바꾸면 출력은?', code('for i in range(5):\n    if i == 2:\n        break\n    print(i)', 'a.py'))).toBe('changed')
+    // A comment at a line's end is left out as a whole-line one is; `//` in Python and `#` in a string are code.
+    expect(rung('```python\ntotal = 1 + 2  # 더하기\nprint(total)\n```', code('# 합\ntotal = 1 + 2\nprint(total)', 'a.py'))).toBeUndefined()
+    expect(rung('`const total = 1 + 2`의 total은?', code('const total = 1 + 2 // 합'))).toBeUndefined()
+    expect(rung('`print(7 // 3)`의 출력은?', code('print(7 // 2)', 'a.py'))).toBe('changed')
+    expect(rung('`print("# 2")`의 출력은?', code('print("# 1")', 'a.py'))).toBe('changed')
+    // What haiku wrote (docs/qa/견본.md, r1): the code as it was beside braces named in words keeps none; the code with
+    // two lines more that change what it prints keeps the rung, as 0183a13 and the hand count had them.
+    const block = code('let x = 1\nif (true) {\n  let x = 2\n}\nconsole.log(x)')
+    expect(rung('아래 코드에서 마지막 `console.log(x)`가 2를 출력하게 하려면 안쪽 블록(중괄호 `{ }`로 묶은 부분)의 어느 줄을 어떻게 바꿔야 할까요?\n```\nlet x = 1\nif (true) {\n  let x = 2\n}\nconsole.log(x)\n```', block)).toBeUndefined()
+    const order = code("console.log('A')\nPromise.resolve().then(() => console.log('B'))\nconsole.log('C')")
+    expect(rung("아래 코드를 실행하면 출력되는 글자가 어떤 순서로 나올까요? 순서대로 한 줄에 쓰면 됩니다.\n```\nconsole.log('A')\nPromise.resolve().then(() => console.log('B'))\nconsole.log('C')\nPromise.resolve().then(() => console.log('D'))\nconsole.log('E')\n```", order)).toBe('changed')
+    expect(rung('`{ }`를 `[ ]`로 바꾸면?', block)).toBe('changed')
+  })
+
   test('a T line that names the rung before the kind is read for its kind; one naming the rung alone has none, as in 1.7', () => {
     const picks = [pickForRung(pick('A', { slip }), 'worked')]
     const kind = (t: string) => parseQuiz(`T1: ${t}\nQ1: 풀이: 예. 이제 풀어 보세요: y는?\nA1: 6`, picks)[0]!.kind

@@ -4554,9 +4554,13 @@ function unquoted(text: string): string {
     .trim()
 }
 
-/** The code a question shows: each fenced block's lines, and each span in backticks outside them. */
-function shownCode(question: string): string[] {
-  const shown: string[] = []
+/**
+ * The code a question shows: each fenced block's lines, and each span in backticks outside them. A span is `isNew` when
+ * the question says the code becomes it: 로 or 으로 right after it and a word of changing next (`>`로 바꾸면, `5`로
+ * 하면; not `{ }`로 묶은), or 대신 or → before it.
+ */
+function shownCode(question: string): { text: string; isNew: boolean }[] {
+  const shown: { text: string; isNew: boolean }[] = []
   const prose: string[] = []
   let fence: string | null = null
   let lines: string[] = []
@@ -4566,7 +4570,7 @@ function shownCode(question: string): string[] {
       fence = bare[1]!
       lines = []
     } else if (fence !== null && bare && bare[1]!.startsWith(fence[0]!) && bare[1]!.length >= fence.length) {
-      shown.push(lines.join('\n'))
+      shown.push({ text: lines.join('\n'), isNew: false })
       fence = null
     } else if (fence !== null) {
       lines.push(raw)
@@ -4574,50 +4578,220 @@ function shownCode(question: string): string[] {
       prose.push(raw)
     }
   }
-  for (const m of prose.join('\n').matchAll(/``(.+?)``|`([^`\n]+)`/g)) shown.push(m[1] ?? m[2]!)
+  const said = prose.join('\n')
+  for (const m of said.matchAll(/``(.+?)``|`([^`\n]+)`/g)) {
+    const after = said.slice(m.index + m[0].length)
+    const isNew = /^으?로\s*(?:바꾸|바꿔|바뀌|바꾼|고치|고쳐|고친|하면|해\s*보|두면|둔다|쓰면|써\s*보|정하|대체|교체|변경|수정)/.test(after) || /(?:대신|→)\s*$/.test(said.slice(0, m.index))
+    shown.push({ text: m[1] ?? m[2]!, isNew })
+  }
   return shown
 }
 
+/** Signs read as one, the longest first: `>=` is one sign, not `>` beside `=`, and `===` is not `==`. */
+const CODE_SIGNS = ['>>>=', '===', '!==', '**=', '//=', '<<=', '>>=', '>>>', '&&=', '||=', '??=', '...', '=>', '==', '!=', '<=', '>=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '**', '//', '&&', '||', '??', '?.', '++', '--', '<<', '>>', '->', '::', ':=']
+
 /**
- * Code as isShownAsItWas compares it: each line as normalizeCode reads it (its spaces, a `;` at its end, a string's
- * quotes one kind where `isQuoteFree`), blank lines and whole-line comments left out, then the lines run together, a
- * line break kept as one space only between two words, so the same code on fewer lines reads the same.
+ * Words JavaScript, TypeScript or Python keep for themselves, never a value: code of its own starts after one
+ * (`return items.filter(…)`).
  */
-function codeAsRead(text: string, isQuoteFree: boolean): string {
-  const isWord = (ch: string | undefined) => ch !== undefined && /[\p{L}\p{N}_$]/u.test(ch)
-  return text
-    .split('\n')
-    .filter(line => !/^\s*(?:\/\/|#(?:\s|$))/.test(line))
-    .map(line => normalizeCode(line, isQuoteFree))
-    .filter(line => line !== '')
-    .reduce((flat, line) => (flat === '' ? line : `${flat}${isWord(flat.at(-1)) && isWord(line[0]) ? ' ' : ''}${line}`), '')
+const CODE_KEYWORDS = new Set(['return', 'yield', 'await', 'throw', 'raise', 'case', 'if', 'elif', 'else', 'while', 'for', 'do', 'in', 'of', 'not', 'and', 'or', 'is', 'typeof', 'void', 'delete', 'del', 'new', 'const', 'let', 'var', 'export', 'default', 'assert', 'with', 'as', 'from', 'import', 'def', 'function', 'lambda', 'class', 'async', 'try', 'catch', 'except', 'finally', 'pass', 'break', 'continue', 'switch', 'global', 'nonlocal'])
+
+/** Ways of writing code alone in backticks: a word the question talks about (`function`으로 바꿔 쓰면), not a value. */
+const CODE_FORMS = new Set(['function', 'def', 'lambda', 'return', 'const', 'let', 'var', 'async', 'await', 'class', '=>'])
+
+/** Files whose language starts a comment with `//` anywhere on a line (in Python and Lua it divides). */
+const SLASH_COMMENTS = /\.(?:[cm]?[jt]sx?|vue|svelte|astro|java|kts?|scala|dart|swift|go|rs|c|h|cc|cpp|hpp|cs|php)$/i
+
+/**
+ * A line with its comment taken off: from a `#` standing alone, or from `//` at its start or where SLASH_COMMENTS;
+ * neither inside a string.
+ */
+function uncommented(line: string, isSlash: boolean): string {
+  let quote: string | null = null
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i]!
+    if (ch === '\\') i += 1
+    else if (quote !== null) quote = ch === quote ? null : quote
+    else if (ch === '"' || ch === "'" || ch === '`') quote = ch
+    else if (ch === '#' && /^\s?$/.test(line[i - 1] ?? '') && /^\s?$/.test(line[i + 1] ?? '')) return line.slice(0, i)
+    else if (ch === '/' && line[i + 1] === '/' && (isSlash || line.slice(0, i).trim() === '')) return line.slice(0, i)
+  }
+  return line
 }
 
-/** True when `part` is in `whole` with no word running on past either end of it: `x>1` is not in `x>10`. */
-function holdsCode(whole: string, part: string): boolean {
+/** True for a name, number or string that is not a keyword (CODE_KEYWORDS): a value code works on. */
+function isOperand(token: string | undefined): boolean {
+  return token !== undefined && /^(?:[\p{L}\p{N}_$"'`]|[-+]\p{N})/u.test(token) && !CODE_KEYWORDS.has(token)
+}
+
+/**
+ * A line as normalizeCode reads it, in tokens: a name, a number with its decimal point and the sign standing for it
+ * (`1.5` is not `1`, nor `-5` a `5`; `a-5` takes 5 away), a string, a sign of CODE_SIGNS, or any other character.
+ */
+function codeTokens(code: string): string[] {
+  const tokens: string[] = []
+  const isDigit = (ch: string | undefined) => ch !== undefined && /\p{N}/u.test(ch)
   const isWord = (ch: string | undefined) => ch !== undefined && /[\p{L}\p{N}_$]/u.test(ch)
-  for (let at = whole.indexOf(part); at !== -1; at = whole.indexOf(part, at + 1)) {
-    const end = at + part.length
-    if (!(isWord(part[0]) && isWord(whole[at - 1])) && !(isWord(part.at(-1)) && isWord(whole[end]))) return true
+  for (let i = 0; i < code.length; ) {
+    const ch = code[i]!
+    const prev = tokens.at(-1)
+    let end = i + 1
+    if (/\s/.test(ch)) {
+      i = end
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      while (end < code.length && code[end] !== ch) end += code[end] === '\\' ? 2 : 1
+      end = Math.min(end + 1, code.length)
+    } else if (isDigit(ch) || ((ch === '-' || ch === '+') && isDigit(code[i + 1]) && !(isOperand(prev) || prev === ')' || prev === ']'))) {
+      while (isWord(code[end]) || (code[end] === '.' && isDigit(code[end + 1]))) end += 1
+    } else if (isWord(ch)) {
+      while (isWord(code[end])) end += 1
+    } else {
+      end = i + (CODE_SIGNS.find(sign => code.startsWith(sign, i))?.length ?? 1)
+    }
+    tokens.push(code.slice(i, end))
+    i = end
   }
-  return false
+  return tokens
+}
+
+/**
+ * Code as isShownAsItWas compares it, line by line in tokens (codeTokens): each line as normalizeCode reads it (its
+ * spaces, a `;` at its end, a string's quotes one kind where quotesAlike), its comment left out (uncommented), blank
+ * lines dropped. Tokens do not see line breaks, so the same code on fewer lines reads the same.
+ */
+function codeAsRead(text: string, file: string): string[][] {
+  const isQuoteFree = quotesAlike(file)
+  const isSlash = SLASH_COMMENTS.test(file)
+  return text
+    .split('\n')
+    .map(line => codeTokens(normalizeCode(uncommented(line, isSlash), isQuoteFree)))
+    .filter(line => line.length > 0)
+}
+
+/**
+ * True for tokens that are one value as code reads it: names, numbers and strings joined by `.` or `?.` (any word a
+ * member: `.then`, `.delete`), with what is in brackets after them (`items.filter(…)`, `item.qty`, `(a + b)`).
+ * Nothing outside such a value takes it apart.
+ */
+function isValue(tokens: readonly string[]): boolean {
+  let depth = 0
+  let isAfterValue = false
+  let isMember = false
+  for (const token of tokens) {
+    if (token === '(' || token === '[') depth += 1
+    else if (token === ')' || token === ']') {
+      depth -= 1
+      if (depth < 0) return false
+      if (depth === 0) isAfterValue = true
+    } else if (depth > 0) continue
+    else if (token === '.' || token === '?.') {
+      if (!isAfterValue) return false
+      isAfterValue = false
+      isMember = true
+    } else if (!isAfterValue && (isOperand(token) || (isMember && /^[\p{L}_$]/u.test(token)))) {
+      isAfterValue = true
+      isMember = false
+    } else return false
+  }
+  return depth === 0 && isAfterValue
+}
+
+/**
+ * Where `part` is a part of the code `whole` (its lines in tokens) as code reads it, as a count of tokens, or -1: its
+ * tokens run in the whole's, and at each end it meets a line's edge, or what starts or closes code of its own there
+ * (`(`, `=`, `return` before it; `)`, `,` after it), or, where `isValueApart`, it is one value (isValue) nothing beside
+ * it takes apart (`item.qty` in `item.qty > 0`). `const b = 2` is not a part of `const b = 2 * 3`, nor
+ * `item => item.qty` of `item => item.qty > 0`.
+ */
+function partAt(whole: readonly string[][], part: readonly string[], isValueApart: boolean): number {
+  const tokens = whole.flat()
+  const edges = new Set(whole.reduce((at, line) => [...at, at.at(-1)! + line.length], [0]))
+  const isValuePart = isValueApart && isValue(part)
+  const isWordAt = (token: string) => /^[\p{L}_$]/u.test(token)
+  for (let at = 0; at + part.length <= tokens.length; at += 1) {
+    if (!part.every((token, k) => tokens[at + k] === token)) continue
+    const end = at + part.length
+    const before = tokens[at - 1] ?? ''
+    const after = tokens[end] ?? ''
+    const opens =
+      edges.has(at) ||
+      ['(', '[', '{', ',', ';', ':', '?'].includes(before) ||
+      /^(?:=>|[-+*/%&|^?:]*=)$/.test(before) ||
+      CODE_KEYWORDS.has(before) ||
+      ((before === ')' || before === '}') && isWordAt(part[0]!)) ||
+      (isValuePart && before !== '.' && before !== '?.')
+    const closes =
+      edges.has(end) ||
+      [')', ']', '}', ',', ';', ':', '?'].includes(after) ||
+      ((part.at(-1) === ')' || part.at(-1) === '}') && isWordAt(after)) ||
+      (isValuePart && !['.', '?.', '(', '['].includes(after))
+    if (opens && closes) return at
+  }
+  return -1
+}
+
+/** The functions and classes code defines, by name: after `function`, `def` or `class`, or set to an arrow function or a lambda. */
+function definedIn(lines: readonly string[][]): Set<string> {
+  const names = new Set<string>()
+  const isName = (token: string | undefined): token is string => token !== undefined && /^[\p{L}_$]/u.test(token) && !CODE_KEYWORDS.has(token)
+  for (const line of lines) {
+    line.forEach((token, k) => {
+      if ((token === 'function' || token === 'def' || token === 'class') && isName(line[k + 1])) names.add(line[k + 1]!)
+      if (line[k + 1] === '=' && isName(token) && line.slice(k + 2).some(one => one === '=>' || one === 'function' || one === 'lambda')) names.add(token)
+    })
+  }
+  return names
+}
+
+/**
+ * True when the code shown holds all of the learner's code where code of its own starts and closes (partAt: `return`
+ * before it, a call around it), and each line of it beside the learner's only calls a function or class that code
+ * defines (definedIn: `console.log(visibleItems([]))`). Lines that do more (`console.log('E')`) are the code changed.
+ */
+function holdsMine(shown: readonly string[][], mine: readonly string[][]): boolean {
+  const all = mine.flat()
+  const at = partAt(shown, all, false)
+  if (at === -1) return false
+  const defined = definedIn(mine)
+  let start = 0
+  return shown.every(line => {
+    const from = start
+    start += line.length
+    const isBeside = start <= at || from >= at + all.length
+    return !isBeside || line.some((token, k) => defined.has(token) && line[k + 1] === '(')
+  })
 }
 
 /**
  * True when a question asked in the learner's code changed (rung 'changed') shows that code as it was: some code is
- * shown, and every piece of it is a part of the learner's code (a line with its `return` left off, the arrow function
- * in it) or holds all of it (with a call that runs it), as codeAsRead reads both. A number, sign or order changed
- * anywhere in it is another piece (`> 10` is not `> 0`, nor `1` a part of `10`). A name alone in backticks
- * (`function`, `filter`) shows no code: it is a word the question talks about.
+ * shown, and every piece of it is a part of the learner's code (partAt: a line with its `return` left off, the arrow
+ * function in it, `item.qty` in it) or holds all of it (holdsMine: with `return` before it, beside a call that runs
+ * it), on code as codeAsRead reads it. A number, sign or order changed anywhere in it is another piece (`> 10` is not
+ * `> 0`, nor `1` a part of `10` or `1.5`), and so is more on its line (`2 * 3` for `2`) or lines that do more. A
+ * piece of one token or of signs alone shows no code: a way of writing (`function`, `let`, CODE_FORMS) or a word or
+ * sign of the code (`filter`, `>=`, `{ }`) is what the question talks about; one the code does not hold (`price`), or
+ * one the code is said to become (`>`로 바꾸면, 대신 `==`), is the code changed.
  */
 function isShownAsItWas(code: { file: string; text: string }, question: string): boolean {
-  const isQuoteFree = quotesAlike(code.file)
-  const mine = codeAsRead(code.text, isQuoteFree)
-  if (mine === '') return false
-  const shown = shownCode(question)
-    .map(text => codeAsRead(text, isQuoteFree))
-    .filter(text => text !== '' && !/^[\p{L}_$][\p{L}\p{N}_$]*$/u.test(text))
-  return shown.length > 0 && shown.every(text => holdsCode(mine, text) || holdsCode(text, mine))
+  const lines = codeAsRead(code.text, code.file)
+  const mine = lines.flat()
+  if (mine.length === 0) return false
+  let isShown = false
+  for (const piece of shownCode(question)) {
+    const shown = codeAsRead(piece.text, code.file)
+    const tokens = shown.flat()
+    if (tokens.length === 0) continue
+    if (tokens.length === 1 || !tokens.some(token => /^(?:[\p{L}\p{N}_$"'`]|[-+]\p{N})/u.test(token))) {
+      if (tokens.every(token => CODE_FORMS.has(token))) continue
+      if (piece.isNew || !tokens.every(token => mine.includes(token))) return false
+    } else {
+      if (partAt(lines, tokens, true) === -1 && !holdsMine(shown, lines)) return false
+      isShown = true
+    }
+  }
+  return isShown
 }
 
 /**
