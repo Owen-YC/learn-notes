@@ -11373,6 +11373,20 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     const again = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
     expect(await again.find({ type: 'Text', text: /^문제 1\/1 · 예측$/ })).toBeDefined()
     await again.unmount()
+
+    // A line of it alone, in backticks and with a `;`, is the learner's code as it was too (교차 검토 5); a value
+    // changed in that line is not.
+    await w.clock.advance(60_000)
+    w.answer = ['T1: 바꿔 보기', 'Q1: `const b = 2;`를 `let`으로 바꿔 쓰면?', 'A1: let b = 2'].join('\n')
+    expect((await learn($, '퀴즈 새로')).text).toContain('\n1. `const b = 2;`를 `let`으로 바꿔 쓰면?')
+    expect(quizItems(store)[0]!.rung).toBeUndefined()
+    const line = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    expect(await line.find({ type: 'Text', text: /^문제 1\/1 · 바꿔 보기$/ })).toBeDefined()
+    await line.unmount()
+    await w.clock.advance(60_000)
+    w.answer = ['T1: 예측', 'Q1: `const b = 3;` 다음 줄에서 b는?', 'A1: 3'].join('\n')
+    expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (비슷한 코드) `const b = 3;` 다음 줄에서 b는?')
+    expect(quizItems(store)[0]).toMatchObject({ rung: 'changed' })
   })
 
   test('a concept met once is asked in the learner\'s own code with no tag, as in 1.7; the rung is kept on the question', async ($, on) => {

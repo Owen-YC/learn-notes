@@ -181,6 +181,41 @@ describe('1.8.0: a question keeps its rung as the model kept to it (E3)', () => 
     expect(parseQuiz('Q1: `const b = 5` 다음 줄에서 b = 3이면?\nA1: 오류', line)[0]!.rung).toBe('changed')
   })
 
+  test('code meant changed shown as a part of it, its return left off, or with `;`, other quotes or fewer lines, keeps no rung; one changed number, operator or order keeps it (교차 검토 5)', () => {
+    const cart = { file: 'cartView.js', text: '// 장바구니 화면에 보여 줄 상품만 고른다\nfunction visibleItems(items) {\n  return items.filter(item => item.qty > 0)\n}' }
+    const changed = [pickForRung(pick('화살표 함수', { code: cart }), 'changed')]
+    const rung = (question: string, picks = changed) => parseQuiz(`T1: 바꿔 보기\nQ1: ${question}\nA1: 답`, picks)[0]!.rung
+    // What haiku wrote for a concept at its third step: the line of the learner's code, its return left off.
+    expect(rung('아래 화살표 함수를 `function` 키워드를 쓴 일반 함수 형태로 바꾸면 어떻게 써야 할까요? 같은 동작을 해야 합니다. `items.filter(item => item.qty > 0)`')).toBeUndefined()
+    expect(rung('`item => item.qty > 0`을 `return`이 있는 함수로 바꿔 쓰면?')).toBeUndefined()
+    const arrow = [pickForRung(pick('화살표 함수', { code: { file: 'a.js', text: 'const shown = items.filter(item => item.qty > 0)' } }), 'changed')]
+    expect(rung('`item => item.qty > 0`을 `function`으로 바꿔 쓰면?', arrow)).toBeUndefined()
+    // The whole of it with `;` at its lines' ends, or on fewer lines, its comment left out; or with a call that runs it.
+    expect(rung('아래 코드는?\n```js\nfunction visibleItems(items) {\n    return items.filter(item => item.qty > 0);\n};\n```')).toBeUndefined()
+    expect(rung('아래 코드는?\n```js\nfunction visibleItems(items) { return items.filter(item => item.qty > 0) }\n```')).toBeUndefined()
+    expect(rung('아래 코드는?\n```js\nfunction visibleItems(items) {\n  return items.filter(item => item.qty > 0)\n}\nconsole.log(visibleItems([{ qty: 0 }]).length)\n```')).toBeUndefined()
+    // A string's quotes made one kind only where the language reads them so (quotesAlike).
+    const unit = (file: string) => [pickForRung(pick('A', { code: { file, text: "unit = '원'\nprint(unit)" } }), 'changed')]
+    expect(rung('```\nunit = "원";\nprint(unit)\n```', unit('a.py'))).toBeUndefined()
+    expect(rung('```\nunit = "원"\nprint(unit)\n```', unit('a.rb'))).toBe('changed')
+    // One place changed: a number, an operator, the order, a return taken out; or said changed beside the part it was.
+    expect(rung('`items.filter(item => item.qty > 10)`의 결과는?')).toBe('changed')
+    expect(rung('`items.filter(item => item.qty >= 0)`의 결과는?')).toBe('changed')
+    expect(rung('`item.qty > 0`을 `item.qty >= 2`로 바꾸면 무엇이 남을까요?')).toBe('changed')
+    expect(rung('원래 코드:\n```js\nfunction visibleItems(items) {\n  return items.filter(item => item.qty > 0)\n}\n```\n바꾼 코드:\n```js\nfunction visibleItems(items) {\n  return items.filter(item => item.qty > 1)\n}\n```')).toBe('changed')
+    expect(rung('```js\nlet total = 0\nconsole.log(total)\nfor (const n of [1, 2]) total += n\n```', [pickForRung(pick('A', { code: CODE }), 'changed')])).toBe('changed')
+    const callback = [pickForRung(pick('A', { code: { file: 'a.js', text: 'items.filter(function (item) {\n  return item.qty > 0\n})' } }), 'changed')]
+    expect(rung('```js\nitems.filter(function (item) {\n  item.qty > 0\n})\n```', callback)).toBe('changed')
+    // A number cut short is another number, either way round: 10 is not 1.
+    const code = (text: string) => [pickForRung(pick('A', { code: { file: 'a.js', text } }), 'changed')]
+    expect(rung('`const limit = 1` 뒤 limit은?', code('const limit = 10'))).toBe('changed')
+    expect(rung('`const limit = 10` 뒤 limit은?', code('const limit = 1'))).toBe('changed')
+    expect(rung('`const a = 2` 뒤 a는?', code('const a = 1\nconst b = 2'))).toBe('changed')
+    // Names alone in backticks show no code; nor does a question with none.
+    expect(rung('`filter`와 `return`을 써서 다시 쓰면?')).toBe('changed')
+    expect(rung('조건을 반대로 바꾸면 무엇이 남을까요?')).toBe('changed')
+  })
+
   test('a T line that names the rung before the kind is read for its kind; one naming the rung alone has none, as in 1.7', () => {
     const picks = [pickForRung(pick('A', { slip }), 'worked')]
     const kind = (t: string) => parseQuiz(`T1: ${t}\nQ1: 풀이: 예. 이제 풀어 보세요: y는?\nA1: 6`, picks)[0]!.kind

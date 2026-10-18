@@ -4579,15 +4579,54 @@ function shownCode(question: string): string[] {
 }
 
 /**
+ * Code as isShownAsItWas compares it: each line as normalizeCode reads it (its spaces, a `;` at its end, a string's
+ * quotes one kind where `isQuoteFree`), blank lines and whole-line comments left out, then the lines run together, a
+ * line break kept as one space only between two words, so the same code on fewer lines reads the same.
+ */
+function codeAsRead(text: string, isQuoteFree: boolean): string {
+  const isWord = (ch: string | undefined) => ch !== undefined && /[\p{L}\p{N}_$]/u.test(ch)
+  return text
+    .split('\n')
+    .filter(line => !/^\s*(?:\/\/|#(?:\s|$))/.test(line))
+    .map(line => normalizeCode(line, isQuoteFree))
+    .filter(line => line !== '')
+    .reduce((flat, line) => (flat === '' ? line : `${flat}${isWord(flat.at(-1)) && isWord(line[0]) ? ' ' : ''}${line}`), '')
+}
+
+/** True when `part` is in `whole` with no word running on past either end of it: `x>1` is not in `x>10`. */
+function holdsCode(whole: string, part: string): boolean {
+  const isWord = (ch: string | undefined) => ch !== undefined && /[\p{L}\p{N}_$]/u.test(ch)
+  for (let at = whole.indexOf(part); at !== -1; at = whole.indexOf(part, at + 1)) {
+    const end = at + part.length
+    if (!(isWord(part[0]) && isWord(whole[at - 1])) && !(isWord(part.at(-1)) && isWord(whole[end]))) return true
+  }
+  return false
+}
+
+/**
+ * True when a question asked in the learner's code changed (rung 'changed') shows that code as it was: some code is
+ * shown, and every piece of it is a part of the learner's code (a line with its `return` left off, the arrow function
+ * in it) or holds all of it (with a call that runs it), as codeAsRead reads both. A number, sign or order changed
+ * anywhere in it is another piece (`> 10` is not `> 0`, nor `1` a part of `10`). A name alone in backticks
+ * (`function`, `filter`) shows no code: it is a word the question talks about.
+ */
+function isShownAsItWas(code: { file: string; text: string }, question: string): boolean {
+  const isQuoteFree = quotesAlike(code.file)
+  const mine = codeAsRead(code.text, isQuoteFree)
+  if (mine === '') return false
+  const shown = shownCode(question)
+    .map(text => codeAsRead(text, isQuoteFree))
+    .filter(text => text !== '' && !/^[\p{L}_$][\p{L}\p{N}_$]*$/u.test(text))
+  return shown.length > 0 && shown.every(text => holdsCode(mine, text) || holdsCode(text, mine))
+}
+
+/**
  * The rung a question keeps, read against what the model wrote: a worked example with no example shown (no 풀이:)
- * keeps none, nor code meant changed that is shown as it was; any other keeps its pick's.
+ * keeps none, nor code meant changed that is shown as it was (isShownAsItWas); any other keeps its pick's.
  */
 function keptRung(pick: Pick<QuizPick, 'rung' | 'code'>, question: string): QuizRung | undefined {
   if (pick.rung === 'worked') return WORKED_SHOWN.test(question) ? 'worked' : undefined
-  if (pick.rung === 'changed' && pick.code) {
-    const mine = squash(pick.code.text)
-    if (mine !== '' && shownCode(question).some(code => squash(code) === mine)) return undefined
-  }
+  if (pick.rung === 'changed' && pick.code && isShownAsItWas(pick.code, question)) return undefined
   return pick.rung
 }
 
