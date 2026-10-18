@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cleanConcepts, conceptKey, journalPath, recallSteps, rootTag, stamp, withKnownMarks } from '../hooks/notes'
+import { cleanConcepts, conceptKey, journalPath, recallSteps, recapRange, reportMarkdown, rootTag, stamp, withKnownMarks } from '../hooks/notes'
 
 const NOW = Date.UTC(2026, 9, 3, 1)
 const NOTES_DIR = '/home/u/.claude/learning-notes'
@@ -85,6 +85,14 @@ type World = {
   mtimes: Map<string, number>
   /** Paths that are links, with where each leads (fs.stat's isLink and realPath). */
   links: Map<string, string>
+  /** Paths fs.stat refuses (1.8.0), with the errno it says (`ENOENT`) or `network` for a network location. */
+  statFails?: Map<string, string>
+  /** Paths fs.stat calls a folder though no file lies under them. */
+  dirs?: Set<string>
+  /** Paths fs.read refuses, with the errno it says or `network`. */
+  readFails?: Map<string, string>
+  /** Each file's size as fs.stat gives it, where it is not the text's length. */
+  sizes?: Map<string, number>
   /** Each text put on the clipboard. */
   copied: string[]
   /** True while the surface has no clipboard to copy on (a remote one). */
@@ -220,20 +228,31 @@ function world(
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('ui.render', { component: 'Spinner' }, ($, e) => $.ui.resolve(e).Text({ children: e.props.word }))
   on('fs.exists', (_$, e) => ({ value: w.files.has(e.path) }))
-  on('fs.stat', (_$, e) => ({
-    value: {
-      // A path some file lies under is a folder (the journal folder once a journal is in it).
-      kind: [...w.files.keys()].some(path => path.startsWith(`${e.path}/`)) ? ('dir' as const) : ('file' as const),
-      size: (w.files.get(e.path) ?? '').length,
-      mtimeMs: w.mtimes.get(e.path) ?? 0,
-      isLink: w.links.has(e.path),
-      ...(e.resolve ? { realPath: w.links.get(e.path) ?? e.path } : {}),
-    },
-  }))
+  /** A refusal in the engine's words: an OS refusal with its errno and the path, or a network location. */
+  const refusal = (call: string, path: string, code: string) =>
+    code === 'network' ? `$.fs.${call}: a network location is not reached from here` : `${code}: refused, ${call} '${path}'`
+  on('fs.stat', (_$, e) => {
+    const failed = w.statFails?.get(e.path)
+    if (failed !== undefined) return { deny: refusal('stat', e.path, failed) }
+    return {
+      value: {
+        // A path some file lies under is a folder (the journal folder once a journal is in it).
+        kind: w.dirs?.has(e.path) || [...w.files.keys()].some(path => path.startsWith(`${e.path}/`)) ? ('dir' as const) : ('file' as const),
+        size: w.sizes?.get(e.path) ?? (w.files.get(e.path) ?? '').length,
+        mtimeMs: w.mtimes.get(e.path) ?? 0,
+        isLink: w.links.has(e.path),
+        ...(e.resolve ? { realPath: w.links.get(e.path) ?? e.path } : {}),
+      },
+    }
+  })
   // The plugin's own manifest, as a release ships it: what /learn 도움말 and /learn 진단 name.
-  on('fs.read', (_$, e) => ({
-    value: w.files.get(e.path) ?? (e.path.endsWith('/.claude-plugin/plugin.json') && w.version !== null ? JSON.stringify({ name: 'learn-notes', version: w.version }) : ''),
-  }))
+  on('fs.read', (_$, e) => {
+    const failed = w.readFails?.get(e.path)
+    if (failed !== undefined) return { deny: refusal('read', e.path, failed) }
+    return {
+      value: w.files.get(e.path) ?? (e.path.endsWith('/.claude-plugin/plugin.json') && w.version !== null ? JSON.stringify({ name: 'learn-notes', version: w.version }) : ''),
+    }
+  })
   on('fs.list', (_$, e) => ({
     value: [...w.files.keys()]
       .filter(path => path.startsWith(`${e.path}/`) && !path.slice(e.path.length + 1).includes('/'))
@@ -4745,7 +4764,8 @@ describe('1.6.0: fewer commands, one record, a report with no code', () => {
     // 보고 · report say the same; a period it cannot read says how.
     expect((await learn($, 'report 어제')).text).toContain(`report-${stamp(NOW - DAY).day}_${stamp(NOW - DAY).day}.md`)
     expect((await learn($, '보고 이번주')).text).toContain('학습 보고서를 클립보드에 복사했습니다')
-    expect((await learn($, '보고서 내일')).text).toBe('쓰는 법: /learn 보고서 (최근 7일 · 이번주 · 어제 · 오늘 · 2026-10-03)')
+    // 1.8.0: with the team map's command after it.
+    expect((await learn($, '보고서 내일')).text).toBe('쓰는 법: /learn 보고서 (최근 7일 · 이번주 · 어제 · 오늘 · 2026-10-03) · 팀 학습 지도: /learn 보고서 모으기 파일')
     expect(w.models).toHaveLength(calls)
   })
 
@@ -12365,5 +12385,216 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through, answered in t
     expect(await hintsOf(ui)).toEqual([])
     expect((await fieldOf(ui)).props.placeholder).toBe(SHUT)
     await ui.unmount()
+  })
+})
+
+describe('1.8.0: /learn 보고서 모으기, a team map of the reports gathered in one file (E5)', () => {
+  const DAY = 86_400_000
+  const FILE = '/proj/팀.md'
+  const TEAM_PATH = '/proj/.claude/learn-notes.md'
+  const COPIED = '팀 학습 지도를 클립보드에 복사했습니다 · 보고서 3개 · 팀 채널에 붙이기 전에 한 번 읽어 보세요'
+  const LEFT = '같은 보고서 1개는 한 번만 셌습니다 · 형식이 맞지 않는 보고서 1개는 뺐습니다 · 기간이 겹치지 않는 보고서 1개는 뺐습니다'
+  const HERE = '팀 학습 지도입니다 · 이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다. 붙이기 전에 한 번 읽어 보세요'
+
+  /** A teammate's /learn 보고서 of the last seven days to `at`, as reportMarkdown writes it. */
+  function report(fresh: string[], missed: string[] = [], at = NOW, notes = 3, team?: { total: number; met: string[] }): string {
+    const index: Record<string, unknown> = {}
+    fresh.forEach((name, i) => {
+      index[conceptKey(name)] = { name, count: 1, firstAt: at - DAY + i, lastAt: at - DAY + i, blurb: '', files: [] }
+    })
+    missed.forEach((name, i) => {
+      index[conceptKey(name)] = { name, count: 2, firstAt: at - 40 * DAY, lastAt: at - 40 * DAY, blurb: '', files: [], missedAt: at - DAY + i, reviewedAt: at - DAY + i, step: 0 }
+    })
+    const day = stamp(at - DAY).day
+    return reportMarkdown({
+      range: recapRange('최근 7일', at)!,
+      activity: { [day]: { notes, right: 2, wrong: 1 } },
+      index: index as Parameters<typeof reportMarkdown>[0]['index'],
+      now: at,
+      usage: { [day]: { calls: 20, auto: 12, input: 46_000, output: 10_000 } },
+      since: at - 100 * DAY,
+      ...(team ? { team } : {}),
+    })
+  }
+  /** `text` with the learner's own words written under its last heading. */
+  const own = (text: string, words: string) => text.replace('## 이번 기간에 배운 것을 내 말로 한 줄\n\n- ', `## 이번 기간에 배운 것을 내 말로 한 줄\n\n- ${words}`)
+  /** Three teammates' reports as a leader saves them: one sent twice, a block cut short, one of another week. */
+  const GATHERED = [
+    '김철수  오후 3:12',
+    own(report(['클로저', 'async/await'], ['Promise 체이닝']), '홍길동 대리님 덕분에 이해했습니다'),
+    own(report(['클로저'], ['Promise 체이닝'], NOW, 4), '어려웠다'),
+    report(['클로저', 'async/await'], ['Promise 체이닝'], NOW, 5),
+    report(['클로저'], ['Promise 체이닝'], NOW, 4),
+    report(['맵 함수'], [], NOW, 6).replace(/^- 학습 노트 6개\n/m, ''),
+    report(['클로저'], [], NOW - 14 * DAY, 2),
+  ].join('\n\n')
+
+  test('a file of reports becomes a map on the clipboard: what was left out said, no model call, no store write, no file', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.files.set(FILE, GATHERED)
+    const before = { models: w.models.length, sets: w.sets.length, writes: w.writes.length }
+    const reply = (await learn($, '보고서 모으기 /proj/팀.md')).text
+    expect(reply).toBe(`${COPIED}\n${LEFT}`)
+    expect(w.copied).toHaveLength(1)
+    const map = w.copied[0]!
+    expect(map.split('\n')[0]).toBe(`# 팀 학습 지도 · ${stamp(NOW - 6 * DAY).day} ~ ${stamp(NOW).day} · 보고서 3개`)
+    expect(map).toContain('\n- 학습 노트 12개 · 보고서마다 평균 1일 학습\n- 퀴즈 9문제 중 6개 맞힘 (67%)\n')
+    expect(map).toContain('\n- 여럿이 새로 배운 개념: 클로저 (3)\n- 여럿이 다시 볼 개념(퀴즈에서 틀림): Promise 체이닝 (3)\n')
+    // async/await, in two reports.
+    expect(map).toContain('\n- 보고서 3개 미만에 나온 개념 1개는 이름을 적지 않았습니다\n')
+    expect(map).toContain('\n- 모델 호출 60번 (자동 노트 36) · 입력 약 14만 · 출력 약 3만 토큰 · 보고서마다 평균 20번\n')
+    // With no team file here: where to make one.
+    expect(map).toContain('\n## 팀 파일 후보\n\n여럿이 퀴즈에서 틀린 개념입니다. 저장소에 `.claude/learn-notes.md`를 만들고 ')
+    expect(map).toContain('\n- **Promise 체이닝**: \n')
+    expect(map).not.toContain('팀 용어')
+    for (const leak of ['홍길동', '대리님', '김철수', '오후', '어려웠다', '맵 함수', 'async/await', '/proj', '팀.md']) expect(map).not.toContain(leak)
+    expect(w.models).toHaveLength(before.models)
+    expect(w.sets).toHaveLength(before.sets)
+    expect(w.writes).toHaveLength(before.writes)
+  })
+
+  test('collect is the same word; a path with spaces, in quotes or as macOS drops it; a folder, another kind or past 2MB is not read', async ($, on) => {
+    const w = world(on)
+    await start($)
+    const spaced = '/home/u/Downloads/팀 보고서 (1).txt'
+    w.files.set(spaced, GATHERED)
+    expect((await learn($, 'report collect "~/Downloads/팀 보고서 (1).txt"')).text).toBe(`${COPIED}\n${LEFT}`)
+    expect((await learn($, '보고서 모으기 /home/u/Downloads/팀\\ 보고서\\ \\(1\\).txt')).text).toBe(`${COPIED}\n${LEFT}`)
+    expect((await learn($, '보고 COLLECT ~/Downloads/팀 보고서 (1).txt')).text).toBe(`${COPIED}\n${LEFT}`)
+    expect(w.copied).toHaveLength(3)
+    w.dirs = new Set(['/home/u/빈 폴더'])
+    expect((await learn($, '보고서 모으기 ~/빈 폴더')).text).toBe('폴더가 아니라 보고서를 모은 파일 하나를 적습니다')
+    expect((await learn($, '보고서 모으기 ~/Downloads')).text).toBe('폴더가 아니라 보고서를 모은 파일 하나를 적습니다')
+    w.files.set('/proj/팀.png', GATHERED)
+    expect((await learn($, '보고서 모으기 팀.png')).text).toBe('md나 txt 파일만, 2MB까지 읽습니다')
+    w.files.set(FILE, GATHERED)
+    w.sizes = new Map([[FILE, 2_000_001]])
+    expect((await learn($, '보고서 모으기 팀.md')).text).toBe('md나 txt 파일만, 2MB까지 읽습니다')
+    w.sizes = new Map([[FILE, 2_000_000]])
+    expect((await learn($, '보고서 모으기 팀.md')).text).toBe(`${COPIED}\n${LEFT}`)
+    // An .md past what a read takes since: the same words.
+    w.readFails = new Map([[FILE, 'over the 4194304-byte limit']])
+    expect((await learn($, '보고서 모으기 팀.md')).text).toBe('md나 txt 파일만, 2MB까지 읽습니다')
+  })
+
+  test('each refusal in one line that never says the path again, with no fault kept and nothing read where the rules forbid it', async ($, on) => {
+    const reads: string[] = []
+    on('fs.read', { path: /\.(?:md|txt)$/ }, (_$, e, next) => {
+      reads.push(e.path)
+      return next(e)
+    })
+    const w = world(on)
+    on('tool.check', { tool: 'Read' }, (_$, e) => ({ decision: /비밀|secret/.test(String((e.input as { file_path?: string }).file_path)) ? 'deny' : 'allow' }))
+    await start($)
+    const faults = JSON.stringify(w.store.get('faults') ?? null)
+    const logs = w.logs.length
+    const read = reads.length
+    const said: string[] = []
+    const ask = async (args: string) => {
+      const text = (await learn($, args)).text ?? ''
+      said.push(text)
+      return text
+    }
+    const USAGE =
+      '쓰는 법: /learn 보고서 모으기 파일 · 팀원이 보내 준 /learn 보고서를 .md나 .txt 파일 하나에 모아 저장한 곳을 적습니다 (예: /learn 보고서 모으기 ~/Downloads/팀보고서.txt) · 보고서가 3개 이상이어야 합니다'
+    expect(await ask('보고서 모으기')).toBe(USAGE)
+    expect(await ask('보고서 모으기 ""')).toBe(USAGE)
+    w.statFails = new Map([['/proj/없음.md', 'ENOENT']])
+    expect(await ask('보고서 모으기 없음.md')).toBe('그 파일을 찾지 못했습니다 · 경로를 확인해 주세요')
+    expect(await ask('보고서 모으기 \\\\server\\share\\팀.md')).toBe('네트워크 위치는 읽지 않습니다 · 보고서를 내 컴퓨터 폴더에 저장한 뒤 다시 해 주세요')
+    expect(await ask('보고서 모으기 //server/share/팀.md')).toBe('네트워크 위치는 읽지 않습니다 · 보고서를 내 컴퓨터 폴더에 저장한 뒤 다시 해 주세요')
+    // A share mounted as a folder (a mapped drive): the engine's refusal says so.
+    w.statFails = new Map([['/mnt/팀공유/보고서.md', 'network']])
+    expect(await ask('보고서 모으기 /mnt/팀공유/보고서.md')).toBe('네트워크 위치는 읽지 않습니다 · 보고서를 내 컴퓨터 폴더에 저장한 뒤 다시 해 주세요')
+    w.files.set(FILE, GATHERED)
+    w.readFails = new Map([[FILE, 'EACCES']])
+    expect(await ask('보고서 모으기 팀.md')).toBe('그 파일을 읽지 못했습니다: 이 파일을 읽을 권한이 없습니다')
+    w.readFails = new Map([[FILE, 'EBUSY']])
+    expect(await ask('보고서 모으기 팀.md')).toBe('그 파일을 읽지 못했습니다: 다른 프로그램이 파일을 잡고 있습니다')
+    w.statFails = new Map([[FILE, 'EIO']])
+    expect(await ask('보고서 모으기 팀.md')).toBe('그 파일을 읽지 못했습니다')
+    w.statFails = new Map()
+    w.readFails = new Map()
+    // Forbidden by the permission rules, or a link to a file they forbid: never read.
+    w.files.set('/proj/비밀.md', GATHERED)
+    expect(await ask('보고서 모으기 비밀.md')).toBe('권한 설정이 이 파일 읽기를 막습니다')
+    w.links.set('/proj/링크.md', '/home/u/secret/팀.md')
+    w.files.set('/proj/링크.md', GATHERED)
+    expect(await ask('보고서 모으기 링크.md')).toBe('권한 설정이 이 파일 읽기를 막습니다')
+    expect(reads.slice(read)).toEqual(['/proj/팀.md', '/proj/팀.md'])
+    // Too few reports, or none.
+    w.files.set('/proj/둘.md', [report(['클로저']), report(['클로저'], [], NOW, 4), report(['클로저'], [], NOW, 4)].join('\n'))
+    expect(await ask('보고서 모으기 둘.md')).toBe('보고서가 3개 이상 있어야 팀 학습 지도를 만듭니다 · 지금 센 보고서 2개\n같은 보고서 1개는 한 번만 셌습니다')
+    w.files.set('/proj/메모.txt', '이번 주 회의 메모\n- 학습 노트 3개\n')
+    expect(await ask('보고서 모으기 메모.txt')).toBe("learn-notes 보고서를 찾지 못했습니다 · '# 학습 보고 ·'로 시작하는 글을 .md나 .txt(UTF-8)로 저장해 주세요")
+    expect(w.copied).toEqual([])
+    // A path mistyped is no fault of the plugin's: nothing for /learn 진단, no debug line.
+    expect(JSON.stringify(w.store.get('faults') ?? null)).toBe(faults)
+    expect(w.logs.slice(logs).filter(line => line.startsWith('learn-notes: '))).toEqual([])
+    for (const text of said) for (const typed of ['없음.md', 'server', '팀.md', '팀공유', '비밀', '링크', '둘.md', '메모']) expect(text).not.toContain(typed)
+  })
+
+  test('a cloud session says it cannot read this computer\'s files', async ($, on) => {
+    const w = world(on, 'ok', null, true, new Map(), { CLAUDE_CODE_REMOTE: 'true' })
+    await start($)
+    w.files.set(FILE, GATHERED)
+    expect((await learn($, '보고서 모으기 팀.md')).text).toBe('이 세션은 클라우드 컴퓨터에서 돌아 내 컴퓨터의 파일을 읽을 수 없습니다')
+    expect(w.copied).toEqual([])
+  })
+
+  test('where nothing can be copied (away from this screen, an app with no clipboard), the map is the reply', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.files.set(FILE, GATHERED)
+    for (const origin of [{ kind: 'bridge' as const }, { kind: 'channel' as const, server: 'slack' }]) {
+      const reply = (await $.command.run({ command: 'learn', args: '보고서 모으기 팀.md', origin, presentation: { isFullscreen: true, columns: 160 } })).text ?? ''
+      expect(reply.split('\n').slice(0, 3)).toEqual([HERE, LEFT, ''])
+      expect(reply).toContain(`\n\n# 팀 학습 지도 · ${stamp(NOW - 6 * DAY).day} ~ ${stamp(NOW).day} · 보고서 3개\n`)
+      expect(reply).toContain('\n- 여럿이 새로 배운 개념: 클로저 (3)\n')
+    }
+    expect(w.copied).toEqual([])
+    w.surfaces = ['desktop']
+    w.copyFails = true
+    const reply = (await learn($, '보고서 모으기 팀.md')).text ?? ''
+    expect(reply.split('\n')[0]).toBe(HERE)
+    expect(reply).toContain('\n- **Promise 체이닝**: \n')
+  })
+
+  test('the team terms of this repository\'s team file, its merges followed, and its candidates sentence', async ($, on) => {
+    const store = new Map<string, unknown>([['aliases', { [conceptKey('Promise chaining')]: conceptKey('Promise 체이닝') }]])
+    const w = world(on, 'ok', null, true, store)
+    w.files.set(TEAM_PATH, ['## 용어', '- **fetcher**: 우리 팀의 API 호출 함수입니다', '- **캐시 키**: 요청마다 캐시를 나누는 이름입니다', '- **페이지 커서**: 다음 쪽을 가리키는 값입니다', ''].join('\n'))
+    await start($)
+    const team = (met: string[]) => ({ total: 3, met })
+    w.files.set(
+      FILE,
+      [
+        report(['클로저'], ['Promise chaining'], NOW, 3, team(['fetcher'])),
+        report(['클로저'], ['Promise 체이닝'], NOW, 4, team(['fetcher', '캐시 키'])),
+        report(['클로저'], ['Promise 체이닝'], NOW, 5, team(['fetcher'])),
+        // Made in another repository, whose team file had four terms: not in the count.
+        report(['클로저'], [], NOW, 6, { total: 4, met: ['캐시 키'] }),
+      ].join('\n\n'),
+    )
+    expect((await learn($, '보고서 모으기 팀.md')).text).toBe('팀 학습 지도를 클립보드에 복사했습니다 · 보고서 4개 · 팀 채널에 붙이기 전에 한 번 읽어 보세요')
+    const map = w.copied.at(-1)!
+    expect(map).toContain('\n- 여럿이 새로 배운 개념: 클로저 (4)\n- 여럿이 다시 볼 개념(퀴즈에서 틀림): Promise 체이닝 (3)\n')
+    expect(map).toContain('\n- 팀 용어 3개 · 이 저장소 팀 용어 줄이 있는 보고서 3개\n  - 여럿이 만남: fetcher (3)\n  - 덜 만남(보고서 3개 미만): 캐시 키 · 페이지 커서\n')
+    expect(map).toContain('\n여럿이 퀴즈에서 틀렸지만 팀 용어에 없는 개념입니다. `.claude/learn-notes.md`의 `## 용어`에 ')
+    expect(map).toContain('\n- **Promise 체이닝**: \n')
+  })
+
+  test('/learn 보고서 with no word or a period is 1.7\'s, and the help names the team map', async ($, on) => {
+    const w = world(on)
+    await start($)
+    expect((await learn($, '보고서')).text).toStartWith('학습 보고서를 클립보드에 복사했습니다 · PR 설명이나 팀 채널에 붙이기 전에 한 번 읽어 보세요')
+    expect(w.copied.at(-1)).toStartWith(`# 학습 보고 · ${stamp(NOW - 6 * DAY).day} ~ ${stamp(NOW).day} (최근 7일)`)
+    expect((await learn($, '보고서 이번주')).text).toStartWith('학습 보고서를 클립보드에 복사했습니다')
+    expect(w.copied.at(-1)).toContain(' (이번 주)\n')
+    // Glued to a word, 모으기 is no command: the report's usage.
+    expect((await learn($, '보고서 모으기팀.md')).text).toBe('쓰는 법: /learn 보고서 (최근 7일 · 이번주 · 어제 · 오늘 · 2026-10-03) · 팀 학습 지도: /learn 보고서 모으기 파일')
+    const help = (await learn($, '도움말')).text ?? ''
+    expect(help.split('\n')).toContain('- `/learn 보고서`: 코드 없는 학습 보고서를 클립보드와 파일로 (최근 7일 · `이번주` · `어제`도 됩니다) · 리더는 `/learn 보고서 모으기 파일`로 팀 학습 지도')
   })
 })

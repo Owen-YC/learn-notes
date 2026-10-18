@@ -4095,6 +4095,315 @@ export function reportMarkdown({ range, activity, index, now, usage = {}, since,
 }
 
 /**
+ * A learning report (reportMarkdown, 1.6.0 on) as /learn 보고서 모으기 reads it back (1.8.0, readReports): its days,
+ * the lines of counts, and the names of the concepts and of this repository's team terms it lists. Nothing else of a
+ * report is read: no person's name, no line of their own words.
+ */
+export type ReadReport = {
+  from: string
+  to: string
+  days?: number
+  notes: number
+  fresh: string[]
+  missed: string[]
+  quiz?: { graded: number; right: number }
+  team?: { total: number; met: string[] }
+  calls?: { calls: number; auto: number; input: number; output: number }
+}
+
+/** Reports a name must be in before the team map names it (1.8.0): a conservative constant, so no name points at one person. */
+export const TEAM_MAP_MIN = 3
+/** Reports a team map counts at most, the file's first. */
+export const TEAM_MAP_REPORTS = 300
+/** Characters of a name read back at most, and names read of one line at most. */
+const MAP_NAME_MAX = 80
+const MAP_NAMES_PER_LINE = 30
+/** Names each list of the team map gives at most: the new concepts, the missed ones, the team terms met less, the team file's candidates. */
+const MAP_FRESH = 15
+const MAP_MISSED = 10
+const MAP_FEW_TERMS = 10
+const MAP_PICKS = 10
+
+/** A report's first line (`# 학습 보고 · 2026-10-12 ~ 2026-10-18 (최근 7일)`) once bareLine and the marks of bold are off it. */
+const REPORT_HEAD = /^[^\p{L}\p{N}]*학습\s*보고\s*[·・]\s*(\d{4}-\d{2}-\d{2})(?:\s*[~～]?\s*(\d{4}-\d{2}-\d{2}))?/u
+/** The heading over a report's line for the learner's own words: nothing under it is read, up to the next report. */
+const REPORT_OWN_WORDS = /^[^\p{L}\p{N}]*이번\s*기간에\s*배운\s*것을\s*내\s*말로/u
+
+/**
+ * A line of a pasted report as plain words: a quote's `>` and a list mark (`-`, Slack's `•`) off its start, bold's
+ * `**` gone, Slack's bold or italic around the whole line and its `(편집됨)` off, a full-width colon made `:`, and its
+ * spaces folded.
+ */
+function bareLine(line: string): string {
+  const text = line
+    .replace(/^[\s>]*/, '')
+    .replace(/^(?:[-+•◦▪‣·]|\*(?=\s))\s*/u, '')
+    .replace(/\*\*/g, '')
+    .replace(/：/g, ':')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\s*\((?:편집됨|edited)\)$/i, '')
+  const wrapped = /^([*_])(?![*_])(.+)\1$/.exec(text)
+  return wrapped ? wrapped[2]!.trim() : text
+}
+
+/** The names of a report's list (`a · b · c 외 5개`): each as reportMarkdown wrote it, its table bar unescaped. */
+function namesOf(list: string): string[] {
+  const parts = list.split(/\s+[·・]\s+/)
+  parts[parts.length - 1] = parts.at(-1)!.replace(/\s*외\s*\d+개\s*$/, '')
+  return parts
+    .map(one => one.replace(/\\\|/g, '|').trim().slice(0, MAP_NAME_MAX))
+    .filter(one => one !== '')
+    .slice(0, MAP_NAMES_PER_LINE)
+}
+
+/** A token count as tokenText says it, back as a number (`약 1.2만` 12000, `약 3천` 3000, `850`); undefined for other words. */
+export function tokenNumber(text: string): number | undefined {
+  const m = /^(?:약\s*)?(\d+(?:\.\d+)?)\s*(천|만|억)?$/.exec(text.trim())
+  if (!m) return undefined
+  const unit = m[2] === '천' ? 1e3 : m[2] === '만' ? 1e4 : m[2] === '억' ? 1e8 : 1
+  return Math.round(Number(m[1]) * unit)
+}
+
+/** One report's lines read (readReports): undefined for a block with no `학습 노트 N개` line, no report of this plugin's. */
+function readReport(from: string, to: string, lines: readonly string[]): ReadReport | undefined {
+  let notes: number | undefined
+  const one: Omit<ReadReport, 'notes'> = { from, to, fresh: [], missed: [] }
+  for (const kept of lines) {
+    // The labels with every mark of bold or italic off; the names as written (`__init__` keeps its underscores).
+    const line = kept.replace(/[*_]/g, '')
+    const after = kept.slice(kept.indexOf(':') + 1).trim()
+    let m: RegExpExecArray | null
+    if ((m = /^학습한 날 (\d+)일/.exec(line))) one.days = Number(m[1])
+    else if ((m = /^학습 노트 (\d+)개$/.exec(line))) notes = Number(m[1])
+    else if ((m = /^새로 배운 개념 \d+개(?: ?: ?(.+))?$/.exec(line))) one.fresh = m[1] ? namesOf(after) : []
+    else if (/^다시 볼 개념 ?\(퀴즈에서 틀림\) ?: ?.+$/.test(line)) one.missed = namesOf(after)
+    else if ((m = /^퀴즈 (\d+)문제 중 (\d+)개 맞힘/.exec(line))) one.quiz = { graded: Number(m[1]), right: Math.min(Number(m[2]), Number(m[1])) }
+    else if (/^이 저장소 팀 용어 ?:/.test(line)) {
+      // reportTeamLine's: the quiz of the ones left off its end, then the names up to the last bracket.
+      const body = after.replace(/^[*_]+/, '').replace(/\s*[·・]\s*아직\s*\d+개\s*\(\/learn 퀴즈 팀\)\s*$/, '')
+      const t = /^(?:(\d+)개 모두 만남|(\d+)개 중 \d+개 만남)[*_]*(?: ?\((.*)\))?$/.exec(body)
+      if (t) one.team = { total: Number(t[1] ?? t[2]), met: t[3] ? namesOf(t[3]) : [] }
+    } else if ((m = /^학습 노트의 모델 호출 (\d+)번(?: ?\(자동 노트 (\d+)\))? · 입력 (.+?) · 출력 (.+?) 토큰/.exec(line))) {
+      const input = tokenNumber(m[3]!)
+      const output = tokenNumber(m[4]!)
+      if (input !== undefined && output !== undefined) one.calls = { calls: Number(m[1]), auto: Number(m[2] ?? 0), input, output }
+    } else if (/^학습 노트의 모델 호출 ?: ?없습니다$/.test(line)) one.calls = { calls: 0, auto: 0, input: 0, output: 0 }
+  }
+  return notes === undefined ? undefined : { ...one, notes }
+}
+
+/**
+ * Every learn-notes report in a leader's file of them (1.8.0, /learn 보고서 모으기): from one report's first line to
+ * the next's, only the lines of counts and names (readReport), the line of the learner's own words and all under it
+ * never read, nor any line before the first report (a chat's sender and time). A report read to the same values as
+ * one before it (the same report pasted from a chat and from its file, or with only its own words changed) is counted
+ * once (`repeated`); a block with no `학습 노트 N개` line is left out (`odd`). Pasted text is taken as chats leave it:
+ * a byte order mark, CRLF, Slack's `•` and `*bold*`, `(편집됨)`, a full-width colon.
+ */
+export function readReports(text: string): { reports: ReadReport[]; repeated: number; odd: number } {
+  const blocks: { from: string; to: string; lines: string[] }[] = []
+  let current: (typeof blocks)[number] | undefined
+  let isOwn = false
+  for (const raw of text.replace(/﻿/g, '').replace(/\r\n?/g, '\n').split('\n')) {
+    const kept = bareLine(raw)
+    const plain = kept.replace(/[*_]/g, '')
+    const head = REPORT_HEAD.exec(plain)
+    if (head) {
+      const [a, b] = [head[1]!, head[2] ?? head[1]!]
+      current = { from: a <= b ? a : b, to: a <= b ? b : a, lines: [] }
+      blocks.push(current)
+      isOwn = false
+    } else if (current && !isOwn) {
+      if (REPORT_OWN_WORDS.test(plain)) isOwn = true
+      else current.lines.push(kept)
+    }
+  }
+  const seen = new Set<string>()
+  const reports: ReadReport[] = []
+  let repeated = 0
+  let odd = 0
+  for (const block of blocks) {
+    const one = readReport(block.from, block.to, block.lines)
+    if (!one) {
+      odd += 1
+      continue
+    }
+    const key = JSON.stringify([one.from, one.to, one.days, one.notes, one.quiz, one.fresh, one.missed, one.team, one.calls])
+    if (seen.has(key)) {
+      repeated += 1
+      continue
+    }
+    seen.add(key)
+    reports.push(one)
+  }
+  return { reports, repeated, odd }
+}
+
+/**
+ * The reports a team map counts (1.8.0): those whose days hold the one day the most of them hold (the latest of
+ * such days), so one person's reports of different weeks do not make up three; `apart`, how many were left out.
+ */
+export function overlapReports(reports: readonly ReadReport[]): { kept: ReadReport[]; apart: number } {
+  const holds = (one: ReadReport, day: string) => one.from <= day && day <= one.to
+  let best: string | undefined
+  let most = 0
+  // The latest day held by the most is some report's last day: past it, none is held by more.
+  for (const day of new Set(reports.map(one => one.to))) {
+    const n = reports.filter(one => holds(one, day)).length
+    if (n > most || (n === most && best !== undefined && day > best)) {
+      best = day
+      most = n
+    }
+  }
+  const kept = best === undefined ? [] : reports.filter(one => holds(one, best!))
+  return { kept, apart: reports.length - kept.length }
+}
+
+/** Names in one order whatever the runtime's locale: as Korean collation has them, Hangul before other letters, each by its code points. */
+function nameOrder(a: string, b: string): number {
+  const rank = (name: string) => (/^[ㄱ-ㅎㅏ-ㅣ가-힣]/.test(name) ? 1 : /^\p{L}/u.test(name) ? 2 : 0)
+  const [x, y] = [a.toLowerCase(), b.toLowerCase()]
+  return rank(a) - rank(b) || (x < y ? -1 : x > y ? 1 : a < b ? -1 : a > b ? 1 : 0)
+}
+
+/** A name as the team map writes it: reportMarkdown's way (one line, no backtick to open code with, no table bar). */
+function mapName(name: string): string {
+  return cell(name.replace(/`/g, ''))
+}
+
+/**
+ * How many reports name each concept of `lists` (one list a report), merges followed (`aliases`) and once a report,
+ * each by the spelling written most.
+ */
+function reportCounts(lists: readonly (readonly string[])[], aliases: Readonly<Record<string, string>>): { key: string; n: number; name: string }[] {
+  const by = new Map<string, { n: number; names: Map<string, number> }>()
+  for (const list of lists) {
+    const once = new Set<string>()
+    for (const name of list) {
+      const key = resolveKey(aliases, conceptKey(name))
+      if (once.has(key)) continue
+      once.add(key)
+      const at = by.get(key) ?? { n: 0, names: new Map<string, number>() }
+      at.n += 1
+      at.names.set(name, (at.names.get(name) ?? 0) + 1)
+      by.set(key, at)
+    }
+  }
+  return [...by].map(([key, at]) => ({ key, n: at.n, name: [...at.names].sort((a, b) => b[1] - a[1] || nameOrder(a[0], b[0]))[0]![0] }))
+}
+
+/**
+ * The team learning map (1.8.0, /learn 보고서 모으기): the reports kept (overlapReports) added up, with no line per person:
+ * no person's name, no code, no request, no one's own words; a concept named only where TEAM_MAP_MIN reports or more
+ * name it, with how many (the rest only counted). Then this repository's team terms (its team file's `terms`, undefined
+ * with no team file) met by how many of the reports made with the same terms, and the concepts many missed that are
+ * no team term yet, as lines to fill in for the team file (`- **이름**: `). Made with no model call.
+ */
+export function teamMapText(reports: readonly ReadReport[], terms: readonly TeamTerm[] | undefined, aliases: Readonly<Record<string, string>>): string {
+  const from = reports.map(one => one.from).sort()[0] ?? ''
+  const to = reports.map(one => one.to).sort().at(-1) ?? ''
+  const spans = new Set(reports.map(one => `${one.from}~${one.to}`)).size
+  const withDays = reports.filter(one => one.days !== undefined)
+  const days = withDays.length > 0 ? Math.round((withDays.reduce((sum, one) => sum + one.days!, 0) / withDays.length) * 10) / 10 : undefined
+  const notes = reports.reduce((sum, one) => sum + one.notes, 0)
+  const quiz = reports.reduce((sum, one) => (one.quiz ? { graded: sum.graded + one.quiz.graded, right: sum.right + one.quiz.right } : sum), { graded: 0, right: 0 })
+  type Row = { key: string; n: number; name: string }
+  const byCount = (a: Row, b: Row) => b.n - a.n || nameOrder(a.name, b.name)
+  const many = (rows: readonly Row[]) => rows.filter(row => row.n >= TEAM_MAP_MIN).sort(byCount)
+  const listed = (rows: readonly Row[], max: number) =>
+    rows.length === 0 ? '없습니다' : rows.slice(0, max).map(row => `${mapName(row.name)} (${row.n})`).join(' · ') + (rows.length > max ? ` 외 ${rows.length - max}개` : '')
+  const fresh = reportCounts(reports.map(one => one.fresh), aliases)
+  const missed = reportCounts(reports.map(one => one.missed), aliases)
+  const named = new Set([...many(fresh), ...many(missed)].map(row => row.key))
+  const hidden = new Set([...fresh, ...missed].filter(row => !named.has(row.key)).map(row => row.key)).size
+  const own = terms === undefined ? [] : distinctTerms(terms, aliases)
+  const ownKeys = new Set(own.map(term => termKey(term, aliases)))
+  const teamLines: string[] = []
+  if (own.length > 0) {
+    // Only the reports made in this repository with these terms: another's total is another team file's.
+    const teamed = reports.filter(one => one.team?.total === own.length)
+    if (teamed.length < TEAM_MAP_MIN) {
+      teamLines.push(`- 팀 용어 ${own.length}개: 이 저장소 팀 용어 줄이 있는 보고서가 ${TEAM_MAP_MIN}개보다 적어 세지 않았습니다`)
+    } else {
+      const met = reportCounts(teamed.map(one => one.team!.met), aliases)
+      const rows = own.map(term => {
+        const key = termKey(term, aliases)
+        return { key, name: term.name, n: met.find(row => row.key === key)?.n ?? 0 }
+      })
+      const lots = many(rows)
+      const few = rows.filter(row => row.n < TEAM_MAP_MIN)
+      teamLines.push(
+        `- 팀 용어 ${own.length}개 · 이 저장소 팀 용어 줄이 있는 보고서 ${teamed.length}개`,
+        ...(lots.length > 0 ? [`  - 여럿이 만남: ${listed(lots, MAP_FRESH)}`] : []),
+        ...(few.length > 0
+          ? [`  - 덜 만남(보고서 ${TEAM_MAP_MIN}개 미만): ${few.slice(0, MAP_FEW_TERMS).map(row => mapName(row.name)).join(' · ')}${few.length > MAP_FEW_TERMS ? ` 외 ${few.length - MAP_FEW_TERMS}개` : ''}`]
+          : []),
+        // A report names REPORT_NEW of the terms met at most: the ones past them in the file go uncounted.
+        ...(own.length > REPORT_NEW ? [`  - 보고서마다 만난 용어를 ${REPORT_NEW}개까지 적어, 팀 파일 뒤쪽 용어는 덜 셀 수 있습니다`] : []),
+      )
+    }
+  }
+  const usage = reports.filter(one => one.calls !== undefined)
+  const calls = usage.reduce(
+    (sum, one) => ({ calls: sum.calls + one.calls!.calls, auto: sum.auto + one.calls!.auto, input: sum.input + one.calls!.input, output: sum.output + one.calls!.output }),
+    { calls: 0, auto: 0, input: 0, output: 0 },
+  )
+  const picks = many(missed)
+    .filter(row => !ownKeys.has(row.key))
+    .slice(0, MAP_PICKS)
+  return [
+    `# 팀 학습 지도 · ${from === to ? from : `${from} ~ ${to}`} · 보고서 ${reports.length}개${spans > 1 ? ` (기간 ${spans}가지)` : ''}`,
+    '',
+    `사람별 줄은 만들지 않습니다. 사람 이름 · 코드 · 요청 · 각자 쓴 한 줄은 넣지 않았습니다. 개념은 보고서 ${TEAM_MAP_MIN}개 이상에 나온 것만 이름을 적고, 괄호 안 숫자는 그 보고서 수입니다.`,
+    '',
+    `- 학습 노트 ${notes}개${days !== undefined ? ` · 보고서마다 평균 ${days}일 학습` : ''}`,
+    quiz.graded > 0 ? `- 퀴즈 ${quiz.graded}문제 중 ${quiz.right}개 맞힘 (${Math.round((quiz.right / quiz.graded) * 100)}%)` : '- 퀴즈: 채점한 문제가 없습니다',
+    `- 여럿이 새로 배운 개념: ${listed(many(fresh), MAP_FRESH)}`,
+    `- 여럿이 다시 볼 개념(퀴즈에서 틀림): ${listed(many(missed), MAP_MISSED)}`,
+    ...(hidden > 0 ? [`- 보고서 ${TEAM_MAP_MIN}개 미만에 나온 개념 ${hidden}개는 이름을 적지 않았습니다`] : []),
+    ...teamLines,
+    ...(calls.calls > 0
+      ? [
+          `- 모델 호출 ${calls.calls}번${calls.auto > 0 ? ` (자동 노트 ${calls.auto})` : ''} · 입력 ${tokenText(calls.input)} · 출력 ${tokenText(calls.output)} 토큰 · 보고서마다 평균 ${Math.round(calls.calls / usage.length)}번`,
+        ]
+      : []),
+    ...(picks.length > 0
+      ? [
+          '',
+          '## 팀 파일 후보',
+          '',
+          terms !== undefined
+            ? `여럿이 퀴즈에서 틀렸지만 팀 용어에 없는 개념입니다. \`${TEAM_FILE}\`의 \`## 용어\`에 우리 팀 코드로 설명을 적으면 팀원의 퀴즈가 그 설명으로 묻습니다. 설명 끝에 \`src/api/client.ts:10-30\`처럼 경로를 백틱으로 적으면 그 코드로 묻습니다.`
+            : `여럿이 퀴즈에서 틀린 개념입니다. 저장소에 \`${TEAM_FILE}\`를 만들고 \`## 용어\` 아래에 우리 팀 코드로 설명을 적으면 팀원의 퀴즈가 그 설명으로 묻습니다.`,
+          '',
+          ...picks.map(row => `- **${mapName(row.name)}**: `),
+        ]
+      : []),
+    '',
+  ].join('\n')
+}
+
+/**
+ * The file /learn 보고서 모으기 names (1.8.0), as typed: quotes off (Windows' 경로로 복사, a chat's backticks), the backslash macOS's
+ * terminal puts before a space or a bracket of a dropped file off, `~` read as `home` (undefined with none), a path
+ * not absolute under `root`; `network` for a network location (`\\server\share`, `//server`), never read. Undefined
+ * for nothing left.
+ */
+export function gatherPath(raw: string, home: string | undefined, root: string): string | 'network' | undefined {
+  let path = raw.trim()
+  const quoted = /^(["'“‘`])(.*)(["'”’`])$/.exec(path)
+  if (quoted && (quoted[1] === quoted[3] || (quoted[1] === '“' && quoted[3] === '”') || (quoted[1] === '‘' && quoted[3] === '’'))) path = quoted[2]!.trim()
+  if (path === '') return undefined
+  if (/^(?:\\\\|\/\/)/.test(path)) return 'network'
+  // A Windows path keeps its backslashes: there each is a separator.
+  if (!/^(?:[A-Za-z]:|~\\)/.test(path)) path = path.replace(/\\([ ()[\]{}'"&;!$#?*|<>`,])/g, '$1')
+  if (/^~(?=$|[\\/])/.test(path)) return home === undefined ? undefined : expandHome(path, home)
+  if (/^(?:[\\/]|[A-Za-z]:)/.test(path) || root === '') return path
+  return `${root.replace(/[\\/]+$/, '')}/${path.replace(/^(?:\.[\\/])+/, '')}`
+}
+
+/**
  * A concept picked for a quiz, with the code a note met it in when there is one (the quiz asks about the
  * learner's own code), that note's id when a note still holds the concept, and its slip while one is open (1.7.0:
  * asked again in other code). A team term of this repository (1.7.0 D6, `team`) is asked by the team's words (its

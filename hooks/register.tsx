@@ -214,6 +214,12 @@ import {
   recapRange,
   recapSection,
   reportMarkdown,
+  gatherPath,
+  overlapReports,
+  readReports,
+  teamMapText,
+  TEAM_MAP_MIN,
+  TEAM_MAP_REPORTS,
   type RecapEntry,
   type RecapRange,
   parseDiff,
@@ -6289,7 +6295,7 @@ async function toolText($: EngineInterface, cfg: Config, action: string, query: 
   return cut(redactText(lines.join('\n')).text, TOOL_BUDGET)
 }
 
-const REPORT_USAGE = '쓰는 법: /learn 보고서 (최근 7일 · 이번주 · 어제 · 오늘 · 2026-10-03)'
+const REPORT_USAGE = '쓰는 법: /learn 보고서 (최근 7일 · 이번주 · 어제 · 오늘 · 2026-10-03) · 팀 학습 지도: /learn 보고서 모으기 파일'
 
 /**
  * /learn 보고서: the learning report with no code in it (reportMarkdown) for
@@ -6301,6 +6307,9 @@ const REPORT_USAGE = '쓰는 법: /learn 보고서 (최근 7일 · 이번주 · 
  * the clipboard would be the terminal's, not theirs), the reply is the report.
  */
 async function reportCommand($: EngineInterface, cfg: Config, rest: string, isAway: boolean): Promise<string> {
+  // 모으기 (collect) after it: a leader's team map of the reports gathered in one file (1.8.0). A 1.7 window answers REPORT_USAGE.
+  const gather = /^(?:모으기|collect)(?:\s+([\s\S]+))?$/i.exec(rest)
+  if (gather) return gatherCommand($, gather[1]?.trim() ?? '', isAway)
   const now = await $.clock.now()
   const range = recapRange(rest === '' ? '최근 7일' : rest, now)
   if (!range) return REPORT_USAGE
@@ -6333,6 +6342,84 @@ async function reportCommand($: EngineInterface, cfg: Config, rest: string, isAw
   const file = path === undefined ? undefined : `파일: ${home !== undefined && isUnder(path, home) ? `~${path.slice(home.replace(/[\\/]+$/, '').length)}` : path}`
   if (await deliver($, text, isAway)) return ['학습 보고서를 클립보드에 복사했습니다 · PR 설명이나 팀 채널에 붙이기 전에 한 번 읽어 보세요', ...(file ? [file] : [])].join('\n')
   return [`학습 보고서입니다 · 이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다. 붙이기 전에 한 번 읽어 보세요${file ? ` · ${file}` : ''}`, '', text].join('\n')
+}
+
+/** Bytes past which /learn 보고서 모으기 reads no file: a team's reports are a few kilobytes each. */
+const GATHER_READ_MAX = 2_000_000
+/** /learn 보고서 모으기's replies (1.8.0), each one line and none saying the path typed again. */
+const GATHER_USAGE =
+  '쓰는 법: /learn 보고서 모으기 파일 · 팀원이 보내 준 /learn 보고서를 .md나 .txt 파일 하나에 모아 저장한 곳을 적습니다 (예: /learn 보고서 모으기 ~/Downloads/팀보고서.txt) · 보고서가 3개 이상이어야 합니다'
+const GATHER_CLOUD = '이 세션은 클라우드 컴퓨터에서 돌아 내 컴퓨터의 파일을 읽을 수 없습니다'
+const GATHER_NETWORK = '네트워크 위치는 읽지 않습니다 · 보고서를 내 컴퓨터 폴더에 저장한 뒤 다시 해 주세요'
+const GATHER_DENIED = '권한 설정이 이 파일 읽기를 막습니다'
+const GATHER_MISSING = '그 파일을 찾지 못했습니다 · 경로를 확인해 주세요'
+const GATHER_FOLDER = '폴더가 아니라 보고서를 모은 파일 하나를 적습니다'
+const GATHER_KIND = 'md나 txt 파일만, 2MB까지 읽습니다'
+const GATHER_NONE = "learn-notes 보고서를 찾지 못했습니다 · '# 학습 보고 ·'로 시작하는 글을 .md나 .txt(UTF-8)로 저장해 주세요"
+const GATHER_COPIED = '팀 학습 지도를 클립보드에 복사했습니다'
+const GATHER_HERE = '팀 학습 지도입니다 · 이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다. 붙이기 전에 한 번 읽어 보세요'
+
+/**
+ * Why the file /learn 보고서 모으기 names could not be looked at or read, by its cause (faultCode): missing, a network
+ * location, past what a read takes, or no read permission. fileWhy's words are a write's (`폴더에 쓸 권한이 없습니다`);
+ * a read says its own, or none.
+ */
+function gatherFailText(code: string): string {
+  if (code === 'ENOENT') return GATHER_MISSING
+  if (code === 'network') return GATHER_NETWORK
+  if (code === 'too-big') return GATHER_KIND
+  const why = code === 'EACCES' || code === 'EPERM' ? '이 파일을 읽을 권한이 없습니다' : code === 'EBUSY' ? fileWhy(code) : undefined
+  return `그 파일을 읽지 못했습니다${why ? `: ${why}` : ''}`
+}
+
+/**
+ * /learn 보고서 모으기 파일 (1.8.0): a leader's team learning map (teamMapText) of the /learn 보고서 the team sent them,
+ * gathered in one .md or .txt file, with no line per person. One file and no folder: one person's weekly reports in a
+ * journal folder would make up three. The permission rules are asked before anything is read (where a link leads,
+ * too); a network location is never read; a file past GATHER_READ_MAX is not. Reports read to the same values count
+ * once and only those holding one day together count (overlapReports); fewer than TEAM_MAP_MIN make no map. The map
+ * goes on the clipboard as /learn 보고서 does (deliver), else in the reply. No model call, no store write, no file
+ * written, and no fault kept: a path mistyped is no failure of the plugin's for /learn 진단.
+ */
+async function gatherCommand($: EngineInterface, raw: string, isAway: boolean): Promise<string> {
+  if (raw.replace(/["'“”‘’`\s]/g, '') === '') return GATHER_USAGE
+  if (await isCloudSession($)) return GATHER_CLOUD
+  const path = gatherPath(raw, await homeDir($), await $.session.root().catch(() => ''))
+  if (path === 'network') return GATHER_NETWORK
+  if (path === undefined) return GATHER_MISSING
+  if (await isReadDenied($, path)) return GATHER_DENIED
+  let stat: Awaited<ReturnType<EngineInterface['fs']['stat']>>
+  try {
+    stat = await $.fs.stat(path, { resolve: true })
+  } catch (error) {
+    return gatherFailText(faultCode(error))
+  }
+  // A link is judged by where it leads too, as the team file is.
+  if (stat.isLink && stat.realPath !== undefined && stat.realPath !== path && (await isReadDenied($, stat.realPath))) return GATHER_DENIED
+  if (stat.kind === 'dir') return GATHER_FOLDER
+  if (stat.kind !== 'file') return stat.isLink ? GATHER_MISSING : GATHER_KIND
+  if (!/\.(?:md|txt|markdown)$/i.test(path) || stat.size > GATHER_READ_MAX) return GATHER_KIND
+  let text: string
+  try {
+    text = String(await $.fs.read(path))
+  } catch (error) {
+    return gatherFailText(faultCode(error))
+  }
+  const found = readReports(text)
+  const { kept, apart } = overlapReports(found.reports.slice(0, TEAM_MAP_REPORTS))
+  const left = [
+    ...(found.repeated > 0 ? [`같은 보고서 ${found.repeated}개는 한 번만 셌습니다`] : []),
+    ...(found.odd > 0 ? [`형식이 맞지 않는 보고서 ${found.odd}개는 뺐습니다`] : []),
+    ...(apart > 0 ? [`기간이 겹치지 않는 보고서 ${apart}개는 뺐습니다`] : []),
+  ]
+  const tail = left.length > 0 ? [left.join(' · ')] : []
+  if (kept.length === 0) return [GATHER_NONE, ...tail].join('\n')
+  if (kept.length < TEAM_MAP_MIN) return [`보고서가 ${TEAM_MAP_MIN}개 이상 있어야 팀 학습 지도를 만듭니다 · 지금 센 보고서 ${kept.length}개`, ...tail].join('\n')
+  const map = await currentAliases($).catch(() => read($, aliases))
+  const team = await teamOf($, '')
+  const out = teamMapText(kept, team?.practice, map)
+  if (await deliver($, out, isAway)) return [`${GATHER_COPIED} · 보고서 ${kept.length}개 · 팀 채널에 붙이기 전에 한 번 읽어 보세요`, ...tail].join('\n')
+  return [GATHER_HERE, ...tail, '', out].join('\n')
 }
 
 /** What c and /learn 공유 say once the note is on the clipboard. */
@@ -6997,7 +7084,7 @@ const HELP = [
   '- `/learn 정리`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
   '- `/learn 질문 …`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기',
   '- `/learn 기록`: 연속 학습일 · 정답률 · 복습할 개념 · 배운 개념 · 모델 호출 수',
-  '- `/learn 보고서`: 코드 없는 학습 보고서를 클립보드와 파일로 (최근 7일 · `이번주` · `어제`도 됩니다)',
+  '- `/learn 보고서`: 코드 없는 학습 보고서를 클립보드와 파일로 (최근 7일 · `이번주` · `어제`도 됩니다) · 리더는 `/learn 보고서 모으기 파일`로 팀 학습 지도',
   '- `/learn 공유`: 고른 노트를 요청·경로 없이 복사해 멘토에게 묻기(`c`와 같음) · `/learn 퀴즈 팀`: 이 저장소의 팀 용어만으로 퀴즈',
   '- 가끔: `/learn 찾기 말` 노트 찾기 · `/learn 일지` 오늘 노트 목차(`어제` · `목록`도) · `/learn 합치기 A = B` 개념 합치기 · `/learn 안다 이름` 복습에서 빼기 · `/learn 모른다 이름` 되돌리기 · `/learn 안키` Anki 카드 · `/learn 비우기` 패널 비우기 · `/learn 진단` 막히면 담당자에게',
 ].join('\n')
