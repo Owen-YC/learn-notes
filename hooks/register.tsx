@@ -229,6 +229,7 @@ import {
   EASIER_QUESTION,
   KEYED_LABELS,
   isThinkFollow,
+  IS_THINK_ASKED,
   openThink,
   THINK_OPEN_MS,
   type RankedConcept,
@@ -309,12 +310,14 @@ const ANSWER_FOCUSED_HINT = 'Esc: 대화로 돌아가기 · 답은 한/영 상�
 
 /**
  * The dim line under r's walk-through while its 생각해 보기 is open (1.8.0, openThink), by where the answer goes from
- * here: i into the question field while the terminal's pane holds the keys (FOCUSED_HINT under the pane names the
- * input mode); ctrl+x tab first while they are in the prompt, so `i0이요` never reaches the main Claude; a click in
- * the desktop app; /learn 질문 where no field is drawn (the mobile app). Never a move of the focus: the walk-through
- * is read first, and in the field p, n and 1~4 would be typed as words.
+ * here: i into the question field while the terminal's pane holds the keys, the line naming the input mode i needs
+ * (FOCUSED_HINT, which says so too, is drawn above the note, and r's answer is scrolled to the top: on a long note it
+ * is out of sight by then, and i in 한글 types ㅑ, which does nothing); ctrl+x tab first while they are in the prompt,
+ * so `i0이요` never reaches the main Claude (the line is the first one from then on); a click in the desktop app;
+ * /learn 질문 where no field is drawn (the mobile app). Never a move of the focus: the walk-through is read first,
+ * and in the field p, n and 1~4 would be typed as words.
  */
-const THINK_HINT_FOCUSED = 'i: 질문 칸에 답 적기 · 넘어가도 됩니다'
+const THINK_HINT_FOCUSED = 'i(영문 상태): 질문 칸에 답 적기 · 넘어가도 됩니다'
 const THINK_HINT_KEYS = 'ctrl+x tab 뒤 i: 질문 칸에 답 적기 · 넘어가도 됩니다'
 const THINK_HINT_CLICK = '질문 칸을 눌러 답을 적어 보세요 · 넘어가도 됩니다'
 const THINK_HINT_ELSEWHERE = '답해 보려면 /learn 질문 뒤에 내 생각을 적습니다 (예: /learn 질문 0이 나와요) · 넘어가도 됩니다'
@@ -6987,7 +6990,8 @@ const HELP = [
   '- `/learn`: 패널 열기 · 패널의 키를 쓰려면 터미널은 `ctrl+x tab`(또는 패널 클릭), 데스크톱 앱은 패널 클릭, Esc로 대화로 돌아갑니다 (숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다)',
   '- `/learn 복습`: 오늘 복습을 패널 퀴즈로 바로 시작 · 답 칸에 바로 적고 Enter (패널이 없는 화면에서는 대화창에 문제를 냅니다)',
   '- 패널: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작 · `p`·`n` 이전·다음 노트 · `w` 노트 쓰기, 다시 쓰기',
-  '- 노트 아래: `t` 직접 해 보기(한 번 고친 뒤 `a` 예시 답) · `e` 더 쉽게 · `r` 예시로 따라가기(끝의 생각해 보기는 `i`로 답하기) · `i` 질문하기 · `c` 복사',
+  // r's 생각해 보기 named only while r asks for it (IS_THINK_ASKED, off in 1.8.0): 1.7.0's line otherwise.
+  `- 노트 아래: \`t\` 직접 해 보기(한 번 고친 뒤 \`a\` 예시 답) · \`e\` 더 쉽게 · \`r\` 예시로 따라가기${IS_THINK_ASKED ? '(끝의 생각해 보기는 `i`로 답하기)' : ''} · \`i\` 질문하기 · \`c\` 복사`,
   '- 퀴즈(`4`): 답을 적고 Enter로 채점 · 틀리면 되묻기를 보고 한 번 더 (모르면 `모르겠어요`) · Tab으로 버튼에 가서 `h` 힌트 · `i` 답 적기 · `a` 정답(한 번 적은 뒤 · 첫 판정대로 매김) · `f` 채점 바꾸기 · `s` 새 문제(남은 문제가 있으면 두 번) · `n` 틀린 개념을 배운 노트 · 정답을 채점 전에 봤으면(입력칸이 없는 화면 · 채점 실패 · `/learn 퀴즈 정답`) `o`·`x`로 채점',
   '- `/learn 퀴즈`: 대화창에서 풀기 · 풀던 퀴즈, 없으면 복습할 개념으로 새 퀴즈 · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트`(`힌트 2`) · `정답`',
   '- `/learn 정리`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',

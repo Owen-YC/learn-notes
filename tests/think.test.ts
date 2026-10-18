@@ -4,6 +4,7 @@ import {
   ASK_SYSTEM,
   EASIER_LABEL,
   EASIER_QUESTION,
+  IS_THINK_ASKED,
   THINK_ASK,
   THINK_OPEN_MS,
   TRACE_LABEL,
@@ -148,6 +149,8 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
       ['**생각해 보기: 입력이 0이면요?**', '입력이 0이면요?'],
       ['생각해 보기: (입력이 0이면요?)', '(입력이 0이면요?)'],
       ['**생각해 보기:** 입력이 0이면요?\r\n\r\n\n', '입력이 0이면요?'],
+      // A full-width question mark, as the other.
+      ['**생각해 보기:** 입력이 0이면요？', '입력이 0이면요？'],
     ]
     for (const [last, said] of forms) expect([last, thinkOf(`${steps}\n${last}`)]).toEqual([last, said])
     // A reply that is nothing but the question still has it.
@@ -168,6 +171,7 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
       // Words past its last `?`.
       '1. a\n**생각해 보기:** 배열이 `[]`이면 `total`은? 0입니다.',
       '1. a\n**생각해 보기:** 입력이 0이면요? 질문 칸에 적어 보세요.',
+      '1. a\n**생각해 보기:** 입력이 0이면요？ 0입니다.',
       // No 생각해 보기 at all: a change with no run to follow, 1.7.0's walk-through, nothing.
       '따라갈 실행 흐름이 없는 변경입니다. 버튼 색이 파랑으로 보입니다.',
       '1. `const a = 1`: a는 1입니다.\n2. `const b = 2`: b는 2입니다.',
@@ -181,6 +185,27 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
     expect(long.endsWith('…')).toBe(true)
     // A question with no `?` at all is still one.
     expect(thinkOf('1. a\n**생각해 보기:** 입력이 0이면 무엇이 찍힐지 떠올려 보세요.')).toBe('입력이 0이면 무엇이 찍힐지 떠올려 보세요.')
+  })
+
+  test('thinkOf takes a question only once its sentence ends: a reply cut inside the line (the r call\'s token cap) opens nothing', () => {
+    const steps = '1. `sum([2, 3])`을 부르면 `total`은 0입니다.\n2. `n`이 2일 때 `total`은 2입니다.\n\n'
+    // $.model.complete says nothing of a reply cut at maxTokens: its text so far comes back answered.
+    for (const cutOff of ['**생각해 보기:** 배열이 `[]`이면 `tot', '**생각해 보기:** 배열이 `[]`이면 `total`은', '**생각해 보기:** `b`를 3으로 바꾸면 마지막에', '**생각해 보기**\n배열이 `[]`이면 `total`은 얼마', '**생각해 보기:** 입력이 `[1, 2]`가 아니라 `[3]`이면'])
+      expect([cutOff, thinkOf(`${steps}${cutOff}`)]).toEqual([cutOff, undefined])
+    // askNote's own cut of a long reply (to 4000 characters) ends on its ellipsis: not a question either.
+    const long = cut(`${'1. 단계입니다.\n'.repeat(400)}**생각해 보기:** 배열이 \`[]\`이면 \`total\`은 얼마일까요?`, 4000)
+    expect(long.endsWith('…')).toBe(true)
+    expect(thinkOf(long)).toBeUndefined()
+    expect(openThink([{ question: TRACE_LABEL, answer: `${steps}**생각해 보기:** 배열이 \`[]\`이면 \`tot`, at: 1 }], 2)).toBeUndefined()
+    // A sentence ended with no `?` is still a question: on 요, 까, 다 or a full stop, bold or bracketed after it.
+    const ended: [string, string][] = [
+      ['**생각해 보기:** 배열이 `[]`이면 `total`은 얼마일까요', '배열이 `[]`이면 `total`은 얼마일까요'],
+      ['**생각해 보기:** `total`은 얼마가 될까', '`total`은 얼마가 될까'],
+      ['**생각해 보기:** 배열이 비면 결과가 어떻게 되는지 떠올려 봅시다', '배열이 비면 결과가 어떻게 되는지 떠올려 봅시다'],
+      ['**생각해 보기: 입력이 0이면 무엇이 찍힐지 떠올려 보세요.**', '입력이 0이면 무엇이 찍힐지 떠올려 보세요.'],
+      ['생각해 보기: (입력이 0이면 무엇이 찍힐지 떠올려 보세요!)', '(입력이 0이면 무엇이 찍힐지 떠올려 보세요!)'],
+    ]
+    for (const [last, said] of ended) expect([last, thinkOf(`${steps}${last}`)]).toEqual([last, said])
   })
 
   test('openThink: only r\'s walk-through last, ending on a question, THINK_OPEN_MS after it came at most', () => {
@@ -198,6 +223,9 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
     expect(openThink(undefined, at)).toBeUndefined()
     // A question since: the walk-through is no longer the last.
     expect(openThink([r, { question: '0이요', answer: '맞습니다.', at: at + 1 }], at + 1)).toBeUndefined()
+    // Stamped ahead of the clock (a clock set back since, by hours): closed, never open for as long as it is ahead.
+    expect(openThink([r], at - 1)).toBeUndefined()
+    expect(openThink([{ ...r, at: at + 9 * 3_600_000 }], at + 8 * 3_600_000)).toBeUndefined()
     // The walk-through in full, to 2000 characters, for the call that checks the answer.
     const long = `${'1. 단계입니다.\n'.repeat(300)}**생각해 보기:** 입력이 0이면요?`
     const open = openThink([{ ...r, answer: long }], at)!
@@ -213,6 +241,9 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
     expect(isThinkFollow([r, typed(at + THINK_OPEN_MS)], 1)).toBe(true)
     expect(isThinkFollow([r, typed(at + THINK_OPEN_MS + 1)], 1)).toBe(false)
     expect(isThinkFollow([r, typed(at + 1)], 0)).toBe(false)
+    // One stamped before the walk-through (the clock set back between them): no follow, by any gap.
+    expect(isThinkFollow([r, typed(at - 1)], 1)).toBe(false)
+    expect(isThinkFollow([{ ...r, at: at + 9 * 3_600_000 }, typed(at + 8 * 3_600_000)], 1)).toBe(false)
     expect(isThinkFollow([r], 1)).toBe(false)
     // A key's question after it (e, r again), one after a walk-through with no question, one after another question.
     expect(isThinkFollow([r, { ...typed(at + 1), question: EASIER_LABEL }], 1)).toBe(false)
@@ -250,14 +281,16 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
     expect(alone.indexOf(section)).toBeLessThan(alone.indexOf('## 이 저장소의 팀 규칙과 용어'))
   })
 
-  test('r asks for the line by values and names, its answer left out; the other prompts are 1.7.0\'s; the journal says which question followed it', () => {
-    expect(TRACE_QUESTION).toContain('`**생각해 보기:**`')
-    expect(TRACE_QUESTION).toContain('번호 없이')
-    expect(TRACE_QUESTION).toContain('그 답은 쓰지 마세요')
-    expect(TRACE_QUESTION).toContain('단계 번호 대신 입력 값과 변수·줄 이름으로')
-    expect(TRACE_QUESTION).toContain('따라갈 실행 흐름이 없는 변경이면 이 줄은 빼 주세요')
-    expect(TRACE_QUESTION.endsWith(THINK_ASK)).toBe(true)
-    expect(TRACE_QUESTION.startsWith(TRACE_170)).toBe(true)
+  test('the line r would ask for is by values and names, its answer left out; off in 1.8.0, r\'s prompt and the others are 1.7.0\'s; the journal says which question followed it', () => {
+    expect(THINK_ASK).toContain('`**생각해 보기:**`')
+    expect(THINK_ASK).toContain('번호 없이')
+    expect(THINK_ASK).toContain('그 답은 쓰지 마세요')
+    expect(THINK_ASK).toContain('단계 번호 대신 입력 값과 변수·줄 이름으로')
+    expect(THINK_ASK).toContain('따라갈 실행 흐름이 없는 변경이면 이 줄은 빼 주세요')
+    // The answer check stayed under its bar on held-out answers (docs/qa/견본.md): the sentence ships out, as decided.
+    expect(IS_THINK_ASKED).toBe(false)
+    expect(TRACE_QUESTION).toBe(TRACE_170)
+    expect(TRACE_QUESTION).not.toContain('생각해 보기')
     expect(ASK_SYSTEM).toBe(ASK_SYSTEM_170)
     expect(EASIER_QUESTION).toBe(EASIER_170)
     expect(TRACE_LABEL).toBe('예시로 따라가기')

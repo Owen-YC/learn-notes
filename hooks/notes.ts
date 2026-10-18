@@ -1607,12 +1607,19 @@ export const TRACE_LABEL = '예시로 따라가기'
  */
 export const THINK_ASK =
   '마지막 줄에는 번호 없이 `**생각해 보기:**`로 시작하는 질문 한 문장을 더해 주세요. 방금 따라간 예시에서 입력 값 하나를 바꾸면 결과가 어떻게 달라지는지, 단계 번호 대신 입력 값과 변수·줄 이름으로 묻고 그 답은 쓰지 마세요. 따라갈 실행 흐름이 없는 변경이면 이 줄은 빼 주세요.'
+/**
+ * Whether r asks for THINK_ASK's line (1.8.0): off. The check of an answer to it stayed under its bar on answers the
+ * rule was not worded from (docs/qa/견본.md: a guessed stop or crash read as a bug report), and the decisions ship
+ * the sentence out then. Off, r's prompt is 1.7.0's to the byte, the help says nothing of it, and the rest (thinkOf,
+ * the dim line, 이어서) waits on a reply that ends on one by itself. On again once a sample clears the bar.
+ */
+export const IS_THINK_ASKED = false
 export const TRACE_QUESTION = [
   '바뀐 코드를 구체적인 예시 입력 하나로 한 단계씩 따라가 주세요.',
   '번호 목록으로, 단계마다 어느 줄이 실행되고 변수 값이 어떻게 바뀌는지 적고 마지막에 결과를 적어 주세요.',
   '바뀌기 전 코드였다면 어느 단계에서 결과가 달라지는지 한 줄로 짚어 주세요.',
   '따라갈 실행 흐름이 없는 변경(설정, 스타일, 문서 등)이면 그렇다고 한 줄로 말하고, 바뀐 결과가 화면이나 동작에서 어떻게 보이는지 설명해 주세요.',
-  THINK_ASK,
+  ...(IS_THINK_ASKED ? [THINK_ASK] : []),
 ].join(' ')
 
 /**
@@ -1628,12 +1635,19 @@ const THINK_LINE = /^[^\p{L}\p{N}]*(?:\d+[.)]\s*)?[^\p{L}\p{N}]*생각해\s*보�
 const THINK_GIVEN = /답\s*[:：]|정답/
 /** Characters that may close a question after its last `?`: bold's stars, a bracket, spaces. */
 const THINK_CLOSE = /^[\s*)）]*$/
+/**
+ * How a question's sentence ends: a question mark or a full stop, or 요, 까, 다 or 죠 with none, closed as THINK_CLOSE
+ * lets. A line ending on none was cut, not asked: by the r call's maxTokens (of which $.model.complete says nothing,
+ * the text so far coming back answered), or by askNote's own cut and its ellipsis.
+ */
+const THINK_END = /(?:[?？.!！。]|[요까다죠])[\s*)）]*$/u
 
 /**
  * The question a walk-through ends on (생각해 보기, THINK_ASK), or undefined: its last line that is not blank, or
  * the line after a label alone (`**생각해 보기**` with the question on the next line, the last). None when the
- * question is empty, says its answer (`답:`, 정답) or goes on past its last `?`: such a line stays in the answer as
- * written, but nothing opens for it. Cut to 300 characters.
+ * question is empty, says its answer (`답:`, 정답), goes on past its last `?` or stops short of its sentence's end
+ * (THINK_END, a reply cut inside the line): such a line stays in the answer as written, but nothing opens for it.
+ * Cut to 300 characters.
  */
 export function thinkOf(answer: string): string | undefined {
   const lines = clean(answer)
@@ -1648,18 +1662,19 @@ export function thinkOf(answer: string): string | undefined {
   const said = own !== undefined ? own : label(lines.at(-2)) === '' ? last.replace(/^(?:[-*+•]\s+|>\s*)+/, '').replace(/\*\*$/, '').trim() : undefined
   if (said === undefined || said === '' || THINK_GIVEN.test(said)) return undefined
   const asked = Math.max(said.lastIndexOf('?'), said.lastIndexOf('？'))
-  if (asked !== -1 && !THINK_CLOSE.test(said.slice(asked + 1))) return undefined
+  if ((asked !== -1 && !THINK_CLOSE.test(said.slice(asked + 1))) || !THINK_END.test(said)) return undefined
   return cut(said, 300)
 }
 
 /**
  * A walk-through's question still open (1.8.0, 생각해 보기): the note's last question is r's (TRACE_LABEL), its answer
  * ends on a question (thinkOf), and that answer came THINK_OPEN_MS ago at most. With it, the walk-through in full as
- * far as 2000 characters, for the call that checks an answer to it (askPrompt).
+ * far as 2000 characters, for the call that checks an answer to it (askPrompt). One stamped ahead of `now` (a clock
+ * set back since) is closed, never open for as long as it is ahead.
  */
 export function openThink(asks: readonly LearnAsk[] | undefined, now: number): { question: string; trace: string } | undefined {
   const last = asks?.at(-1)
-  if (last === undefined || last.question !== TRACE_LABEL || now - last.at > THINK_OPEN_MS) return undefined
+  if (last === undefined || last.question !== TRACE_LABEL || !isThinkAge(now - last.at)) return undefined
   const question = thinkOf(last.answer)
   return question === undefined ? undefined : { question, trace: cut(last.answer, 2000) }
 }
@@ -1669,13 +1684,18 @@ export function openThink(asks: readonly LearnAsk[] | undefined, now: number): {
  * right after r's answer ending on a question, THINK_OPEN_MS after it at most. Its head says `이어서`. Both times
  * are when the answers came (all a note keeps), so every window reads it alike; a question put in the bound's last
  * seconds whose answer came past it is headed 질문, though it went with the walk-through (askNote reads the bound
- * when the question is put).
+ * when the question is put). One stamped before the walk-through (the clock set back between them) is none.
  */
 export function isThinkFollow(asks: readonly LearnAsk[], i: number): boolean {
   const one = asks[i]
   const before = asks[i - 1]
   if (one === undefined || before === undefined || KEYED_LABELS.includes(one.question)) return false
-  return before.question === TRACE_LABEL && one.at - before.at <= THINK_OPEN_MS && thinkOf(before.answer) !== undefined
+  return before.question === TRACE_LABEL && isThinkAge(one.at - before.at) && thinkOf(before.answer) !== undefined
+}
+
+/** Whether a time since r's walk-through answered is within its open bound (THINK_OPEN_MS); never one below zero. */
+function isThinkAge(age: number): boolean {
+  return age >= 0 && age <= THINK_OPEN_MS
 }
 
 /**

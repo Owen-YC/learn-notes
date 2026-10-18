@@ -10471,7 +10471,8 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
       'note-drill': [NOTE, '`t` 직접 해 보기'],
       'note-drill-answer': [NOTE, '`a` 예시 답'],
       easier: [NOTE, '`e` 더 쉽게'],
-      trace: [NOTE, '`r` 예시로 따라가기(끝의 생각해 보기는 `i`로 답하기)'],
+      // 1.7.0's words: r asks for no 생각해 보기 in 1.8.0 (IS_THINK_ASKED off), so the help names none.
+      trace: [NOTE, '`r` 예시로 따라가기 · '],
       'ask-type': [NOTE, '`i` 질문하기'],
       share: [NOTE, '`c` 복사'],
       'quiz-new': [QUIZ, '`s` 새 문제'],
@@ -12030,7 +12031,7 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through, answered in t
   const THOUGHT = '`b`를 3으로 바꾸면 마지막에 `b`는 얼마일까요?'
   const TRACED = ['1. `const a = 1`: `a`는 1입니다.', '2. `const b = 2`: `b`는 2입니다.', '', `**생각해 보기:** ${THOUGHT}`].join('\n')
   const HINT = {
-    focused: 'i: 질문 칸에 답 적기 · 넘어가도 됩니다',
+    focused: 'i(영문 상태): 질문 칸에 답 적기 · 넘어가도 됩니다',
     keys: 'ctrl+x tab 뒤 i: 질문 칸에 답 적기 · 넘어가도 됩니다',
     click: '질문 칸을 눌러 답을 적어 보세요 · 넘어가도 됩니다',
     elsewhere: '답해 보려면 /learn 질문 뒤에 내 생각을 적습니다 (예: /learn 질문 0이 나와요) · 넘어가도 됩니다',
@@ -12079,8 +12080,12 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through, answered in t
     expect(focusesOf(w)).toEqual([])
     expect(await ui.find({ type: 'Button', key: 'ask-type' })).toMatchObject({ props: { hotkey: 'i' } })
     expect(String(field.props.key)).toMatch(/^ask-/)
-    // The pane's own line under it names the input mode the letter keys need.
-    expect(await ui.find({ type: 'Text', text: 'Esc: 대화로 돌아가기 · 글자 키는 영문 상태에서' })).toBeDefined()
+    // The line names the input mode i needs itself: the pane's own line saying so is drawn above the note, and r's
+    // answer is scrolled to the top (revealInPane 'start'), so a long note has that line out of sight by now.
+    expect(HINT.focused).toContain('영문 상태')
+    const texts = (await ui.findAll({ type: 'Text' })).map(one => one.text)
+    expect(texts.indexOf('Esc: 대화로 돌아가기 · 글자 키는 영문 상태에서')).toBeLessThan(texts.indexOf('▶ 예시로 따라가기'))
+    expect(cells(HINT.focused)).toBeLessThanOrEqual(49)
     // Nothing graded or counted: the walk-through and its line ask nothing more of the model, the store holds no new key.
     expect(w.models).toHaveLength(2)
     // (faults aside: nothing in this kit answers the scroll to r's answer, kept as the pane's.)
@@ -12257,11 +12262,13 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through, answered in t
     expect(await hintsOf(ui)).toEqual([])
     expect((await fieldOf(ui)).props.placeholder).toBe(SHUT)
 
-    // r again: its own new question is the one an answer goes with; r's own prompt never carries a walk-through.
+    // r again: its own new question is the one an answer goes with; r's own prompt never carries a walk-through, nor
+    // (IS_THINK_ASKED off in 1.8.0) asks for the line: a reply that ends on one by itself is read all the same.
     const next = '`a`를 5로 바꾸면 `a`는 얼마일까요?'
     await trace(ui, w, `1. a는 1입니다.\n\n**생각해 보기:** ${next}`)
     expect(w.models.at(-1)).toContain('구체적인 예시 입력 하나로 한 단계씩 따라가')
-    expect(w.models.at(-1)).toContain('`**생각해 보기:**`로 시작하는 질문 한 문장')
+    expect(w.models.at(-1)).toContain('화면이나 동작에서 어떻게 보이는지 설명해 주세요.\n\n')
+    expect(w.models.at(-1)).not.toContain('`**생각해 보기:**`로 시작하는 질문 한 문장')
     expect(w.models.at(-1)).not.toContain(SECTION)
     expect(await hintsOf(ui)).toEqual([HINT.focused])
     w.answer = '맞습니다.'
@@ -12272,6 +12279,55 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through, answered in t
     expect(w.models.at(-1)).not.toContain(`생각해 보기: ${THOUGHT}`)
     expect(w.models.at(-1)).toContain('- 질문: 더 쉽게\n')
     expect(await ui.find({ type: 'Text', text: '이어서 · 5요' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a walk-through cut inside its 생각해 보기 (the r call\'s token cap) is drawn as written and opens nothing', async ($, on) => {
+    const w = await noted($, on)
+    const ui = await pane($)
+    const key = String((await fieldOf(ui)).props.key)
+    // The reply's text so far, answered: $.model.complete says nothing of maxTokens reached.
+    const cutOff = '1. `const a = 1`: `a`는 1입니다.\n2. `const b = 2`: `b`는 2입니다.\n\n**생각해 보기:** `b`를 3으로 바꾸면 마지막에'
+    await trace(ui, w, cutOff)
+    expect(await ui.find({ type: 'Markdown', text: cutOff })).toBeDefined()
+    expect(await hintsOf(ui)).toEqual([])
+    expect((await fieldOf(ui)).props.placeholder).toBe(SHUT)
+    w.answer = '네.'
+    await ui.input({ key, text: '3이요' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: '질문 · 3이요' })).toBeDefined()
+    expect(w.models.at(-1)).not.toContain(SECTION)
+    expect(w.files.get(JOURNAL)).not.toContain('(생각해 보기 뒤)')
+    await ui.unmount()
+  })
+
+  test('a walk-through first drawn after it came (a window opened again) closes at its own half hour in a pane left as it is', async ($, on) => {
+    const note = {
+      id: 'kept',
+      turnId: 'kept',
+      at: NOW - 20 * MIN,
+      prompt: '요청',
+      answer: '',
+      changes: [{ file: 'src/a.ts', path: '/proj/src/a.ts', tool: 'Edit', kind: 'update', added: 1, removed: 1, diff: '@@ -1,1 +1,1 @@\n-a\n+b', isCut: false }],
+      moreFiles: 0,
+      status: 'ready',
+      text: NOTE_TEXT,
+      savedAs: 'ready',
+      asks: [{ question: '예시로 따라가기', answer: TRACED, at: NOW - 10 * MIN }],
+    }
+    const w = world(on, 'ok', null, true, new Map<string, unknown>([['history', { '/proj': { at: NOW, notes: [note] } }]]))
+    await start($)
+    const ui = await pane($)
+    expect(await hintsOf(ui)).toEqual([HINT.focused])
+    // Its half hour ends 20 minutes on (less what start took), not 30 minutes after this first drawing.
+    const shut = NOW - 10 * MIN + 30 * MIN + 1
+    await w.clock.advance(shut - 1 - w.clock.now())
+    await w.clock.settle()
+    expect(await hintsOf(ui)).toEqual([HINT.focused])
+    await w.clock.advance(1)
+    await w.clock.settle()
+    expect(await hintsOf(ui)).toEqual([])
+    expect((await fieldOf(ui)).props.placeholder).toBe(SHUT)
     await ui.unmount()
   })
 
