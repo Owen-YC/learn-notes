@@ -4740,11 +4740,20 @@ export const WORKED_NEXT = '다음 복습 퀴즈는 풀이부터 보여 줍니�
 
 /**
  * True when a graded question's concept is asked by a worked example in the next review quiz (rungOf): its slip
- * (`record`, as the store has it after the grade) open, missed WORKED_AFTER_TIMES times running, not set right on a
- * try again, and the question no team term's (asked by the team's words, as in 1.7).
+ * (`record`, as the store has it after the grade) open, kept by this very grade (so the next quiz asks it again,
+ * slipsToAsk: a grade that kept no miss, as wrong once the answer is seen, leaves it gone over), missed
+ * WORKED_AFTER_TIMES times running, not set right on a try again, and the question no team term's (asked by the
+ * team's words, as in 1.7).
  */
-export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuizItem, 'team'>): boolean {
-  return record !== undefined && record.fixedAt === undefined && record.times >= WORKED_AFTER_TIMES && record.isRight !== true && item.team !== true
+export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuizItem, 'team' | 'gradedAt'>): boolean {
+  return (
+    record !== undefined &&
+    record.fixedAt === undefined &&
+    record.at === item.gradedAt &&
+    record.times >= WORKED_AFTER_TIMES &&
+    record.isRight !== true &&
+    item.team !== true
+  )
 }
 
 /**
@@ -4862,9 +4871,20 @@ function quizParts(text: string, isFenceAware: boolean): Map<string, string[]> {
   return parts
 }
 
-/** A question's kind from its T line (예측 · 왜 · 바꿔 보기, or the English words); undefined for anything else. */
+/**
+ * What a T line may put before its kind, a place of the title taken for one (1.8.0: the rung said under the concept's
+ * head, 다시 도전, 팀 용어): passed over, so `풀이 보고 풀기 · 예측` reads as 예측.
+ */
+const KIND_LEAD = new RegExp(
+  `^(?:(?:${[...Object.values(RUNG_LABEL), '다시 도전', '팀 용어'].map(label => label.replace(/ /g, '\\s*')).join('|')})\\s*[·:：,/|-]?\\s*)+`,
+)
+
+/**
+ * A question's kind from its T line (예측 · 왜 · 바꿔 보기, or the English words), past a place of the title it may
+ * name first (KIND_LEAD); undefined for anything else, a T line naming that place alone among them.
+ */
 function kindOf(lines: readonly string[] | undefined): QuizKind | undefined {
-  const word = (lines?.[0] ?? '').replace(/[*_`()[\]]/g, '').trim().toLowerCase()
+  const word = (lines?.[0] ?? '').replace(/[*_`()[\]]/g, '').trim().toLowerCase().replace(KIND_LEAD, '')
   if (/^(예측|predict)/.test(word)) return 'predict'
   if (/^(왜|why)/.test(word)) return 'why'
   if (/^(바꿔\s*보기|바꾸기|바꿔|modify)/.test(word)) return 'modify'

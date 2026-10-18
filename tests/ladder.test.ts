@@ -179,6 +179,19 @@ describe('1.8.0: a question keeps its rung as the model kept to it (E3)', () => 
     expect(parseQuiz('Q1: `const b = 2` 다음 줄에서 b = 3이면?\nA1: 오류', line)[0]!.rung).toBeUndefined()
     expect(parseQuiz('Q1: `const b = 5` 다음 줄에서 b = 3이면?\nA1: 오류', line)[0]!.rung).toBe('changed')
   })
+
+  test('a T line that names the rung before the kind is read for its kind; one naming the rung alone has none, as in 1.7', () => {
+    const picks = [pickForRung(pick('A', { slip }), 'worked')]
+    const kind = (t: string) => parseQuiz(`T1: ${t}\nQ1: 풀이: 예. 이제 풀어 보세요: y는?\nA1: 6`, picks)[0]!.kind
+    expect(kind('풀이 보고 풀기 · 예측')).toBe('predict')
+    expect(kind('(비슷한 코드) 바꿔 보기')).toBe('modify')
+    expect(kind('**내 코드**: 왜')).toBe('why')
+    expect(kind('다시 도전 · 팀 용어 · predict')).toBe('predict')
+    expect(kind('풀이보고풀기 - 예측')).toBe('predict')
+    expect(kind('예측')).toBe('predict')
+    expect(kind('풀이 보고 풀기')).toBeUndefined()
+    expect(kind('내 코드로')).toBeUndefined()
+  })
 })
 
 describe('1.8.0: a worked example\'s flash card, its next quiz said, and how its grade marks the concept (E3)', () => {
@@ -213,15 +226,19 @@ describe('1.8.0: a worked example\'s flash card, its next quiz said, and how its
     expect(WORKED_NEXT).toBe('다음 복습 퀴즈는 풀이부터 보여 줍니다')
   })
 
-  test('the next quiz is a worked example only with the slip open, twice or more, not set right, and no team term\'s', () => {
-    const item = {}
+  test('the next quiz is a worked example only with the slip open, kept by this grade, twice or more, not set right, and no team term\'s', () => {
+    const item = { gradedAt: NOW }
     expect(isWorkedNext({ ...SLIP, times: 2 }, item)).toBe(true)
     expect(isWorkedNext({ ...SLIP, times: 5 }, item)).toBe(true)
     expect(isWorkedNext({ ...SLIP, times: 1 }, item)).toBe(false)
     expect(isWorkedNext({ ...SLIP, times: 2, isRight: true }, item)).toBe(false)
     expect(isWorkedNext({ ...SLIP, times: 2, fixedAt: NOW }, item)).toBe(false)
-    expect(isWorkedNext({ ...SLIP, times: 2 }, { team: true })).toBe(false)
+    expect(isWorkedNext({ ...SLIP, times: 2 }, { team: true, gradedAt: NOW })).toBe(false)
     expect(isWorkedNext(undefined, item)).toBe(false)
+    // A grade that kept no miss (wrong once the answer is seen, f with no slip read): the slip is the one before, gone
+    // over by this grade, so the next quiz does not ask it again first, and no worked example is said.
+    expect(isWorkedNext({ ...SLIP, times: 2, at: NOW - 8 * DAY }, item)).toBe(false)
+    expect(slipNotice({ result: 'wrong', gradedAt: NOW, rung: 'worked' }, { ...SLIP, times: 2, at: NOW - 8 * DAY }, true)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
   })
 
   test('a grade marks its concept as in 1.7, but a miss in code never seen steps back one, not to the first', () => {

@@ -11523,6 +11523,66 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     await ui.unmount()
   })
 
+  test('a worked example graded wrong once its answer is seen keeps no new miss: no worked example is promised, and the next quiz asks it again with none', async ($, on) => {
+    const store = storeOf(['클로저'], 2, 8 * DAY, false, { 클로저: { times: 2 } })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = worked(1)
+    expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (풀이 보고 풀기) 풀이:')
+    await learn($, '퀴즈 정답 1')
+    // No typed answer, no slip read: the slip stays as it was, and the next quiz goes over it as one asked again (1.7).
+    const reply = (await learn($, '퀴즈 틀림 1')).text
+    expect(reply).toBe('틀린 것으로 적었습니다: 1. 클로저. 복습할 개념 맨 앞에 올라 다음 퀴즈에 먼저 나옵니다.\n같은 곳을 또 헷갈렸습니다')
+    expect(slipsOf(store)['c:클로저']).toMatchObject({ times: 2, at: NOW - 8 * DAY })
+    await w.clock.advance(60_000)
+    w.answer = plainQ(1)
+    expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (다시 도전) 문제 1')
+    expect(w.models.at(-1)).not.toContain('칸: 풀이 보고 풀기')
+  })
+
+  test('a worked example turned wrong with f, or graded wrong with no slip read: the pane promises no worked example, and the next quiz shows none', async ($, on) => {
+    const store = storeOf(['클로저', 'map'], 2, 8 * DAY, false, { 클로저: { times: 2 }, map: { what: '원래 배열을 바꾼다고 봄', type: 'state', times: 2 } })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w, [worked(1), worked(2)].join('\n'))
+    await answer(ui, w, mineKey(store, 0), '안쪽 함수가 바깥 c를 기억해서 11을 찍습니다', RIGHT)
+    await ui.press({ key: 'quiz-flip' })
+    await w.clock.settle()
+    // The slip as it was before the grade (nothing read from a right answer), gone over by it: asked again as in 1.7.
+    expect(slipsOf(store)['c:클로저']).toMatchObject({ times: 2, at: NOW - 8 * DAY })
+    expect(await ui.find({ type: 'Text', text: /^같은 곳을 또 헷갈렸습니다$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /풀이부터/ })).toBeUndefined()
+    await answer(ui, w, mineKey(store, 1), '10이요', '판정: 틀림\n피드백: 아닙니다.\n헷갈린 점: 없음')
+    expect(slipsOf(store)['c:map']).toMatchObject({ times: 2, at: NOW - 8 * DAY })
+    expect(await ui.find({ type: 'Text', text: /^같은 곳을 또 헷갈렸습니다$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /풀이부터/ })).toBeUndefined()
+    await ui.unmount()
+    await w.clock.advance(60_000)
+    w.answer = [plainQ(1), plainQ(2)].join('\n')
+    const listed = (await learn($, '퀴즈 새로')).text
+    expect(w.models.at(-1)).not.toContain('칸: 풀이 보고 풀기')
+    expect(listed).toContain('\n1. (다시 도전) 문제 1')
+    expect(listed).toContain('\n2. (다시 도전) 문제 2')
+  })
+
+  test('/learn 안키: a worked example whose question after its example is not marked makes no card, its example kept off the front', async ($, on) => {
+    const store = storeOf(['클로저', 'map'], 0, DAY, true, { 클로저: { times: 2 } })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    // The example shown (풀이:, so the rung stays) but no 이제 풀어 보세요 before its question.
+    const unmarked = ['T1: 예측', `Q1: 풀이: 흔히 ${WHAT}. 하지만 바깥 변수는 남습니다. 아래 코드는 무엇을 찍을까요? \`let c = 1; (() => ++c)(); console.log(c)\``, 'A1: 2'].join('\n')
+    w.answer = [unmarked, plainQ(2)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store)[0]).toMatchObject({ rung: 'worked' })
+    const bank = store.get('quizBank') as { name: string; question: string }[]
+    expect(bank.map(one => one.name)).toEqual(['map'])
+    await learn($, '안키')
+    const file = w.files.get('/home/u/.claude/learning-notes/learn-notes-anki.txt')!
+    expect(file).toContain('문제 2')
+    expect(file).not.toContain('풀이:')
+    expect(file).not.toContain(WHAT)
+  })
+
   test('/learn 퀴즈 맞음 over a worked example\'s first try: right, its step kept, and the reply says the interval stays', async ($, on) => {
     const store = storeOf(['클로저'], 2, 8 * DAY, false, { 클로저: { times: 2 } })
     const w = world(on, 'ok', null, true, store)
@@ -11531,8 +11591,28 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     await learn($, '퀴즈 새로')
     w.answer = ASKED_BACK
     expect((await learn($, '퀴즈 1 10')).text).toContain('되묻기: 안쪽 함수가 다시 불릴 때 c는 어디에 남아 있을까요?')
-    expect((await learn($, '퀴즈 맞음 1')).text).toBe('맞힌 것으로 적었습니다: 1. 클로저. 정답을 보고 맞혀 복습 간격은 그대로입니다.')
+    // The help was the example (and the question asked back), not the answer: named so, as the quiz's last sentence names it.
+    expect((await learn($, '퀴즈 맞음 1')).text).toBe('맞힌 것으로 적었습니다: 1. 클로저. 풀이·정답을 보고 맞혀 복습 간격은 그대로입니다.')
     expect(conceptOf(store, '클로저')).toMatchObject({ step: 2, reviewedAt: NOW })
+  })
+
+  test('/learn 퀴즈 맞음 over a worked example and a typed miss: the reply names the example among the help of the ones whose interval stays', async ($, on) => {
+    const store = storeOf(['클로저', 'map'], 2, 8 * DAY, false, { 클로저: { times: 2 } })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = [worked(1), plainQ(2)].join('\n')
+    await learn($, '퀴즈 새로')
+    w.answer = ASKED_BACK
+    await learn($, '퀴즈 1 10')
+    w.answer = missed('원래 배열을 바꾼다고 봄', '상태가 바뀌는 때')
+    await learn($, '퀴즈 2 원래 배열이 바뀝니다')
+    expect((await learn($, '퀴즈 맞음 1 2')).text).toBe('맞힌 것으로 적었습니다: 1. 클로저 · 2. map. 직접 맞힌 문제는 간격이 늘고, 풀이·정답을 보고 맞힌 문제는 그대로입니다.')
+    // With no worked example among them, the words of 1.7.
+    await w.clock.advance(60_000)
+    w.answer = plainQ(1)
+    await learn($, '퀴즈 새로')
+    await learn($, '퀴즈 정답 1')
+    expect((await learn($, '퀴즈 맞음 1')).text).toBe('맞힌 것으로 적었습니다: 1. 클로저. 정답을 보고 맞혀 복습 간격은 그대로입니다.')
   })
 
   test('a quiz read back from the store keeps its rungs, drops one it does not know, and reads a 1.7 quiz as before', async ($, on) => {
@@ -11556,6 +11636,37 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     w.answer = RIGHT
     await learn($, '퀴즈 2 답')
     expect(quizItems(store).map(one => one.rung)).toEqual(['worked', 'changed', undefined])
+  })
+
+  test('a question in code never seen (1.8.x, off in 1.8.0) turned wrong steps its concept back one, as a miss graded so does', async ($, on) => {
+    const store = storeOf(['클로저', 'map'], 4, 31 * DAY, false)
+    // A quiz a window of a later build wrote, with the rung 1.8.0 keeps but never asks.
+    const at = NOW - 60_000
+    store.set('quiz', {
+      at,
+      isRevealed: false,
+      items: [
+        { key: 'c:클로저', name: '클로저', question: '처음 보는 코드 문제', answer: '11', rung: 'new', kind: 'predict' },
+        { key: 'c:map', name: 'map', question: '처음 보는 코드 문제 2', answer: '[2, 4]', rung: 'new', kind: 'predict' },
+      ],
+    })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = RIGHT
+    await learn($, '퀴즈 1 11')
+    expect(conceptOf(store, '클로저').step).toBe(5)
+    // The learner's own word turns it wrong: one step back from where it stood before the grade, not to the first.
+    expect((await learn($, '퀴즈 틀림 1')).text).toContain('틀린 것으로 적었습니다: 1. 클로저.')
+    expect(conceptOf(store, '클로저')).toMatchObject({ step: 3, reviewedAt: NOW })
+    // Graded wrong at once: the same.
+    w.answer = missed()
+    await learn($, '퀴즈 2 [1, 2]')
+    expect(conceptOf(store, 'map')).toMatchObject({ step: 3, reviewedAt: NOW })
+    // Turned right in the conversation and back: a step on from where it stood, then one back again.
+    await learn($, '퀴즈 맞음 2')
+    expect(conceptOf(store, 'map').step).toBe(5)
+    await learn($, '퀴즈 틀림 2')
+    expect(conceptOf(store, 'map').step).toBe(3)
   })
 
   test('a window of an older build that wrote a worked example back without its rung: right on another day mends nothing', async ($, on) => {

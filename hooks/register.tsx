@@ -2637,11 +2637,12 @@ async function regradeQuiz($: EngineInterface, cfg: Config, current: Quiz, i: nu
       return fresh.at !== current.at ? 'moved' : 'busy'
     }
     const at = item.gradedAt ?? (await $.clock.now())
-    // The learner's own word: fully right or fully wrong, never "partly"; right after help keeps the step.
-    const right = isHelpedGrade(item) ? markHelped : markReviewed
+    // The learner's own word: fully right or fully wrong, never "partly"; right after help keeps the step, and wrong in
+    // code never seen (1.8.x) steps back one, as a miss graded so does (markFor).
+    const how = markFor(result, undefined, isHelpedGrade(item), item.rung)
     // Marks a 1.5 grade kept are read as the index is: its step begun at the notes met is 1 at most.
     const before = item.before && recallMarks(item.before, await stepsFrom($))
-    const mark: Mark = (index, keys) => regrade(index, keys[0]!, before, at, result === 'right' ? right : markWrong)
+    const mark: Mark = (index, keys) => regrade(index, keys[0]!, before, at, how)
     if (!(await markConcepts($, cfg, mark, [item.key], at))) return 'failed'
     // Its slip as if graded this way then: from the slip before the first grade, turned right as if right at once.
     const turned: LearnQuizItem = { ...item, result, isLearnerGraded: true }
@@ -4446,6 +4447,8 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
     const changed: string[] = []
     const changedAt: number[] = []
     let helped = 0
+    // A worked example among the help (1.8.0): the reply names it, as the quiz's last sentence does (missesText).
+    let isWorkedHelp = false
     for (const n of numbers) {
       const latest = (await lastQuiz($)) ?? current
       if (latest.at !== current.at) return MOVED_TEXT
@@ -4464,7 +4467,10 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
         changedAt.push(n - 1)
         // Right over a first try, as the learner says it was: recalled by themselves unless its hint was seen, or it
         // came after a worked example (1.8.0), whose step stays all the same.
-        if (tried ? item.isHinted === true || item.rung === 'worked' : isHelpedGrade(item)) helped += 1
+        if (tried ? item.isHinted === true || item.rung === 'worked' : isHelpedGrade(item)) {
+          helped += 1
+          if (item.rung === 'worked') isWorkedHelp = true
+        }
       }
     }
     if (changed.length === 0) return `이미 ${word}으로 적혀 있습니다.`
@@ -4478,12 +4484,13 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
     const slipped = slipLines.length > 0 ? `\n${slipLines.join('\n')}` : ''
     if (result === 'wrong') return `틀린 것으로 적었습니다: ${changed.join(' · ')}. 복습할 개념 맨 앞에 올라 다음 퀴즈에 먼저 나옵니다.${slipped}`
     // Graded after the answer showed: recalled with help, so the interval stays (a typed answer turned right moves on).
+    const helpSeen = isWorkedHelp ? '풀이·정답을 보고' : '정답을 보고'
     const spacing =
       helped === changed.length
-        ? '정답을 보고 맞혀 복습 간격은 그대로입니다.'
+        ? `${helpSeen} 맞혀 복습 간격은 그대로입니다.`
         : helped === 0
           ? '다음 복습까지 간격이 늘어납니다.'
-          : '직접 맞힌 문제는 간격이 늘고, 정답을 보고 맞힌 문제는 그대로입니다.'
+          : `직접 맞힌 문제는 간격이 늘고, ${helpSeen} 맞힌 문제는 그대로입니다.`
     const graduated = graduatedIn(
       graded.map(({ item }) => item),
       await read($, concepts),
