@@ -4343,10 +4343,13 @@ export function teamMapText(reports: readonly ReadReport[], terms: readonly Team
   const ownKeys = new Set(own.map(term => termKey(term, aliases)))
   const teamLines: string[] = []
   if (own.length > 0) {
-    // Only the reports made in this repository with these terms: another's total is another team file's.
+    // Only the reports made in this repository with these terms: another's total is another team file's. A report made
+    // before the team file changed its count is left out too, and the line says that check, not "no team line".
     const teamed = reports.filter(one => one.team?.total === own.length)
     if (teamed.length < TEAM_MAP_MIN) {
-      teamLines.push(`- 팀 용어 ${own.length}개: 이 저장소 팀 용어 줄이 있는 보고서가 ${TEAM_MAP_MIN}개보다 적어 세지 않았습니다`)
+      teamLines.push(
+        `- 팀 용어 ${own.length}개: 지금 팀 파일과 같은 용어 ${own.length}개로 만든 보고서가 ${TEAM_MAP_MIN}개보다 적어 세지 않았습니다 (다른 저장소에서나 팀 파일을 바꾸기 전에 만든 보고서는 세지 않습니다)`,
+      )
     } else {
       const met = reportCounts(teamed.map(one => one.team!.met), aliases)
       const rows = own.map(term => {
@@ -4584,6 +4587,32 @@ function keptRung(pick: Pick<QuizPick, 'rung' | 'code'>, question: string): Quiz
     if (mine !== '' && shownCode(question).some(code => squash(code) === mine)) return undefined
   }
   return pick.rung
+}
+
+/** What a worked example asks when only code follows its 이제 풀어 보세요 (the model left the ask out): what it prints. */
+export const WORKED_DEFAULT_ASK = '이 코드를 실행하면 무엇이 출력될까요?'
+
+/**
+ * A worked example's question with WORKED_DEFAULT_ASK on the line after its 이제 풀어 보세요 when nothing but code
+ * blocks follows it (no words outside them say what to answer); as it is otherwise, with nothing after it too. The
+ * pane, the conversation's list, the flash card (bankQuestion) and the grade all read the question so.
+ */
+function workedAsked(question: string): string {
+  const m = WORKED_ASKS.exec(question)
+  if (!m) return question
+  const after = question.slice(m.index + m[0].length)
+  const words: string[] = []
+  let fence: string | null = null
+  for (const raw of after.split('\n')) {
+    const bare = BARE_FENCE.exec(raw)
+    if (fence === null && bare) fence = bare[1]!
+    else if (fence !== null && bare && bare[1]!.startsWith(fence[0]!) && bare[1]!.length >= fence.length) fence = null
+    else if (fence === null) words.push(raw)
+  }
+  if (after.trim() === '' || words.join('').trim() !== '') return question
+  // The marker's match may run on over the line break after it: the ask goes on the next line, the code right under it.
+  const head = question.slice(0, m.index + m[0].length).replace(/\s+$/, '')
+  return `${head}\n${WORKED_DEFAULT_ASK}\n${after.replace(/^\s*\n/, '')}`
 }
 
 /**
@@ -5467,6 +5496,9 @@ function quizItems(parts: Map<string, string[]>, picks: readonly QuizPick[]): Le
     const kind = kindOf(parts.get(`T${i + 1}`))
     // Its rung (1.8.0) as the model kept to it: a worked example with none shown, or code meant changed shown as it was, keeps none.
     const rung = keptRung(one, question)
+    // A worked example with only code after 이제 풀어 보세요 asks what that code prints (교차 검토 2): a 예측, its T line
+    // naming no kind. Code alone is no question to change.
+    const asked = rung === 'worked' ? workedAsked(question) : question
     // Asked again over an open slip, unless the question says the slip itself: then it is a question as any other. A
     // worked example shows the slip on purpose and is no retry either: right after the example mends nothing, in a
     // window of an older build too, which knows no rung.
@@ -5475,10 +5507,10 @@ function quizItems(parts: Map<string, string[]>, picks: readonly QuizPick[]): Le
       items.push({
         key: one.key,
         name: one.name,
-        question,
+        question: asked,
         ...(isHelpful ? { hint } : {}),
         answer,
-        ...(kind ? { kind } : {}),
+        ...(kind ? { kind } : asked !== question ? { kind: 'predict' as const } : {}),
         ...(one.noteId ? { noteId: one.noteId } : {}),
         ...(isRetry ? { isRetry: true as const } : {}),
         ...(rung ? { rung } : {}),

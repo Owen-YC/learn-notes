@@ -5,6 +5,7 @@ import {
   RUNG_CHANGED_STEP,
   RUNG_NEW_STEP,
   WORKED_AFTER_TIMES,
+  WORKED_DEFAULT_ASK,
   WORKED_NEXT,
   addToBank,
   bankQuestion,
@@ -191,6 +192,47 @@ describe('1.8.0: a question keeps its rung as the model kept to it (E3)', () => 
     expect(kind('예측')).toBe('predict')
     expect(kind('풀이 보고 풀기')).toBeUndefined()
     expect(kind('내 코드로')).toBeUndefined()
+  })
+
+  test('a worked example with only code after 이제 풀어 보세요 asks what it prints, on the line after the marker: a 예측 when its T line names no kind (교차 검토 2)', () => {
+    const picks = [pickForRung(pick('A', { slip }), 'worked')]
+    const example = '풀이: `[1, 2].filter(n => n > 1)`은 `[2]`입니다. filter는 조건이 참인 것만 남깁니다.'
+    const code = '```js\nconst ages = [12, 25, 8]\nconsole.log(ages.filter(a => a >= 18))\n```'
+    expect(WORKED_DEFAULT_ASK).toBe('이 코드를 실행하면 무엇이 출력될까요?')
+    // The haiku sample's B4: the T line names the rung alone, and nothing but the code follows the marker.
+    const [only] = parseQuiz(`T1: 풀이 보고 풀기\nQ1: ${example}\n이제 풀어 보세요:\n${code}\nH1: 18 이상만\nA1: [ 25 ]`, picks)
+    expect(only).toMatchObject({ rung: 'worked', kind: 'predict', question: `${example}\n이제 풀어 보세요:\n${WORKED_DEFAULT_ASK}\n${code}` })
+    // The card's front, what the pane and the conversation show, and what the grade reads: the ask, then the code.
+    expect(bankQuestion(only!)).toBe(`${WORKED_DEFAULT_ASK}\n${code}`)
+    // The marker in bold, a blank line after it, and two blocks: the ask on the line after the marker all the same; a T line's kind stays.
+    const [bold] = parseQuiz(`T1: 왜\nQ1: ${example}\n**이제 풀어 보세요:**\n\n${code}\n\n${code}\nA1: [ 25 ]`, picks)
+    expect(bold!.question).toBe(`${example}\n**이제 풀어 보세요:**\n${WORKED_DEFAULT_ASK}\n${code}\n\n${code}`)
+    expect(bold!.kind).toBe('why')
+    // A block left open is closed first (closeFence), and is code alone too.
+    const [open] = parseQuiz(`Q1: ${example}\n이제 풀어 보세요:\n\`\`\`py\nprint(sum(range(3, 7)))\nA1: 18`, picks)
+    expect(bankQuestion(open!)!.startsWith(`${WORKED_DEFAULT_ASK}\n\`\`\`py\nprint(sum(range(3, 7)))\n`)).toBe(true)
+    expect(open!.kind).toBe('predict')
+  })
+
+  test('a worked example that asks in words after its marker, before or after its code, is kept as written; so is any question not a worked example (교차 검토 2)', () => {
+    const picks = [pickForRung(pick('A', { slip }), 'worked')]
+    const code = '```js\nlet c = 10\nconsole.log(++c)\n```'
+    // Code in backticks is words of the question here: only a fenced block is code alone.
+    for (const asks of [`아래 코드는 무엇을 찍을까요?\n${code}`, `${code}\nc는?`, '`let y = 5; y += 1`의 y는?', `${code}\n이 줄을 바꾸면 c는 몇이 될까요?`, '`console.log(typeof null)`', '']) {
+      const question = `풀이: \`let n = 0; n += 1\` 뒤 n은 1입니다.\n이제 풀어 보세요:${asks === '' ? '' : `\n${asks}`}`
+      const [item] = parseQuiz(`T1: 풀이 보고 풀기\nQ1: ${question}\nA1: 11`, picks)
+      expect(item!.question).toBe(question)
+      expect(item!.question).not.toContain(WORKED_DEFAULT_ASK)
+      expect(item!.kind).toBeUndefined()
+    }
+    // No example shown (no rung kept), no marker, or no worked example at all: code alone stays code alone.
+    expect(parseQuiz(`Q1: 이제 풀어 보세요:\n${code}\nA1: 11`, picks)[0]!.question).toBe(`이제 풀어 보세요:\n${code}`)
+    expect(parseQuiz(`Q1: 풀이: 예.\n${code}\nA1: 11`, picks)[0]!.question).toBe(`풀이: 예.\n${code}`)
+    for (const rung of ['mine', 'changed'] as const) {
+      const [item] = parseQuiz(`Q1: 이제 풀어 보세요:\n${code}\nA1: 11`, [pickForRung(pick('B', { code: CODE }), rung)])
+      expect(item!.question).toBe(`이제 풀어 보세요:\n${code}`)
+      expect(item!.kind).toBeUndefined()
+    }
   })
 })
 

@@ -1,4 +1,4 @@
-import type { LearnConcept } from '../types'
+import type { LearnConcept, LearnDayActivity } from '../types'
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
@@ -32,6 +32,10 @@ type Person = {
   right?: number
   wrong?: number
   calls?: { calls: number; auto: number; input: number; output: number }
+  /** Days learned in the range (1 by default): the day before `now` holds `notes` and the quiz, each day before it one note. */
+  active?: number
+  /** Made where no model call was recorded yet (its calls line says the period has no record): no usage, since `now`. */
+  unrecorded?: boolean
   range?: string
   now?: number
 }
@@ -50,13 +54,15 @@ function report(p: Person = {}): string {
     index[conceptKey(name)] = concept(name, { count: 2, firstAt: now - 40 * DAY, lastAt: now - 40 * DAY, missedAt: now - DAY + i, reviewedAt: now - DAY + i, step: 0 })
   })
   const day = stamp(now - DAY).day
+  const activity: Record<string, LearnDayActivity> = { [day]: { notes: p.notes ?? 3, right: p.right ?? 2, wrong: p.wrong ?? 1 } }
+  for (let back = 2; back <= (p.active ?? 1); back++) activity[stamp(now - back * DAY).day] = { notes: 1, right: 0, wrong: 0 }
   return reportMarkdown({
     range: recapRange(p.range ?? '최근 7일', now)!,
-    activity: { [day]: { notes: p.notes ?? 3, right: p.right ?? 2, wrong: p.wrong ?? 1 } },
+    activity,
     index,
     now,
-    usage: { [day]: p.calls ?? { calls: 20, auto: 12, input: 46_000, output: 10_000 } },
-    since: now - 100 * DAY,
+    usage: p.unrecorded ? {} : { [day]: p.calls ?? { calls: 20, auto: 12, input: 46_000, output: 10_000 } },
+    since: p.unrecorded ? now : now - 100 * DAY,
     ...(p.team ? { team: p.team } : {}),
   })
 }
@@ -98,12 +104,14 @@ describe('1.8.0: /learn 보고서 모으기 reads the reports back (E5)', () => 
       // Tokens over every size tokenText says: plain, 천, 만, 억.
       const tokens = () => Math.floor(10 ** (next() * 9))
       const calls = int(3) === 0 ? { calls: 0, auto: 0, input: 0, output: 0 } : { calls: 1 + int(200), auto: int(50), input: tokens(), output: tokens() }
-      const text = report({ fresh, missed, team: total > 0 ? { total, met } : undefined, notes, right, wrong, calls })
+      // Days learned, one to six: the days before today in 최근 7일 (교차 검토 2: a constant 1 passed the reading).
+      const active = 1 + int(5)
+      const text = report({ fresh, missed, team: total > 0 ? { total, met } : undefined, notes, right, wrong, calls, active })
       const one = readOne(text)
       expect(one.from).toBe(recapRange('최근 7일', NOW)!.days[0]!)
       expect(one.to).toBe(stamp(NOW).day)
-      expect(one.days).toBe(1)
-      expect(one.notes).toBe(notes)
+      expect(one.days).toBe(active)
+      expect(one.notes).toBe(notes + active - 1)
       expect(one.quiz).toEqual(right + wrong > 0 ? { graded: right + wrong, right } : undefined)
       // The report lists the most recent first, fifteen at most (its 외 N개 left off), and five missed, the oldest miss first.
       expect(one.fresh).toEqual([...fresh].reverse().slice(0, 15))
@@ -343,7 +351,20 @@ describe('1.8.0: the team learning map, with no line per person (E5)', () => {
       { team: { total: 4, met: ['fetcher', '캐시 키'] } },
       {},
     )
-    expect(teamMapText(mixed, terms, {})).toContain('- 팀 용어 3개: 이 저장소 팀 용어 줄이 있는 보고서가 3개보다 적어 세지 않았습니다\n')
+    expect(teamMapText(mixed, terms, {})).toContain(
+      '- 팀 용어 3개: 지금 팀 파일과 같은 용어 3개로 만든 보고서가 3개보다 적어 세지 않았습니다 (다른 저장소에서나 팀 파일을 바꾸기 전에 만든 보고서는 세지 않습니다)\n',
+    )
+    // Every report has its team line, made with six terms; a seventh added since (the map's own candidate, 교차 검토 2):
+    // the line says why they are not counted, not that they have no team line.
+    const six = ['fetcher', '캐시 키', '페이지 커서', '재시도 정책', '기능 플래그', '로그 레벨'].map(name => ({ name, blurb: '' }))
+    const made = read(...[0, 1, 2].map(() => ({ team: { total: 6, met: ['fetcher', '캐시 키'] } })))
+    expect(made.map(one => one.team?.total)).toEqual([6, 6, 6])
+    expect(teamMapText(made, six, {})).toContain('\n- 팀 용어 6개 · 이 저장소 팀 용어 줄이 있는 보고서 3개\n')
+    const seven = teamMapText(made, [...six, { name: 'Promise 체이닝', blurb: '' }], {})
+    expect(seven).toContain(
+      '\n- 팀 용어 7개: 지금 팀 파일과 같은 용어 7개로 만든 보고서가 3개보다 적어 세지 않았습니다 (다른 저장소에서나 팀 파일을 바꾸기 전에 만든 보고서는 세지 않습니다)\n',
+    )
+    expect(seven).not.toContain('팀 용어 줄이 있는 보고서가')
     const same = read({ team: { total: 3, met: ['fetcher', '캐시 키'] } }, { team: { total: 3, met: ['fetcher'] } }, { team: { total: 3, met: ['Fetcher', '캐시 키'] } }, {})
     const map = teamMapText(same, terms, {})
     expect(map).toContain('- 팀 용어 3개 · 이 저장소 팀 용어 줄이 있는 보고서 3개\n  - 여럿이 만남: fetcher (3)\n  - 덜 만남(보고서 3개 미만): 캐시 키 · 페이지 커서\n')
@@ -400,6 +421,22 @@ describe('1.8.0: the team learning map, with no line per person (E5)', () => {
     // No calls counted anywhere: no calls line.
     const none = { calls: 0, auto: 0, input: 0, output: 0 }
     expect(teamMapText(read({ calls: none }, { calls: none }, { calls: none }), undefined, {})).not.toContain('모델 호출')
+  })
+
+  test('the averages: days learned over the reports that say them, to one decimal; calls over the reports whose calls line was read (교차 검토 2)', () => {
+    const calls = { calls: 30, auto: 0, input: 9_000, output: 2_000 }
+    // The third made where no call was recorded yet (a window of an older build in the team): its calls line is no count.
+    expect(report({ unrecorded: true })).toContain('\n- 학습 노트의 모델 호출: 이 기간은 기록이 없습니다')
+    const reports = read({ active: 2, calls }, { active: 3, calls }, { active: 3, unrecorded: true })
+    expect(reports.map(one => one.days)).toEqual([2, 3, 3])
+    expect(reports.map(one => one.calls?.calls)).toEqual([30, 30, undefined])
+    const map = teamMapText(reports, undefined, {})
+    expect(map).toContain('\n- 학습 노트 14개 · 보고서마다 평균 2.7일 학습\n')
+    expect(map).toMatch(/\n- 모델 호출 60번 · 입력 [^\n]+ 토큰 · 보고서마다 평균 30번\n/)
+    // A report with no days line is left out of the days' average too.
+    const undated: ReadReport = { ...reports[0]! }
+    delete undated.days
+    expect(teamMapText([undated, reports[1]!, { ...reports[1]!, notes: 6 }], undefined, {})).toContain(' · 보고서마다 평균 3일 학습\n')
   })
 })
 

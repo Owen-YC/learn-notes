@@ -11762,6 +11762,73 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (풀이 보고 풀기) 풀이:')
   })
 
+  test('a worked example with only code after 이제 풀어 보세요 asks what it prints: in the pane, the conversation, the card and the grade (교차 검토 2)', async ($, on) => {
+    const store = storeOf(['클로저'], 0, DAY, true, { 클로저: { times: 2 } })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const code = ['```js', 'let c = 10', 'const add = () => ++c', 'add()', 'console.log(c)', '```']
+    // As haiku wrote one in four of its worked examples with code: no words after the marker, and a T line naming the rung alone.
+    const bare = ['T1: 풀이 보고 풀기', 'Q1: 풀이: `let n = 0; const up = () => ++n; up(); up()` 뒤 n은 2입니다. 바깥 변수는 함수가 끝나도 남기 때문입니다.', '이제 풀어 보세요:', ...code, 'A1: 11'].join('\n')
+    const ui = await quizIn($, w, bare)
+    expect(quizItems(store)[0]).toMatchObject({ rung: 'worked', kind: 'predict' })
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 풀이 보고 풀기 · 예측$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Markdown', text: /이제 풀어 보세요:\n이 코드를 실행하면 무엇이 출력될까요\?\n```js\nlet c = 10\n/ })).toBeDefined()
+    expect((await learn($, '퀴즈')).text).toContain('남기 때문입니다.\n   이제 풀어 보세요:\n   이 코드를 실행하면 무엇이 출력될까요?\n   ```js\n   let c = 10\n')
+    const bank = store.get('quizBank') as { question: string }[]
+    expect(bank.map(one => one.question)).toEqual([['이 코드를 실행하면 무엇이 출력될까요?', ...code].join('\n')])
+    // Graded with the question as it is shown.
+    await answer(ui, w, mineKey(store, 0), '11', RIGHT)
+    expect(w.models.at(-1)).toContain('이제 풀어 보세요:\n이 코드를 실행하면 무엇이 출력될까요?\n```js')
+    await ui.unmount()
+  })
+
+  test('a quiz replaced the same day over a first try asked back, the second miss running there: the new quiz is the worked example (교차 검토 2)', async ($, on) => {
+    const store = storeOf(['클로저'], 0, 2 * DAY, true, { 클로저: {} })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = plainQ(1)
+    expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (다시 도전) 문제 1')
+    // Asked back: the first try waits for its try again, the slip counted once still.
+    w.answer = ASKED_BACK
+    await learn($, '퀴즈 1 10이요')
+    expect(slipsOf(store)['c:클로저']).toMatchObject({ times: 1 })
+    await w.clock.advance(60_000)
+    w.answer = worked(1)
+    const listed = (await learn($, '퀴즈 새로')).text
+    // The first try graded as Claude graded it when the quiz was replaced: the second miss running, and this quiz shows the example.
+    expect(slipsOf(store)['c:클로저']).toMatchObject({ times: 2, question: '문제 1', mine: '10이요', at: NOW })
+    expect(listed).toContain('\n1. (풀이 보고 풀기) 풀이:')
+    const prompt = w.models.at(-1)!
+    expect(prompt).toContain('칸: 풀이 보고 풀기')
+    // What the quiz is told of the last try is the store's as the quiz was made, as in 1.7 ('a first try left waiting when a new quiz is made').
+    expect(prompt).toContain("지난번 문제 '지난 문제의 코드' · 학습자 답 '전역 변수'")
+    expect(w.budgets.at(-1)).toBe(1600)
+    expect(quizItems(store).map(one => [one.rung, one.isRetry])).toEqual([['worked', undefined]])
+  })
+
+  test('the same in the pane: asked back, then s twice the same day; the new quiz is the worked example (교차 검토 2)', async ($, on) => {
+    const store = storeOf(['클로저'], 0, 2 * DAY, true, { 클로저: {} })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w, plainQ(1))
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 다시 도전 · 예측$/ })).toBeDefined()
+    await answer(ui, w, mineKey(store, 0), '10이요', ASKED_BACK)
+    expect(quizItems(store)[0]!.firstTry).toBeDefined()
+    await w.clock.advance(60_000)
+    const calls = w.models.length
+    w.answer = worked(1)
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(w.models.length).toBe(calls + 1)
+    expect(w.models.at(-1)).toContain('칸: 풀이 보고 풀기')
+    expect(slipsOf(store)['c:클로저']).toMatchObject({ times: 2, mine: '10이요' })
+    expect(quizItems(store).map(one => [one.rung, one.isRetry])).toEqual([['worked', undefined]])
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 풀이 보고 풀기 · 예측$/ })).toBeDefined()
+    await ui.unmount()
+  })
+
   /** This repository's team file, with one term (1.7.0 D6). */
   const TEAM_PATH = '/proj/.claude/learn-notes.md'
   const TEAM_TERMS = ['## 용어', '- **fetcher**: 우리 팀의 API 호출 함수입니다', ''].join('\n')

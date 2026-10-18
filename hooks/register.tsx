@@ -2413,6 +2413,19 @@ async function makeQuiz(
   // under that grade said (slipsToAsk: 거의 marks no miss, so its review may be days off).
   const open = await storedSlips($, map, now)
   const asking = new Set(isTeamQuiz ? [] : slipsToAsk(index, open, now))
+  // For the rung only (교차 검토 2): an open slip as it will stand once the quiz this one replaces has its waiting
+  // first try graded as Claude graded it (settleFirstTries, below, after the model's reply): a second miss running
+  // there makes this quiz the worked example. Which concepts are asked again, and what of the last try they are told,
+  // stay as in 1.7: the slip as the store holds it now.
+  const ahead = new Map<string, LearnSlip>()
+  for (const item of isQuizChecking ? [] : ((await sharedQuiz($))?.items ?? [])) {
+    const key = resolveKey(map, item.key)
+    const before = openSlip(open, key)
+    if (!isTryWaiting(item) || !before) continue
+    const { firstTry, ...rest } = item
+    const next = nextSlip(before, slipChange({ ...rest, ...firstGrade(firstTry!), result: 'wrong' }, { isHelped: false, isGraduated: false }), firstTry!.at)
+    if (next) ahead.set(key, next)
+  }
   // A concept the learner knows is asked about in no quiz.
   const chosen = isTeamQuiz ? metTeamConcepts(terms, index, map, now).slice(0, QUIZ_CANDIDATES) : quizPick(index, now, QUIZ_CANDIDATES, [...asking])
   // The places the concepts due leave free (all three in a team quiz) go to the team terms not met yet, in the file's order.
@@ -2457,7 +2470,7 @@ async function makeQuiz(
     // its slip, asked again, was missed twice running.
     const rung = rungOf(one, {
       ...(one.code ? { code: one.code } : {}),
-      ...(slip ? { slip } : {}),
+      ...(slip ? { slip: ahead.get(one.key) ?? slip } : {}),
       isAsking: asking.has(one.key),
       isTeam: one.team === true,
       isDue: isDue(one, now),
