@@ -11732,6 +11732,87 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     expect(file).not.toContain('풀이:')
     expect(file).not.toContain('let n = 0')
   })
+
+  test('a slip set right before and missed once more on a plain question opens again from one: asked again in other code, no worked example yet (교차 검토)', async ($, on) => {
+    // As a try again right on another day leaves it, or a 1.7 window did: set right, its count kept.
+    const store = storeOf(['클로저'], 2, 8 * DAY, false, { 클로저: { times: 1, at: NOW - 20 * DAY, fixedAt: NOW - 15 * DAY } })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    const ui = await quizIn($, w, plainQ(1))
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 예측$/ })).toBeDefined()
+    await answer(ui, w, mineKey(store, 0), '전역에 남아요', missed())
+    // One miss since it was set right is no second one running: the words of 1.7.
+    expect(await ui.find({ type: 'Text', text: `헷갈린 점: ${WHAT} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /풀이부터/ })).toBeUndefined()
+    expect(slipsOf(store)['c:클로저']).toMatchObject({ times: 1, at: NOW })
+    expect(slipsOf(store)['c:클로저']!.fixedAt).toBeUndefined()
+    await ui.unmount()
+    await w.clock.advance(60_000)
+    w.answer = plainQ(1)
+    const listed = (await learn($, '퀴즈 새로')).text
+    expect(w.models.at(-1)).toContain(`1. 클로저 — 클로저 설명\n   지난번 문제 '문제 1' · 학습자 답 '전역에 남아요'`)
+    expect(w.models.at(-1)).not.toContain('칸:')
+    expect(listed).toContain('\n1. (다시 도전) 문제 1')
+    // Missed there again: twice running now, and the worked example is promised and comes.
+    w.answer = missed()
+    expect((await learn($, '퀴즈 1 전역에 남아요')).text).toContain('\n같은 곳을 또 헷갈렸습니다 · 다음 복습 퀴즈는 풀이부터 보여 줍니다')
+    expect(slipsOf(store)['c:클로저']).toMatchObject({ times: 2 })
+    await w.clock.advance(60_000)
+    w.answer = worked(1)
+    expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (풀이 보고 풀기) 풀이:')
+  })
+
+  /** This repository's team file, with one term (1.7.0 D6). */
+  const TEAM_PATH = '/proj/.claude/learn-notes.md'
+  const TEAM_TERMS = ['## 용어', '- **fetcher**: 우리 팀의 API 호출 함수입니다', ''].join('\n')
+  const fetcher = (more: Record<string, unknown>) => ({ name: 'fetcher', count: 2, firstAt: NOW - 30 * DAY, lastAt: NOW - 30 * DAY, blurb: '우리 팀의 API 호출 함수입니다', files: [], ...more })
+
+  test('a team term of this repository met and missed twice running is asked again by the team\'s words, with no worked example (1.7, 교차 검토)', async ($, on) => {
+    const store = new Map<string, unknown>([
+      ['welcomed', true],
+      ['stepsFrom', 0],
+      ['concepts', { 'c:fetcher': fetcher({ step: 0, reviewedAt: NOW - 3 * DAY, missedAt: NOW - 3 * DAY }) }],
+      ['teamTerms', { 'c:fetcher': [rootTag('/proj')] }],
+      ['slips', { 'c:fetcher': { what: 'fetcher가 오류를 삼킨다고 봄', type: 'other', question: '지난 문제', mine: '삼켜요', at: NOW - 2 * DAY, times: 2 } }],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    w.files.set(TEAM_PATH, TEAM_TERMS)
+    await start($)
+    // Even a reply shaped as a worked example keeps no rung: none was asked for.
+    const ui = await quizIn($, w, ['T1: 예측', 'Q1: 풀이: 예입니다. 이제 풀어 보세요: 문제', 'A1: 답'].join('\n'))
+    const prompt = w.models.at(-1)!
+    expect(prompt).toContain('(팀 용어) fetcher')
+    expect(prompt).toContain("지난번 문제 '지난 문제'")
+    expect(prompt).not.toContain('칸:')
+    expect(quizItems(store)[0]!.rung).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 다시 도전 · 팀 용어 · 예측$/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a team term of this repository at its third step, with a note\'s code, is asked by the team\'s words: no 비슷한 코드 (1.7, 교차 검토)', async ($, on) => {
+    const concepts = { 'c:fetcher': fetcher({ step: 2, reviewedAt: NOW - 8 * DAY }) }
+    const store = new Map<string, unknown>([
+      ['welcomed', true],
+      ['stepsFrom', 0],
+      ['concepts', concepts],
+      ['steps', ownSteps(concepts as never)],
+      ['teamTerms', { 'c:fetcher': [rootTag('/proj')] }],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    w.files.set(TEAM_PATH, TEAM_TERMS)
+    await start($)
+    w.answer = CONCEPT_NOTE(['fetcher'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const ui = await quizIn($, w, ['T1: 예측', 'Q1: 아래 코드는 b를 무엇으로 찍을까요?', '```', 'const a = 10', 'const b = a * 2', 'console.log(b)', '```', 'A1: 20'].join('\n'))
+    const prompt = w.models.at(-1)!
+    expect(prompt).toContain('(팀 용어) fetcher')
+    expect(prompt).not.toContain('칸:')
+    expect(quizItems(store)[0]!.rung).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 팀 용어 · 예측$/ })).toBeDefined()
+    expect((await learn($, '퀴즈')).text).not.toContain('(비슷한 코드)')
+    await ui.unmount()
+  })
 })
 
 describe('1.8.0: slipped concepts shown by name under a note, on /learn 기록 and counted on /learn 진단 (E2)', () => {
@@ -12397,6 +12478,9 @@ describe('1.8.0: /learn 보고서 모으기, a team map of the reports gathered 
   const HERE = '팀 학습 지도입니다 · 이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다. 붙이기 전에 한 번 읽어 보세요'
   const USAGE =
     '쓰는 법: /learn 보고서 모으기 파일 · 팀원이 보내 준 /learn 보고서를 .md나 .txt 파일 하나에 모아 저장한 곳을 적습니다 (예: /learn 보고서 모으기 ~/Downloads/팀보고서.txt) · 보고서가 3개 이상이어야 합니다'
+  /** No file there (교차 검토): the names Explorer and Finder show, and how to copy the real path. */
+  const MISSING =
+    '그 파일을 찾지 못했습니다 · 탐색기·Finder에 보이는 이름(다운로드·문서 폴더, 숨겨진 .txt)은 실제 경로와 다를 수 있습니다 · Shift를 누른 채 파일을 오른쪽 클릭해 경로로 복사(macOS는 오른쪽 클릭 뒤 Option을 누르고 경로 이름으로 복사)한 뒤 붙여 넣어 주세요'
 
   /** A teammate's /learn 보고서 of the last seven days to `at`, as reportMarkdown writes it. */
   function report(fresh: string[], missed: string[] = [], at = NOW, notes = 3, team?: { total: number; met: string[] }): string {
@@ -12501,7 +12585,7 @@ describe('1.8.0: /learn 보고서 모으기, a team map of the reports gathered 
     expect(await ask('보고서 모으기')).toBe(USAGE)
     expect(await ask('보고서 모으기 ""')).toBe(USAGE)
     w.statFails = new Map([['/proj/없음.md', 'ENOENT']])
-    expect(await ask('보고서 모으기 없음.md')).toBe('그 파일을 찾지 못했습니다 · 경로를 확인해 주세요')
+    expect(await ask('보고서 모으기 없음.md')).toBe(MISSING)
     expect(await ask('보고서 모으기 \\\\server\\share\\팀.md')).toBe('네트워크 위치는 읽지 않습니다 · 보고서를 내 컴퓨터 폴더에 저장한 뒤 다시 해 주세요')
     expect(await ask('보고서 모으기 //server/share/팀.md')).toBe('네트워크 위치는 읽지 않습니다 · 보고서를 내 컴퓨터 폴더에 저장한 뒤 다시 해 주세요')
     // A share mounted as a folder (a mapped drive): the engine's refusal says so.
@@ -12533,6 +12617,21 @@ describe('1.8.0: /learn 보고서 모으기, a team map of the reports gathered 
     expect(JSON.stringify(w.store.get('faults') ?? null)).toBe(faults)
     expect(w.logs.slice(logs).filter(line => line.startsWith('learn-notes: '))).toEqual([])
     for (const text of said) for (const typed of ['없음.md', 'server', '팀.md', '팀공유', '비밀', '링크', '둘.md', '메모']) expect(text).not.toContain(typed)
+  })
+
+  test('a path typed as Explorer or Finder shows it (a Korean folder name, no .txt, no folder) finds nothing: the line says why and how to copy the real one (교차 검토)', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.files.set('/home/u/Downloads/팀보고서.txt', GATHERED)
+    w.statFails = new Map(['/home/u/다운로드/팀보고서.txt', '/home/u/Downloads/팀보고서', '/proj/팀보고서.txt'].map(path => [path, 'ENOENT']))
+    for (const typed of ['~/다운로드/팀보고서.txt', '~/Downloads/팀보고서', '팀보고서.txt']) {
+      const text = (await learn($, `보고서 모으기 ${typed}`)).text
+      expect(text).toBe(MISSING)
+      expect(text).not.toContain('\n')
+    }
+    // The path Explorer's 경로로 복사 gives, in its quotes: read.
+    expect((await learn($, '보고서 모으기 "/home/u/Downloads/팀보고서.txt"')).text).toBe(`${COPIED}\n${LEFT}`)
+    expect((await learn($, '보고서 모으기 ~/Downloads/팀보고서.txt')).text).toBe(`${COPIED}\n${LEFT}`)
   })
 
   test('the help\'s word for the file typed as it reads is how it is used; an @ mention of the composer\'s file picker is the file', async ($, on) => {
@@ -12575,7 +12674,7 @@ describe('1.8.0: /learn 보고서 모으기, a team map of the reports gathered 
     expect(checks).toContain('/home/u/secret/팀.md')
     expect((await learn($, '보고서 모으기 가린.md')).text).toBe('권한 설정이 이 파일 읽기를 막습니다')
     expect((await learn($, '보고서 모으기 파이프.md')).text).toBe('md나 txt 파일만, 2MB까지 읽습니다')
-    expect((await learn($, '보고서 모으기 끊긴.md')).text).toBe('그 파일을 찾지 못했습니다 · 경로를 확인해 주세요')
+    expect((await learn($, '보고서 모으기 끊긴.md')).text).toBe(MISSING)
     expect(reads.slice(read)).toEqual([])
     expect(w.copied).toEqual([])
     // A path that lands where it says is asked about once.

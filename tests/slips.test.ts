@@ -164,18 +164,24 @@ describe('1.7.0: a slip kept, asked again and mended (D5)', () => {
     expect(slipChange(graded({ result: 'right', mine: '[1, 2]', isRetry: true }), how)).toEqual({ kind: 'right', isRetry: true, isHelped: false, isGraduated: false })
   })
 
-  test('a miss of the same kind counts again on the slip there; another kind takes its place; what is kept is masked and cut', () => {
+  test('a miss of the same kind counts again on an open slip, opens a mended one from one; another kind takes its place; what is kept is masked and cut', () => {
     const made = nextSlip(undefined, { kind: 'missed', question: '문제\n  둘째 줄', what: SLIP.what, type: 'reference', mine: `키는 sk-ant-api03-${'A'.repeat(20)} 입니다` }, NOW)
     expect(made).toEqual({ what: SLIP.what, type: 'reference', question: '문제 둘째 줄', mine: '키는 «가림» 입니다', at: NOW, times: 1 })
-    const again = nextSlip({ ...made!, fixedAt: NOW }, { kind: 'missed', question: '새 문제', what: '다른 말', type: 'reference', mine: '또 오류' }, NOW + DAY)
-    expect(again).toEqual({ what: SLIP.what, type: 'reference', question: '새 문제', mine: '또 오류', at: NOW + DAY, times: 2 })
+    // Open: counted once more on it, the latest question and answer kept.
+    const twice = nextSlip(made, { kind: 'missed', question: '새 문제', what: '다른 말', type: 'reference', mine: '또 오류' }, NOW + DAY)
+    expect(twice).toEqual({ what: SLIP.what, type: 'reference', question: '새 문제', mine: '또 오류', at: NOW + DAY, times: 2 })
+    // Mended (1.8.0, 교차 검토: times counts misses running, for 풀이 보고 풀기): opened again from one, its words kept.
+    const again = nextSlip({ ...made!, times: 3, fixedAt: NOW }, { kind: 'missed', question: '새 문제', what: '다른 말', type: 'reference', mine: '또 오류' }, NOW + DAY)
+    expect(again).toEqual({ what: SLIP.what, type: 'reference', question: '새 문제', mine: '또 오류', at: NOW + DAY, times: 1 })
     // Nothing recalled where a slip with words is open (review fix): counted on it, its words and the answer that showed them kept.
     const blank = { kind: 'missed' as const, question: 'q', what: '', type: 'blank' as const, mine: '몰라' }
-    expect(nextSlip(again, blank, NOW + 2 * DAY)).toEqual({ ...again, at: NOW + 2 * DAY, times: 3 })
+    expect(nextSlip(again, blank, NOW + 2 * DAY)).toEqual({ ...again, at: NOW + 2 * DAY, times: 2 })
     // Over one mended, or one with no words, the blank one is kept as it is.
     expect(nextSlip({ ...again!, fixedAt: NOW + DAY }, blank, NOW + 2 * DAY)).toEqual({ what: '', type: 'blank', question: 'q', mine: '몰라', at: NOW + 2 * DAY, times: 1 })
     const blanks = nextSlip(undefined, blank, NOW)!
     expect(nextSlip(blanks, { ...blank, question: 'q2', mine: '3' }, NOW + DAY)).toEqual({ what: '', type: 'blank', question: 'q2', mine: '3', at: NOW + DAY, times: 2 })
+    // A blank one mended, then nothing recalled again: from one too.
+    expect(nextSlip({ ...blanks, times: 2, fixedAt: NOW }, { ...blank, question: 'q2', mine: '3' }, NOW + DAY)).toEqual({ what: '', type: 'blank', question: 'q2', mine: '3', at: NOW + DAY, times: 1 })
     const long = nextSlip(undefined, { kind: 'missed', question: '문'.repeat(500), what: '가'.repeat(200), type: 'other', mine: '답'.repeat(500) }, NOW)!
     expect([long.what.length, long.question.length, long.mine.length]).toEqual([80, 240, 160])
   })

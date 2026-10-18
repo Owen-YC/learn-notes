@@ -6352,7 +6352,13 @@ const GATHER_USAGE =
 const GATHER_CLOUD = '이 세션은 클라우드 컴퓨터에서 돌아 내 컴퓨터의 파일을 읽을 수 없습니다'
 const GATHER_NETWORK = '네트워크 위치는 읽지 않습니다 · 보고서를 내 컴퓨터 폴더에 저장한 뒤 다시 해 주세요'
 const GATHER_DENIED = '권한 설정이 이 파일 읽기를 막습니다'
-const GATHER_MISSING = '그 파일을 찾지 못했습니다 · 경로를 확인해 주세요'
+/**
+ * No file where the path leads. The two slips a Korean Explorer or Finder invites are said, the path itself never
+ * again: the folder names it shows (다운로드 for Downloads) and an extension it hides (.txt); and how to copy the real
+ * path (Explorer's 경로로 복사 puts it in quotes, which gatherPath takes off).
+ */
+const GATHER_MISSING =
+  '그 파일을 찾지 못했습니다 · 탐색기·Finder에 보이는 이름(다운로드·문서 폴더, 숨겨진 .txt)은 실제 경로와 다를 수 있습니다 · Shift를 누른 채 파일을 오른쪽 클릭해 경로로 복사(macOS는 오른쪽 클릭 뒤 Option을 누르고 경로 이름으로 복사)한 뒤 붙여 넣어 주세요'
 const GATHER_FOLDER = '폴더가 아니라 보고서를 모은 파일 하나를 적습니다'
 const GATHER_KIND = 'md나 txt 파일만, 2MB까지 읽습니다'
 const GATHER_NONE = "learn-notes 보고서를 찾지 못했습니다 · '# 학습 보고 ·'로 시작하는 글을 .md나 .txt(UTF-8)로 저장해 주세요"

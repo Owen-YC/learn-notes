@@ -369,6 +369,10 @@ describe('1.8.0: the team learning map, with no line per person (E5)', () => {
     const reports = [3, 4, 5].map(notes => readOne(report({ notes, missed: ['fetcher', '캐시 키', ...missed.slice(0, 3)] })))
     const terms = [{ name: 'fetcher', blurb: '' }]
     const map = teamMapText(reports, terms, {})
+    // A week of reviews and nothing new (교차 검토): the line has no colon, and its own words are no concept's name.
+    expect(report({ missed: ['map'] })).toContain('\n- 새로 배운 개념 0개\n')
+    expect(reports.map(one => one.fresh)).toEqual([[], [], []])
+    expect(map).toContain('\n- 여럿이 새로 배운 개념: 없습니다\n')
     expect(map).toContain('\n## 팀 파일 후보\n\n여럿이 퀴즈에서 틀렸지만 팀 용어에 없는 개념입니다. ')
     expect(map.split('## 팀 파일 후보')[1]).toContain('\n\n- **캐시 키**: \n- **틀림 00**: \n- **틀림 01**: \n- **틀림 02**: \n')
     expect(map.split('## 팀 파일 후보')[1]).not.toContain('fetcher')

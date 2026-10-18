@@ -5074,12 +5074,14 @@ export function slipChange(item: LearnQuizItem, how: { isHelped: boolean; isGrad
 }
 
 /**
- * A concept's slip after a grade at `at` (slipChange). A miss of the kind it had counts once more on it (the latest
- * question and answer kept, mended no more); one of another kind takes its place. A miss with nothing to read a slip
- * from (`blank`) where a slip with words is still open counts on that one instead, its words and the question and
- * answer that showed them kept: not recalling it says nothing new of what was got wrong. Right on a question asked
- * again (isRetry) on another day than the miss, with no hint and no question asked back, mends it, as graduating does,
- * and /learn 안다 (`mended`). What it keeps is masked first (redactText) and cut short.
+ * A concept's slip after a grade at `at` (slipChange). A miss of the kind it had counts once more on it while it is
+ * open (the latest question and answer kept); on one mended it opens it again from one, as a first miss would: its
+ * `times` counts misses running (rungOf, isWorkedNext), and a miss after it was set right is none running since. One
+ * of another kind takes its place. A miss with nothing to read a slip from (`blank`) where a slip with words is still
+ * open counts on that one instead, its words and the question and answer that showed them kept: not recalling it
+ * says nothing new of what was got wrong. Right on a question asked again (isRetry) on another day than the miss,
+ * with no hint and no question asked back, mends it, as graduating does, and /learn 안다 (`mended`). What it keeps is
+ * masked first (redactText) and cut short.
  */
 export function nextSlip(before: LearnSlip | undefined, change: SlipChange, at: number): LearnSlip | undefined {
   if (change.kind === 'none') return before
@@ -5093,7 +5095,7 @@ export function nextSlip(before: LearnSlip | undefined, change: SlipChange, at: 
       return again
     }
     if (before && before.type === change.type) {
-      const again: LearnSlip = { ...before, ...kept, times: before.times + 1, ...right }
+      const again: LearnSlip = { ...before, ...kept, times: before.fixedAt !== undefined ? 1 : before.times + 1, ...right }
       delete again.fixedAt
       if (change.isRight !== true) delete again.isRight
       return again
