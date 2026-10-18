@@ -4113,7 +4113,7 @@ export type ReadReport = {
 
 /** Reports a name must be in before the team map names it (1.8.0): a conservative constant, so no name points at one person. */
 export const TEAM_MAP_MIN = 3
-/** Reports a team map counts at most, the file's first. */
+/** Reports a team map counts at most: of those holding the day the most hold (overlapReports), the file's first. */
 export const TEAM_MAP_REPORTS = 300
 /** Characters of a name read back at most, and names read of one line at most. */
 const MAP_NAME_MAX = 80
@@ -4128,6 +4128,12 @@ const MAP_PICKS = 10
 const REPORT_HEAD = /^[^\p{L}\p{N}]*학습\s*보고\s*[·・]\s*(\d{4}-\d{2}-\d{2})(?:\s*[~～]?\s*(\d{4}-\d{2}-\d{2}))?/u
 /** The heading over a report's line for the learner's own words: nothing under it is read, up to the next report. */
 const REPORT_OWN_WORDS = /^[^\p{L}\p{N}]*이번\s*기간에\s*배운\s*것을\s*내\s*말로/u
+/**
+ * What a KakaoTalk export writes before a message's first line, its sender and time: the PC app's `[이름] [오후 3:12] `,
+ * the phones' `2026. 10. 18. 오후 3:12, 이름 : ` and `2026년 10월 18일 오후 3:12, 이름 : `. Dropped only where a report's
+ * heading (`#`) follows, and never read.
+ */
+const REPORT_CHAT_PREFIX = /^(?:\[[^\]]{1,40}\] \[[^\]]{1,20}\]|\d{4}(?:\.|년) ?\d{1,2}(?:\.|월) ?\d{1,2}(?:\.|일) [^,]{1,20}, [^:]{1,40} :) (?=#)/u
 
 /**
  * A line of a pasted report as plain words: a quote's `>` and a list mark (`-`, Slack's `•`) off its start, bold's
@@ -4184,7 +4190,8 @@ function readReport(from: string, to: string, lines: readonly string[]): ReadRep
       const body = after.replace(/^[*_]+/, '').replace(/\s*[·・]\s*아직\s*\d+개\s*\(\/learn 퀴즈 팀\)\s*$/, '')
       const t = /^(?:(\d+)개 모두 만남|(\d+)개 중 \d+개 만남)[*_]*(?: ?\((.*)\))?$/.exec(body)
       if (t) one.team = { total: Number(t[1] ?? t[2]), met: t[3] ? namesOf(t[3]) : [] }
-    } else if ((m = /^학습 노트의 모델 호출 (\d+)번(?: ?\(자동 노트 (\d+)\))? · 입력 (.+?) · 출력 (.+?) 토큰/.exec(line))) {
+    } else if ((m = /^학습 노트의 모델 호출 (\d+)번(?: ?\(자동 노트 (\d+)\))? · 입력 ([^·]+?) · 출력 ([^·]+?) 토큰/.exec(line))) {
+      // Each count up to the next `·` (tokenText has none): a line a paste broke takes a time that grows with it, not its square.
       const input = tokenNumber(m[3]!)
       const output = tokenNumber(m[4]!)
       if (input !== undefined && output !== undefined) one.calls = { calls: Number(m[1]), auto: Number(m[2] ?? 0), input, output }
@@ -4199,7 +4206,8 @@ function readReport(from: string, to: string, lines: readonly string[]): ReadRep
  * never read, nor any line before the first report (a chat's sender and time). A report read to the same values as
  * one before it (the same report pasted from a chat and from its file, or with only its own words changed) is counted
  * once (`repeated`); a block with no `학습 노트 N개` line is left out (`odd`). Pasted text is taken as chats leave it:
- * a byte order mark, CRLF, Slack's `•` and `*bold*`, `(편집됨)`, a full-width colon.
+ * a byte order mark, CRLF, Slack's `•` and `*bold*`, `(편집됨)`, a full-width colon, a KakaoTalk export's sender and
+ * time before a heading (REPORT_CHAT_PREFIX).
  */
 export function readReports(text: string): { reports: ReadReport[]; repeated: number; odd: number } {
   const blocks: { from: string; to: string; lines: string[] }[] = []
@@ -4207,7 +4215,7 @@ export function readReports(text: string): { reports: ReadReport[]; repeated: nu
   let isOwn = false
   for (const raw of text.replace(/﻿/g, '').replace(/\r\n?/g, '\n').split('\n')) {
     const kept = bareLine(raw)
-    const plain = kept.replace(/[*_]/g, '')
+    const plain = kept.replace(REPORT_CHAT_PREFIX, '').replace(/[*_]/g, '')
     const head = REPORT_HEAD.exec(plain)
     if (head) {
       const [a, b] = [head[1]!, head[2] ?? head[1]!]
@@ -4246,11 +4254,25 @@ export function readReports(text: string): { reports: ReadReport[]; repeated: nu
  */
 export function overlapReports(reports: readonly ReadReport[]): { kept: ReadReport[]; apart: number } {
   const holds = (one: ReadReport, day: string) => one.from <= day && day <= one.to
+  // How many hold a day: those begun by it less those ended before it, each found by halving a sorted list, so a
+  // file of tens of thousands takes no time. A report whose first day is past its last holds none.
+  const spans = reports.filter(one => one.from <= one.to)
+  const froms = spans.map(one => one.from).sort()
+  const tos = spans.map(one => one.to).sort()
+  const before = (list: readonly string[], day: string, isThrough: boolean) => {
+    let [lo, hi] = [0, list.length]
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (list[mid]! < day || (isThrough && list[mid] === day)) lo = mid + 1
+      else hi = mid
+    }
+    return lo
+  }
   let best: string | undefined
   let most = 0
   // The latest day held by the most is some report's last day: past it, none is held by more.
-  for (const day of new Set(reports.map(one => one.to))) {
-    const n = reports.filter(one => holds(one, day)).length
+  for (const day of new Set(tos)) {
+    const n = before(froms, day, true) - before(tos, day, false)
     if (n > most || (n === most && best !== undefined && day > best)) {
       best = day
       most = n
@@ -4385,19 +4407,21 @@ export function teamMapText(reports: readonly ReadReport[], terms: readonly Team
 }
 
 /**
- * The file /learn 보고서 모으기 names (1.8.0), as typed: quotes off (Windows' 경로로 복사, a chat's backticks), the backslash macOS's
- * terminal puts before a space or a bracket of a dropped file off, `~` read as `home` (undefined with none), a path
- * not absolute under `root`; `network` for a network location (`\\server\share`, `//server`), never read. Undefined
- * for nothing left.
+ * The file /learn 보고서 모으기 names (1.8.0), as typed: the `@` of the composer's file picker off (`@팀.md`,
+ * `@"팀 보고서.md"`), quotes off (Windows' 경로로 복사, a chat's backticks), the backslash macOS's terminal puts before a
+ * space or a bracket of a dropped file off (not on Windows, told by the path, `root` or `home`, where each is a
+ * separator), `~` read as `home` (undefined with none), a path not absolute under `root`; `network` for a network
+ * location (`\\server\share`, `//server`), never read. Undefined for nothing left.
  */
 export function gatherPath(raw: string, home: string | undefined, root: string): string | 'network' | undefined {
-  let path = raw.trim()
+  let path = raw.trim().replace(/^@/, '').trim()
   const quoted = /^(["'“‘`])(.*)(["'”’`])$/.exec(path)
   if (quoted && (quoted[1] === quoted[3] || (quoted[1] === '“' && quoted[3] === '”') || (quoted[1] === '‘' && quoted[3] === '’'))) path = quoted[2]!.trim()
   if (path === '') return undefined
   if (/^(?:\\\\|\/\/)/.test(path)) return 'network'
-  // A Windows path keeps its backslashes: there each is a separator.
-  if (!/^(?:[A-Za-z]:|~\\)/.test(path)) path = path.replace(/\\([ ()[\]{}'"&;!$#?*|<>`,])/g, '$1')
+  // A Windows path keeps its backslashes: there each is a separator. A relative one says nothing, its root or home does.
+  const isWindows = /^(?:[A-Za-z]:|~\\)/.test(path) || [root, home ?? ''].some(dir => /^[A-Za-z]:|\\/.test(dir))
+  if (!isWindows) path = path.replace(/\\([ ()[\]{}'"&;!$#?*|<>`,])/g, '$1')
   if (/^~(?=$|[\\/])/.test(path)) return home === undefined ? undefined : expandHome(path, home)
   if (/^(?:[\\/]|[A-Za-z]:)/.test(path) || root === '') return path
   return `${root.replace(/[\\/]+$/, '')}/${path.replace(/^(?:\.[\\/])+/, '')}`

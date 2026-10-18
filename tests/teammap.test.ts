@@ -116,6 +116,44 @@ describe('1.8.0: /learn 보고서 모으기 reads the reports back (E5)', () => 
     }
   })
 
+  test('a long line a paste broke is read in a time that grows with it: a calls line with no end', () => {
+    const text = report({ fresh: ['클로저'] })
+    // A calls line cut before its ' 토큰', with ' · 출력 ' many times over: a lazy match tried at each would take minutes.
+    const broken = `- 학습 노트의 모델 호출 1번 · 입력 ${' · 출력 x'.repeat(30_000)}`
+    const pasted = text.replace('\n\n## 이번 기간에', `\n${broken}\n\n## 이번 기간에`)
+    expect(pasted).toContain(broken)
+    const started = Date.now()
+    expect(readOne(pasted)).toEqual(readOne(text))
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  test('a quiz line saying more right than asked counts as all right, never more', () => {
+    const text = report({ right: 2, wrong: 1 })
+    expect(text).toContain('\n- 퀴즈 3문제 중 2개 맞힘 (67%)\n')
+    expect(readOne(text.replace('- 퀴즈 3문제 중 2개 맞힘', '- 퀴즈 3문제 중 5개 맞힘')).quiz).toEqual({ graded: 3, right: 3 })
+  })
+
+  test('a KakaoTalk export: the sender and time before a report\'s heading are dropped, and never read', () => {
+    const text = report({ fresh: ['클로저', 'async/await'], missed: ['Promise 체이닝'] })
+    const file = readOne(text)
+    const [head, ...rest] = text.split('\n')
+    // The PC app's: a heading of the chat, the day's line, then `[이름] [시간] ` before each message's first line.
+    const pc = ['김철수 님과 카카오톡 대화', '저장한 날짜 : 2026-10-18 15:20:01', '', '--------------- 2026년 10월 18일 일요일 ---------------', `[김철수] [오후 3:12] ${head}`, ...rest, '[이영희] [오후 3:15] 잘 받았습니다']
+    expect(readOne(pc.join('\r\n'))).toEqual(file)
+    // The phones': iOS's and Android's.
+    expect(readOne([`2026. 10. 18. 오후 3:12, 김철수 : ${head}`, ...rest].join('\n'))).toEqual(file)
+    expect(readOne([`2026년 10월 18일 오후 3:12, 김철수 : ${head}`, ...rest].join('\n'))).toEqual(file)
+    // Only before a heading: a message naming a report's days starts none.
+    expect(readReports('[김철수] [오후 3:12] 학습 보고 · 2026-10-12 보냈습니다\n- 학습 노트 3개\n').reports).toEqual([])
+    const three = [3, 4, 5].map((notes, i) => {
+      const [first, ...lines] = report({ fresh: ['클로저'], notes }).split('\n')
+      return [`[${['김철수', '이영희', '박민수'][i]}] [오후 3:1${i}] ${first}`, ...lines].join('\n')
+    })
+    const map = teamMapText(readReports(three.join('\n')).reports, undefined, {})
+    expect(map).toContain('- 여럿이 새로 배운 개념: 클로저 (3)')
+    for (const leak of ['김철수', '이영희', '박민수', '오후', '[']) expect(map).not.toContain(leak)
+  })
+
   test('a token count as said reads back as a number, and other words as none', () => {
     expect(tokenNumber('약 1.2만')).toBe(12_000)
     expect(tokenNumber('약 3천')).toBe(3000)
@@ -202,7 +240,25 @@ describe('1.8.0: /learn 보고서 모으기 reads the reports back (E5)', () => 
     // The day the most hold, the latest of two held by as many: another week's report and the earliest left out.
     expect(overlapReports([weeks[1]!, days[1]!, days[0]!]).kept).toEqual([days[1]!, days[0]!])
     expect(overlapReports([])).toEqual({ kept: [], apart: 0 })
+    // A report whose first day is past its last (none read so) holds none, nor moves the day kept: two of the 5th and
+    // two of the 1st, the later kept.
+    const span = (from: string, to: string, notes: number): ReadReport => ({ ...days[0]!, from, to, notes })
+    const pairs = [span('2026-10-05', '2026-10-05', 1), span('2026-10-05', '2026-10-05', 2), span('2026-10-01', '2026-10-01', 3), span('2026-10-01', '2026-10-01', 4)]
+    expect(overlapReports([...pairs, span('2026-10-09', '2026-10-03', 5)])).toEqual({ kept: pairs.slice(0, 2), apart: 3 })
     expect(TEAM_MAP_REPORTS).toBe(300)
+  })
+
+  test('a file of tens of thousands of reports, each of another day, is sorted out in time', () => {
+    const base = readOne(report({}))
+    const dayOf = (i: number) => new Date(Date.UTC(1990, 0, 1) + i * DAY).toISOString().slice(0, 10)
+    const many: ReadReport[] = Array.from({ length: 40_000 }, (_, i) => ({ ...base, from: dayOf(i), to: dayOf(i) }))
+    // Three more of one day in the middle: those and the one of that day are the ones kept.
+    const held = [0, 1, 2].map(i => ({ ...base, notes: 10 + i, from: dayOf(19_999), to: dayOf(19_999) }))
+    const started = Date.now()
+    const out = overlapReports([...many.slice(0, 20_000), ...held, ...many.slice(20_000)])
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(out.kept).toEqual([many[19_999]!, ...held])
+    expect(out.apart).toBe(39_999)
   })
 })
 
@@ -301,6 +357,10 @@ describe('1.8.0: the team learning map, with no line per person (E5)', () => {
     const wide = teamMapText(read({ team: { total: 16, met: all } }, { team: { total: 16, met: all } }, { team: { total: 16, met: all } }), many, {})
     expect(wide).toContain('  - 여럿이 만남: 용어 0 (3) · 용어 1 (3) · ')
     expect(wide).toContain('  - 덜 만남(보고서 3개 미만): 용어 15\n  - 보고서마다 만난 용어를 15개까지 적어, 팀 파일 뒤쪽 용어는 덜 셀 수 있습니다\n')
+    // Ten of the ones met less at most, the rest counted.
+    const thirteen = many.slice(0, 13)
+    const few = teamMapText(read({ team: { total: 13, met: ['용어 0'] } }, { team: { total: 13, met: ['용어 0'] } }, { team: { total: 13, met: ['용어 0'] } }), thirteen, {})
+    expect(few).toContain('  - 여럿이 만남: 용어 0 (3)\n  - 덜 만남(보고서 3개 미만): 용어 1 · 용어 2 · 용어 3 · 용어 4 · 용어 5 · 용어 6 · 용어 7 · 용어 8 · 용어 9 · 용어 10 외 2개\n')
   })
 
   test('the team file\'s candidates: missed in three reports, no team term, ten at most; another sentence with no team file', () => {
@@ -361,5 +421,19 @@ describe('1.8.0: the file /learn 보고서 모으기 names (E5)', () => {
     expect(gatherPath('"\\\\server\\share\\팀.md"', '/home/u', '/proj')).toBe('network')
     expect(gatherPath('//server/share/팀.md', '/home/u', '/proj')).toBe('network')
     expect(gatherPath('""', '/home/u', '/proj')).toBeUndefined()
+  })
+
+  test('an @ mention from the composer\'s file picker, and a Windows path told by its root or home keeps its backslashes', () => {
+    expect(gatherPath('@팀.md', '/Users/kim', '/proj')).toBe('/proj/팀.md')
+    expect(gatherPath('@"팀 보고서.md"', '/Users/kim', '/proj')).toBe('/proj/팀 보고서.md')
+    expect(gatherPath('@~/Downloads/팀.txt', '/Users/kim', '/proj')).toBe('/Users/kim/Downloads/팀.txt')
+    expect(gatherPath('@', '/Users/kim', '/proj')).toBeUndefined()
+    // A relative path, one from the drive's root and one under ~/ with a bracket after a separator: no escape there.
+    expect(gatherPath('보고서\\(42주)\\팀.md', undefined, 'C:\\proj')).toBe('C:\\proj/보고서\\(42주)\\팀.md')
+    expect(gatherPath('\\Users\\kim\\[팀]\\보고서.md', 'C:\\Users\\kim', 'C:\\proj')).toBe('\\Users\\kim\\[팀]\\보고서.md')
+    expect(gatherPath('~/Downloads\\(1)\\팀.txt', 'C:\\Users\\kim', 'C:\\proj')).toBe('C:\\Users\\kim/Downloads\\(1)\\팀.txt')
+    // On macOS a dropped file's escapes are read still, relative or under ~.
+    expect(gatherPath('팀\\ 보고서\\ \\(1\\).txt', '/Users/kim', '/Users/kim/proj')).toBe('/Users/kim/proj/팀 보고서 (1).txt')
+    expect(gatherPath('~/팀\\ 보고서.txt', '/Users/kim', '/Users/kim/proj')).toBe('/Users/kim/팀 보고서.txt')
   })
 })

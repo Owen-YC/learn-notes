@@ -6375,14 +6375,16 @@ function gatherFailText(code: string): string {
 /**
  * /learn 보고서 모으기 파일 (1.8.0): a leader's team learning map (teamMapText) of the /learn 보고서 the team sent them,
  * gathered in one .md or .txt file, with no line per person. One file and no folder: one person's weekly reports in a
- * journal folder would make up three. The permission rules are asked before anything is read (where a link leads,
+ * journal folder would make up three. The permission rules are asked before anything is read (where the path lands,
  * too); a network location is never read; a file past GATHER_READ_MAX is not. Reports read to the same values count
- * once and only those holding one day together count (overlapReports); fewer than TEAM_MAP_MIN make no map. The map
- * goes on the clipboard as /learn 보고서 does (deliver), else in the reply. No model call, no store write, no file
- * written, and no fault kept: a path mistyped is no failure of the plugin's for /learn 진단.
+ * once and only those holding one day together count (overlapReports), TEAM_MAP_REPORTS at most; fewer than
+ * TEAM_MAP_MIN make no map. The map goes on the clipboard as /learn 보고서 does (deliver), else in the reply. No model
+ * call, no store write, no file written, and no fault kept: a path mistyped is no failure of the plugin's for /learn 진단.
  */
 async function gatherCommand($: EngineInterface, raw: string, isAway: boolean): Promise<string> {
-  if (raw.replace(/["'“”‘’`\s]/g, '') === '') return GATHER_USAGE
+  // Nothing but quotes, or the help's own word for the file typed as it reads (`/learn 보고서 모으기 파일`): how it is used.
+  const word = raw.replace(/["'“”‘’`\s@<>[\]]/g, '')
+  if (word === '' || /^(?:파일|file)$/i.test(word)) return GATHER_USAGE
   if (await isCloudSession($)) return GATHER_CLOUD
   const path = gatherPath(raw, await homeDir($), await $.session.root().catch(() => ''))
   if (path === 'network') return GATHER_NETWORK
@@ -6394,10 +6396,14 @@ async function gatherCommand($: EngineInterface, raw: string, isAway: boolean): 
   } catch (error) {
     return gatherFailText(faultCode(error))
   }
-  // A link is judged by where it leads too, as the team file is.
-  if (stat.isLink && stat.realPath !== undefined && stat.realPath !== path && (await isReadDenied($, stat.realPath))) return GATHER_DENIED
+  // Where the path lands is judged too, a link or a file in a linked folder, as a team term's file is. With no landing it
+  // leads nowhere (`other`) or a hook above withheld it, and a guard denies without it.
+  const real = stat.realPath
+  if (real === undefined) return stat.kind === 'other' ? GATHER_MISSING : GATHER_DENIED
+  if (real !== path && (await isReadDenied($, real))) return GATHER_DENIED
   if (stat.kind === 'dir') return GATHER_FOLDER
-  if (stat.kind !== 'file') return stat.isLink ? GATHER_MISSING : GATHER_KIND
+  // A named pipe or a device: no file to read (a read could wait on it for good).
+  if (stat.kind !== 'file') return GATHER_KIND
   if (!/\.(?:md|txt|markdown)$/i.test(path) || stat.size > GATHER_READ_MAX) return GATHER_KIND
   let text: string
   try {
@@ -6406,11 +6412,14 @@ async function gatherCommand($: EngineInterface, raw: string, isAway: boolean): 
     return gatherFailText(faultCode(error))
   }
   const found = readReports(text)
-  const { kept, apart } = overlapReports(found.reports.slice(0, TEAM_MAP_REPORTS))
+  // The day first, over every report (a file added to each week has this week's last), then TEAM_MAP_REPORTS of them.
+  const { kept: held, apart } = overlapReports(found.reports)
+  const kept = held.slice(0, TEAM_MAP_REPORTS)
   const left = [
     ...(found.repeated > 0 ? [`같은 보고서 ${found.repeated}개는 한 번만 셌습니다`] : []),
     ...(found.odd > 0 ? [`형식이 맞지 않는 보고서 ${found.odd}개는 뺐습니다`] : []),
     ...(apart > 0 ? [`기간이 겹치지 않는 보고서 ${apart}개는 뺐습니다`] : []),
+    ...(held.length > kept.length ? [`${TEAM_MAP_REPORTS}개를 넘는 보고서 ${held.length - kept.length}개는 뺐습니다`] : []),
   ]
   const tail = left.length > 0 ? [left.join(' · ')] : []
   if (kept.length === 0) return [GATHER_NONE, ...tail].join('\n')

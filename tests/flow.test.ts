@@ -12395,6 +12395,8 @@ describe('1.8.0: /learn 보고서 모으기, a team map of the reports gathered 
   const COPIED = '팀 학습 지도를 클립보드에 복사했습니다 · 보고서 3개 · 팀 채널에 붙이기 전에 한 번 읽어 보세요'
   const LEFT = '같은 보고서 1개는 한 번만 셌습니다 · 형식이 맞지 않는 보고서 1개는 뺐습니다 · 기간이 겹치지 않는 보고서 1개는 뺐습니다'
   const HERE = '팀 학습 지도입니다 · 이 화면에서는 클립보드에 복사할 수 없어 여기에 적습니다. 붙이기 전에 한 번 읽어 보세요'
+  const USAGE =
+    '쓰는 법: /learn 보고서 모으기 파일 · 팀원이 보내 준 /learn 보고서를 .md나 .txt 파일 하나에 모아 저장한 곳을 적습니다 (예: /learn 보고서 모으기 ~/Downloads/팀보고서.txt) · 보고서가 3개 이상이어야 합니다'
 
   /** A teammate's /learn 보고서 of the last seven days to `at`, as reportMarkdown writes it. */
   function report(fresh: string[], missed: string[] = [], at = NOW, notes = 3, team?: { total: number; met: string[] }): string {
@@ -12496,8 +12498,6 @@ describe('1.8.0: /learn 보고서 모으기, a team map of the reports gathered 
       said.push(text)
       return text
     }
-    const USAGE =
-      '쓰는 법: /learn 보고서 모으기 파일 · 팀원이 보내 준 /learn 보고서를 .md나 .txt 파일 하나에 모아 저장한 곳을 적습니다 (예: /learn 보고서 모으기 ~/Downloads/팀보고서.txt) · 보고서가 3개 이상이어야 합니다'
     expect(await ask('보고서 모으기')).toBe(USAGE)
     expect(await ask('보고서 모으기 ""')).toBe(USAGE)
     w.statFails = new Map([['/proj/없음.md', 'ENOENT']])
@@ -12533,6 +12533,71 @@ describe('1.8.0: /learn 보고서 모으기, a team map of the reports gathered 
     expect(JSON.stringify(w.store.get('faults') ?? null)).toBe(faults)
     expect(w.logs.slice(logs).filter(line => line.startsWith('learn-notes: '))).toEqual([])
     for (const text of said) for (const typed of ['없음.md', 'server', '팀.md', '팀공유', '비밀', '링크', '둘.md', '메모']) expect(text).not.toContain(typed)
+  })
+
+  test('the help\'s word for the file typed as it reads is how it is used; an @ mention of the composer\'s file picker is the file', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.files.set(FILE, GATHERED)
+    w.files.set('/proj/팀 보고서.md', GATHERED)
+    w.statFails = new Map(['/proj/파일', '/proj/file', '/proj/FILE', '/proj/@팀.md', '/proj/@"팀 보고서.md"'].map(path => [path, 'ENOENT']))
+    for (const args of ['보고서 모으기 파일', '보고서 모으기 "파일"', 'report collect file', '보고서 collect FILE']) expect((await learn($, args)).text).toBe(USAGE)
+    expect((await learn($, '보고서 모으기 @팀.md')).text).toBe(`${COPIED}\n${LEFT}`)
+    expect((await learn($, '보고서 모으기 @"팀 보고서.md"')).text).toBe(`${COPIED}\n${LEFT}`)
+    expect(w.copied).toHaveLength(2)
+  })
+
+  test('where the path lands is judged too: a file in a linked folder, a landing withheld; a pipe and a link to nowhere are not read', async ($, on) => {
+    const reads: string[] = []
+    const checks: string[] = []
+    on('fs.read', { path: /\.(?:md|txt)$/ }, (_$, e, next) => {
+      reads.push(e.path)
+      return next(e)
+    })
+    const size = GATHERED.length
+    // /proj/공유 is a link to /home/u/secret: the file is no link, its folder is.
+    on('fs.stat', { path: '/proj/공유/팀.md' }, (_$, e) => ({ value: { kind: 'file' as const, size, mtimeMs: 0, isLink: false, ...(e.resolve ? { realPath: '/home/u/secret/팀.md' } : {}) } }))
+    // A link whose landing a hook above withheld: a guard denies without it.
+    on('fs.stat', { path: '/proj/가린.md' }, () => ({ value: { kind: 'file' as const, size, mtimeMs: 0, isLink: true } }))
+    // A named pipe, and a link that leads nowhere (no landing, `other`).
+    on('fs.stat', { path: '/proj/파이프.md' }, (_$, e) => ({ value: { kind: 'other' as const, size: 0, mtimeMs: 0, isLink: false, ...(e.resolve ? { realPath: e.path } : {}) } }))
+    on('fs.stat', { path: '/proj/끊긴.md' }, () => ({ value: { kind: 'other' as const, size: 0, mtimeMs: 0, isLink: true } }))
+    const w = world(on)
+    on('tool.check', { tool: 'Read' }, (_$, e) => {
+      const path = String((e.input as { file_path?: string }).file_path)
+      checks.push(path)
+      return { decision: /secret/.test(path) ? 'deny' : 'allow' }
+    })
+    await start($)
+    for (const path of ['/proj/공유/팀.md', '/proj/가린.md', '/proj/파이프.md', '/proj/끊긴.md', FILE]) w.files.set(path, GATHERED)
+    const read = reads.length
+    expect((await learn($, '보고서 모으기 공유/팀.md')).text).toBe('권한 설정이 이 파일 읽기를 막습니다')
+    expect(checks).toContain('/home/u/secret/팀.md')
+    expect((await learn($, '보고서 모으기 가린.md')).text).toBe('권한 설정이 이 파일 읽기를 막습니다')
+    expect((await learn($, '보고서 모으기 파이프.md')).text).toBe('md나 txt 파일만, 2MB까지 읽습니다')
+    expect((await learn($, '보고서 모으기 끊긴.md')).text).toBe('그 파일을 찾지 못했습니다 · 경로를 확인해 주세요')
+    expect(reads.slice(read)).toEqual([])
+    expect(w.copied).toEqual([])
+    // A path that lands where it says is asked about once.
+    checks.length = 0
+    expect((await learn($, '보고서 모으기 팀.md')).text).toBe(`${COPIED}\n${LEFT}`)
+    expect(checks.filter(path => path.endsWith('팀.md'))).toEqual([FILE])
+  })
+
+  test('past 300 reports: the ones holding the day most hold, this week\'s of a file added to each week; past 300 of those, said', async ($, on) => {
+    const w = world(on)
+    await start($)
+    // Ten weeks of thirty-one teammates' reports, each week's added at the end.
+    const weeks = Array.from({ length: 10 }, (_, k) => Array.from({ length: 31 }, (_, i) => report(['클로저'], [], NOW - (9 - k) * 7 * DAY, i + 1)).join('\n\n'))
+    w.files.set(FILE, weeks.join('\n\n'))
+    expect((await learn($, '보고서 모으기 팀.md')).text).toBe(
+      '팀 학습 지도를 클립보드에 복사했습니다 · 보고서 31개 · 팀 채널에 붙이기 전에 한 번 읽어 보세요\n기간이 겹치지 않는 보고서 279개는 뺐습니다',
+    )
+    expect(w.copied.at(-1)!.split('\n')[0]).toBe(`# 팀 학습 지도 · ${stamp(NOW - 6 * DAY).day} ~ ${stamp(NOW).day} · 보고서 31개`)
+    // 305 of one week: the file's first 300 counted, the rest said.
+    w.files.set(FILE, Array.from({ length: 305 }, (_, i) => report(['클로저'], [], NOW, i + 1)).join('\n\n'))
+    expect((await learn($, '보고서 모으기 팀.md')).text).toBe('팀 학습 지도를 클립보드에 복사했습니다 · 보고서 300개 · 팀 채널에 붙이기 전에 한 번 읽어 보세요\n300개를 넘는 보고서 5개는 뺐습니다')
+    expect(w.copied.at(-1)).toContain('\n- 학습 노트 45150개 · ')
   })
 
   test('a cloud session says it cannot read this computer\'s files', async ($, on) => {
