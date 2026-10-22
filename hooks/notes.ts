@@ -3197,6 +3197,63 @@ export function storedConcepts(index: Readonly<Record<string, LearnConcept>>): R
   return Object.fromEntries(Object.entries(index).map(([key, one]) => [key, storedConcept(one)]))
 }
 
+/**
+ * The writer's mark (1.9.0): one slot of the concept index a 1.9.0 or later session writes, beside the concepts
+ * (whose keys all begin `c:`), holding no object but when it was written (markedConcepts). The cleanConcepts of
+ * 1.5.1, 1.6.0, 1.7.0 and 1.8.0 pass over a slot that is no object, and each of them writes the index back from
+ * what it read, so a session of any of them that writes the index leaves the mark out: an index that holds it was
+ * last written by 1.9.0 or later, which writes the known and step copies first (isMarkedIndex).
+ */
+export const WRITER_MARK = '#w'
+
+/** The index as the store keeps it (storedConcepts), with the writer's mark (WRITER_MARK) at `at`. */
+export function markedConcepts(index: Readonly<Record<string, LearnConcept>>, at: number): Record<string, unknown> {
+  return { ...storedConcepts(index), [WRITER_MARK]: at }
+}
+
+/**
+ * True when the concept index the store holds (`raw`) has the writer's mark (WRITER_MARK, a finite number): 1.9.0
+ * or later wrote it last, its known and step copies (knownMarks, stepMarks) just before, so they are not read
+ * (cleanMarkedConcepts).
+ */
+export function isMarkedIndex(raw: unknown): boolean {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return false
+  const at = Object.prototype.hasOwnProperty.call(raw, WRITER_MARK) ? (raw as Record<string, unknown>)[WRITER_MARK] : undefined
+  return typeof at === 'number' && Number.isFinite(at)
+}
+
+/**
+ * A concept index with the writer's mark read back (isMarkedIndex), its known and step copies left unread: as
+ * cleanConcepts reads it, but a step past the first with no time it was given read as 1, as a read through the step
+ * copy written with it does (stepMarks keeps none such, recallSteps). The known copy would put back nothing: it holds
+ * the marks the index holds. So the same index a read through the copies gives, with two store reads fewer.
+ */
+export function cleanMarkedConcepts(raw: unknown, aliases: Readonly<Record<string, string>> = {}): Record<string, LearnConcept> {
+  const index = cleanConcepts(raw, aliases)
+  return recallSteps(index, stepMarks(index))
+}
+
+/**
+ * The store's `oldWrites` (1.9.0), for /learn 진단 and for a later build that stops writing the known and step
+ * copies: when 1.9.0 or later first wrote a marked index on this device (`since`), when one last read an index a
+ * build before it wrote over that (`last`, absent while none was seen), and how many times it read one (`n`, about,
+ * OLD_WRITES_MAX at most). Under 100 bytes, under a key of its own: no build before 1.9.0 knows it to write it away.
+ */
+export type OldWrites = { since: number; last?: number; n: number }
+
+/** The count `oldWrites` keeps at most. */
+export const OLD_WRITES_MAX = 9999
+
+/** The store's `oldWrites` read back (OldWrites); undefined when it holds none, or one with no `since`. */
+export function cleanOldWrites(raw: unknown): OldWrites | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const { since, last, n } = raw as Record<string, unknown>
+  if (typeof since !== 'number' || !Number.isFinite(since)) return undefined
+  const count = typeof n === 'number' && Number.isFinite(n) ? Math.max(0, Math.min(OLD_WRITES_MAX, Math.floor(n))) : 0
+  // A last time is one seen at least.
+  return typeof last === 'number' && Number.isFinite(last) ? { since, last, n: Math.max(1, count) } : { since, n: count }
+}
+
 /** The known marks of an index by key, kept under a store key of their own: a 1.5 session writing the index drops the field. */
 export function knownMarks(index: Readonly<Record<string, LearnConcept>>): Record<string, number> {
   return Object.fromEntries(Object.entries(index).flatMap(([key, one]) => (one.knownAt !== undefined ? [[key, one.knownAt]] : [])))
@@ -6541,6 +6598,11 @@ export type DiagInput = {
   today: { notes: number; calls: number }
   /** The store's size in all and its biggest keys; undefined when it could not be read. */
   store?: { bytes: number; keys: readonly { key: string; bytes: number }[] }
+  /**
+   * The index writes of builds before 1.9.0 seen (1.9.0, cleanOldWrites: times and a count alone); undefined while no
+   * 1.9.0 wrote the index here, `unread` when it could not be read.
+   */
+  oldWrites?: OldWrites | 'unread'
   /** This project's notes the journal has not taken; undefined when the project could not be read. */
   unsaved?: number
   /** The slips the store keeps, counted (1.8.0, slipCounts: no name, no words); `unread` when it could not be read. */
@@ -6555,11 +6617,26 @@ export function appName(raw: string | undefined): string | undefined {
 }
 
 /**
+ * What the store's line of /learn 진단 ends with (1.9.0): when a build before 1.9.0 last wrote the concept index
+ * over a marked one and how often that was seen, since when 1.9.0 marks it (OldWrites). Nothing while no 1.9.0
+ * wrote the index here.
+ */
+export function oldWritesText(seen: OldWrites | 'unread' | undefined): string {
+  if (seen === undefined) return ''
+  const head = ' · 옛 판 창의 개념 모음 쓰기: '
+  if (seen === 'unread') return `${head}읽지 못함`
+  const since = stamp(seen.since).day.slice(5)
+  if (seen.last === undefined) return `${head}없음 (${since}부터)`
+  const last = stamp(seen.last)
+  return `${head}마지막 ${last.day.slice(5)} ${last.time} (${since}부터 ${seen.n}번)`
+}
+
+/**
  * /learn 진단's text, to paste to whoever looks after the plugin: versions, the screen, the settings, today's
- * counts, the store's size, the journal, the slips counted (1.8.0), and the last FAULT_DAYS days' faults (newest
- * first). The pane's refused focus is no failure: it is summed on a line of its own, never in today's failures nor
- * among the listed ones, where a week of quizzes would push a journal that failed out of sight. No path, request,
- * code, concept name or slip's words.
+ * counts, the store's size and the index writes of builds before 1.9.0 seen (oldWritesText), the journal, the
+ * slips counted (1.8.0), and the last FAULT_DAYS days' faults (newest first). The pane's refused focus is no
+ * failure: it is summed on a line of its own, never in today's failures nor among the listed ones, where a week of
+ * quizzes would push a journal that failed out of sight. No path, request, code, concept name or slip's words.
  */
 export function diagText(input: DiagInput): string {
   const { now, settings: s } = input
@@ -6640,7 +6717,7 @@ export function diagText(input: DiagInput): string {
     `- 화면: ${screen.join(' · ')}`,
     `- 설정: ${settings.join(' · ')}`,
     `- 오늘: 노트 ${input.today.notes}개 · 모델 호출 ${input.today.calls}번 · 실패 ${failures}번`,
-    `- 저장소: ${store}`,
+    `- 저장소: ${store}${oldWritesText(input.oldWrites)}`,
     `- 일지: ${journal}`,
     ...slipLine,
     recent.length === 0 ? `- 최근 ${FAULT_DAYS}일 문제: 없습니다` : `- 최근 ${FAULT_DAYS}일 문제 ${recent.length}건 (최근 것부터)`,

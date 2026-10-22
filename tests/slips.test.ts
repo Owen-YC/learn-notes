@@ -9,6 +9,7 @@ import {
   HISTORY_MAX_BYTES,
   HISTORY_PER_PROJECT,
   HISTORY_PROJECTS,
+  OLD_WRITES_MAX,
   SLIPS_KEPT,
   SLIPS_MAX_BYTES,
   STAMPS_KEPT,
@@ -33,6 +34,7 @@ import {
   isSlipSaid,
   jsonBytes,
   knownMarks,
+  markedConcepts,
   nextSlip,
   parseCheck,
   parseQuiz,
@@ -403,7 +405,8 @@ describe('1.7.0: asked again in other code (다시 도전, D5)', () => {
  * and D6's teamTerms and teamNudged) take about 0.18MB of it. The store refuses a write that would take it past
  * 4,194,304 in all (4 MiB): Claude Code counts the UTF-16 characters of its compact JSON, never more than the UTF-8
  * bytes counted here, so this byte test is the stricter one. About 0.52MB is left, and STORE_WORST holds the line so
- * no key grows into it unseen.
+ * no key grows into it unseen. 1.9.0 (F1) adds the writer's mark in the concept index and oldWrites, 72 bytes in all:
+ * 3,671,370 bytes.
  */
 const STORE_LIMIT = 4 * 1024 * 1024
 const STORE_WORST = 3_672_000
@@ -512,7 +515,8 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
     const store: Record<string, unknown> = {
       // At its cap whatever the fixture came to: the history is cut to it (fitHistory).
       history: HISTORY_MAX_BYTES,
-      concepts: storedConcepts(index),
+      // With the writer's mark 1.9.0 puts beside the concepts (F1).
+      concepts: markedConcepts(index, NOW),
       aliases,
       merges,
       known: knownMarks(index),
@@ -531,6 +535,8 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
       welcomed: true,
       limitToast: '2026-10-03',
       quotaToast: '2026-10-03',
+      // 1.9.0's one new key (F1), at its longest.
+      oldWrites: { since: NOW, last: NOW, n: OLD_WRITES_MAX },
     }
     const sizes = Object.fromEntries(Object.entries(store).map(([key, value]) => [key, key === 'history' ? HISTORY_MAX_BYTES : jsonBytes(value)]))
     const total = Object.values(sizes).reduce((sum, n) => sum + n, 0)
@@ -540,6 +546,9 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
     // 1.7.0's own keys, within what they were planned to take.
     const added = ['slips', 'faults', 'sessions', 'schema', 'quotaToast', 'teamTerms', 'teamNudged'].reduce((sum, key) => sum + sizes[key]!, 0)
     expect(added).toBeLessThanOrEqual(190_000)
+    // 1.9.0's (F1): the writer's mark in the index, and its one new key, under 100 bytes.
+    expect(sizes.oldWrites!).toBeLessThan(100)
+    expect(jsonBytes(markedConcepts(index, NOW)) - jsonBytes(storedConcepts(index))).toBeLessThanOrEqual(20)
     // The whole: no key may grow unseen past this, and the store's limit stays well clear.
     expect(total).toBeLessThanOrEqual(STORE_WORST)
     expect(STORE_LIMIT - total).toBeGreaterThanOrEqual(500_000)

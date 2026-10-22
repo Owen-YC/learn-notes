@@ -125,13 +125,18 @@ import {
   changeSection,
   type ChangeItem,
   cleanConcepts,
+  cleanMarkedConcepts,
+  cleanOldWrites,
   conceptAt,
+  isMarkedIndex,
   knownMarks,
+  markedConcepts,
+  OLD_WRITES_MAX,
+  type OldWrites,
   recallMarks,
   recallSteps,
   stepMarks,
   storedConcept,
-  storedConcepts,
   withKnownMarks,
   conceptKey,
   conceptsMarkdown,
@@ -411,6 +416,14 @@ const STEPS_FROM_KEY = 'stepsFrom'
  */
 const STEPS_KEY = 'steps'
 /**
+ * What a 1.9.0 or later session saw of the concept index's writers (1.9.0, OldWrites: `{ since, last, n }`, under 100
+ * bytes): when the first one here wrote a marked index (WRITER_MARK), written once by the first index write each
+ * load finds without it (keepOldWrites), and when one last read an index that a build before 1.9.0 wrote over a
+ * marked one, and how often (noteOldWrite). For /learn 진단, and for the build that one day stops writing the known
+ * and step copies. Never written while the schema guard is on. No build before 1.9.0 knows it, so none writes it away.
+ */
+const OLD_WRITES_KEY = 'oldWrites'
+/**
  * What failed lately and how (FaultRecord: the last 7 days' faults as classification codes, 4KB at most),
  * for /learn 진단, and the day the session-start check line last showed. Written at most once a minute.
  */
@@ -620,6 +633,16 @@ let myVersion: string | undefined
 let mySessionId: string | undefined
 /** True once the store's layout is newer than this build's (SCHEMA_KEY): the concepts are left alone until a reload (isStoreAhead). */
 let isBehind = false
+/** True once this load found OLD_WRITES_KEY kept, or kept it (keepOldWrites): looked at again only after a reload. */
+let isOldWritesKept = false
+/**
+ * How often this load saw the concept index marked (WRITER_MARK): a marked index read, or one it wrote. An index
+ * with no mark read while this stands where it stood at the last one counted is the same old build's write read
+ * again (noteOldWrite).
+ */
+let markedSeen = 0
+/** markedSeen as it stood when an index with no mark was last counted (noteOldWrite); -1 while none was. */
+let oldCountedAt = -1
 /** When this session last wrote its stamp (SESSIONS_KEY), and last read the others': each at most every STAMP_EVERY_MS. */
 let stampedAt = Number.NEGATIVE_INFINITY
 let lookedAt = Number.NEGATIVE_INFINITY
@@ -1348,11 +1371,62 @@ async function stepsFrom($: EngineInterface): Promise<number> {
 
 /**
  * The concept index read back from what the store holds under CONCEPTS_KEY
- * (`raw`), for 1.6.0: a known mark a 1.5 session dropped put back
- * (KNOWN_KEY), a step a 1.5 quiz gave read as 1 at most (STEPS_KEY).
+ * (`raw`). One with the writer's mark (isMarkedIndex: 1.9.0 or later wrote it
+ * last, its copies first) is read alone. Any other, for 1.6.0: a known mark a
+ * 1.5 session dropped put back (KNOWN_KEY), a step a 1.5 quiz gave read as 1
+ * at most (STEPS_KEY); one holding concepts is counted as a build before
+ * 1.9.0's write, if 1.9.0 marked the index here before (noteOldWrite).
  */
 async function indexOf($: EngineInterface, raw: unknown, map: Readonly<Record<string, string>>): Promise<Record<string, LearnConcept>> {
+  if (isMarkedIndex(raw)) {
+    markedSeen += 1
+    return cleanMarkedConcepts(raw, map)
+  }
+  if (isRecord(raw) && Object.values(raw).some(isRecord)) {
+    const readAt = await $.clock.now().catch(() => undefined)
+    if (readAt !== undefined) void noteOldWrite($, readAt, markedSeen)
+  }
   return recallSteps(withKnownMarks(cleanConcepts(raw, map), await $.store.get(KNOWN_KEY), map), await $.store.get(STEPS_KEY), map)
+}
+
+/**
+ * Counts an index with no writer's mark read at `readAt` (indexOf) under OLD_WRITES_KEY: when it was seen (`last`)
+ * and one more (`n`). In the storing lane, never waited for, so after the work that read it, and only when 1.9.0 had
+ * marked the index here before that read (`since` before `readAt`): with none, or one kept since, the index read is
+ * one from before 1.9.0 (this device's first 1.9.0 session). Once for each old write: one read while this load saw
+ * no marked index since the last counted (`marked`, markedSeen then) is the same write read again, and an old window
+ * that writes between each of this one's writes is counted each time. Never while the schema guard is on. A read or
+ * a write that fails is let go: the next read tries again.
+ */
+function noteOldWrite($: EngineInterface, readAt: number, marked: number): Promise<void> {
+  return enqueue('storing', async () => {
+    if (isBehind || marked === oldCountedAt) return
+    try {
+      const held = cleanOldWrites(await $.store.get(OLD_WRITES_KEY))
+      if (held === undefined || !(held.since < readAt)) return
+      const seen: OldWrites = { ...held, last: readAt, n: Math.min(held.n + 1, OLD_WRITES_MAX) }
+      await $.store.set(OLD_WRITES_KEY, seen)
+      oldCountedAt = marked
+      isOldWritesKept = true
+    } catch (error) {
+      debugLog($, `learn-notes: 옛 판 창의 개념 모음 쓰기를 남기지 못했습니다 (${String(error)})`)
+    }
+  })
+}
+
+/**
+ * Keeps when 1.9.0 or later first marked the index here (OLD_WRITES_KEY's `since`: `at`, the mark's time), at the
+ * first index write of each load: read then, written only when the store holds none. A read or a write that fails
+ * is tried again at the next index write, and never fails this one.
+ */
+async function keepOldWrites($: EngineInterface, at: number): Promise<void> {
+  if (isOldWritesKept) return
+  try {
+    if (cleanOldWrites(await $.store.get(OLD_WRITES_KEY)) === undefined) await $.store.set(OLD_WRITES_KEY, { since: at, n: 0 } satisfies OldWrites)
+    isOldWritesKept = true
+  } catch (error) {
+    debugLog($, `learn-notes: 1.9.0이 개념 모음을 처음 쓴 때를 남기지 못했습니다 (${String(error)})`)
+  }
 }
 
 /** The concept index as the store has it now (indexOf). */
@@ -1364,13 +1438,17 @@ async function storedIndex($: EngineInterface, map: Readonly<Record<string, stri
  * Writes the concept index: its known marks and steps first, apart
  * (KNOWN_KEY, STEPS_KEY), each written only when the store does not hold
  * the same already (setChanged), then the index with each name as it was
- * stored (storedConcepts), every time. Every caller asks the schema guard
- * (isStoreAhead) first.
+ * stored and the writer's mark (markedConcepts), every time (markedSeen),
+ * and when 1.9.0 first marked it here (keepOldWrites). Every caller asks the
+ * schema guard (isStoreAhead) first.
  */
 async function storeIndex($: EngineInterface, index: Readonly<Record<string, LearnConcept>>): Promise<void> {
   await setChanged($, KNOWN_KEY, knownMarks(index))
   await setChanged($, STEPS_KEY, stepMarks(index))
-  await $.store.set(CONCEPTS_KEY, storedConcepts(index))
+  const at = await $.clock.now()
+  await $.store.set(CONCEPTS_KEY, markedConcepts(index, at))
+  markedSeen += 1
+  await keepOldWrites($, at)
 }
 
 /**
@@ -6524,10 +6602,10 @@ const SETTING_FIELDS = ['autoNote', 'model', 'dailyAutoNotes', 'level', 'autoSav
 
 /**
  * /learn 진단: a page to paste to whoever looks after the plugin, made with no model call (diagText): the
- * versions, the screen, the settings and which an administrator locked, today's counts, the store's size, notes
- * the journal has not taken, the slips counted (1.8.0), the last week's faults. Copied as /learn 보고서 is
- * (deliver), and always in the reply too. Each piece that cannot be read is left out or said unknown: it is what
- * is asked for when things fail.
+ * versions, the screen, the settings and which an administrator locked, today's counts, the store's size and the
+ * index writes of builds before 1.9.0 seen (OLD_WRITES_KEY), notes the journal has not taken, the slips counted
+ * (1.8.0), the last week's faults. Copied as /learn 보고서 is (deliver), and always in the reply too. Each piece
+ * that cannot be read is left out or said unknown: it is what is asked for when things fail.
  */
 async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Promise<string> {
   const now = await $.clock.now().catch(() => Date.now())
@@ -6580,6 +6658,11 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
     raw => slipCounts(cleanSlips(raw, map, now)),
     () => 'unread' as const,
   )
+  // The index writes of builds before 1.9.0 seen (1.9.0): times and a count alone.
+  const oldWrites = await $.store.get(OLD_WRITES_KEY).then(
+    raw => cleanOldWrites(raw),
+    () => 'unread' as const,
+  )
   const text = diagText({
     now,
     ...(version !== undefined ? { version } : {}),
@@ -6605,6 +6688,7 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
     },
     today: { notes: has(activityToday) ? activityToday[day]!.notes : 0, calls: has(usageToday) ? usageToday[day]!.calls : 0 },
     ...(store ? { store } : {}),
+    ...(oldWrites !== undefined ? { oldWrites } : {}),
     ...(unsaved !== undefined ? { unsaved } : {}),
     slips: slipped,
     faults: list,

@@ -409,3 +409,22 @@ describe('1.8.0: /learn 진단 counts the slips, with no name and no words (E2)'
     expect(diagText(input())).not.toContain('오답 노트')
   })
 })
+
+describe('1.9.0: /learn 진단\'s store line ends with the index writes of builds before 1.9.0 (F1)', () => {
+  test('seen: the last and since when, how often; none seen; unread; nothing while no 1.9.0 wrote the index here', () => {
+    const since = new Date(2026, 9, 2, 8, 15).getTime()
+    const last = new Date(2026, 9, 13, 14, 2).getTime()
+    const storeLine = (over: Partial<DiagInput>) => diagText(input(over)).split('\n').find(line => line.startsWith('- 저장소:'))
+    expect(storeLine({ oldWrites: { since, last, n: 3 } })).toBe('- 저장소: 2.3MB / 4MB (history 1.2MB) · 옛 판 창의 개념 모음 쓰기: 마지막 10-13 14:02 (10-02부터 3번)')
+    expect(storeLine({ oldWrites: { since, n: 0 } })).toBe('- 저장소: 2.3MB / 4MB (history 1.2MB) · 옛 판 창의 개념 모음 쓰기: 없음 (10-02부터)')
+    expect(storeLine({ oldWrites: 'unread' })).toBe('- 저장소: 2.3MB / 4MB (history 1.2MB) · 옛 판 창의 개념 모음 쓰기: 읽지 못함')
+    // No 1.9.0 wrote the index here yet: the line is 1.8.0's.
+    expect(storeLine({})).toBe('- 저장소: 2.3MB / 4MB (history 1.2MB)')
+    // The store's size unread, the record read: both said.
+    expect(storeLine({ store: undefined, oldWrites: { since, n: 0 } })).toBe('- 저장소: 읽지 못함 · 옛 판 창의 개념 모음 쓰기: 없음 (10-02부터)')
+    // The rest of the page is as it was.
+    const with3 = diagText(input({ oldWrites: { since, last, n: 3 } })).split('\n')
+    const without = diagText(input()).split('\n')
+    expect(with3.filter(line => !line.startsWith('- 저장소:'))).toEqual(without.filter(line => !line.startsWith('- 저장소:')))
+  })
+})
