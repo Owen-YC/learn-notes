@@ -640,9 +640,24 @@ let myVersion: string | undefined
  * The model-gated items' switches this load runs with (1.9.0): each its constant in notes.ts, which a release sets
  * by its samples (docs/qa/견본.md) — `isRuleDrill`, IS_RULE_DRILL (F2). A test's harness turns one the other way
  * through the plugin.json it serves (its `harness` object, read with the version at session start, readManifest),
- * so both states are tested whichever one ships. A release's plugin.json has none: only the build's own files can.
+ * so both states are tested whichever one ships. A release's plugin.json has none: only the build's own files can,
+ * and /learn 진단 names a switch that runs the other way (switched), so a copy someone turned one in is seen to be.
  */
 const build = { isRuleDrill: IS_RULE_DRILL }
+/** The switches as the build's constants set them, which no harness turns: /learn 진단 names one that differs (switched). */
+const RELEASE: Readonly<typeof build> = { ...build }
+/** Each switch's name in /learn 진단. */
+const SWITCH_NAMES: Record<keyof typeof build, string> = { isRuleDrill: '팀 규칙 연습' }
+
+/** The switches this load runs the other way from its build's constants (a harness's), with their state, for /learn 진단. */
+function switched(): string[] {
+  return (Object.keys(build) as (keyof typeof build)[])
+    .filter(key => build[key] !== RELEASE[key])
+    .map(key => {
+      const value = build[key]
+      return `${SWITCH_NAMES[key]} ${typeof value === 'boolean' ? (value ? '켬' : '끔') : String(value)}`
+    })
+}
 /** This session's id, read at session start: the key of its stamp (SESSIONS_KEY); undefined when it cannot be read. */
 let mySessionId: string | undefined
 /** True once the store's layout is newer than this build's (SCHEMA_KEY): the concepts are left alone until a reload (isStoreAhead). */
@@ -6728,6 +6743,7 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
     now,
     ...(version !== undefined ? { version } : {}),
     ...(engine !== undefined ? { engine } : {}),
+    ...(switched().length > 0 ? { switches: switched() } : {}),
     ...(others !== undefined ? { others } : {}),
     ...(isSchemaAhead(layout) ? { schema: { stored: layout as number, mine: STORE_SCHEMA } } : {}),
     surfaces,

@@ -9819,6 +9819,8 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect(w.models).toHaveLength(1)
     expect((await ui.find({ type: 'Text', text: '✓ 해냈습니다' }))?.props.color).toBe('green')
     expect(await ui.find({ type: 'Markdown', text: /^예시 답과 견주기/ })).toBeUndefined()
+    // A concept's practice has no team rule to fix by: no line for one under it (1.9.0 F2).
+    expect(await ui.find({ type: 'Text', text: DRILL_RULE_AFTER })).toBeUndefined()
     expect(await ui.find({ type: 'Input', key: `drill-${id}` })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: '아직 바꾼 곳이 없습니다 · 줄을 고친 뒤 Enter' })).toBeUndefined()
     expect(focusesOf(w).at(-1)).toBe('note-drill')
@@ -9858,6 +9860,7 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect(await ui.find({ type: 'Markdown', text: `예시 답과 견주기: \`\` ${EXAMPLE} \`\`` })).toBeDefined()
     expect(await ui.find({ type: 'Markdown', text: '이름이 비면 "손"이 들어가 "손님"이 됩니다.' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '내 줄: return `안녕하세요, ${name ? name : "손"}님!`' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: DRILL_RULE_AFTER })).toBeUndefined()
     expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 1, right: 1, wrong: 0, drills: 1 } })
     await ui.unmount()
   })
@@ -9911,6 +9914,7 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect(await ui.find({ type: 'Text', text: '✗ 틀림 · 예시 답 봄' })).toBeDefined()
     expect(await ui.find({ type: 'Markdown', text: `**예시 답:** \`\` ${EXAMPLE} \`\`` })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'note-drill-answer' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: DRILL_RULE_AFTER })).toBeUndefined()
     // a was where the keys went, and it is gone: they go to the practice's own place (교차 검토 7).
     expect(focusesOf(w).at(-1)).toBe('note-drill')
     expect(w.models).toHaveLength(3)
@@ -9981,6 +9985,7 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     expect(w.models).toHaveLength(1)
     expect(await ui.find({ type: 'Text', text: '✗ 틀림' })).toBeDefined()
     expect(await ui.find({ type: 'Markdown', text: 'a로 예시 답을 읽어 보고, 다음에 이 개념이 나오면 다시 고쳐 보세요.' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: DRILL_RULE_AFTER })).toBeUndefined()
     expect(await ui.find({ type: 'Button', key: 'note-drill-answer' })).toBeDefined()
     expect(concept(store)).toMatchObject({ step: 0, missedAt: expect.any(Number) })
     // Nothing recalled: kept as such, for the next quiz.
@@ -13687,6 +13692,53 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     expect(shown).not.toContain('직접 해 보기')
     expect(w.journal().filter(one => one.text.includes(`- 할 일 (팀 규칙): ${TASK}`)).length).toBeGreaterThanOrEqual(1)
     expect(w.journal().at(-1)!.text.split('## ').at(-1)).toContain(`- 할 일 (팀 규칙): ${TASK}`)
+  })
+
+  test('on: a practice of a concept under a rule line is 1.8.0\'s: over, its concept marked and no line under it for a team rule', async ($, on) => {
+    const store = new Map<string, unknown>()
+    const plain = RULE_NOTE.replace(`- 할 일 (팀 규칙): ${TASK}`, '- 할 일: API 호출을 fetcher로 바꿔 보세요')
+    const { w, id } = await written($, on, true, store, plain)
+    const ui = await pane($)
+    await ui.press({ key: 'note-drill' })
+    await ui.input({ key: `drill-${id}`, text: EXAMPLE })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(1)
+    expect(await ui.find({ type: 'Text', text: '✓ 해냈습니다' })).toBeDefined()
+    expect(concept(store).reviewedAt).toBeGreaterThanOrEqual(NOW)
+    expect(await ui.find({ type: 'Text', text: DRILL_RULE_AFTER })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('on: c, /learn 공유 and e carry the rule practice as the pane shows it, its task and check, never its line or example', async ($, on) => {
+    const { w, ui } = await practiced($, on)
+    await ui.press({ key: 'share' })
+    await w.clock.settle()
+    expect(w.copied.at(-1)).toContain(`- 할 일 (팀 규칙): ${TASK}`)
+    expect(w.copied.at(-1)).not.toContain('await fetcher(')
+    w.answer = '쉬운 말로 다시 쓴 답'
+    await ui.press({ key: 'easier' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(2)
+    expect(w.models.at(-1)).toContain(`- 할 일 (팀 규칙): ${TASK}`)
+    expect(w.models.at(-1)).not.toContain('await fetcher(')
+    await ui.unmount()
+    await learn($, '공유')
+    expect(w.copied.at(-1)).toContain(`- 할 일 (팀 규칙): ${TASK}`)
+    expect(w.copied.at(-1)).not.toContain('await fetcher(')
+  })
+
+  test('/learn 진단 names a switch the build runs the other way from its constant (a test harness\'s plugin.json); with none, nothing', async ($, on) => {
+    const w = world(on, 'ok', null, true, new Map())
+    await start($)
+    const plain = ((await learn($, '진단')).text ?? '').split('\n').find(line => line.startsWith('- 버전: '))!
+    expect(plain).not.toContain('시험 스위치')
+    w.harness = { isRuleDrill: !IS_RULE_DRILL }
+    await start($)
+    const switched = ((await learn($, '진단')).text ?? '').split('\n').find(line => line.startsWith('- 버전: '))!
+    expect(switched).toBe(`${plain} · 시험 스위치: 팀 규칙 연습 ${IS_RULE_DRILL ? '끔' : '켬'}`)
+    w.harness = { isRuleDrill: IS_RULE_DRILL }
+    await start($)
+    expect(((await learn($, '진단')).text ?? '').split('\n').find(line => line.startsWith('- 버전: '))).toBe(plain)
   })
 
   test('on: the record Claude reads leaves the rule practice out; /learn where no pane shows keeps its task and how to do it', async ($, on) => {

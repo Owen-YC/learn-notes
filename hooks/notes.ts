@@ -1956,43 +1956,56 @@ function taskLineOf(line: string): { words: string; isMarked: boolean } | undefi
 
 /**
  * A written note with its team-rule practice's task lines in the one shape kept (1.9.0 F2, RULE_TASK_HEAD), before the
- * store, the journal or any window reads it; run whether IS_RULE_DRILL is on or off. In its practice section (from
- * its heading to the next heading, a bold line alone not ending it), a task line marked in any shape a model writes
- * (TASK_LINE) puts every task line there in the kept shape, so a window before 1.9.0 reads none of them as its task
- * (it would grade a rule's line as a concept practice, and reset the concept). So does a task that names a team rule
- * (`팀 규칙`) under a note whose "다를 수 있음" line ruleOf reads. A label alone keeps its words on the next line.
- * The rest of the note is as it was, byte for byte; run twice, it is the same.
+ * store, the journal or any window reads it; run whether IS_RULE_DRILL is on or off. In its practice sections (each
+ * from its heading to the next heading, a bold line alone not ending it), a task line marked in any shape a model
+ * writes (TASK_LINE) puts every task line there in the kept shape, so a window before 1.9.0 reads none of them as its
+ * task (it would grade a rule's line as a concept practice, and reset the concept). So does a task that names a team
+ * rule (`팀 규칙`) under a note whose "다를 수 있음" line ruleOf reads. A label alone keeps its words on the next line.
+ * Its lines are read as every window reads them, in a fence too (drillParts). A note with more than one practice
+ * section then keeps one: the later headings go and their lines come up under the first, the team rule's first, so
+ * every window, each reading the first section alone, finds the rule's task, line and example first and hides every
+ * line and example there. The rest of the note is as it was, byte for byte; run twice, it is the same.
  */
 export function ruleLabelled(text: string): string {
   const lines = text.split('\n')
-  const start = lines.findIndex(line => DRILL_HEADING.test(line.trim()))
-  if (start === -1) return text
-  const after = lines.slice(start + 1).findIndex(line => ANY_HEADING.test(line.trim()))
-  const end = after === -1 ? lines.length : start + 1 + after
-  const tasks: { at: number; words: string; isMarked: boolean }[] = []
-  let fence: string | undefined
-  for (let i = start + 1; i < end; i += 1) {
-    const trimmed = lines[i]!.trim()
-    if (fence !== undefined) {
-      if (trimmed.startsWith(fence)) fence = undefined
-      continue
+  type Task = { at: number; end: number; words: string; isMarked: boolean }
+  type Section = { start: number; end: number; tasks: Task[] }
+  const sections: Section[] = []
+  for (let start = 0; start < lines.length; start += 1) {
+    if (!DRILL_HEADING.test(lines[start]!.trim())) continue
+    let end = start + 1
+    while (end < lines.length && !ANY_HEADING.test(lines[end]!.trim()) && !DRILL_HEADING.test(lines[end]!.trim())) end += 1
+    const tasks: Task[] = []
+    for (let i = start + 1; i < end; i += 1) {
+      const task = taskLineOf(lines[i]!)
+      if (task) tasks.push({ at: i, end, ...task })
     }
-    const opens = FENCE.exec(trimmed)
-    if (opens) {
-      fence = opens[1]!
-      continue
-    }
-    const task = taskLineOf(lines[i]!)
-    if (task) tasks.push({ at: i, ...task })
+    sections.push({ start, end, tasks })
+    start = end - 1
   }
-  if (tasks.length === 0) return text
+  const first = sections[0]
+  if (first === undefined) return text
+  const hasRule = ruleOf(lines, first.start) !== undefined
   // A label alone: its words are on the next line that is not blank.
-  const wordsOf = (task: (typeof tasks)[number]) => (task.words !== '' ? task.words : (lines.slice(task.at + 1, end).find(one => one.trim() !== '') ?? ''))
-  const isRule = tasks.some(task => task.isMarked) || (ruleOf(lines, start) !== undefined && tasks.some(task => /팀\s*규칙/.test(wordsOf(task))))
-  if (!isRule) return text
+  const wordsOf = (task: Task) => (task.words !== '' ? task.words : (lines.slice(task.at + 1, task.end).find(one => one.trim() !== '') ?? ''))
+  const isRuleSection = (section: Section) => section.tasks.some(task => task.isMarked || (hasRule && /팀\s*규칙/.test(wordsOf(task))))
+  if (!sections.some(isRuleSection)) return text
   const out = [...lines]
-  for (const task of tasks) out[task.at] = task.words === '' ? RULE_TASK_HEAD : `${RULE_TASK_HEAD} ${task.words}`
-  return out.join('\n')
+  for (const task of sections.flatMap(section => section.tasks)) out[task.at] = task.words === '' ? RULE_TASK_HEAD : `${RULE_TASK_HEAD} ${task.words}`
+  if (sections.length === 1) return out.join('\n')
+  // A section's lines with no blank line at its end, nor at its start for one that comes up under another.
+  const body = (section: Section, isFirst: boolean) => {
+    const kept = out.slice(section.start + 1, section.end)
+    while (kept.length > 0 && kept.at(-1)!.trim() === '') kept.pop()
+    while (!isFirst && kept.length > 0 && kept[0]!.trim() === '') kept.shift()
+    return kept
+  }
+  const ordered = [...sections.filter(isRuleSection), ...sections.filter(section => !isRuleSection(section))]
+  const merged = ordered.flatMap((section, k) => (k === 0 ? body(section, true) : ['', ...body(section, false)]))
+  // What stood between the sections (under another heading), as it was, after them.
+  const isIn = (i: number) => sections.some(section => i >= section.start && i < section.end)
+  const rest = out.slice(first.end).filter((_, k) => !isIn(first.end + k))
+  return [...out.slice(0, first.start + 1), ...merged, ...(rest.length > 0 ? ['', ...rest] : [])].join('\n')
 }
 
 /**
@@ -2287,7 +2300,8 @@ export const DRILL_HINT = '할 일과 확인을 다시 읽고, 이 줄에서 바
  * pane docked 56 columns wide it stands far above the field. No model call.
  */
 export function drillRuleHint(rule: string): string {
-  return `팀 규칙과 다를 수 있음: ${cut(rule, 80)} · 이 줄에서 바꿀 곳 한 군데를 찾아보세요`
+  // Cut inside its inline code, the code is closed (closeTicks): the hint is markdown.
+  return `팀 규칙과 다를 수 있음: ${closeTicks(cut(rule, 80))} · 이 줄에서 바꿀 곳 한 군데를 찾아보세요`
 }
 /** A team-rule practice's feedback once a second "모르겠어요" ends it (no model call): its concept is none to meet again. */
 export const DRILL_RULE_BLANK = 'a로 예시 답을 읽어 보세요.'
@@ -5406,11 +5420,14 @@ export type CheckReply = {
   base?: string
 }
 
-/** A team-rule grade's `규칙:` line read (1.9.0 F2): 지킴 kept; 안 지킴, 어김 broken; undefined for any other word or none. */
+/**
+ * A team-rule grade's `규칙:` line read (1.9.0 F2): 지킴 kept; 안 지킴, 지키지 않음 · 못함, 지킴 아님, 어김 broken;
+ * undefined for any other word or none.
+ */
 function ruleKeptOf(raw: unknown): 'kept' | 'broken' | undefined {
   if (typeof raw !== 'string') return undefined
   const said = raw.replace(/[*`]/g, '').trim().toLowerCase()
-  if (/^(?:안\s*지[킴키켰]|지키지\s*않|못\s*지[킴키켰]|어[김겼기]|위반|broken|no\b)/.test(said)) return 'broken'
+  if (/^(?:안\s*지[킴키켰]|지키지\s*(?:않|못)|지[킴켰]\s*(?:아님|아니|않|못)|못\s*지[킴키켰]|어[김겼기]|위반|broken|no\b)/.test(said)) return 'broken'
   if (/^(?:지[킴키켰]|kept|yes\b)/.test(said)) return 'kept'
   return undefined
 }
@@ -6826,6 +6843,11 @@ export type DiagInput = {
   /** This build's version, and Claude Code's. */
   version?: string
   engine?: string
+  /**
+   * The model-gated switches this load runs the other way from its build's constants, as named for a person (1.9.0:
+   * a test harness's plugin.json turns them; a release's has none), each with its state; none given, none differ.
+   */
+  switches?: readonly string[]
   /** The other sessions' stamps the store keeps (the last day's, newest first); undefined when it could not be read. */
   others?: readonly SessionStamp[]
   /** The store's layout number and this build's, given only while the store's is newer (the schema guard is on). */
@@ -6970,7 +6992,7 @@ export function diagText(input: DiagInput): string {
         ]
   return [
     `learn-notes 진단 · ${day} ${time}`,
-    `- 버전: learn-notes ${input.version ?? '알 수 없음'} · Claude Code ${input.engine ?? '알 수 없음'}`,
+    `- 버전: learn-notes ${input.version ?? '알 수 없음'} · Claude Code ${input.engine ?? '알 수 없음'}${(input.switches ?? []).length > 0 ? ` · 시험 스위치: ${input.switches!.join(' · ')}` : ''}`,
     ...others,
     `- 화면: ${screen.join(' · ')}`,
     `- 설정: ${settings.join(' · ')}`,

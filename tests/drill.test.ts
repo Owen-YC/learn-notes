@@ -625,6 +625,70 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     expect(old.hide(raw)).toContain('await fetcher(')
   })
 
+  test('ruleLabelled: a second practice section, the rule\'s after a concept\'s, is kept as one, the rule\'s first: every window reads one and hides every line and example', () => {
+    const concept = [
+      '### 직접 해 보기',
+      '- 할 일: 응답을 기다리지 않고 Promise 그대로 돌려주게 바꿔 보세요',
+      '- 고칠 줄: `return res.json()`',
+      '- 확인: `getUser(1)` → Promise가 나옵니다',
+      '- 예시 답: `return res`',
+    ]
+    const ruleBody = RULE_PRACTICE.slice(1)
+    const conceptBody = [`- 할 일 (팀 규칙): ${concept[1]!.slice('- 할 일: '.length)}`, ...concept.slice(2)]
+    const kept = [...RULE_HEAD, '### 직접 해 보기', ...ruleBody, '', ...conceptBody].join('\n')
+    // As N1's second samples had it (E15): a concept's section, then the rule's, under headings alike; a mark in
+    // another shape, or a bold heading, the same.
+    const raws = [
+      [...RULE_HEAD, ...concept, '', ...RULE_PRACTICE].join('\n'),
+      [...RULE_HEAD, ...concept, '', '## 직접 해 보기', `- 할 일: (팀 규칙) ${RULE_TASK}`, ...RULE_PRACTICE.slice(2)].join('\n'),
+      [...RULE_HEAD, ...concept, '**직접 해 보기**', ...ruleBody].join('\n'),
+    ]
+    for (const raw of raws) {
+      // Before it, every window reads the concept's section alone: the team's own fix shows under it.
+      expect(old.hide(raw)).toContain('await fetcher(')
+      expect(hideDrillAnswer(raw, undefined, { isRuleDrill: true, isTool: true })).toContain('await fetcher(')
+      expect(ruleLabelled(raw)).toBe(kept)
+    }
+    expect(ruleLabelled(kept)).toBe(kept)
+    // On, the rule's practice; off, none; the record tool and the windows before 1.9.0 show neither line nor example.
+    expect(drillOf(kept, [api()], true)).toMatchObject({ task: RULE_TASK, line: 'const res = await fetch(`/u/${id}`)', example: 'const res = await fetcher(`/u/${id}`)', rule: RULE_SAID })
+    expect(drillOf(kept, [api()], false)).toBeUndefined()
+    expect(hideDrillAnswer(kept, undefined, { isRuleDrill: true, isTool: true })).toBe(RULE_HEAD.join('\n'))
+    expect(hideDrillAnswer(kept, undefined, { isRuleDrill: false })).toBe(RULE_HEAD.join('\n'))
+    const shown = hideDrillAnswer(kept, 'api.js', { isRuleDrill: true })
+    for (const answer of ['await fetcher(', 'return res`', '고칠 줄', '예시 답']) expect(shown).not.toContain(answer)
+    const lines = kept.split('\n')
+    const at = old.span(lines)!
+    expect(at.end).toBe(lines.length)
+    expect(old.labels(lines.slice(at.start + 1, at.end))).not.toContain('할일')
+    for (const answer of ['await fetcher(', 'return res`', '고칠 줄']) expect(old.hide(kept)).not.toContain(answer)
+    // What stood between them stays, after the one section; two sections of concepts are left as they are.
+    const between = [...RULE_HEAD, ...concept, '### 참고', '- 응답은 한 번만 읽습니다', ...RULE_PRACTICE].join('\n')
+    expect(ruleLabelled(between)).toBe(`${kept}\n\n### 참고\n- 응답은 한 번만 읽습니다`)
+    const concepts = [...RULE_HEAD, ...concept, '', ...concept].join('\n')
+    expect(ruleLabelled(concepts)).toBe(concepts)
+  })
+
+  test('ruleLabelled reads a task line in a fence as every window does: marked there, it is kept marked, so none of them reads it as a concept\'s', () => {
+    const head = [...RULE_HEAD, '### 직접 해 보기']
+    const rest = RULE_PRACTICE.slice(2)
+    const plain = '- 할 일: 응답을 Promise 그대로 돌려주게 바꿔 보세요'
+    const fenced = [
+      [...head, '```', `- 할 일: (팀 규칙) ${RULE_TASK}`, ...rest, '```'],
+      [...head, plain, '```', `- 할 일 (팀 규칙): ${RULE_TASK}`, '```', ...rest],
+    ]
+    for (const raw of fenced.map(one => one.join('\n'))) {
+      const kept = ruleLabelled(raw)
+      const lines = kept.split('\n')
+      const at = old.span(lines)!
+      expect(old.labels(lines.slice(at.start + 1, at.end))).not.toContain('할일')
+      expect(lines.filter(line => /할 일/.test(line)).every(line => line.startsWith('- 할 일 (팀 규칙):'))).toBe(true)
+      // Off, no practice at all, as the windows before it.
+      expect(drillOf(kept, [api()], false)).toBeUndefined()
+      expect(ruleLabelled(kept)).toBe(kept)
+    }
+  })
+
   test('drillOf: the kept mark under a rule line gives the practice its rule, a closing ** off and 200 characters at most; else none', () => {
     const drill = drillOf(RULE_NOTE, [api()], true)
     expect(drill).toEqual({
@@ -724,11 +788,21 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     // Not asked: a 규칙: line under the feedback is the feedback's, and a broken one lowers nothing.
     expect(parseCheck(INPUT_18.checkReply)).toEqual(OUTPUT_18.parsed)
     expect(parseCheck('판정: 맞음\n피드백: 좋습니다.\n규칙: 안 지킴')).toEqual({ verdict: 'right', feedback: '좋습니다.\n규칙: 안 지킴' })
+    // 지키… with a not after it is broken, never kept (1.9.0 2/5 검토); 지켰습니다 alone is kept.
+    for (const said of ['지키지 못함', '지키지 못했습니다', '지키지 않았습니다', '지킴 아님']) {
+      expect(parseCheck(`규칙: ${said}\n판정: 맞음\n피드백: 좋아요`, { rule: true })).toMatchObject({ verdict: 'partial', rule: 'broken' })
+    }
+    for (const said of ['지켰습니다', '지킴 (fetcher로 부름)', '지켰지만 결과가 다릅니다']) {
+      expect(parseCheck(`규칙: ${said}\n판정: 맞음\n피드백: 좋아요`, { rule: true })).toMatchObject({ verdict: 'right', rule: 'kept' })
+    }
   })
 
   test('the hint, the second "모르겠어요" and the line once over are its own; the journal names the task a team rule\'s', () => {
     expect(drillRuleHint(RULE_SAID)).toBe(`팀 규칙과 다를 수 있음: ${RULE_SAID} · 이 줄에서 바꿀 곳 한 군데를 찾아보세요`)
     expect(drillRuleHint('가'.repeat(120))).toBe(`팀 규칙과 다를 수 있음: ${'가'.repeat(79)}… · 이 줄에서 바꿀 곳 한 군데를 찾아보세요`)
+    // Cut inside its inline code, the code is closed: no backtick left open in the markdown (1.9.0 2/5 검토).
+    const ticked = `${'가'.repeat(70)} \`process.env.SHIPPING_URL\`을 바로 읽습니다`
+    expect(drillRuleHint(ticked)).toBe(`팀 규칙과 다를 수 있음: ${'가'.repeat(70)} \`process\`… · 이 줄에서 바꿀 곳 한 군데를 찾아보세요`)
     expect(DRILL_RULE_BLANK).toBe('a로 예시 답을 읽어 보세요.')
     expect(DRILL_RULE_AFTER).toBe('팀 규칙대로 고치려면 Claude에게 부탁하세요')
     const state = { mine: 'const res = await fetcher(`/u/${id}`)', verdict: 'right' as const, feedback: '', at: AT }
