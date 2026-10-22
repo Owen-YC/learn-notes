@@ -128,6 +128,7 @@ import {
   cleanMarkedConcepts,
   cleanOldWrites,
   conceptAt,
+  indexPrint,
   isMarkedIndex,
   knownMarks,
   markedConcepts,
@@ -416,11 +417,12 @@ const STEPS_FROM_KEY = 'stepsFrom'
  */
 const STEPS_KEY = 'steps'
 /**
- * What a 1.9.0 or later session saw of the concept index's writers (1.9.0, OldWrites: `{ since, last, n }`, under 100
- * bytes): when the first one here wrote a marked index (WRITER_MARK), written once by the first index write each
- * load finds without it (keepOldWrites), and when one last read an index that a build before 1.9.0 wrote over a
- * marked one, and how often (noteOldWrite). For /learn 진단, and for the build that one day stops writing the known
- * and step copies. Never written while the schema guard is on. No build before 1.9.0 knows it, so none writes it away.
+ * What a 1.9.0 or later session saw of the concept index's writers (1.9.0, OldWrites: `{ since, last, n, w }`, under
+ * 100 bytes): when the first one here wrote a marked index (WRITER_MARK), written once by the first index write each
+ * load finds without it (keepOldWrites), and when one first read the last index a build before 1.9.0 wrote since,
+ * how many such writes one read, each once, and that write's print (noteOldWrite). For /learn 진단, and for the build
+ * that one day stops writing the known and step copies. Never written while the schema guard is on. No build before
+ * 1.9.0 knows it, so none writes it away.
  */
 const OLD_WRITES_KEY = 'oldWrites'
 /**
@@ -637,12 +639,16 @@ let isBehind = false
 let isOldWritesKept = false
 /**
  * How often this load saw the concept index marked (WRITER_MARK): a marked index read, or one it wrote. An index
- * with no mark read while this stands where it stood at the last one counted is the same old build's write read
- * again (noteOldWrite).
+ * with no mark read with the print of the last one found counted, while this stands where it stood then, is the
+ * same old build's write read again (noteOldWrite).
  */
 let markedSeen = 0
-/** markedSeen as it stood when an index with no mark was last counted (noteOldWrite); -1 while none was. */
+/**
+ * markedSeen as it stood when this load last read an index with no mark that is counted under OLD_WRITES_KEY, by
+ * this load or before it (noteOldWrite), and that index's print (indexPrint); -1 and undefined while it read none.
+ */
 let oldCountedAt = -1
+let oldCountedPrint: string | undefined
 /** When this session last wrote its stamp (SESSIONS_KEY), and last read the others': each at most every STAMP_EVERY_MS. */
 let stampedAt = Number.NEGATIVE_INFINITY
 let lookedAt = Number.NEGATIVE_INFINITY
@@ -1384,29 +1390,36 @@ async function indexOf($: EngineInterface, raw: unknown, map: Readonly<Record<st
   }
   if (isRecord(raw) && Object.values(raw).some(isRecord)) {
     const readAt = await $.clock.now().catch(() => undefined)
-    if (readAt !== undefined) void noteOldWrite($, readAt, markedSeen)
+    if (readAt !== undefined) void noteOldWrite($, raw, readAt, markedSeen)
   }
   return recallSteps(withKnownMarks(cleanConcepts(raw, map), await $.store.get(KNOWN_KEY), map), await $.store.get(STEPS_KEY), map)
 }
 
 /**
- * Counts an index with no writer's mark read at `readAt` (indexOf) under OLD_WRITES_KEY: when it was seen (`last`)
- * and one more (`n`). In the storing lane, never waited for, so after the work that read it, and only when 1.9.0 had
- * marked the index here before that read (`since` before `readAt`): with none, or one kept since, the index read is
- * one from before 1.9.0 (this device's first 1.9.0 session). Once for each old write: one read while this load saw
- * no marked index since the last counted (`marked`, markedSeen then) is the same write read again, and an old window
- * that writes between each of this one's writes is counted each time. Never while the schema guard is on. A read or
- * a write that fails is let go: the next read tries again.
+ * Counts an index with no writer's mark (`raw`) read at `readAt` (indexOf) under OLD_WRITES_KEY: when it was seen
+ * (`last`), one more (`n`) and its print (`w`, indexPrint). In the storing lane, never waited for, so after the work
+ * that read it, and only when 1.9.0 had marked the index here before that read (`since` before `readAt`): with none,
+ * or one kept since, the index read is one from before 1.9.0 (this device's first 1.9.0 session). Once for each old
+ * write, across loads and windows: one with the print of the write counted last is that write read again, by a later
+ * load or after another window counted it, unless this load read that one and saw a marked index since (`marked`,
+ * markedSeen at this read, past oldCountedAt), so an old window that writes between each of this one's writes is
+ * counted each time, if it writes the same again too. The same write read again in this load is let go with no
+ * store read. Never while the schema guard is on. A read or a write that fails is let go: the next read tries again.
  */
-function noteOldWrite($: EngineInterface, readAt: number, marked: number): Promise<void> {
+function noteOldWrite($: EngineInterface, raw: unknown, readAt: number, marked: number): Promise<void> {
   return enqueue('storing', async () => {
-    if (isBehind || marked === oldCountedAt) return
+    if (isBehind) return
+    const print = indexPrint(raw)
+    if (marked === oldCountedAt && print === oldCountedPrint) return
     try {
       const held = cleanOldWrites(await $.store.get(OLD_WRITES_KEY))
       if (held === undefined || !(held.since < readAt)) return
-      const seen: OldWrites = { ...held, last: readAt, n: Math.min(held.n + 1, OLD_WRITES_MAX) }
-      await $.store.set(OLD_WRITES_KEY, seen)
+      if (print !== held.w || print === oldCountedPrint) {
+        const seen: OldWrites = { since: held.since, last: readAt, n: Math.min(held.n + 1, OLD_WRITES_MAX), w: print }
+        await $.store.set(OLD_WRITES_KEY, seen)
+      }
       oldCountedAt = marked
+      oldCountedPrint = print
       isOldWritesKept = true
     } catch (error) {
       debugLog($, `learn-notes: 옛 판 창의 개념 모음 쓰기를 남기지 못했습니다 (${String(error)})`)
@@ -1439,14 +1452,21 @@ async function storedIndex($: EngineInterface, map: Readonly<Record<string, stri
  * (KNOWN_KEY, STEPS_KEY), each written only when the store does not hold
  * the same already (setChanged), then the index with each name as it was
  * stored and the writer's mark (markedConcepts), every time (markedSeen),
- * and when 1.9.0 first marked it here (keepOldWrites). Every caller asks the
- * schema guard (isStoreAhead) first.
+ * and when 1.9.0 first marked it here (keepOldWrites). The known copy is
+ * read once more just before the index: one another window wrote over this
+ * one's meanwhile has its marks put on the index written (withKnownMarks),
+ * as 1.8.0's next read through the copy put them back, since no read of a
+ * marked index looks at the copy. Every caller asks the schema guard
+ * (isStoreAhead) first.
  */
 async function storeIndex($: EngineInterface, index: Readonly<Record<string, LearnConcept>>): Promise<void> {
-  await setChanged($, KNOWN_KEY, knownMarks(index))
+  const known = knownMarks(index)
+  await setChanged($, KNOWN_KEY, known)
   await setChanged($, STEPS_KEY, stepMarks(index))
+  const held = await $.store.get(KNOWN_KEY).catch(() => undefined)
+  const kept = held === undefined || JSON.stringify(held) === JSON.stringify(known) ? index : withKnownMarks(index, held)
   const at = await $.clock.now()
-  await $.store.set(CONCEPTS_KEY, markedConcepts(index, at))
+  await $.store.set(CONCEPTS_KEY, markedConcepts(kept, at))
   markedSeen += 1
   await keepOldWrites($, at)
 }

@@ -8,6 +8,7 @@ import {
   cleanMarkedConcepts,
   cleanOldWrites,
   conceptKey,
+  indexPrint,
   isMarkedIndex,
   knownMarks,
   markedConcepts,
@@ -106,8 +107,29 @@ describe('1.9.0: the writer\'s mark in the concept index, read with no copy (F1)
     expect(cleanOldWrites({ since: NOW, n: -4 })).toEqual({ since: NOW, n: 0 })
     expect(cleanOldWrites({ since: NOW, last: 'x', n: 'y' })).toEqual({ since: NOW, n: 0 })
     for (const raw of [undefined, null, NOW, [], { n: 3 }, { since: 'x', n: 1 }, { since: Number.NaN, n: 1 }]) expect(cleanOldWrites(raw)).toBeUndefined()
+    // The last write's print (review of 1/5): beside a last time alone, and only as indexPrint makes one.
+    const w = indexPrint({ [conceptKey('map')]: concept('map') })
+    expect(cleanOldWrites({ since: NOW, last: NOW + DAY, n: 3, w })).toEqual({ since: NOW, last: NOW + DAY, n: 3, w })
+    expect(cleanOldWrites({ since: NOW, n: 0, w })).toEqual({ since: NOW, n: 0 })
+    for (const bad of ['', 'ABC', 'a-b', '12345678', 7, null]) expect(cleanOldWrites({ since: NOW, last: NOW + DAY, n: 3, w: bad })).toEqual({ since: NOW, last: NOW + DAY, n: 3 })
     // Under 100 bytes at its longest.
-    expect(JSON.stringify({ since: NOW, last: NOW, n: OLD_WRITES_MAX }).length).toBeLessThan(100)
+    expect(JSON.stringify({ since: NOW, last: NOW, n: OLD_WRITES_MAX, w: 'zzzzzzz' }).length).toBeLessThan(100)
+  })
+
+  test('indexPrint: the same index the same print, seven characters of base 36 at most; a change to any concept another', () => {
+    const stored = storedConcepts(indexOf([concept('클로저', { knownAt: NOW - DAY }), concept('map', { step: 2, reviewedAt: NOW - 3 * DAY })]))
+    const print = indexPrint(stored)
+    expect(print).toMatch(/^[0-9a-z]{1,7}$/)
+    expect(indexPrint(json(stored))).toBe(print)
+    const map = stored[conceptKey('map')] as LearnConcept
+    const changed = [
+      { ...stored, [conceptKey('map')]: { ...map, count: map.count + 1 } },
+      { ...stored, [conceptKey('map')]: { ...map, step: 3 } },
+      { ...stored, [conceptKey('클로저')]: { ...(stored[conceptKey('클로저')] as LearnConcept), knownAt: undefined } },
+      { ...stored, [conceptKey('for')]: concept('for') },
+    ]
+    for (const other of changed) expect(indexPrint(json(other))).not.toBe(print)
+    expect(new Set(changed.map(other => indexPrint(json(other)))).size).toBe(changed.length)
   })
 })
 

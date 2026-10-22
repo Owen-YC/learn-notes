@@ -3235,23 +3235,45 @@ export function cleanMarkedConcepts(raw: unknown, aliases: Readonly<Record<strin
 
 /**
  * The store's `oldWrites` (1.9.0), for /learn 진단 and for a later build that stops writing the known and step
- * copies: when 1.9.0 or later first wrote a marked index on this device (`since`), when one last read an index a
- * build before it wrote over that (`last`, absent while none was seen), and how many times it read one (`n`, about,
- * OLD_WRITES_MAX at most). Under 100 bytes, under a key of its own: no build before 1.9.0 knows it to write it away.
+ * copies: when 1.9.0 or later first wrote a marked index on this device (`since`); of the index writes a build
+ * before it made since, how many one read, each once (`n`, about, OLD_WRITES_MAX at most), when it first read the
+ * last of them (`last`, absent while none was read), and that one's print (`w`, indexPrint), so the same write read
+ * again by a later load or another window is not counted again. Under 100 bytes, under a key of its own: no build
+ * before 1.9.0 knows it to write it away.
  */
-export type OldWrites = { since: number; last?: number; n: number }
+export type OldWrites = { since: number; last?: number; n: number; w?: string }
 
 /** The count `oldWrites` keeps at most. */
 export const OLD_WRITES_MAX = 9999
 
-/** The store's `oldWrites` read back (OldWrites); undefined when it holds none, or one with no `since`. */
+/**
+ * The store's `oldWrites` read back (OldWrites); undefined when it holds none, or one with no `since`. A print is
+ * kept beside a last time alone, and only as indexPrint makes one.
+ */
 export function cleanOldWrites(raw: unknown): OldWrites | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
-  const { since, last, n } = raw as Record<string, unknown>
+  const { since, last, n, w } = raw as Record<string, unknown>
   if (typeof since !== 'number' || !Number.isFinite(since)) return undefined
   const count = typeof n === 'number' && Number.isFinite(n) ? Math.max(0, Math.min(OLD_WRITES_MAX, Math.floor(n))) : 0
+  if (typeof last !== 'number' || !Number.isFinite(last)) return { since, n: count }
   // A last time is one seen at least.
-  return typeof last === 'number' && Number.isFinite(last) ? { since, last, n: Math.max(1, count) } : { since, n: count }
+  return { since, last, n: Math.max(1, count), ...(typeof w === 'string' && /^[0-9a-z]{1,7}$/.test(w) ? { w } : {}) }
+}
+
+/**
+ * A short print of a concept index with no writer's mark as the store holds it (`raw`): its JSON text's FNV-1a, 32
+ * bits in base 36, seven characters at most. Kept in `oldWrites` (`w`) for the old build's write counted last: the
+ * same write read again has the same print, and a write that changes any concept almost surely another. Never a
+ * name: nothing of a concept can be read back from it.
+ */
+export function indexPrint(raw: unknown): string {
+  const text = JSON.stringify(raw) ?? ''
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(36)
 }
 
 /** The known marks of an index by key, kept under a store key of their own: a 1.5 session writing the index drops the field. */

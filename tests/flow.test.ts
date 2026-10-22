@@ -7,6 +7,7 @@ import {
   cleanConcepts,
   cleanMarkedConcepts,
   conceptKey,
+  indexPrint,
   journalPath,
   knownMarks,
   markedConcepts,
@@ -16,6 +17,7 @@ import {
   rootTag,
   stamp,
   stepMarks,
+  storedConcepts,
   withKnownMarks,
 } from '../hooks/notes'
 import { COEXIST_CASES, COEXIST_MIXED, type CoexistStore } from './fixtures/coexist19'
@@ -12994,14 +12996,15 @@ describe('1.9.0: the writer\'s mark, the known and step copies unread under it, 
     await w.clock.settle()
     expect(copies(w)).toEqual([])
     expect(w.sets).not.toContain('concepts')
-    // A grade: read alone, each copy read once just before its write (1.8.0 E1), the step's written, the known one not.
+    // A grade: read alone, each copy read once just before its write (1.8.0 E1), and the known one again just before
+    // the index's (another window's mark written meanwhile kept), the step's written, the known one not.
     await w.clock.advance(HOUR)
     w.gets.length = 0
     w.sets.length = 0
     w.answer = '판정: 맞음\n피드백: 정확합니다.'
     await learn($, 'quiz 1 새 배열을 만들어요')
     await w.clock.settle()
-    expect(copies(w)).toEqual(['known', 'steps'])
+    expect(copies(w)).toEqual(['known', 'steps', 'known'])
     expect(w.sets).toEqual(expect.arrayContaining(['steps', 'concepts']))
     expect(w.sets).not.toContain('known')
     const graded = conceptIn(store, 'map')
@@ -13017,7 +13020,7 @@ describe('1.9.0: the writer\'s mark, the known and step copies unread under it, 
       w.gets.length = 0
       w.sets.length = 0
       expect((await learn($, `${word} 클로저`)).text).toStartWith(reply)
-      expect(copies(w)).toEqual(['known', 'steps'])
+      expect(copies(w)).toEqual(['known', 'steps', 'known'])
       expect(w.sets).toEqual(expect.arrayContaining(['known', 'concepts']))
       expect(w.sets).not.toContain('steps')
       expect(markOf(store)).toBe(w.clock.now())
@@ -13030,7 +13033,7 @@ describe('1.9.0: the writer\'s mark, the known and step copies unread under it, 
     w.answer = CONCEPT_NOTE(['for...of 반복문'])
     await turn($, () => $.tool.call(EDIT_A))
     await finish(w)
-    expect(copies(w)).toEqual(['known', 'steps'])
+    expect(copies(w)).toEqual(['known', 'steps', 'known'])
     expect(w.sets).toContain('concepts')
     expect(w.sets).not.toContain('known')
     expect(w.sets).not.toContain('steps')
@@ -13056,8 +13059,8 @@ describe('1.9.0: the writer\'s mark, the known and step copies unread under it, 
     w.answer = CONCEPT_NOTE(['for...of 반복문'])
     await turn($, () => $.tool.call(EDIT_A))
     await finish(w)
-    // Read with the index, then again just before its write.
-    expect(copies(w).filter(key => key === 'known')).toHaveLength(2)
+    // Read with the index, then again just before its copy's write and the index's.
+    expect(copies(w).filter(key => key === 'known')).toHaveLength(3)
     expect(typeof markOf(store)).toBe('number')
     expect(conceptIn(store, '클로저').knownAt).toBe(KNOWN.knownAt)
     expect(conceptIn(store, 'map').step).toBe(1)
@@ -13110,31 +13113,35 @@ describe('1.9.0: the writer\'s mark, the known and step copies unread under it, 
     await finish(w)
     expect(w.sets).toContain('concepts')
     expect(w.sets).not.toContain('oldWrites')
-    // A 1.8.0 window writes the index: the mark is gone. This one's next read counts it.
+    // Read once a load, at its first index write.
+    expect(w.gets.filter(key => key === 'oldWrites')).toEqual(['oldWrites'])
+    // A 1.8.0 window writes the index: the mark is gone. This one's next read counts it, with the write's print.
     await w.clock.advance(HOUR)
     oldWrite(store)
     const seenAt = w.clock.now()
+    const print = indexPrint(store.get('concepts'))
     await learn($, '보고서')
     await w.clock.settle()
-    expect(store.get('oldWrites')).toEqual({ since, last: seenAt, n: 1 })
+    expect(store.get('oldWrites')).toEqual({ since, last: seenAt, n: 1, w: print })
     // Read again with no marked index between: the same write, counted once.
     await w.clock.advance(HOUR)
     await start($)
     await learn($, '보고서')
     await w.clock.settle()
-    expect(store.get('oldWrites')).toEqual({ since, last: seenAt, n: 1 })
-    // Another 1.9.0 window writes the index, read here marked; then an old window's write again: twice.
+    expect(store.get('oldWrites')).toEqual({ since, last: seenAt, n: 1, w: print })
+    // Another 1.9.0 window writes the index, read here marked; then an old window's write again: twice, though it
+    // holds what the first did (the mark seen since tells the two apart).
     await w.clock.advance(HOUR)
     store.set('concepts', markedConcepts(cleanConcepts(store.get('concepts')), w.clock.now()))
     await learn($, '보고서')
     await w.clock.settle()
-    expect(store.get('oldWrites')).toEqual({ since, last: seenAt, n: 1 })
+    expect(store.get('oldWrites')).toEqual({ since, last: seenAt, n: 1, w: print })
     await w.clock.advance(HOUR)
     oldWrite(store)
     const againAt = w.clock.now()
     await learn($, '보고서')
     await w.clock.settle()
-    expect(store.get('oldWrites')).toEqual({ since, last: againAt, n: 2 })
+    expect(store.get('oldWrites')).toEqual({ since, last: againAt, n: 2, w: print })
     // Nothing of a concept in it.
     expect(JSON.stringify(store.get('oldWrites'))).not.toMatch(/c:|for|화살표|구조/)
   })
@@ -13220,6 +13227,124 @@ describe('1.9.0: the writer\'s mark, the known and step copies unread under it, 
     expect(await storeLine($)).toEndWith(' · 옛 판 창의 개념 모음 쓰기: 읽지 못함')
   })
 
+  test('oldWrites: a later load reading the old build\'s write an earlier load counted counts it no more; its last time and count stay (review of 1/5)', async ($, on) => {
+    const index = { [conceptKey('map')]: DUE }
+    const counted = { since: SINCE, last: NOW - 2 * DAY, n: 1, w: indexPrint(index) }
+    const store = new Map<string, unknown>([
+      ['stepsFrom', 0],
+      ['concepts', index],
+      ['steps', { [conceptKey('map')]: [DUE.step, DUE.reviewedAt] }],
+      ['oldWrites', counted],
+    ])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    await w.clock.settle()
+    await learn($, '보고서')
+    await w.clock.settle()
+    expect(w.sets).not.toContain('oldWrites')
+    expect(store.get('oldWrites')).toEqual(counted)
+    const last = stamp(NOW - 2 * DAY)
+    expect(await storeLine($)).toEndWith(` · 옛 판 창의 개념 모음 쓰기: 마지막 ${last.day.slice(5)} ${last.time} (${stamp(SINCE).day.slice(5)}부터 1번)`)
+    // The old window writes again: a write of its own, counted.
+    await w.clock.advance(HOUR)
+    store.set('concepts', { [conceptKey('map')]: { ...DUE, count: DUE.count + 1 } })
+    const seenAt = w.clock.now()
+    await learn($, '보고서')
+    await w.clock.settle()
+    expect(store.get('oldWrites')).toEqual({ since: SINCE, last: seenAt, n: 2, w: indexPrint(store.get('concepts')) })
+  })
+
+  test('oldWrites: an old build\'s write another 1.9.0 window counted first is not counted again here (review of 1/5)', async ($, on) => {
+    const store = marked([DUE])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    await w.clock.settle()
+    await w.clock.advance(HOUR)
+    oldWrite(store)
+    // Another 1.9.0 window read it first, and counted it.
+    const counted = { since: SINCE, last: w.clock.now(), n: 1, w: indexPrint(store.get('concepts')) }
+    store.set('oldWrites', counted)
+    await w.clock.advance(HOUR)
+    await learn($, '보고서')
+    await w.clock.settle()
+    expect(store.get('oldWrites')).toEqual(counted)
+  })
+
+  test('oldWrites: a later load\'s first index write leaves the record it finds (review of 1/5)', async ($, on) => {
+    const store = marked()
+    const held = { since: NOW - 30 * DAY, last: NOW - 2 * DAY, n: 3, w: 'abc12' }
+    store.set('oldWrites', held)
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(w.sets).toContain('concepts')
+    expect(w.sets).not.toContain('oldWrites')
+    expect(store.get('oldWrites')).toEqual(held)
+  })
+
+  test('oldWrites: kept once the marked index is written: a first index write refused keeps none, the next keeps it (review of 1/5)', async ($, on) => {
+    let isRefused = true
+    on('store.set', { key: 'concepts' }, async (_$, e, next) => (isRefused ? { deny: 'refused' } : next(e)))
+    const store = new Map<string, unknown>([['stepsFrom', 0]])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await turn($, () => $.tool.call(EDIT_A), 't1')
+    await finish(w)
+    expect(store.has('concepts')).toBe(false)
+    expect(store.has('oldWrites')).toBe(false)
+    isRefused = false
+    await w.clock.advance(HOUR)
+    w.answer = CONCEPT_NOTE(['화살표 함수'])
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    expect(store.get('oldWrites')).toEqual({ since: markOf(store), n: 0 })
+  })
+
+  test('a 1.8.0 window\'s /learn 안다 landing inside this one\'s index write, after its known copy: the mark kept, as 1.8.0 kept it (review of 1/5)', async ($, on) => {
+    const KAT = NOW - HOUR
+    let isArmed = false
+    let hasLanded = false
+    on('store.get', { key: 'steps' }, async (_$, e, next) => {
+      if (isArmed) {
+        isArmed = false
+        hasLanded = true
+        // A 1.8.0 window's /learn 안다 클로저, read through the copies: its three writes, the index last with no mark.
+        const read = as16(store)
+        const next18 = { ...read, [conceptKey('클로저')]: { ...read[conceptKey('클로저')]!, knownAt: KAT } }
+        store.set('known', JSON.parse(JSON.stringify(knownMarks(next18))))
+        store.set('steps', JSON.parse(JSON.stringify(stepMarks(next18))))
+        store.set('concepts', JSON.parse(JSON.stringify(storedConcepts(next18))))
+      }
+      return next(e)
+    })
+    const store = marked([{ ...KNOWN, knownAt: undefined }, DUE])
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    await w.clock.settle()
+    // This one's next note: its index read marked, the step copy read for its write after the known one.
+    isArmed = true
+    w.answer = CONCEPT_NOTE(['for...of 반복문'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(hasLanded).toBe(true)
+    // This one wrote last, the other window's mark in it.
+    expect(typeof markOf(store)).toBe('number')
+    expect(conceptIn(store, 'for...of 반복문').count).toBe(1)
+    expect(cleanMarkedConcepts(store.get('concepts'))[conceptKey('클로저')]!.knownAt).toBe(KAT)
+    // Kept at this one's next write, read either way.
+    w.answer = CONCEPT_NOTE(['화살표 함수'])
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    expect(store.get('known')).toEqual({ [conceptKey('클로저')]: KAT })
+    expect(cleanMarkedConcepts(store.get('concepts'))[conceptKey('클로저')]!.knownAt).toBe(KAT)
+    expect(as16(store)[conceptKey('클로저')]!.knownAt).toBe(KAT)
+    // The step 1.8.0 would have lowered (its copy not its own) stays.
+    expect(conceptIn(store, 'map')).toMatchObject({ step: 2, reviewedAt: DUE.reviewedAt })
+  })
+
   test('/learn 진단\'s store line: nothing before 1.9.0 marked the index here, then none seen since when, then the last seen and how often', async ($, on) => {
     const store = new Map<string, unknown>([['stepsFrom', 0]])
     const w = world(on, 'ok', null, true, store)
@@ -13250,7 +13375,7 @@ describe('1.9.0: the writer\'s mark, the known and step copies unread under it, 
       await start($)
       await w.clock.settle()
       expect(copies(w)).toEqual(expect.arrayContaining(['known', 'steps']))
-      expect(store.get('oldWrites')).toEqual({ since: one.since, last: NOW, n: 1 })
+      expect(store.get('oldWrites')).toEqual({ since: one.since, last: NOW, n: 1, w: indexPrint(one.store.concepts) })
       w.answer = CONCEPT_NOTE(['옵셔널 체이닝'])
       await turn($, () => $.tool.call(EDIT_A))
       await finish(w)
