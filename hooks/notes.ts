@@ -4720,35 +4720,61 @@ export const KIND_LABEL: Readonly<Record<QuizKind, string>> = { predict: '예측
 /**
  * Which code a quiz question asks in (1.8.0, the question ladder), set by the concept's review step and never chosen
  * by the learner: its own code as the note met it, that code with one value, condition or order changed so the answer
- * remembered no longer fits, code never seen (off in 1.8.0), or a worked example first once it was missed twice running.
+ * remembered no longer fits (off from 1.9.0), code never seen (off in 1.8.0 and 1.9.0), or a worked example first once
+ * it was missed twice running.
  */
 export type QuizRung = NonNullable<LearnQuizItem['rung']>
 
 /** Each rung as the quiz prompt names it; the pane's title and the conversation name only 비슷한 코드, 풀이 보고 풀기 (and 처음 보는 코드). */
 export const RUNG_LABEL: Readonly<Record<QuizRung, string>> = { worked: '풀이 보고 풀기', mine: '내 코드', changed: '비슷한 코드', new: '처음 보는 코드' }
 
-/** The review step from which a concept is asked in its code changed (비슷한 코드): the third, a week after the last. */
-export const RUNG_CHANGED_STEP = 2
+/**
+ * The review step from which a concept is asked in its code changed (비슷한 코드): the third, a week after the last, as
+ * 1.8.0 shipped it (2). Off from 1.9.0: measured again as the plugin calls (effort low, docs/qa/견본.md), it kept the
+ * learner's code as it was in too many questions, and once its sentence was mended one answer it wrote was wrong; a
+ * concept is asked in its own code until a sample shows it right.
+ */
+export const RUNG_CHANGED_STEP = Infinity
 /**
  * The review step from which a concept due is asked in code never seen (처음 보는 코드). Off in 1.8.0: that question's
  * answer is the model's too, and a wrong one would cost a concept weeks of steps; on (4) once a sample shows it right.
+ * Off in 1.9.0 too: in its run-checked sample (docs/qa/견본.md) the answers were right once the R line was in, but too
+ * many replies ran out of room (maxTokens), the last question cut or none at all, and the grade took an answer with one
+ * value of several wrong for 거의 more often than the bar allows.
  */
 export const RUNG_NEW_STEP = Infinity
 /** Misses running on one concept (its open slip's `times`) after which the next review quiz shows a worked example first. */
 export const WORKED_AFTER_TIMES = 2
+/**
+ * The ladder's switches a load runs with (1.9.0): each its constant above, which a release sets by its samples
+ * (docs/qa/견본.md); a test harness may run a load with others (register.tsx `build`).
+ */
+export type LadderSteps = { changedStep: number; workedAfter: number }
 /** The languages a question in code never seen may be written in: the ones its samples could run. */
 const RUNG_NEW_EXTS: readonly string[] = ['js', 'mjs', 'cjs', 'ts', 'py']
 
 /** What each rung asks of the quiz, said only for the rungs the quiz has, in this order. */
 const RUNG_ASK: readonly [QuizRung, string][] = [
   ['mine', '내 코드: 학습자가 만든 코드를 그대로 보여 주고 묻는다.'],
-  ['changed', '비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 보여 주고 묻는다. 원래 코드의 답으로는 맞힐 수 없게 바꾼다.'],
-  ['new', '처음 보는 코드: 학습자 코드와 다른 상황에서 그 개념을 쓰는 8줄 이하 코드를 새로 써서 묻는다. 괄호 안 언어로, 기본 기능만 쓰고 결과가 하나로 정해지게 쓴다.'],
+  [
+    'changed',
+    '비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 보여 주고 묻는다. 원래 코드의 답으로는 맞힐 수 없게 바꾼다. 바꿔 보기로 낼 때도 학습자 코드를 그대로 보이거나 몇 줄만 떼어 보이지 않고, 한 곳을 바꾼 코드에서 묻는다.',
+  ],
+  [
+    'new',
+    '처음 보는 코드: 학습자 코드와 다른 상황(다른 이름·값·쓰임)에서 그 개념을 쓰는 8줄 이하 코드를 괄호 안 언어로 새로 써서 예측으로 묻는다. 다른 문제와 유형이 겹쳐도 이 칸은 예측으로 낸다. 그 언어에 기본으로 든 기능만 쓰고, 라이브러리의 동작을 흉내 낸 코드는 쓰지 않는다. 파일·네트워크·입력·시간·난수, 브라우저 화면(document·window·localStorage·alert)과 Node 모듈(fs·process)은 쓰지 않고 console.log나 print로만 찍는다. 출력은 3줄 이하로, 줄마다 숫자·문자열·참거짓·undefined·null·None 하나를 40자 이하로 찍는다(배열·객체를 통째로 찍지 않는다). A 바로 앞에 같은 번호의 R 줄(예: R2:)을 두어 코드를 한 줄씩 따라간 과정을 쓰고, A에는 찍히는 글자만 줄마다 그대로 쓴다(설명을 붙이지 않는다). 문제(Q)에는 출력값이나 따라간 과정을 쓰지 않는다. 그 개념이 라이브러리나 프레임워크가 있어야 보일 수 있는 것이면 코드 없이 왜로 묻는다.',
+  ],
   [
     'worked',
     '풀이 보고 풀기: 문제를 "풀이:"로 시작해, "지난번" 줄의 헷갈림이 드러나는 4줄 이하 예와 그 결과, 까닭 한 문장을 먼저 보인다. 여기서는 까닭에 헷갈린 점을 풀어 써도 된다. 헷갈린 점이 없으면(떠올리지 못함) 그 개념의 기본 쓰임을 풀이로 보인다. 이어서 "이제 풀어 보세요:" 뒤에 같은 원리를 다른 값으로 묻는다. 풀이의 결과와 문제의 답이 같지 않게 한다. 힌트에서 풀이를 되풀이하지 않는다.',
   ],
 ]
+
+/**
+ * The format's line for the trace a question in code never seen writes before its answer (1.9.0 F3, R{n}): read as a
+ * marker of its own and dropped (parseQuiz), so the answer kept is what the code prints and the hint holds no trace.
+ */
+const NEW_TRACE_LINE = 'R1: (칸이 "처음 보는 코드"인 문제만: 코드를 한 줄씩 따라간 과정)'
 
 /** Said when a quiz has a rung whose code the quiz writes itself, over QUIZ_SYSTEM's "only in the words and code given". */
 const RUNG_WRITES = "'처음 보는 코드'·'풀이 보고 풀기' 칸은 그 개념을 쓰는 짧은 코드를 새로 쓴다. 그 밖에는 주어진 설명과 코드 안에서만 묻는다."
@@ -4768,24 +4794,52 @@ export function extOf(file: string): string | undefined {
 
 /**
  * Which code a picked concept is asked in, the first that fits: none for a team term of this repository (asked by the
- * team's words and lines, as in 1.7); a worked example once its open slip, asked again, was missed WORKED_AFTER_TIMES
- * times running and not set right on the try again (`isRight`); none for any other open slip (다시 도전, as in 1.7) or
- * a concept with no code (asked why); code never seen from `newStep` on, for a concept due whose code a sample could
- * run; its code changed from RUNG_CHANGED_STEP on (any language, a concept filling the quiz before it is due too);
- * else its own code.
+ * team's words and lines, as in 1.7); a worked example once its open slip, asked again, was missed `workedAfter`
+ * (WORKED_AFTER_TIMES) times running and not set right on the try again (`isRight`); none for any other open slip
+ * (다시 도전, as in 1.7) or a concept with no code (asked why); code never seen from `newStep` on, for a concept due
+ * whose code a sample could run and needs nothing but its language (1.9.0: none that a library, a framework or a
+ * browser runs, isUnrunnableCode, asked as before); its code changed from `changedStep` (RUNG_CHANGED_STEP) on (any
+ * language, a concept filling the quiz before it is due too); else its own code.
  */
 export function rungOf(
   one: LearnConcept,
-  how: { code?: { file: string }; slip?: Pick<LearnSlip, 'times' | 'isRight'>; isAsking: boolean; isTeam: boolean; isDue: boolean },
+  how: { code?: { file: string; text?: string }; slip?: Pick<LearnSlip, 'times' | 'isRight'>; isAsking: boolean; isTeam: boolean; isDue: boolean },
   newStep = RUNG_NEW_STEP,
+  { changedStep = RUNG_CHANGED_STEP, workedAfter = WORKED_AFTER_TIMES }: Partial<LadderSteps> = {},
 ): QuizRung | undefined {
   if (how.isTeam) return undefined
-  if (how.slip) return how.isAsking && how.slip.times >= WORKED_AFTER_TIMES && how.slip.isRight !== true ? 'worked' : undefined
+  if (how.slip) return how.isAsking && how.slip.times >= workedAfter && how.slip.isRight !== true ? 'worked' : undefined
   if (!how.code) return undefined
   const step = stepOf(one)
   const ext = extOf(how.code.file)
-  if (step >= newStep && how.isDue && ext !== undefined && RUNG_NEW_EXTS.includes(ext)) return 'new'
-  return step >= RUNG_CHANGED_STEP ? 'changed' : 'mine'
+  const isRunnable = how.code.text === undefined || !isUnrunnableCode(how.code.text)
+  if (step >= newStep && how.isDue && ext !== undefined && RUNG_NEW_EXTS.includes(ext) && isRunnable) return 'new'
+  return step >= changedStep ? 'changed' : 'mine'
+}
+
+/** A module named by its bare name (`'react'`, `"lodash/debounce"`), not by a path (`./`, `../`, `/`) or `node:`. */
+const BARE_MODULE = String.raw`(['"\x60])(?!\.{0,2}\/|node:)[^'"\x60\s]+\1`
+/**
+ * Code a learner met that a library, a framework or a browser runs, which a question in code never seen (1.9.0 F3)
+ * could not show working in the language alone: a module imported (`from 'react'`, `import('x')`) or required by its
+ * bare name, a JSX component (`<Button`, not `a < B` or a type's `Array<Item>`), a hook called (`useState(`), an
+ * Express handler's `(req, res`, the browser's page, window, storage, events or alert, or a Python import line (the
+ * standard library's too, to be safe; not one relative to its package, `from .models import`).
+ */
+const UNRUNNABLE: readonly RegExp[] = [
+  new RegExp(String.raw`(?<![\w$.])(?:from\s*|import\s*\(?\s*|require\s*\(\s*)${BARE_MODULE}`),
+  /(?<![\w$)\]])<[A-Z][\w.]*[\s/>]/,
+  /(?<![\w$])use[A-Z]\w*\s*(?:<[^>\n]*>)?\s*\(/,
+  /\(\s*req\s*,\s*res\b/,
+  /(?<![\w$.])(?:document|window|localStorage|sessionStorage)\s*\./,
+  /\baddEventListener\s*\(/,
+  /(?<![\w$.])alert\s*\(/,
+  /^[ \t]*(?:import[ \t]+[A-Za-z_][\w.]*|from[ \t]+[A-Za-z_][\w.]*[ \t]+import\b)[^'"`\n]*$/m,
+]
+
+/** True when code a learner met needs a library, a framework or a browser to run (UNRUNNABLE). */
+export function isUnrunnableCode(text: string): boolean {
+  return UNRUNNABLE.some(pattern => pattern.test(text))
 }
 
 /**
@@ -5053,10 +5107,14 @@ function isShownAsItWas(code: { file: string; text: string }, question: string):
 
 /**
  * The rung a question keeps, read against what the model wrote: a worked example with no example shown (no 풀이:)
- * keeps none, nor code meant changed that is shown as it was (isShownAsItWas); any other keeps its pick's.
+ * keeps none, nor code meant changed that is shown as it was (isShownAsItWas), nor code never seen with no code shown;
+ * any other keeps its pick's.
  */
 function keptRung(pick: Pick<QuizPick, 'rung' | 'code'>, question: string): QuizRung | undefined {
   if (pick.rung === 'worked') return WORKED_SHOWN.test(question) ? 'worked' : undefined
+  // Code never seen (1.9.0 F3) is the rung of a question that shows code, of whatever kind, so a miss steps it back
+  // one only (markFor); one asked with none (a concept the model found a library needed) is a why as in 1.7.
+  if (pick.rung === 'new') return shownCode(question).some(piece => piece.text.trim() !== '') ? 'new' : undefined
   if (pick.rung === 'changed' && pick.code && isShownAsItWas(pick.code, question)) return undefined
   return pick.rung
 }
@@ -5207,7 +5265,8 @@ export const QUIZ_SYSTEM = [
  * `(팀 용어)`, carries the team's lines under their own head (`팀 코드 (fetcher.ts 12~30줄)`) when it has them, and the
  * quiz is told the team's words and lines are data (TEAM_IS_DATA). A concept on a rung of the question ladder (1.8.0)
  * says it under its head (`칸: 비슷한 코드`), and the quiz is told what each of its rungs asks (RUNG_ASK); one asked by
- * a worked example has its slip shown in the example, so the sentence that keeps a slip unsaid leaves it out.
+ * a worked example has its slip shown in the example, so the sentence that keeps a slip unsaid leaves it out. A quiz
+ * with code never seen (1.9.0 F3) is shown an R line in its format, the trace its answer is written after.
  */
 export function quizPrompt(
   picks: readonly (LearnConcept & Pick<QuizPick, 'code' | 'slip' | 'team' | 'teamCode' | 'isTeamMarked' | 'rung' | 'lang'>)[],
@@ -5252,6 +5311,7 @@ export function quizPrompt(
     'T1: (예측 · 왜 · 바꿔 보기 중 하나)',
     'Q1: (문제 한두 문장)',
     'H1: (힌트 한 문장)',
+    ...(rungs.has('new') ? [NEW_TRACE_LINE] : []),
     'A1: (답 한두 문장)',
     'T2: …',
     'Q2: …',
@@ -5878,15 +5938,15 @@ export const WORKED_NEXT = '다음 복습 퀴즈는 풀이부터 보여 줍니�
  * True when a graded question's concept is asked by a worked example in the next review quiz (rungOf): its slip
  * (`record`, as the store has it after the grade) open, kept by this very grade (so the next quiz asks it again,
  * slipsToAsk: a grade that kept no miss, as wrong once the answer is seen, leaves it gone over), missed
- * WORKED_AFTER_TIMES times running, not set right on a try again, and the question no team term's (asked by the
- * team's words, as in 1.7).
+ * `workedAfter` (WORKED_AFTER_TIMES) times running, not set right on a try again, and the question no team term's
+ * (asked by the team's words, as in 1.7).
  */
-export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuizItem, 'team' | 'gradedAt'>): boolean {
+export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuizItem, 'team' | 'gradedAt'>, workedAfter = WORKED_AFTER_TIMES): boolean {
   return (
     record !== undefined &&
     record.fixedAt === undefined &&
     record.at === item.gradedAt &&
-    record.times >= WORKED_AFTER_TIMES &&
+    record.times >= workedAfter &&
     record.isRight !== true &&
     item.team !== true
   )
@@ -5905,6 +5965,7 @@ export function slipNotice(
   item: Pick<LearnQuizItem, 'result' | 'gradedAt' | 'isRetry' | 'mine' | 'slip' | 'slipType' | 'firstTry' | 'rung' | 'team'>,
   record: LearnSlip | undefined,
   isHelped: boolean,
+  workedAfter = WORKED_AFTER_TIMES,
 ): SlipNotice | undefined {
   const at = item.gradedAt
   if (item.result === undefined || at === undefined) return undefined
@@ -5914,7 +5975,7 @@ export function slipNotice(
     // Missed again where it was asked again: the same slip once more, unless this answer showed another in its place.
     if ((item.isRetry || item.rung === 'worked') && open && !(isNow && open.times === 1)) return { kind: 'again', text: SLIP_AGAIN }
     if (!isNow) return undefined
-    const isWorked = isWorkedNext(open, item)
+    const isWorked = isWorkedNext(open, item, workedAfter)
     // An answer with nothing to read a slip from is said as such, though a slip with words stays open (nextSlip).
     const found = slipFrom(item)
     if (open.type === 'blank' || found?.type === 'blank') {
@@ -5974,25 +6035,28 @@ export function listItem(n: number, text: string): string {
  * next marker; a hint or a kind may be missing.
  */
 export function parseQuiz(text: string, picks: readonly QuizPick[]): LearnQuizItem[] {
-  const aware = quizItems(quizParts(text, true), picks)
+  // A question in code never seen (1.9.0 F3) traces its code on an R line before its answer: a marker too, then dropped.
+  const markers = picks.some(one => one.rung === 'new') ? 'QHATR' : 'QHAT'
+  const aware = quizItems(quizParts(text, true, markers), picks)
   // A fence the model left open would hide every marker after it: then read it as if there were no code.
-  return aware.length >= picks.length ? aware : [aware, quizItems(quizParts(text, false), picks)].reduce((a, b) => (b.length > a.length ? b : a))
+  return aware.length >= picks.length ? aware : [aware, quizItems(quizParts(text, false, markers), picks)].reduce((a, b) => (b.length > a.length ? b : a))
 }
 
 /** A line that only opens or closes a code block (a language name may follow): not one holding code on it too. */
 const BARE_FENCE = /^\s*(`{3,}|~{3,})[\w+.-]*\s*$/
 
 /**
- * Each marker's text (T1, Q1, H1, A1, …), the lines after it included. With
+ * Each marker's text (T1, Q1, H1, A1, …; R1 too among `markers`, 1.9.0), the lines after it included. With
  * `isFenceAware`, a capital marker inside a code block is the code's own line
  * (`h1.textContent`, `T1.textContent`, `a1.`); a marker seen twice keeps its first text.
  */
-function quizParts(text: string, isFenceAware: boolean): Map<string, string[]> {
+function quizParts(text: string, isFenceAware: boolean, markers = 'QHAT'): Map<string, string[]> {
   const parts = new Map<string, string[]>()
+  const marker = new RegExp(`^\\s*(?:\\*\\*)?([${markers}])\\s*(\\d+)\\s*(?:\\*\\*)?\\s*[:.)：]\\s*(?:\\*\\*)?\\s*(.*)$`)
   let current: string[] | undefined
   let fence: string | null = null
   for (const raw of text.split('\n')) {
-    const m = fence !== null ? null : /^\s*(?:\*\*)?([QHAT])\s*(\d+)\s*(?:\*\*)?\s*[:.)：]\s*(?:\*\*)?\s*(.*)$/.exec(raw)
+    const m = fence !== null ? null : marker.exec(raw)
     const key = m ? `${m[1]}${Number(m[2])}` : undefined
     if (m && key && !parts.has(key)) {
       current = [m[3]!.replace(/\*\*$/, '')]
@@ -7070,6 +7134,15 @@ export function newerBuild(stamps: Readonly<Record<string, SessionStamp>>, id: s
     if (compareVersions(one.v, newest ?? mine) > 0) newest = one.v
   }
   return newest
+}
+
+/**
+ * True when another session (not `id`) of a build before 1.8.0 stamped within STAMP_LIVE_MS (1.9.0 F3): that window
+ * reads the quiz every window shares and knows no rung, so a miss there in code never seen would put the concept back
+ * to its first step; a quiz made meanwhile asks in no code never seen.
+ */
+export function isOldGraderOpen(stamps: Readonly<Record<string, SessionStamp>>, id: string | undefined, now: number): boolean {
+  return Object.entries(stamps).some(([other, one]) => other !== id && now - one.at <= STAMP_LIVE_MS && compareVersions(one.v, '1.8.0') < 0)
 }
 
 /** The other sessions' stamps (not `id`), the newest first: /learn 진단's 다른 창 line. */

@@ -38,10 +38,14 @@ import {
   markWrong,
   marksOf,
   bankQuestion,
+  isOldGraderOpen,
   isWorkedNext,
   pickForRung,
   rungOf,
+  RUNG_CHANGED_STEP,
   RUNG_LABEL,
+  RUNG_NEW_STEP,
+  WORKED_AFTER_TIMES,
   WORKED_NEXT,
   regrade,
   type Mark,
@@ -638,16 +642,23 @@ function enqueue<T>(lane: keyof typeof lanes, work: () => Promise<T>): Promise<T
 let myVersion: string | undefined
 /**
  * The model-gated items' switches this load runs with (1.9.0): each its constant in notes.ts, which a release sets
- * by its samples (docs/qa/견본.md) — `isRuleDrill`, IS_RULE_DRILL (F2). A test's harness turns one the other way
- * through the plugin.json it serves (its `harness` object, read with the version at session start, readManifest),
- * so both states are tested whichever one ships. A release's plugin.json has none: only the build's own files can,
- * and /learn 진단 names a switch that runs the other way (switched), so a copy someone turned one in is seen to be.
+ * by its samples (docs/qa/견본.md) — `isRuleDrill`, IS_RULE_DRILL (F2); the question ladder's steps (F3, F4):
+ * `rungNewStep` RUNG_NEW_STEP, `rungChangedStep` RUNG_CHANGED_STEP, `workedAfterTimes` WORKED_AFTER_TIMES, each
+ * Infinity for its rung off. A test's harness turns one the other way through the plugin.json it serves (its
+ * `harness` object, read with the version at session start, readManifest; a step there a whole number, or null for
+ * off), so both states are tested whichever one ships. A release's plugin.json has none: only the build's own files
+ * can, and /learn 진단 names a switch that runs the other way (switched), so a copy someone turned one in is seen to be.
  */
-const build = { isRuleDrill: IS_RULE_DRILL }
+const build = { isRuleDrill: IS_RULE_DRILL, rungNewStep: RUNG_NEW_STEP, rungChangedStep: RUNG_CHANGED_STEP, workedAfterTimes: WORKED_AFTER_TIMES }
 /** The switches as the build's constants set them, which no harness turns: /learn 진단 names one that differs (switched). */
 const RELEASE: Readonly<typeof build> = { ...build }
 /** Each switch's name in /learn 진단. */
-const SWITCH_NAMES: Record<keyof typeof build, string> = { isRuleDrill: '팀 규칙 연습' }
+const SWITCH_NAMES: Record<keyof typeof build, string> = {
+  isRuleDrill: '팀 규칙 연습',
+  rungNewStep: '처음 보는 코드 단계',
+  rungChangedStep: '비슷한 코드 단계',
+  workedAfterTimes: '풀이 보고 풀기 오답 수',
+}
 
 /** The switches this load runs the other way from its build's constants (a harness's), with their state, for /learn 진단. */
 function switched(): string[] {
@@ -655,8 +666,19 @@ function switched(): string[] {
     .filter(key => build[key] !== RELEASE[key])
     .map(key => {
       const value = build[key]
-      return `${SWITCH_NAMES[key]} ${typeof value === 'boolean' ? (value ? '켬' : '끔') : String(value)}`
+      return `${SWITCH_NAMES[key]} ${typeof value === 'boolean' ? (value ? '켬' : '끔') : value === Infinity ? '끔' : String(value)}`
     })
+}
+
+/** A ladder step a harness gives (build): a whole number from 0, or null for the rung off; else the build's own. */
+function harnessStep(value: unknown, own: number): number {
+  if (value === null) return Infinity
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : own
+}
+
+/** The ladder's steps as this load runs them (build), for rungOf, isWorkedNext and slipNotice. */
+function ladderSteps(): { changedStep: number; workedAfter: number } {
+  return { changedStep: build.rungChangedStep, workedAfter: build.workedAfterTimes }
 }
 /** This session's id, read at session start: the key of its stamp (SESSIONS_KEY); undefined when it cannot be read. */
 let mySessionId: string | undefined
@@ -2377,15 +2399,21 @@ function resultMark(item: LearnQuizItem): string {
   return item.result === 'right' ? '✓ 맞힘' : isPartly(item) ? '△ 거의 맞음' : '✗ 틀림'
 }
 
+/** Said of a miss in code never seen (1.9.0 F3): it steps its concept back one (markFor), not to the first. */
+const NEW_MISS_TEXT = '처음 보는 코드는 틀려도 한 단계만 내려갑니다'
+
 /**
  * What happens to the concepts a finished quiz missed (the wrong first next
- * time, the partly right a little sooner), and to the ones right after a hint,
- * a question asked back or the answer (back after as long again).
+ * time, the partly right a little sooner, one wrong in code never seen a step
+ * back only), and to the ones right after a hint, a question asked back or the
+ * answer (back after as long again).
  */
 function missesText(items: readonly LearnQuizItem[], separator = ' · '): string {
   const parts: string[] = []
-  if (items.some(item => item.result === 'wrong' && !isPartly(item))) parts.push('틀린 개념은 다음 퀴즈에 먼저 나옵니다')
+  const isMiss = (item: LearnQuizItem) => item.result === 'wrong' && !isPartly(item)
+  if (items.some(item => isMiss(item) && item.rung !== 'new')) parts.push('틀린 개념은 다음 퀴즈에 먼저 나옵니다')
   else if (items.some(isPartly)) parts.push('거의 맞힌 개념은 조금 일찍 다시 나옵니다')
+  if (items.some(item => isMiss(item) && item.rung === 'new')) parts.push(NEW_MISS_TEXT)
   if (items.some(item => item.result === 'right' && isHelpedGrade(item))) {
     // A worked example (1.8.0) is named among the help only when a question right after one is there.
     const isWorked = items.some(item => item.result === 'right' && item.rung === 'worked')
@@ -2521,6 +2549,18 @@ function metTeamConcepts(
 }
 
 /**
+ * The step from which this quiz asks a concept due in code never seen (build's, 1.9.0 F3): none (Infinity) while
+ * another window of a build before 1.8.0 is open on this device (isOldGraderOpen), or the stamps cannot be read.
+ */
+async function newStepNow($: EngineInterface, now: number): Promise<number> {
+  try {
+    return isOldGraderOpen(cleanStamps(await $.store.get(SESSIONS_KEY), now), mySessionId, now) ? Infinity : build.rungNewStep
+  } catch {
+    return Infinity
+  }
+}
+
+/**
  * Asks the model for a new quiz and keeps it; or says why there is none. The
  * concepts due first, taken from different notes where it can (a wrong one
  * always), never one marked known,
@@ -2595,6 +2635,10 @@ async function makeQuiz(
   // In the quiz's order: the concepts due, then the team terms not met, then the rest (a team quiz: the terms not met first).
   const candidates = isTeamQuiz ? [...fresh, ...marked] : [...marked.filter(isFirst), ...fresh, ...marked.filter(one => !isFirst(one))]
   const spread = spreadPicks(candidates, 3, isFirst, isAsking)
+  // Code never seen (1.9.0 F3) only while no window of a build before 1.8.0 stamped on this device within the half
+  // hour: that window reads this quiz too, and would put a concept missed there back to its first step. The stamps
+  // are read once a quiz, and only with the rung on; a store that cannot be read keeps it off for this quiz.
+  const newStep = build.rungNewStep === Infinity ? Infinity : await newStepNow($, now)
   // Each team term asked by the lines its words name (three files read at most), over the learner's code; then its slip.
   // It keeps this repository and the words its grade puts in the concept index: a quiz may be graded in any window.
   const picks: QuizPick[] = []
@@ -2605,13 +2649,18 @@ async function makeQuiz(
     const slip = openSlip(open, one.key)
     // Which code it is asked in (1.8.0, the question ladder): by its review step, or by a worked example first once
     // its slip, asked again, was missed twice running.
-    const rung = rungOf(one, {
-      ...(one.code ? { code: one.code } : {}),
-      ...(slip ? { slip: ahead.get(one.key) ?? slip } : {}),
-      isAsking: asking.has(one.key),
-      isTeam: one.team === true,
-      isDue: isDue(one, now),
-    })
+    const rung = rungOf(
+      one,
+      {
+        ...(one.code ? { code: one.code } : {}),
+        ...(slip ? { slip: ahead.get(one.key) ?? slip } : {}),
+        isAsking: asking.has(one.key),
+        isTeam: one.team === true,
+        isDue: isDue(one, now),
+      },
+      newStep,
+      ladderSteps(),
+    )
     picks.push(
       pickForRung({ ...one, ...(teamCode ? { teamCode } : {}), ...origin, ...(slip ? { slip: { what: slip.what, question: slip.question, mine: slip.mine } } : {}) }, rung),
     )
@@ -4380,12 +4429,12 @@ function teamMark(item: LearnQuizItem): string {
  */
 async function slipLineText($: EngineInterface, item: LearnQuizItem): Promise<string | undefined> {
   const record = slipAt(await read($, slips), resolveKey(await read($, aliases), item.key))
-  const notice: SlipNotice | undefined = slipNotice(item, record, isHelpedGrade(item))
+  const notice: SlipNotice | undefined = slipNotice(item, record, isHelpedGrade(item), build.workedAfterTimes)
   if (!notice) return undefined
   if (notice.kind !== 'again') return notice.text
   const taught = item.noteId !== undefined ? ` · 이 개념을 배운 노트: /learn 찾기 ${item.name}` : ''
   // Missed twice running (1.8.0): the next review quiz shows a worked example first, said before where the note is.
-  return `${notice.text}${isWorkedNext(record, item) ? ` · ${WORKED_NEXT}` : ''}${taught}`
+  return `${notice.text}${isWorkedNext(record, item, build.workedAfterTimes) ? ` · ${WORKED_NEXT}` : ''}${taught}`
 }
 
 /**
@@ -4700,7 +4749,13 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
       await Promise.all(graded.map(async ({ item, n }) => ({ n, lines: [await teamLineText($, item, true), await slipLineText($, item)] })))
     ).flatMap(({ n, lines }) => lines.flatMap(line => (line === undefined ? [] : [graded.length > 1 ? `${n}번: ${line}` : line])))
     const slipped = slipLines.length > 0 ? `\n${slipLines.join('\n')}` : ''
-    if (result === 'wrong') return `틀린 것으로 적었습니다: ${changed.join(' · ')}. 복습할 개념 맨 앞에 올라 다음 퀴즈에 먼저 나옵니다.${slipped}`
+    if (result === 'wrong') {
+      // A miss in code never seen (1.9.0 F3) steps its concept back one only: said so, alone or after the others' sentence.
+      const isNew = graded.map(({ item }) => item.rung === 'new')
+      if (isNew.length > 0 && isNew.every(Boolean)) return `틀린 것으로 적었습니다: ${changed.join(' · ')}. ${NEW_MISS_TEXT}.${slipped}`
+      const newMiss = isNew.some(Boolean) ? ` ${NEW_MISS_TEXT}.` : ''
+      return `틀린 것으로 적었습니다: ${changed.join(' · ')}. 복습할 개념 맨 앞에 올라 다음 퀴즈에 먼저 나옵니다.${newMiss}${slipped}`
+    }
     // Graded after the answer showed: recalled with help, so the interval stays (a typed answer turned right moves on).
     const helpSeen = isWorkedHelp ? '풀이·정답을 보고' : '정답을 보고'
     const spacing =
@@ -4806,6 +4861,9 @@ export const register: Register = (on, options) => {
     const manifest = await readManifest($)
     myVersion = manifest.version
     build.isRuleDrill = typeof manifest.harness?.isRuleDrill === 'boolean' ? manifest.harness.isRuleDrill : IS_RULE_DRILL
+    build.rungNewStep = harnessStep(manifest.harness?.rungNewStep, RUNG_NEW_STEP)
+    build.rungChangedStep = harnessStep(manifest.harness?.rungChangedStep, RUNG_CHANGED_STEP)
+    build.workedAfterTimes = harnessStep(manifest.harness?.workedAfterTimes, WORKED_AFTER_TIMES)
     mySessionId = await $.session.id().catch(() => undefined)
     // The guard first, before anything writes the concepts; then this session's stamp for the other windows.
     await enqueue('storing', () => keepSchema($))
@@ -7064,7 +7122,7 @@ function quizView(
           const isElsewhere = item.result === 'wrong' && item.noteId !== undefined && taught === undefined
           // What the grade did with its concept's slip (1.7.0), dim under the feedback; green once one asked again is mended.
           const record = slipOf(item.key)
-          const notice = slipNotice(item, record, isHelpedGrade(item))
+          const notice = slipNotice(item, record, isHelpedGrade(item), build.workedAfterTimes)
           // A team term this grade put in the concept index (1.7.0 D6); a miss's place in the next quiz unless the notice says it.
           const added = isAdded(item) ? teamAddedText(isFullMiss(item) && !notice) : undefined
           return (
@@ -7085,7 +7143,7 @@ function quizView(
               )}
               {notice && (
                 <Text color={notice.kind === 'fixed' ? 'green' : undefined} dimColor={notice.kind !== 'fixed'} wrap="wrap">
-                  {notice.kind === 'again' && isWorkedNext(record, item)
+                  {notice.kind === 'again' && isWorkedNext(record, item, build.workedAfterTimes)
                     ? `${notice.text}${taught ? ' · n: 이 개념을 배운 노트' : ''} · ${WORKED_NEXT}`
                     : notice.kind === 'again' && taught
                       ? `${notice.text} · n: 이 개념을 배운 노트 · 거기서 r로 따라가기`

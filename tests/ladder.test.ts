@@ -2,14 +2,19 @@ import type { LearnConcept, LearnSlip } from '../types'
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
+  QUIZ_SYSTEM,
   RUNG_CHANGED_STEP,
   RUNG_NEW_STEP,
+  STAMP_LIVE_MS,
   WORKED_AFTER_TIMES,
   WORKED_DEFAULT_ASK,
   WORKED_NEXT,
   addToBank,
   bankQuestion,
+  cleanStamps,
   extOf,
+  isOldGraderOpen,
+  isUnrunnableCode,
   isWorkedNext,
   markFor,
   markHelped,
@@ -23,6 +28,7 @@ import {
   slipNotice,
   type QuizPick,
 } from '../hooks/notes'
+import { QUIZ_CASES_18, QUIZ_NOW_18, QUIZ_OUTPUT_18, QUIZ_REPLIES_18 } from './fixtures/quiz18'
 
 const NOW = Date.UTC(2026, 9, 3, 1)
 const DAY = 86_400_000
@@ -33,39 +39,45 @@ const CODE = { file: 'src/cart.js', text: 'let total = 0\nfor (const n of [1, 2]
 const plain = { isAsking: false, isTeam: false, isDue: true }
 const SLIP: LearnSlip = { what: '반복이 끝나면 total이 0으로 돌아간다고 봄', type: 'state', question: '`total`은?', mine: '0', at: NOW, times: 1 }
 const pick = (name: string, more: Partial<QuizPick> = {}): QuizPick => ({ key: `c:${name}`, name, count: 1, firstAt: 0, lastAt: 0, blurb: `${name} 설명`, files: [], ...more })
+/** The ladder's two rungs from 1.8.0 on, whatever their constants ship as (1.9.0 F4: each may be turned off). */
+const ON = { changedStep: 2, workedAfter: 2 }
 
 describe('1.8.0: the question ladder, which code a question asks in (E3)', () => {
-  test('the rung goes by the review step: own code for the first two, changed code from the third; code never seen is off', () => {
-    expect(RUNG_CHANGED_STEP).toBe(2)
-    expect(RUNG_NEW_STEP).toBe(Infinity)
-    expect(WORKED_AFTER_TIMES).toBe(2)
-    expect(rungOf(at(0), { ...plain, code: CODE })).toBe('mine')
-    expect(rungOf(at(1), { ...plain, code: CODE })).toBe('mine')
-    expect(rungOf(at(2), { ...plain, code: CODE })).toBe('changed')
-    expect(rungOf(at(3), { ...plain, code: CODE })).toBe('changed')
-    // Off by default: step 5 in code a sample could run is asked in its code changed.
-    expect(rungOf(at(5), { ...plain, code: CODE })).toBe('changed')
-    // Switched on (1.8.x, 4): due, in a language a sample ran.
-    expect(rungOf(at(4), { ...plain, code: CODE }, 4)).toBe('new')
-    expect(rungOf(at(4), { ...plain, code: { file: 'app.css' } }, 4)).toBe('changed')
-    expect(rungOf(at(4), plain, 4)).toBeUndefined()
+  test('the rung goes by the review step: own code for the first two, changed code from the third, code never seen from the fifth when on', () => {
+    // Each its constant as the release's samples set it (docs/qa/견본.md): a step, or Infinity for the rung off.
+    expect([2, Infinity]).toContain(RUNG_CHANGED_STEP)
+    expect([4, Infinity]).toContain(RUNG_NEW_STEP)
+    expect([2, Infinity]).toContain(WORKED_AFTER_TIMES)
+    const byDefault = (step: number) => (step >= RUNG_NEW_STEP ? 'new' : step >= RUNG_CHANGED_STEP ? 'changed' : 'mine')
+    for (const step of [0, 1, 2, 3, 4, 5]) expect(rungOf(at(step), { ...plain, code: CODE })).toBe(byDefault(step))
+    expect(rungOf(at(0), { ...plain, code: CODE }, Infinity, ON)).toBe('mine')
+    expect(rungOf(at(1), { ...plain, code: CODE }, Infinity, ON)).toBe('mine')
+    expect(rungOf(at(2), { ...plain, code: CODE }, Infinity, ON)).toBe('changed')
+    expect(rungOf(at(3), { ...plain, code: CODE }, Infinity, ON)).toBe('changed')
+    // Code never seen off: step 5 in code a sample could run is asked in its code changed.
+    expect(rungOf(at(5), { ...plain, code: CODE }, Infinity, ON)).toBe('changed')
+    // Switched on (4): due, in a language a sample ran.
+    expect(rungOf(at(4), { ...plain, code: CODE }, 4, ON)).toBe('new')
+    expect(rungOf(at(4), { ...plain, code: { file: 'app.css' } }, 4, ON)).toBe('changed')
+    expect(rungOf(at(4), plain, 4, ON)).toBeUndefined()
     // A concept filling the quiz before it is due is no gate to graduate by: its code changed.
-    expect(rungOf(at(4), { ...plain, isDue: false, code: CODE }, 4)).toBe('changed')
+    expect(rungOf(at(4), { ...plain, isDue: false, code: CODE }, 4, ON)).toBe('changed')
     // A team term of this repository is asked by the team's words and lines, as in 1.7; one of another (isTeamMarked) as any concept.
-    expect(rungOf(at(2), { ...plain, isTeam: true, code: CODE })).toBeUndefined()
-    expect(rungOf({ ...at(2), name: '다른 저장소 팀 용어' }, { ...plain, code: CODE })).toBe('changed')
+    expect(rungOf(at(2), { ...plain, isTeam: true, code: CODE }, Infinity, ON)).toBeUndefined()
+    expect(rungOf({ ...at(2), name: '다른 저장소 팀 용어' }, { ...plain, code: CODE }, Infinity, ON)).toBe('changed')
   })
 
   test('an open slip asked again: 다시 도전 (no rung) at first; missed twice running, a worked example, with or without code', () => {
     const asking = { ...plain, isAsking: true }
-    expect(rungOf(at(2), { ...asking, code: CODE, slip: { times: 1 } })).toBeUndefined()
-    expect(rungOf(at(2), { ...asking, code: CODE, slip: { times: 2 } })).toBe('worked')
-    expect(rungOf(at(0), { ...asking, slip: { times: 3 } })).toBe('worked')
+    expect(rungOf(at(2), { ...asking, code: CODE, slip: { times: 1 } }, Infinity, ON)).toBeUndefined()
+    expect(rungOf(at(2), { ...asking, code: CODE, slip: { times: 2 } }, Infinity, ON)).toBe('worked')
+    expect(rungOf(at(0), { ...asking, slip: { times: 3 } }, Infinity, ON)).toBe('worked')
+    expect(rungOf(at(2), { ...asking, code: CODE, slip: { times: 2 } })).toBe(2 >= WORKED_AFTER_TIMES ? 'worked' : undefined)
     // Set right on the try again (isRight): asked again with no example, another day.
-    expect(rungOf(at(2), { ...asking, code: CODE, slip: { times: 2, isRight: true } })).toBeUndefined()
+    expect(rungOf(at(2), { ...asking, code: CODE, slip: { times: 2, isRight: true } }, Infinity, ON)).toBeUndefined()
     // Not one the review asks again now (a quiz went over it since): 다시 도전 when it is due.
-    expect(rungOf(at(2), { ...plain, code: CODE, slip: { times: 2 } })).toBeUndefined()
-    expect(rungOf(at(2), { ...asking, isTeam: true, slip: { times: 2 } })).toBeUndefined()
+    expect(rungOf(at(2), { ...plain, code: CODE, slip: { times: 2 } }, Infinity, ON)).toBeUndefined()
+    expect(rungOf(at(2), { ...asking, isTeam: true, slip: { times: 2 } }, Infinity, ON)).toBeUndefined()
   })
 
   test('an extension in lower case from the last part of a path; none for no dot, a dot file, or one too long', () => {
@@ -353,30 +365,34 @@ describe('1.8.0: a worked example\'s flash card, its next quiz said, and how its
     const graded = NOW + DAY
     const wrong = { result: 'wrong' as const, gradedAt: graded }
     const twice = { ...SLIP, at: graded, times: 2 }
-    expect(slipNotice({ ...wrong, rung: 'worked' }, twice, true)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
+    expect(slipNotice({ ...wrong, rung: 'worked' }, twice, true, ON.workedAfter)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
     // Another kind in its place: a slip of its own, once.
-    expect(slipNotice({ ...wrong, rung: 'worked' }, { ...SLIP, what: '다른 것', at: graded }, true)?.kind).toBe('slip')
+    expect(slipNotice({ ...wrong, rung: 'worked' }, { ...SLIP, what: '다른 것', at: graded }, true, ON.workedAfter)?.kind).toBe('slip')
     // The rare second miss on no question asked again (a practice, then a quiz made before it): the slip's line says it.
-    expect(slipNotice(wrong, twice, false)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · ${WORKED_NEXT}` })
-    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, twice, false)).toEqual({ kind: 'blank', text: `떠오르지 않았습니다 · ${WORKED_NEXT}` })
+    expect(slipNotice(wrong, twice, false, ON.workedAfter)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · ${WORKED_NEXT}` })
+    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, twice, false, ON.workedAfter)).toEqual({ kind: 'blank', text: `떠오르지 않았습니다 · ${WORKED_NEXT}` })
     // A team term's is said as in 1.7.
-    expect(slipNotice({ ...wrong, team: true }, twice, false)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` })
+    expect(slipNotice({ ...wrong, team: true }, twice, false, ON.workedAfter)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` })
     expect(WORKED_NEXT).toBe('다음 복습 퀴즈는 풀이부터 보여 줍니다')
   })
 
   test('the next quiz is a worked example only with the slip open, kept by this grade, twice or more, not set right, and no team term\'s', () => {
     const item = { gradedAt: NOW }
-    expect(isWorkedNext({ ...SLIP, times: 2 }, item)).toBe(true)
-    expect(isWorkedNext({ ...SLIP, times: 5 }, item)).toBe(true)
-    expect(isWorkedNext({ ...SLIP, times: 1 }, item)).toBe(false)
-    expect(isWorkedNext({ ...SLIP, times: 2, isRight: true }, item)).toBe(false)
-    expect(isWorkedNext({ ...SLIP, times: 2, fixedAt: NOW }, item)).toBe(false)
-    expect(isWorkedNext({ ...SLIP, times: 2 }, { team: true, gradedAt: NOW })).toBe(false)
-    expect(isWorkedNext(undefined, item)).toBe(false)
+    expect(isWorkedNext({ ...SLIP, times: 2 }, item, ON.workedAfter)).toBe(true)
+    expect(isWorkedNext({ ...SLIP, times: 5 }, item, ON.workedAfter)).toBe(true)
+    expect(isWorkedNext({ ...SLIP, times: 1 }, item, ON.workedAfter)).toBe(false)
+    expect(isWorkedNext({ ...SLIP, times: 2, isRight: true }, item, ON.workedAfter)).toBe(false)
+    expect(isWorkedNext({ ...SLIP, times: 2, fixedAt: NOW }, item, ON.workedAfter)).toBe(false)
+    expect(isWorkedNext({ ...SLIP, times: 2 }, { team: true, gradedAt: NOW }, ON.workedAfter)).toBe(false)
+    expect(isWorkedNext(undefined, item, ON.workedAfter)).toBe(false)
+    // As the build ships it (WORKED_AFTER_TIMES), and with worked examples off (1.9.0 F4): never.
+    expect(isWorkedNext({ ...SLIP, times: 2 }, item)).toBe(2 >= WORKED_AFTER_TIMES)
+    expect(isWorkedNext({ ...SLIP, times: 5 }, item, Infinity)).toBe(false)
+    expect(slipNotice({ result: 'wrong', gradedAt: NOW }, { ...SLIP, times: 2, at: NOW }, false, Infinity)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` })
     // A grade that kept no miss (wrong once the answer is seen, f with no slip read): the slip is the one before, gone
     // over by this grade, so the next quiz does not ask it again first, and no worked example is said.
-    expect(isWorkedNext({ ...SLIP, times: 2, at: NOW - 8 * DAY }, item)).toBe(false)
-    expect(slipNotice({ result: 'wrong', gradedAt: NOW, rung: 'worked' }, { ...SLIP, times: 2, at: NOW - 8 * DAY }, true)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
+    expect(isWorkedNext({ ...SLIP, times: 2, at: NOW - 8 * DAY }, item, ON.workedAfter)).toBe(false)
+    expect(slipNotice({ result: 'wrong', gradedAt: NOW, rung: 'worked' }, { ...SLIP, times: 2, at: NOW - 8 * DAY }, true, ON.workedAfter)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
   })
 
   test('a grade marks its concept as in 1.7, but a miss in code never seen steps back one, not to the first', () => {
@@ -390,4 +406,165 @@ describe('1.8.0: a worked example\'s flash card, its next quiz said, and how its
     expect(markFor('wrong', 'wrong', false, 'new')({ 'c:a': one }, ['c:a'], NOW)['c:a']!.step).toBe(4)
     expect(markFor('wrong', 'wrong', false, 'changed')({ 'c:a': one }, ['c:a'], NOW)['c:a']!.step).toBe(0)
   })
+})
+
+describe('1.9.0: 처음 보는 코드 from the fifth step, for concepts due met in code that runs on its own (F3)', () => {
+  const PY = { file: 'app/evens.py', text: 'nums = [1, 2, 3, 4]\nprint([n for n in nums if n % 2 == 0])' }
+  const asking = { ...plain, isAsking: true }
+  const NEW_ASK =
+    '처음 보는 코드: 학습자 코드와 다른 상황(다른 이름·값·쓰임)에서 그 개념을 쓰는 8줄 이하 코드를 괄호 안 언어로 새로 써서 예측으로 묻는다. 다른 문제와 유형이 겹쳐도 이 칸은 예측으로 낸다. 그 언어에 기본으로 든 기능만 쓰고, 라이브러리의 동작을 흉내 낸 코드는 쓰지 않는다. 파일·네트워크·입력·시간·난수, 브라우저 화면(document·window·localStorage·alert)과 Node 모듈(fs·process)은 쓰지 않고 console.log나 print로만 찍는다. 출력은 3줄 이하로, 줄마다 숫자·문자열·참거짓·undefined·null·None 하나를 40자 이하로 찍는다(배열·객체를 통째로 찍지 않는다). A 바로 앞에 같은 번호의 R 줄(예: R2:)을 두어 코드를 한 줄씩 따라간 과정을 쓰고, A에는 찍히는 글자만 줄마다 그대로 쓴다(설명을 붙이지 않는다). 문제(Q)에는 출력값이나 따라간 과정을 쓰지 않는다. 그 개념이 라이브러리나 프레임워크가 있어야 보일 수 있는 것이면 코드 없이 왜로 묻는다.'
+  const WRITES = "'처음 보는 코드'·'풀이 보고 풀기' 칸은 그 개념을 쓰는 짧은 코드를 새로 쓴다. 그 밖에는 주어진 설명과 코드 안에서만 묻는다."
+  const TRACE = 'R1: (칸이 "처음 보는 코드"인 문제만: 코드를 한 줄씩 따라간 과정)'
+
+  test('switched on at 4: due steps 4 and 5 in js, mjs, cjs, ts or py; not due, other languages, no code, step 3, slips and team terms as before', () => {
+    expect(rungOf(at(4), { ...plain, code: CODE }, 4, ON)).toBe('new')
+    expect(rungOf(at(5), { ...plain, code: PY }, 4, ON)).toBe('new')
+    for (const file of ['a.mjs', 'a.cjs', 'src/A.TS']) expect(rungOf(at(5), { ...plain, code: { file, text: 'console.log(1)' } }, 4, ON)).toBe('new')
+    expect(rungOf(at(4), { ...plain, isDue: false, code: CODE }, 4, ON)).toBe('changed')
+    for (const file of ['app.css', 'App.tsx', 'App.jsx', 'main.go']) expect(rungOf(at(4), { ...plain, code: { file, text: 'x' } }, 4, ON)).toBe('changed')
+    expect(rungOf(at(4), plain, 4, ON)).toBeUndefined()
+    expect(rungOf(at(3), { ...plain, code: CODE }, 4, ON)).toBe('changed')
+    expect(rungOf(at(5), { ...asking, code: CODE, slip: { times: 1 } }, 4, ON)).toBeUndefined()
+    expect(rungOf(at(5), { ...asking, code: CODE, slip: { times: 2 } }, 4, ON)).toBe('worked')
+    expect(rungOf(at(5), { ...plain, isTeam: true, code: CODE }, 4, ON)).toBeUndefined()
+    // Off (Infinity), as 1.8.0 shipped it: the same concept in its code changed; with 비슷한 코드 off too, its own.
+    expect(rungOf(at(5), { ...plain, code: PY }, Infinity, ON)).toBe('changed')
+    expect(rungOf(at(5), { ...plain, code: PY }, Infinity, { changedStep: Infinity })).toBe('mine')
+    expect(rungOf(at(4), { ...plain, code: PY }, 4, { changedStep: Infinity })).toBe('new')
+  })
+
+  test('code a library, a framework or a browser runs is caught; code with a path, `node:`, a comparison or a format is not; a caught one is asked as before', () => {
+    const caught = [
+      "import { useState } from 'react'",
+      "const app = require('express')",
+      '<Button onClick={() => save()}>저장</Button>',
+      'useEffect(() => { load() }, [])',
+      "app.get('/', (req, res) => res.send('ok'))",
+      "document.querySelector('#a')",
+      "localStorage.setItem('k', '1')",
+      'import pandas as pd',
+      'from flask import Flask',
+      "import debounce from 'lodash/debounce'",
+      "const { data } = await import('axios')",
+      "window.location.href = '/'",
+      "btn.addEventListener('click', go)",
+      "alert('done')",
+      'const [n, setN] = React.useState<number>(0)',
+      'import json',
+    ]
+    for (const text of caught) expect([text, isUnrunnableCode(text)]).toEqual([text, true])
+    const runs = [
+      "import { sum } from './math'",
+      "const fs = require('node:fs')",
+      "import { add } from '../lib/add.js'",
+      'const xs = [1, 2].map(x => x * 2)',
+      'if (a < B) console.log(a)',
+      "print(f'{x:.2f}')",
+      'from .models import User',
+      "const chars = Array.from('abc')",
+      'const ids: Array<Item> = []',
+      'function pick<T>(xs: T[]): T { return xs[0] }',
+      'const reuse = (x) => x',
+      "console.log('import x from y')",
+    ]
+    for (const text of runs) expect([text, isUnrunnableCode(text)]).toEqual([text, false])
+    // Caught at step 4 and due: asked in its code changed (or its own with 비슷한 코드 off), never in code never seen.
+    const react = { file: 'src/Like.js', text: "import { useState } from 'react'\nconst [n, setN] = useState(0)\nsetN(c => c + 1)" }
+    expect(rungOf(at(4), { ...plain, code: react }, 4, ON)).toBe('changed')
+    expect(rungOf(at(4), { ...plain, code: { file: 'app/report.py', text: 'import pandas as pd\nprint(pd.DataFrame().shape)' } }, 4, ON)).toBe('changed')
+    // A pick with no text known (an older caller) goes by its file alone, as 1.8.0 did.
+    expect(rungOf(at(4), { ...plain, code: { file: 'a.js' } }, 4, ON)).toBe('new')
+  })
+
+  test('the quiz prompt for code never seen: the whole sentence, its language under the head, the sentence that lets it write code and the R line; none of the learner\'s code or quotes', () => {
+    const one = pickForRung(pick('리스트 컴프리헨션', { blurb: '조건에 맞는 것만 골라 새 리스트를 만듭니다 — `[n for n in nums if n % 2 == 0]`', code: PY }), 'new')
+    const prompt = quizPrompt([one, pickForRung(pick('B', { code: CODE }), 'mine')], 'beginner')
+    expect(prompt).toContain('1. 리스트 컴프리헨션 — 조건에 맞는 것만 골라 새 리스트를 만듭니다\n   칸: 처음 보는 코드 (py로)\n2. B — B 설명\n   칸: 내 코드\n   학습자가 만든 코드 (src/cart.js):')
+    expect(prompt).toContain(`\n${NEW_ASK}\n${WRITES}\n`)
+    expect(prompt).toContain(`\nH1: (힌트 한 문장)\n${TRACE}\nA1: (답 한두 문장)\n`)
+    expect(prompt).not.toContain('nums = [1, 2, 3, 4]')
+    expect(prompt).not.toContain('n % 2 == 0')
+    expect(prompt).not.toContain('app/evens.py')
+    // A quiz with none of it says none of it.
+    const none = quizPrompt([pickForRung(pick('A', { code: CODE }), 'changed'), pickForRung(pick('B', { code: CODE }), 'mine')], 'beginner')
+    expect(none).not.toContain('처음 보는 코드:')
+    expect(none).not.toContain(WRITES)
+    expect(none).not.toContain('R1:')
+    expect(none).toContain('\nH1: (힌트 한 문장)\nA1: (답 한두 문장)\n')
+    expect(QUIZ_SYSTEM).not.toContain('처음 보는 코드')
+  })
+
+  test('a question in code never seen keeps its rung when it shows code, of whatever kind; one with none is a why as in 1.7; its R line is dropped', () => {
+    const picks = [pickForRung(pick('A', { code: CODE }), 'new'), pickForRung(pick('B', { code: CODE }), 'changed'), pick('C')]
+    const code = '```js\nconst xs = [3, 4]\nlet s = 0\nfor (const x of xs) s += x\nconsole.log(s)\n```'
+    const text = [
+      'T1: 예측',
+      `Q1: 아래 코드는 무엇을 찍을까요?\n${code}`,
+      'H1: 하나씩 더해 보세요',
+      'R1: s는 0에서 3, 다시 7이 된다',
+      'A1: 7',
+      'T2: 예측',
+      'Q2: `let total = 5`이면?',
+      'A2: 8',
+      'T3: 왜',
+      'Q3: 왜 그렇게 썼을까요?',
+      'A3: 그래서',
+    ].join('\n')
+    const items = parseQuiz(text, picks)
+    expect(items.map(one => [one.rung, one.kind])).toEqual([['new', 'predict'], ['changed', 'predict'], [undefined, 'why']])
+    expect(items[0]).toMatchObject({ question: `아래 코드는 무엇을 찍을까요?\n${code}`, hint: '하나씩 더해 보세요', answer: '7' })
+    expect(JSON.stringify(items)).not.toContain('0에서 3')
+    // Shown code asked why or how to change it keeps the rung, so a miss steps it back one only (markFor).
+    const why = parseQuiz(`T1: 왜\nQ1: 아래 코드에서 let을 빼면?\n${code}\nA1: 오류`, picks.slice(0, 1))[0]!
+    expect(why).toMatchObject({ rung: 'new', kind: 'why' })
+    expect(markFor('wrong', 'wrong', false, why.rung)).toBe(markPartial)
+    // No code at all (the model found a library needed): no rung, a why marked as in 1.7, its title `· 왜`.
+    const bare = parseQuiz('T1: 왜\nQ1: 화면을 다시 그리는 까닭은?\nH1: 실마리\nA1: 값이 바뀌어서', picks.slice(0, 1))[0]!
+    expect(bare.rung).toBeUndefined()
+    expect(markFor('wrong', 'wrong', false, bare.rung)).toBe(markWrong)
+    expect(parseQuiz('T1: 왜\nQ1: 무엇이 다를까요?\n```js\n```\nA1: 없음', picks.slice(0, 1))[0]!.rung).toBeUndefined()
+    // The R line a quiz with no code never seen gets is the line it was in 1.8.0: part of the hint before it.
+    const plainPicks = [pickForRung(pick('B', { code: CODE }), 'mine')]
+    expect(parseQuiz('Q1: 문제\nH1: 실마리\nR1: 따라가기\nA1: 답', plainPicks)[0]!.hint).toBe('실마리\nR1: 따라가기')
+  })
+
+  test('a window of a build before 1.8.0 stamped within the half hour keeps code never seen off; 1.8.0 and later, this session\'s own, or an older stamp do not', () => {
+    const now = NOW
+    const at = (v: string, ago: number) => ({ v, at: now - ago })
+    const open = (stamps: Record<string, { v: string; at: number }>) => isOldGraderOpen(cleanStamps(stamps, now), 'mine', now)
+    expect(open({ other: at('1.7.1', 29 * 60_000) })).toBe(true)
+    expect(open({ other: at('1.7.0', STAMP_LIVE_MS) })).toBe(true)
+    expect(open({ other: at('1.7.1', 31 * 60_000) })).toBe(false)
+    expect(open({ other: at('1.8.0', 60_000), third: at('1.9.0', 60_000) })).toBe(false)
+    expect(open({ mine: at('1.7.1', 60_000) })).toBe(false)
+    expect(open({})).toBe(false)
+    expect(isOldGraderOpen({ other: at('1.7.1', 60_000) }, undefined, now)).toBe(true)
+  })
+})
+
+describe('1.9.0: a quiz with no code never seen is 1.8.0\'s to the byte, its 비슷한 코드 sentence aside (F3 · F4)', () => {
+  const CHANGED_18 = '비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 보여 주고 묻는다. 원래 코드의 답으로는 맞힐 수 없게 바꾼다.'
+  const CHANGED_19 = `${CHANGED_18} 바꿔 보기로 낼 때도 학습자 코드를 그대로 보이거나 몇 줄만 떼어 보이지 않고, 한 곳을 바꾼 코드에서 묻는다.`
+  for (const one of QUIZ_CASES_18) {
+    test(`${one.id}: the rungs, the prompt and the questions read back, code never seen off or on (4)`, () => {
+      const want = QUIZ_OUTPUT_18[one.id]!
+      for (const newStep of [Infinity, 4]) {
+        const picks = one.picks.map(p => {
+          const rung = rungOf(p.one, { ...(p.how.code ? { code: p.how.code } : {}), ...(p.how.slip ? { slip: p.how.slip } : {}), isAsking: p.how.isAsking ?? false, isTeam: p.how.isTeam ?? false, isDue: p.how.isDue }, newStep, ON)
+          const base: QuizPick = {
+            ...p.one,
+            ...(p.how.code ? { code: p.how.code } : {}),
+            ...(p.slip ? { slip: p.slip } : {}),
+            ...(p.team ? { team: true as const } : {}),
+            ...(p.isTeamMarked ? { isTeamMarked: true as const } : {}),
+          }
+          return pickForRung(base, rung)
+        })
+        expect(picks.map(p => p.rung ?? null)).toEqual(want.rungs)
+        expect(quizPrompt(picks, one.level)).toBe(want.prompt.replace(CHANGED_18, CHANGED_19))
+        expect(JSON.parse(JSON.stringify(parseQuiz(QUIZ_REPLIES_18[one.id]!, picks)))).toEqual(JSON.parse(JSON.stringify(want.items)))
+      }
+      expect(QUIZ_NOW_18).toBeGreaterThan(0)
+    })
+  }
 })

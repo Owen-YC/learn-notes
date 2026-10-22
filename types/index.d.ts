@@ -231,10 +231,11 @@ export type LearnQuizItem = {
   isRetry?: true
   /**
    * Which code the question asks in (1.8.0, the question ladder): the learner's own (`mine`), that code with one thing
-   * changed (`changed`, 비슷한 코드), code never seen (`new`, 처음 보는 코드: off in 1.8.0), or a worked example
-   * first and a like question after it (`worked`, 풀이 보고 풀기), once its concept was missed twice running. Absent
-   * on quizzes made before, and where the model did not keep to it. A 1.7 window knows no such field and drops it
-   * when it writes the quiz back: the question is then one as any other, a right answer a step on, mending no slip.
+   * changed (`changed`, 비슷한 코드: off from 1.9.0), code never seen (`new`, 처음 보는 코드: off in 1.8.0 and 1.9.0), or
+   * a worked example first and a like question after it (`worked`, 풀이 보고 풀기), once its concept was missed twice
+   * running. Absent on quizzes made before, and where the model did not keep to it. A 1.7 window knows no such field
+   * and drops it when it writes the quiz back: the question is then one as any other, a right answer a step on,
+   * mending no slip.
    */
   rung?: 'worked' | 'mine' | 'changed' | 'new'
   /** The wrong idea Claude read in the typed answer this grade went by (1.7.0), and its kind; absent when none was named. */
