@@ -48,13 +48,13 @@ import {
   RUNG_LABEL,
   RUNG_NEW_STEP,
   WORKED_AFTER_TIMES,
-  WORKED_NEXT,
   regrade,
   type Mark,
   type QuizPick,
   checkPrompt,
   parseCheck,
   isBlankAnswer,
+  isForgotten,
   SLIP_TEXT,
   slipTypeOf,
   cleanSlips,
@@ -298,6 +298,15 @@ import {
   DRILL_RULE_BLANK,
   DRILL_UNCHANGED,
   IS_RULE_DRILL,
+  IS_BASE_ASKED,
+  BASE_LABEL,
+  BASE_LEAD,
+  baseCandidates,
+  baseFor,
+  baseOf,
+  isBaseKey,
+  withBase,
+  workedNextText,
   type Drill,
   drillOf,
   drillQuestion,
@@ -646,12 +655,18 @@ let myVersion: string | undefined
  * The model-gated items' switches this load runs with (1.9.0): each its constant in notes.ts, which a release sets
  * by its samples (docs/qa/견본.md) — `isRuleDrill`, IS_RULE_DRILL (F2); the question ladder's steps (F3, F4):
  * `rungNewStep` RUNG_NEW_STEP, `rungChangedStep` RUNG_CHANGED_STEP, `workedAfterTimes` WORKED_AFTER_TIMES, each
- * Infinity for its rung off. A test's harness turns one the other way through the plugin.json it serves (its
- * `harness` object, read with the version at session start, readManifest; a step there a whole number, or null for
- * off), so both states are tested whichever one ships. A release's plugin.json has none: only the build's own files
+ * Infinity for its rung off; `isBaseAsked`, IS_BASE_ASKED (F5). A test's harness turns one the other way through the
+ * plugin.json it serves (its `harness` object, read with the version at session start, readManifest; a step there a
+ * whole number, or null for off), so both states are tested whichever one ships. A release's plugin.json has none: only the build's own files
  * can, and /learn 진단 names a switch that runs the other way (switched), so a copy someone turned one in is seen to be.
  */
-const build = { isRuleDrill: IS_RULE_DRILL, rungNewStep: RUNG_NEW_STEP, rungChangedStep: RUNG_CHANGED_STEP, workedAfterTimes: WORKED_AFTER_TIMES }
+const build = {
+  isRuleDrill: IS_RULE_DRILL,
+  rungNewStep: RUNG_NEW_STEP,
+  rungChangedStep: RUNG_CHANGED_STEP,
+  workedAfterTimes: WORKED_AFTER_TIMES,
+  isBaseAsked: IS_BASE_ASKED,
+}
 /** The switches as the build's constants set them, which no harness turns: /learn 진단 names one that differs (switched). */
 const RELEASE: Readonly<typeof build> = { ...build }
 /** Each switch's name in /learn 진단. */
@@ -660,6 +675,7 @@ const SWITCH_NAMES: Record<keyof typeof build, string> = {
   rungNewStep: '처음 보는 코드 단계',
   rungChangedStep: '비슷한 코드 단계',
   workedAfterTimes: '풀이 보고 풀기 오답 수',
+  isBaseAsked: '바탕 개념',
 }
 
 /** The switches this load runs the other way from its build's constants (a harness's), with their state, for /learn 진단. */
@@ -2147,7 +2163,7 @@ function firstTryOf(raw: unknown): LearnQuizFirstTry | undefined {
   if (!isRecord(raw)) return undefined
   const { mine, verdict, feedback, nudge, at, slip } = raw
   if (typeof mine !== 'string' || (verdict !== 'partial' && verdict !== 'wrong') || typeof nudge !== 'string' || nudge === '' || typeof at !== 'number') return undefined
-  return { mine, verdict, feedback: typeof feedback === 'string' ? feedback : '', nudge, at, ...slipOfItem(slip, raw.slipType) }
+  return { mine, verdict, feedback: typeof feedback === 'string' ? feedback : '', nudge, at, ...slipOfItem(slip, raw.slipType), ...(isBaseKey(raw.slipBase) ? { slipBase: raw.slipBase } : {}) }
 }
 
 /** A question's (or its first try's) slip and kind read back from the store: none unless it has words. */
@@ -2185,6 +2201,9 @@ function quizItemOf(one: unknown): LearnQuizItem | undefined {
     ...(one.isRetry === true ? { isRetry: true as const } : {}),
     ...(one.rung === 'worked' || one.rung === 'mine' || one.rung === 'changed' || one.rung === 'new' ? { rung: one.rung } : {}),
     ...slipOfItem(one.slip, one.slipType),
+    // The base a grade picked, and a question asked about one (1.9.0 F5).
+    ...(isBaseKey(one.slipBase) ? { slipBase: one.slipBase } : {}),
+    ...(one.isBase === true ? { isBase: true as const } : {}),
     ...(one.slipBefore === null ? { slipBefore: null } : slipRecordOf(one.slipBefore) ? { slipBefore: slipRecordOf(one.slipBefore)! } : {}),
     ...(one.team === true ? { team: true as const } : {}),
     ...teamCodeOf(one.teamCode),
@@ -2316,14 +2335,15 @@ function nudgeLabel(first: LearnQuizFirstTry): string {
 
 /**
  * A first try as a grade gives it: its answer, Claude's grade (partly right or wrong) and feedback, and the slip it
- * showed; "모르겠어요" with a word in the feedback's place.
+ * showed with the base its grade picked (1.9.0 F5); "모르겠어요" with a word in the feedback's place.
  */
-function firstGrade(first: LearnQuizFirstTry): Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback' | 'slip' | 'slipType'> {
+function firstGrade(first: LearnQuizFirstTry): Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback' | 'slip' | 'slipType' | 'slipBase'> {
   return {
     mine: first.mine,
     verdict: first.verdict,
     feedback: first.feedback !== '' ? first.feedback : BLANK_FEEDBACK,
     ...(first.slip !== undefined ? { slip: first.slip, slipType: first.slipType ?? 'other' } : {}),
+    ...(first.slip !== undefined && first.slipBase !== undefined ? { slipBase: first.slipBase } : {}),
   }
 }
 
@@ -2672,10 +2692,20 @@ async function makeQuiz(
   // In the quiz's order: the concepts due, then the team terms not met, then the rest (a team quiz: the terms not met first).
   const candidates = isTeamQuiz ? [...fresh, ...marked] : [...marked.filter(isFirst), ...fresh, ...marked.filter(one => !isFirst(one))]
   const spread = spreadPicks(candidates, 3, isFirst, isAsking)
+  // A base concept (1.9.0 F5, 바탕 개념) right before the worked example whose slip's grade picked it, in the last place no
+  // slip asked again holds (baseFor), its code found as any pick's. Not in a team quiz; only with the switch on.
+  const baseFound =
+    isTeamQuiz || !build.isBaseAsked
+      ? undefined
+      : baseFor(index, key => ahead.get(key) ?? openSlip(open, key), spread, asking, map, open, { workedAfter: build.workedAfterTimes, teamMarks: marks })
+  const basePick = baseFound
+    ? (marked.find(one => one.key === baseFound.key) ?? (await withCode($, cfg, rankConcepts(index).filter(one => one.key === baseFound.key), map, newStep, now))[0])
+    : undefined
+  const ordered = baseFound && basePick ? withBase(spread, baseFound, basePick) : spread
   // Each team term asked by the lines its words name (three files read at most), over the learner's code; then its slip.
   // It keeps this repository and the words its grade puts in the concept index: a quiz may be graded in any window.
   const picks: QuizPick[] = []
-  for (const one of spread) {
+  for (const one of ordered) {
     const term = one.team ? termOf.get(one.key) : undefined
     const teamCode = term && file ? await readTermCode($, cfg, file, term) : undefined
     const origin = term && root ? { teamTag: rootTag(root), teamBlurb: termBlurb(term.blurb, TERM_SEED_TEXT) } : {}
@@ -2829,7 +2859,7 @@ async function applyGrade(
   current: Quiz,
   i: number,
   result: 'right' | 'wrong',
-  extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback' | 'isLearnerGraded' | 'slip' | 'slipType'>,
+  extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback' | 'isLearnerGraded' | 'slip' | 'slipType' | 'slipBase'>,
   how: { at?: number; isFirstDropped?: boolean } = {},
 ): Promise<'kept' | 'busy' | 'moved' | 'failed'> {
   const mark = `${current.at}:${i}`
@@ -2987,16 +3017,28 @@ async function gradeTyped(
   // the feedback once it is mended. Only there can a right answer mend it (nextSlip): elsewhere (the question said
   // the slip, or the slip was kept after the quiz was made) the feedback would name a mend no line follows.
   const past = item.isRetry ? await pastSlip($, item.key) : undefined
-  const prompt = checkPrompt(item, mine, cfg.level, first, past ? { what: past.what, mine: past.mine } : undefined)
+  // The concepts learned before it (1.9.0 F5, 바탕 개념), listed for the grade to pick the one the slip came from getting
+  // wrong: on a question asked again (다시 도전), no team term's, at the grade that asks for the slip (the first, or the
+  // one after "모르겠어요"), of an answer with something to read one from. Only with the switch on (IS_BASE_ASKED).
+  const isBaseAsked =
+    build.isBaseAsked && item.isRetry === true && item.team !== true && (first === undefined || isBlankAnswer(first.mine)) && !isForgotten(mine)
+  const map = isBaseAsked ? await read($, aliases) : {}
+  const bases = isBaseAsked ? baseCandidates(await read($, concepts), resolveKey(map, item.key), await storedTeamTerms($, map)) : []
+  const prompt = checkPrompt(item, mine, cfg.level, first, past ? { what: past.what, mine: past.mine } : undefined, bases.length > 0 ? { bases: bases.map(one => one.name) } : {})
   const asked = await askModel($, cfg, 'grade', { system: CHECK_SYSTEM, prompt, maxTokens: 480, timeoutMs: 60_000 })
   if ('error' in asked) return { error: `채점하지 못했습니다: ${asked.error}` }
-  const graded = parseCheck(asked.text)
+  const graded = parseCheck(asked.text, bases.length > 0 ? { base: true } : {})
   if (!graded) {
     void fault($, 'grade', 'unreadable', '채점 결과를 읽지 못했습니다')
     return { error: '채점 결과를 읽지 못했습니다. 다시 보내 보세요.' }
   }
+  // The base it picked, one of the concepts listed (none for a right answer); kept with the slip it explains.
+  const slipBase = graded.verdict !== 'right' ? baseOf(graded.base, bases) : undefined
   // The slip this answer showed, asked for on its first grade only (after "모르겠어요" too: no answer came before).
-  const slip = (first === undefined || isBlankAnswer(first.mine)) && graded.slip !== undefined ? { slip: graded.slip, slipType: graded.slipType ?? ('other' as const) } : {}
+  const slip =
+    (first === undefined || isBlankAnswer(first.mine)) && graded.slip !== undefined
+      ? { slip: graded.slip, slipType: graded.slipType ?? ('other' as const), ...(slipBase !== undefined ? { slipBase } : {}) }
+      : {}
   // Short of right the first time, with a question asked back that does not give the answer away: one try again.
   const nudge = first === undefined && graded.verdict !== 'right' ? keptNudge(graded.nudge, item.answer) : undefined
   if (nudge !== undefined && graded.verdict !== 'right') {
@@ -3048,7 +3090,7 @@ async function keptGrade(
   current: Quiz,
   i: number,
   result: 'right' | 'wrong',
-  extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback' | 'slip' | 'slipType'>,
+  extra: Pick<LearnQuizItem, 'mine' | 'verdict' | 'feedback' | 'slip' | 'slipType' | 'slipBase'>,
 ): Promise<{ item: LearnQuizItem } | { error: string }> {
   const kept = await applyGrade($, cfg, current, i, result, extra)
   if (kept === 'failed') return { error: GRADE_NOT_KEPT }
@@ -4435,9 +4477,11 @@ function quizItemState(current: Quiz, item: LearnQuizItem, isChecking: boolean):
 /**
  * The one place a question's title gives to how it is asked, after its number: a worked example first (1.8.0, 풀이
  * 보고 풀기), a slip still open asked again (1.7.0, 다시 도전), or its code changed (비슷한 코드) or never seen (처음
- * 보는 코드); none for the learner's own code, as in 1.7. Its slip is not said before an answer.
+ * 보는 코드); none for the learner's own code, as in 1.7. Its slip is not said before an answer. A question about a base
+ * concept (1.9.0 F5) names that in the place, whatever its code: the worked example it comes before is the next one.
  */
 function rungName(item: LearnQuizItem): string | undefined {
+  if (item.isBase) return BASE_LABEL
   if (item.rung === 'worked') return RUNG_LABEL.worked
   if (item.isRetry) return '다시 도전'
   return item.rung === 'changed' || item.rung === 'new' ? RUNG_LABEL[item.rung] : undefined
@@ -4462,12 +4506,13 @@ function teamMark(item: LearnQuizItem): string {
  */
 async function slipLineText($: EngineInterface, item: LearnQuizItem): Promise<string | undefined> {
   const record = slipAt(await read($, slips), resolveKey(await read($, aliases), item.key))
-  const notice: SlipNotice | undefined = slipNotice(item, record, isHelpedGrade(item), build.workedAfterTimes)
+  const notice: SlipNotice | undefined = slipNotice(item, record, isHelpedGrade(item), build.workedAfterTimes, build.isBaseAsked)
   if (!notice) return undefined
   if (notice.kind !== 'again') return notice.text
   const taught = item.noteId !== undefined ? ` · 이 개념을 배운 노트: /learn 찾기 ${item.name}` : ''
-  // Missed twice running (1.8.0): the next review quiz shows a worked example first, said before where the note is.
-  return `${notice.text}${isWorkedNext(record, item, build.workedAfterTimes) ? ` · ${WORKED_NEXT}` : ''}${taught}`
+  // Missed twice running (1.8.0): the next review quiz shows a worked example first (its base first, 1.9.0 F5), said
+  // before where the note is.
+  return `${notice.text}${isWorkedNext(record, item, build.workedAfterTimes) ? ` · ${workedNextText(record, build.isBaseAsked)}` : ''}${taught}`
 }
 
 /**
@@ -4897,6 +4942,7 @@ export const register: Register = (on, options) => {
     build.rungNewStep = harnessStep(manifest.harness?.rungNewStep, RUNG_NEW_STEP)
     build.rungChangedStep = harnessStep(manifest.harness?.rungChangedStep, RUNG_CHANGED_STEP)
     build.workedAfterTimes = harnessStep(manifest.harness?.workedAfterTimes, WORKED_AFTER_TIMES)
+    build.isBaseAsked = typeof manifest.harness?.isBaseAsked === 'boolean' ? manifest.harness.isBaseAsked : IS_BASE_ASKED
     mySessionId = await $.session.id().catch(() => undefined)
     // The guard first, before anything writes the concepts; then this session's stamp for the other windows.
     await enqueue('storing', () => keepSchema($))
@@ -6859,6 +6905,8 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
     ...(oldWrites !== undefined ? { oldWrites } : {}),
     ...(unsaved !== undefined ? { unsaved } : {}),
     slips: slipped,
+    // The open slips with a base concept (1.9.0 F5), counted only while grades pick them.
+    ...(build.isBaseAsked ? { isBaseAsked: true } : {}),
     faults: list,
   })
   const isCopied = await deliver($, text, isAway)
@@ -7155,7 +7203,7 @@ function quizView(
           const isElsewhere = item.result === 'wrong' && item.noteId !== undefined && taught === undefined
           // What the grade did with its concept's slip (1.7.0), dim under the feedback; green once one asked again is mended.
           const record = slipOf(item.key)
-          const notice = slipNotice(item, record, isHelpedGrade(item), build.workedAfterTimes)
+          const notice = slipNotice(item, record, isHelpedGrade(item), build.workedAfterTimes, build.isBaseAsked)
           // A team term this grade put in the concept index (1.7.0 D6); a miss's place in the next quiz unless the notice says it.
           const added = isAdded(item) ? teamAddedText(isFullMiss(item) && !notice) : undefined
           return (
@@ -7177,7 +7225,7 @@ function quizView(
               {notice && (
                 <Text color={notice.kind === 'fixed' ? 'green' : undefined} dimColor={notice.kind !== 'fixed'} wrap="wrap">
                   {notice.kind === 'again' && isWorkedNext(record, item, build.workedAfterTimes)
-                    ? `${notice.text}${taught ? ' · n: 이 개념을 배운 노트' : ''} · ${WORKED_NEXT}`
+                    ? `${notice.text}${taught ? ' · n: 이 개념을 배운 노트' : ''} · ${workedNextText(record, build.isBaseAsked)}`
                     : notice.kind === 'again' && taught
                       ? `${notice.text} · n: 이 개념을 배운 노트 · 거기서 r로 따라가기`
                       : notice.text}
@@ -7225,6 +7273,11 @@ function quizView(
             {item.teamCode && (
               <Text dimColor wrap="truncate-end">
                 {teamCodeHead(item.teamCode)}
+              </Text>
+            )}
+            {item.isBase === true && items[i + 1] !== undefined && (
+              <Text dimColor wrap="wrap">
+                {BASE_LEAD}
               </Text>
             )}
             <Markdown text={item.question} />

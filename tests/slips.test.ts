@@ -30,6 +30,7 @@ import {
   fitHistory,
   fitSlips,
   forHistory,
+  isBaseKey,
   isForgotten,
   isSlipSaid,
   jsonBytes,
@@ -406,16 +407,21 @@ describe('1.7.0: asked again in other code (다시 도전, D5)', () => {
  * 4,194,304 in all (4 MiB): Claude Code counts the UTF-16 characters of its compact JSON, never more than the UTF-8
  * bytes counted here, so this byte test is the stricter one. About 0.52MB is left, and STORE_WORST holds the line so
  * no key grows into it unseen. 1.9.0 (F1) adds the writer's mark in the concept index and oldWrites, 72 bytes in all:
- * 3,671,370 bytes.
+ * 3,671,370 bytes. 1.9.0 (F5) adds a base concept's key on every slip (the slips stay inside SLIPS_MAX_BYTES, fewer of
+ * them) and on a quiz question, its first try and its slip before, with the mark of a question asked about one, each
+ * key at the longest kept (200 characters): 3,675,861 bytes, about 0.52MB still left.
  */
 const STORE_LIMIT = 4 * 1024 * 1024
-const STORE_WORST = 3_672_000
+const STORE_WORST = 3_676_000
 
 describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5, the storage budget test brought forward)', () => {
   test('notes 12 projects × 30, concepts 400, questions 300, slips 300, team terms 150, merges 40: every key at its caps, every text Hangul', { timeoutMs: 30_000 }, () => {
     // Every text in Hangul, three bytes a character: code with Korean in it is the worst any key holds.
     const hangul = (n: number, seed = 0) => Array.from({ length: n }, (_, i) => String.fromCharCode(0xac00 + ((i + seed) % 400))).join('')
     const mixed = hangul
+    // A base concept's key at the longest the store keeps one (1.9.0 F5, isBaseKey).
+    const BASE = `c:${hangul(198)}`
+    expect(isBaseKey(BASE)).toBe(true)
     const history: Record<string, { at: number; notes: ReturnType<typeof forHistory>[] }> = {}
     for (let p = 0; p < HISTORY_PROJECTS; p += 1) {
       const notes = Array.from({ length: HISTORY_PER_PROJECT }, (_, i) =>
@@ -476,13 +482,16 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
       isLearnerGraded: true,
       kind: 'predict',
       noteId: 'n'.repeat(30),
-      firstTry: { mine: mixed(1500), verdict: 'wrong', feedback: hangul(600), nudge: hangul(300), at: NOW, slip: hangul(80), slipType: 'reference' },
+      firstTry: { mine: mixed(1500), verdict: 'wrong', feedback: hangul(600), nudge: hangul(300), at: NOW, slip: hangul(80), slipType: 'reference', slipBase: BASE },
       isRetry: true,
       // Its rung (1.8.0, E3): the longest of the four names.
       rung: 'changed',
       slip: hangul(80),
       slipType: 'reference',
-      slipBefore: { what: hangul(80), type: 'reference', question: mixed(240), mine: mixed(160), at: NOW, times: 99, fixedAt: NOW },
+      // A base concept (1.9.0 F5): the one a grade picked, at the longest a key read back keeps, and a question asked about one.
+      slipBase: BASE,
+      isBase: true,
+      slipBefore: { what: hangul(80), type: 'reference', question: mixed(240), mine: mixed(160), at: NOW, times: 99, fixedAt: NOW, base: BASE },
       // A team term (1.7.0 D6): where its lines are, its repository, and the words its grade puts in the concept index.
       team: true,
       teamCode: { file: hangul(120), from: 999_999, to: 999_999, isDoc: true },
@@ -501,7 +510,7 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
     let sessions = {}
     for (let i = 0; i < STAMPS_KEPT + 4; i += 1) sessions = withStamp(sessions, `session-${'s'.repeat(30)}-${i}`, '1.7.0', NOW + i)
     const slips: Record<string, LearnSlip> = {}
-    for (let i = 0; i < SLIPS_KEPT; i += 1) slips[`c:${hangul(36, i)}${i}`] = { what: hangul(80, i), type: 'reference', question: mixed(240, i), mine: mixed(160, i), at: NOW + i, times: 99 }
+    for (let i = 0; i < SLIPS_KEPT; i += 1) slips[`c:${hangul(36, i)}${i}`] = { what: hangul(80, i), type: 'reference', question: mixed(240, i), mine: mixed(160, i), at: NOW + i, times: 99, base: BASE }
     // Team terms (1.7.0 D6): a name of 40 characters at most, each marked in five repositories; as many repositories toasted.
     let teamTerms: Record<string, string[]> = {}
     for (let i = 0; i < TEAM_TERMS_KEPT + 20; i += 1) for (let r = 0; r < 5; r += 1) teamTerms = withTeamTerm(teamTerms, conceptKey(`${hangul(36, i)}${String(i).padStart(4, '0')}`), rootTag(`/proj${r}`))
@@ -548,6 +557,8 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
     expect(added).toBeLessThanOrEqual(190_000)
     // 1.9.0's (F1): the writer's mark in the index, and its one new key, under 100 bytes.
     expect(sizes.oldWrites!).toBeLessThan(100)
+    // 1.9.0's (F5): every slip with a base (inside SLIPS_MAX_BYTES all the same), and each question's base fields.
+    expect(Object.values(store.slips as Record<string, LearnSlip>).every(one => one.base === BASE)).toBe(true)
     expect(jsonBytes(markedConcepts(index, NOW)) - jsonBytes(storedConcepts(index))).toBeLessThanOrEqual(20)
     // The whole: no key may grow unseen past this, and the store's limit stays well clear.
     expect(total).toBeLessThanOrEqual(STORE_WORST)

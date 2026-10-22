@@ -3,8 +3,11 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import {
+  BASE_LEAD,
   DRILL_RULE_AFTER,
+  IS_BASE_ASKED,
   IS_RULE_DRILL,
+  WORKED_BASE_NEXT,
   RUNG_CHANGED_STEP,
   RUNG_NEW_STEP,
   STAMP_KEPT_MS,
@@ -14215,5 +14218,314 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     w.harness = { rungNewStep: -1, rungChangedStep: 'two', workedAfterTimes: 1.5 }
     await start($)
     expect(await versionLine()).toBe(plain)
+  })
+})
+
+describe('1.9.0: 바탕 개념, a base concept asked right before the worked example of one missed twice running (F5)', () => {
+  const DAY = 86_400_000
+  const WHAT = '함수가 끝나면 바깥 변수도 사라진다고 봄'
+  const RIGHT = '판정: 맞음\n피드백: 정확합니다.'
+  const X = '클로저'
+  const B = '변수 범위'
+  const D = '비동기'
+  const F = '배열'
+  /** The words of the answer a grade says its base came from (바탕 근거). */
+  const WHY = '바탕 근거: "함수가 끝나면 다 사라지니까"'
+  /**
+   * A grade of a question asked again short of right that asks back, its slip read as coming from the concept numbered
+   * `said` in the list (변수 범위 is the third: 비동기 · 배열 · 변수 범위, each sharing counter.js, the latest met first).
+   */
+  const based = (said = '3', why = WHY) => ['판정: 틀림', '피드백: 그 값은 바깥 변수가 아닙니다.', '되묻기: 안쪽 함수가 다시 불릴 때 c는 어디에 남아 있을까요?', `헷갈린 점: ${WHAT}`, why, `바탕: ${said}`, '유형: 변수 범위'].join('\n')
+  /** The same graded at once: no question asked back. */
+  const atOnce = (said = '3', why = WHY) => ['판정: 틀림', '피드백: 아닙니다.', `헷갈린 점: ${WHAT}`, why, `바탕: ${said}`, '유형: 변수 범위'].join('\n')
+  const AGAIN_WRONG = '판정: 틀림\n피드백: 아직 아닙니다.'
+  const worked = (n: number) =>
+    [`T${n}: 예측`, `Q${n}: 풀이: \`let n = 0; const up = () => ++n; up()\` 뒤 n은 1입니다.`, '이제 풀어 보세요: `let c = 10; const add = () => ++c; add()` 뒤 c는?', `H${n}: 바깥 c`, `A${n}: 11`].join('\n')
+  const plainQ = (n: number, text = '문제') => [`T${n}: 예측`, `Q${n}: ${text} ${n}`, `A${n}: 답 ${n}`].join('\n')
+  type Row = { what: string; type: string; question: string; mine: string; at: number; times: number; fixedAt?: number; isRight?: true; base?: string }
+  const slipsOf = (store: Map<string, unknown>) => (store.get('slips') ?? {}) as Record<string, Row>
+  const conceptOf = (store: Map<string, unknown>, name: string) => (store.get('concepts') as Record<string, { step?: number; reviewedAt?: number }>)[conceptKey(name)]!
+  const quizItems = (store: Map<string, unknown>) => (store.get('quiz') as { items: Record<string, unknown>[] }).items
+  /**
+   * X met after B, D and F; X gone over three days ago and its slip kept two days ago (asked again: 다시 도전), D due,
+   * F due in six days and B in nine (so F fills the quiz before B), each with its step copy; `more` adds concepts.
+   */
+  const storeOf = (slip: Partial<Row> = {}, more: Record<string, { step: number; ago: number; first: number }> = {}) => {
+    const rows: Record<string, { step: number; ago: number; first: number }> = {
+      [X]: { step: 1, ago: 3, first: 30 },
+      [B]: { step: 3, ago: 5, first: 60 },
+      [D]: { step: 0, ago: 2, first: 40 },
+      [F]: { step: 2, ago: 1, first: 50 },
+      ...more,
+    }
+    const concepts = Object.fromEntries(
+      Object.entries(rows).map(([name, one]) => [
+        conceptKey(name),
+        { name, count: 2, firstAt: NOW - one.first * DAY, lastAt: NOW - one.first * DAY, blurb: `${name} 설명`, files: ['counter.js'], step: one.step, reviewedAt: NOW - one.ago * DAY },
+      ]),
+    )
+    const slips = { [conceptKey(X)]: { what: WHAT, type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * DAY, times: 1, ...slip } }
+    return new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['slips', slips]])
+  }
+  /** A world whose build asks bases (`isOn`, a harness's) or not, started. */
+  async function opened($: Engine, on: On, store: Map<string, unknown>, harness: Record<string, unknown> = { isBaseAsked: true }) {
+    const w = world(on, 'ok', null, true, store)
+    w.harness = harness
+    await start($)
+    return w
+  }
+  async function quizIn($: Engine, w: World, reply: string) {
+    w.answer = reply
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-quiz' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    return ui
+  }
+  /** The pane on the quiz this window shows, no new one asked for. */
+  async function quizPane($: Engine) {
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-quiz' })
+    return ui
+  }
+  async function answer(ui: Awaited<ReturnType<typeof pane>>, w: World, key: string, text: string, reply: string) {
+    w.answer = reply
+    await ui.input({ key, text })
+    await w.clock.settle()
+  }
+
+  test('missed again on its try again, asked again: the grade is shown the concepts learned before, the base kept on the first try, then on the slip', async ($, on) => {
+    const store = storeOf()
+    const w = await opened($, on, store)
+    const ui = await quizIn($, w, [plainQ(1), plainQ(2), plainQ(3)].join('\n'))
+    expect(quizItems(store).map(one => one.name)).toEqual([X, D, F])
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/3 · 다시 도전 · 예측$/ })).toBeDefined()
+    await answer(ui, w, mineKey(store, 0), '전역에 남아요', based())
+    // The first grade lists the concepts met before 클로저 (each sharing a file with it: the latest met first).
+    const first = w.models.at(-1)!
+    expect(first).toContain(`## 이 학습자가 지난번에 헷갈린 점\n${WHAT}\n## 학습자가 전에 배운 개념\n1. ${D}\n2. ${F}\n3. ${B}\n## 학습자의 답\n`)
+    expect(first).toContain('헷갈린 점: (거의·틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)\n바탕 근거: (답의 어느 말이 위 개념을 잘못 안 것인지 짧게, 없으면 없음)\n바탕: (위 번호 하나, 없으면 0)\n유형:')
+    expect(quizItems(store)[0]).toMatchObject({ firstTry: { slip: WHAT, slipType: 'scope', slipBase: conceptKey(B) } })
+    expect(slipsOf(store)[conceptKey(X)]).not.toHaveProperty('base')
+    // The try again asks for no slip, nor a base: the first try's is kept.
+    await answer(ui, w, `${mineKey(store, 0)}-again`, '함수 안쪽 어딘가', AGAIN_WRONG)
+    expect(w.models.at(-1)).not.toContain('전에 배운 개념')
+    expect(w.models.at(-1)).not.toContain('바탕')
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 2, base: conceptKey(B), at: NOW })
+    // Under the grade, no name: the base comes first in the next review quiz.
+    expect(await ui.find({ type: 'Text', text: `같은 곳을 또 헷갈렸습니다 · ${WORKED_BASE_NEXT}` })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: new RegExp(B) })).toBeUndefined()
+    await ui.unmount()
+
+    // The next review quiz: 변수 범위 right before 클로저's worked example, in the place 배열 (a filler) had.
+    await w.clock.advance(60_000)
+    w.answer = [plainQ(1, '바탕'), worked(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    const next = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    expect(quizItems(store).map(one => [one.name, one.isBase, one.rung])).toEqual([
+      [B, true, undefined],
+      [X, undefined, 'worked'],
+      [D, undefined, undefined],
+    ])
+    // The quiz prompt is told nothing of it: asked as any concept is.
+    const asked = w.models.at(-1)!
+    expect(asked).toContain(`\n1. ${B} — ${B} 설명\n2. ${X} — ${X} 설명\n   지난번 문제 '문제 1'`)
+    expect(asked).not.toContain('바탕')
+    expect(await next.find({ type: 'Text', text: /^문제 1\/3 · 바탕 개념 · 예측$/ })).toBeDefined()
+    const lead = await next.find({ type: 'Text', text: BASE_LEAD })
+    expect(lead?.props.dimColor).toBe(true)
+    expect((await learn($, '퀴즈')).text).toContain('\n1. (바탕 개념) 바탕 1')
+    // Graded as any question: right before it is due, its step kept (as a filler's), gone over now; no base asked of it.
+    await answer(next, w, mineKey(store, 0), '함수 안에서만 보여요', RIGHT)
+    expect(w.models.at(-1)).not.toContain('전에 배운 개념')
+    expect(conceptOf(store, B)).toMatchObject({ step: 3, reviewedAt: NOW + 60_000 })
+    expect(await next.find({ type: 'Text', text: /^문제 2\/3 · 풀이 보고 풀기 · 예측$/ })).toBeDefined()
+    expect(await next.find({ type: 'Text', text: BASE_LEAD })).toBeUndefined()
+    await next.unmount()
+  })
+
+  test('graded at once with no question asked back: the same base on the slip; turned right it goes with the slip before, turned wrong it is back', async ($, on) => {
+    const store = storeOf()
+    const w = await opened($, on, store)
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    w.answer = atOnce()
+    const reply = (await learn($, '퀴즈 1 전역에 남아요')).text ?? ''
+    expect(reply).toContain(`\n같은 곳을 또 헷갈렸습니다 · ${WORKED_BASE_NEXT}`)
+    expect(reply).not.toContain(B)
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 2, base: conceptKey(B) })
+    expect(quizItems(store)[0]).toMatchObject({ slipBase: conceptKey(B), slipBefore: { times: 1 } })
+    await learn($, '퀴즈 맞음 1')
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 1 })
+    expect(slipsOf(store)[conceptKey(X)]).not.toHaveProperty('base')
+    await learn($, '퀴즈 틀림 1')
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 2, base: conceptKey(B) })
+  })
+
+  for (const [said, why] of [['0', WHY], ['7', WHY], ['클로저', WHY], ['3', '바탕 근거: 없음']]) {
+    test(`a base not among the concepts shown, or with no words of the answer (바탕: ${said}, ${why}): none kept, the line as 1.8.0 wrote it`, async ($, on) => {
+      const store = storeOf()
+      const w = await opened($, on, store)
+      w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+      await learn($, '퀴즈 새로')
+      w.answer = atOnce(said, why)
+      expect((await learn($, '퀴즈 1 전역에 남아요')).text).toContain('\n같은 곳을 또 헷갈렸습니다 · 다음 복습 퀴즈는 풀이부터 보여 줍니다')
+      expect(slipsOf(store)[conceptKey(X)]).not.toHaveProperty('base')
+      expect(quizItems(store)[0]).not.toHaveProperty('slipBase')
+    })
+  }
+
+  test('only a question asked again is graded with the list: not one asked the first time, nor an answer of two characters', async ($, on) => {
+    const store = storeOf()
+    const w = await opened($, on, store)
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => [one.name, one.isRetry])).toEqual([[X, true], [D, undefined], [F, undefined]])
+    // 비동기, asked the first time: 1.8.0's grade, no base kept though the reply names one.
+    w.answer = atOnce()
+    await learn($, '퀴즈 2 바로 찍혀요')
+    expect(w.models.at(-1)).not.toContain('전에 배운 개념')
+    expect(w.models.at(-1)).not.toContain('바탕')
+    expect(quizItems(store)[1]).not.toHaveProperty('slipBase')
+    expect(slipsOf(store)[conceptKey(D)]).not.toHaveProperty('base')
+    // On the one asked again, two characters say too little to read a slip from: no list, no base.
+    const calls = w.models.length
+    w.answer = atOnce()
+    await learn($, '퀴즈 1 10')
+    expect(w.models).toHaveLength(calls + 1)
+    expect(w.models.at(-1)).toContain("## 이 학습자가 지난번에 헷갈린 점")
+    expect(w.models.at(-1)).not.toContain('전에 배운 개념')
+    expect(slipsOf(store)[conceptKey(X)]).not.toHaveProperty('base')
+  })
+
+  test('off (the default\'s bytes): no list in the grade, no base kept though a reply names one, the next quiz as 1.8.0 made it', async ($, on) => {
+    const store = storeOf()
+    const w = await opened($, on, store, { isBaseAsked: false })
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    w.answer = atOnce()
+    expect((await learn($, '퀴즈 1 전역에 남아요')).text).toContain('\n같은 곳을 또 헷갈렸습니다 · 다음 복습 퀴즈는 풀이부터 보여 줍니다')
+    expect(w.models.at(-1)).not.toContain('전에 배운 개념')
+    expect(w.models.at(-1)).not.toContain('바탕:')
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 2 })
+    expect(slipsOf(store)[conceptKey(X)]).not.toHaveProperty('base')
+    expect(quizItems(store)[0]).not.toHaveProperty('slipBase')
+    await w.clock.advance(60_000)
+    w.answer = [worked(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => one.name)).toEqual([X, D, F])
+    expect(quizItems(store).some(one => 'isBase' in one)).toBe(false)
+  })
+
+  test('with no harness the build runs as its constant says; a slip with a base from another window is asked so only while it is on', async ($, on) => {
+    const store = storeOf({ times: 2, base: conceptKey(B) })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = [plainQ(1), worked(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store)[0]!.name).toBe(IS_BASE_ASKED ? B : X)
+  })
+
+  test('풀이 보고 풀기 off (F4\'s null): asked again as 1.7 did, no base before it', async ($, on) => {
+    const store = storeOf({ times: 2, base: conceptKey(B) })
+    const w = await opened($, on, store, { isBaseAsked: true, workedAfterTimes: null })
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => [one.name, one.isRetry])).toEqual([[X, true], [D, undefined], [F, undefined]])
+  })
+
+  test('its base gone over since the slip was kept: asked once for that slip, not again', async ($, on) => {
+    const store = storeOf({ times: 2, base: conceptKey(B) }, { [B]: { step: 3, ago: 1, first: 60 } })
+    const w = await opened($, on, store)
+    w.answer = [worked(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => one.name)).toEqual([X, D, F])
+  })
+
+  test('its base\'s own slip open: asked again as its own (다시 도전), its title not taken over', async ($, on) => {
+    const store = storeOf({ times: 2, base: conceptKey(B) })
+    // Kept after its last review (five days ago), so the next quiz asks it again: first, its slip the older.
+    store.set('slips', { ...slipsOf(store), [conceptKey(B)]: { what: '안에서 만든 변수가 밖에서도 보인다고 봄', type: 'scope', question: '지난 문제', mine: '보여요', at: NOW - 4 * DAY, times: 1 } })
+    const w = await opened($, on, store)
+    const ui = await quizIn($, w, [plainQ(1), worked(2), plainQ(3)].join('\n'))
+    expect(quizItems(store).map(one => [one.name, one.isBase, one.isRetry])).toEqual([[B, undefined, true], [X, undefined, undefined], [D, undefined, undefined]])
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/3 · 다시 도전 · 예측$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: BASE_LEAD })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('/learn 퀴즈 팀 asks the team\'s terms alone: no base', async ($, on) => {
+    const store = storeOf({ times: 2, base: conceptKey(B) })
+    const w = world(on, 'ok', null, true, store)
+    w.harness = { isBaseAsked: true }
+    w.files.set('/proj/.claude/learn-notes.md', '# 팀\n\n## 용어\n- **주문서**: 결제 직전에 굳힌 장바구니\n')
+    await start($)
+    w.answer = plainQ(1)
+    await learn($, '퀴즈 팀')
+    expect(quizItems(store).map(one => one.name)).toEqual(['주문서'])
+    expect(quizItems(store).some(one => 'isBase' in one)).toBe(false)
+  })
+
+  test('its base past the concepts a quiz looks through is found in the index, its code as any pick\'s; a worked example unread drops the mark', async ($, on) => {
+    // Five fillers due before 변수 범위: the quiz looks through six, 변수 범위 not among them.
+    const more = Object.fromEntries(['문자열', '조건문', '반복문', '객체', '함수'].map((name, i) => [name, { step: 2, ago: 1, first: 50 + i }]))
+    const store = storeOf({ times: 2, base: conceptKey(B) }, more)
+    const w = await opened($, on, store)
+    w.answer = [plainQ(1, '바탕'), worked(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => [one.name, one.isBase])).toEqual([[B, true], [X, undefined], [D, undefined]])
+    // The model's reply wrote no question for 클로저: 변수 범위 is a question as any other, no tag and no dim line.
+    await w.clock.advance(60_000)
+    w.answer = [plainQ(1, '바탕'), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    const ui = await quizPane($)
+    expect(quizItems(store).map(one => one.name)).toEqual([B, D])
+    expect(quizItems(store)[0]).not.toHaveProperty('isBase')
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/2 · 예측$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: BASE_LEAD })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a 1.8 window that writes the quiz and the slips back: the base a question as any other, the next quiz 1.8.0\'s', async ($, on) => {
+    const store = storeOf({ times: 2, base: conceptKey(B) })
+    const w = await opened($, on, store)
+    w.answer = [plainQ(1, '바탕'), worked(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store)[0]).toMatchObject({ isBase: true })
+    // 1.8.0's quizItemOf keeps no isBase, slipBase or firstTry.slipBase; its slipRecordOf no base.
+    const quiz = store.get('quiz') as { items: Record<string, unknown>[] }
+    store.set('quiz', { ...quiz, items: quiz.items.map(({ isBase, slipBase, ...rest }) => rest) })
+    store.set('slips', Object.fromEntries(Object.entries(slipsOf(store)).map(([key, { base, ...rest }]) => [key, rest])))
+    // Graded on the quiz the store holds, every window's: as any question, right before it is due its step kept.
+    w.answer = RIGHT
+    await learn($, '퀴즈 1 함수 안에서만 보여요')
+    expect(conceptOf(store, B)).toMatchObject({ step: 3, reviewedAt: NOW })
+    expect(quizItems(store)[0]).toMatchObject({ result: 'right' })
+    expect(quizItems(store)[0]).not.toHaveProperty('isBase')
+    // This window shows the quiz as the store has it from then on.
+    expect((await learn($, '퀴즈')).text).not.toContain('(바탕 개념)')
+    const ui = await quizPane($)
+    expect(await ui.find({ type: 'Text', text: /^문제 2\/3 · 풀이 보고 풀기 · 예측$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: BASE_LEAD })).toBeUndefined()
+    await ui.unmount()
+    // The slip the 1.8 window wrote back has no base: the next quiz is the worked example with no base before it.
+    await w.clock.advance(60_000)
+    w.answer = [worked(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => [one.name, one.rung])).toEqual([[X, 'worked'], [D, undefined], [F, undefined]])
+  })
+
+  test('/learn 진단 counts the open slips with a base while bases are asked, no name; the version line names a switch turned', async ($, on) => {
+    const store = storeOf({ times: 2, base: conceptKey(B) })
+    const w = await opened($, on, store)
+    const text = (await learn($, '진단')).text ?? ''
+    expect(text).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 1\n')
+    expect(text).not.toContain(B)
+    if (!IS_BASE_ASKED) expect(text).toContain('· 시험 스위치: 바탕 개념 켬')
+    w.harness = { isBaseAsked: false }
+    await start($)
+    const off = (await learn($, '진단')).text ?? ''
+    expect(off).toContain('· 열린 채 두 번 이상 1\n')
+    expect(off).not.toContain('바탕 개념')
   })
 })

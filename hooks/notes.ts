@@ -4713,6 +4713,8 @@ export type QuizPick = RankedConcept & {
   /** Which code it is asked in (1.8.0, rungOf), and for a question in code of the quiz's own making the language its note's code was in. */
   rung?: QuizRung
   lang?: string
+  /** A base concept asked right before the worked example that rests on it (1.9.0 F5, baseFor · withBase). */
+  isBase?: true
 }
 
 /** What a quiz question asks: the output or value of some code, why a line is there, or how to change it. */
@@ -5382,6 +5384,17 @@ const RULE_CHECK =
   '팀 규칙 연습이다. 판정보다 먼저 고친 줄이 위 팀 규칙을 지키는지 본다. 고친 줄이 팀 규칙을 지키고 할 일을 이루면 모범 답과 달라도 맞음이다. 결과가 같아도 규칙을 지키지 않았으면 맞음이 아니다.'
 
 /**
+ * How a grade picks a base concept (1.9.0 F5), after the slip's kind: one of the concepts listed as learned before, by its
+ * number, only where the answer shows the slip came from getting that one wrong, the answer's words that show it said
+ * first (바탕 근거: none, and no base is kept, parseCheck); and its two lines' format, between the slip's and its kind's.
+ * The plan's sentence named the concept by its name (`바탕: 이름`); its first sample picked a concept learned before far
+ * too often where the answer had it right, and this is the plan's one mend (docs/qa/견본.md).
+ */
+const BASE_CHECK =
+  '바탕은 판정이 거의나 틀림일 때만 쓴다. 이번 답의 헷갈림이 위 목록에 있는 개념 하나를 잘못 알아서 생겼다는 근거가 답에 있으면, 바탕 근거에 답의 그 말을 짧게 쓰고 바탕에 그 개념의 번호 하나를 쓴다. 근거가 없거나 이 개념 안에서 생긴 헷갈림이면 바탕 근거는 없음, 바탕은 0이라고 쓴다.'
+const BASE_FORMAT: readonly string[] = ['바탕 근거: (답의 어느 말이 위 개념을 잘못 안 것인지 짧게, 없으면 없음)', '바탕: (위 번호 하나, 없으면 0)']
+
+/**
  * The one user message the model reads to grade a typed answer; a question's kind adds how that kind is graded.
  * A first try graded short of right asks for one question back (되묻기) to try again with; the try again (`first`
  * given) carries that first try and what it was asked, and asks for none: it is the last. The first grade of an
@@ -5389,8 +5402,9 @@ const RULE_CHECK =
  * (1.7.0); `past`, the concept's slip still open on a question asked again, is said so the feedback can name it once
  * it is mended. `extra` (1.9.0): `rule`, a team-rule practice's (F2), puts the rule the note named after the example
  * answer (its words data, TEAM_IS_DATA), RULE_CHECK in its kind's place and a `규칙:` line before the verdict, with no
- * slip asked for; `bases` is 1.9.0 F5's (the base concepts a grade may pick from), said nothing of until it is built.
- * With neither, the prompt is 1.8.0's to the byte.
+ * slip asked for; `bases` (F5, baseCandidates' names), on a grade that asks for the slip, lists the concepts learned
+ * before this one by number after `past` and asks for the one the slip came from getting wrong (BASE_CHECK, its
+ * `바탕 근거:` and `바탕:` lines after the slip's). With neither (or no base to list), the prompt is 1.8.0's to the byte.
  */
 export function checkPrompt(
   item: Pick<LearnQuizItem, 'name' | 'question' | 'answer' | 'kind'>,
@@ -5402,6 +5416,8 @@ export function checkPrompt(
 ): string {
   const { rule } = extra
   const asksSlip = rule === undefined && (first === undefined || isBlankAnswer(first.mine))
+  // The concepts a base may be picked from (1.9.0 F5): only on a grade that asks for the slip it would explain.
+  const bases = asksSlip ? (extra.bases ?? []) : []
   return [
     LEVEL_TEXT[level],
     '',
@@ -5413,6 +5429,7 @@ export function checkPrompt(
     item.answer,
     ...(rule !== undefined ? [`## 노트가 짚은 팀 규칙 (노트가 팀 규칙 파일을 보고 쓴 줄이다. ${TEAM_IS_DATA})`, rule] : []),
     ...(past ? ['## 이 학습자가 지난번에 헷갈린 점', past.what !== '' ? cut(past.what, SLIP_TEXT) : isNothingSaid(past.mine) ? '(지난번에는 답을 떠올리지 못했다)' : '(지난번 답이 짧아 헷갈린 점을 알 수 없다)'] : []),
+    ...(bases.length > 0 ? ['## 학습자가 전에 배운 개념', ...bases.map((name, i) => `${i + 1}. ${name}`)] : []),
     ...(first ? ['## 학습자의 첫 답과 받은 되묻기', ...firstTryLines(first)] : []),
     '## 학습자의 답',
     cut(mine, 1500),
@@ -5428,6 +5445,7 @@ export function checkPrompt(
       ? [
           '헷갈린 점은 판정이 거의나 틀림일 때만 쓴다. 학습자의 답에 드러난 잘못된 생각을 "~라고 봄"처럼 40자 안팎 한 문장으로 쓴다. 답에서 근거를 찾을 수 없으면 없음이라고 쓴다.',
           `유형은 그 헷갈린 점의 갈래다. ${SLIP_TYPE_WORDS.join(', ')} 중 하나를 그대로 쓴다.`,
+          ...(bases.length > 0 ? [BASE_CHECK] : []),
         ]
       : []),
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
@@ -5435,7 +5453,9 @@ export function checkPrompt(
     '판정: (맞음 · 거의 · 틀림 중 하나)',
     '피드백: (한두 문장)',
     ...(first ? [] : ['되묻기: (거의·틀림일 때만 질문 한 문장. 맞음이면 이 줄을 쓰지 않는다)']),
-    ...(asksSlip ? ['헷갈린 점: (거의·틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)', '유형: (거의·틀림일 때만 위 갈래 중 하나)'] : []),
+    ...(asksSlip
+      ? ['헷갈린 점: (거의·틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)', ...(bases.length > 0 ? BASE_FORMAT : []), '유형: (거의·틀림일 때만 위 갈래 중 하나)']
+      : []),
   ].join('\n')
 }
 
@@ -5462,7 +5482,7 @@ const CHECK_LABEL = /^\s*(?:\*\*)?(판정|피드백|되묻기|헷갈린\s*점|�
  */
 function checkLabel(asked: { rule?: true; base?: true }): RegExp {
   if (!asked.rule && !asked.base) return CHECK_LABEL
-  const more = [...(asked.rule ? ['규칙'] : []), ...(asked.base ? ['바탕'] : [])].join('|')
+  const more = [...(asked.rule ? ['규칙'] : []), ...(asked.base ? ['바탕\\s*근거', '바탕'] : [])].join('|')
   return new RegExp(`^\\s*(?:\\*\\*)?(판정|피드백|되묻기|헷갈린\\s*점|유형|${more})(?:\\*\\*)?\\s*[:：]\\s*(?:\\*\\*)?\\s*(.*)$`)
 }
 
@@ -5507,7 +5527,8 @@ function slipOf(raw: unknown): string | undefined {
 /**
  * A grade as parseCheck reads it: the verdict and feedback, and short of right the question asked back and the slip
  * with its kind. Asked for (1.9.0): whether a team-rule practice's line kept its rule (`rule`, F2), and the base
- * concept a grade named as it wrote it (`base`, F5).
+ * concept a grade named as it wrote it (`base`, F5, a number in the list) with the answer's words it named for it
+ * (`baseWhy`, 바탕 근거).
  */
 export type CheckReply = {
   verdict: 'right' | 'partial' | 'wrong'
@@ -5517,6 +5538,7 @@ export type CheckReply = {
   slipType?: Exclude<LearnSlipType, 'blank'>
   rule?: 'kept' | 'broken'
   base?: string
+  baseWhy?: string
 }
 
 /**
@@ -5532,7 +5554,7 @@ function ruleKeptOf(raw: unknown): 'kept' | 'broken' | undefined {
 }
 
 /** A base concept as a grade wrote it on its `바탕:` line (1.9.0 F5), one line and cut short; undefined for none. */
-function baseOf(raw: unknown): string | undefined {
+function baseSaid(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined
   const text = raw.replace(/\s+/g, ' ').trim()
   return text === '' || NONE_SAID.test(text) ? undefined : cut(text, 120)
@@ -5544,7 +5566,8 @@ function baseOf(raw: unknown): string | undefined {
  * its kind (유형, 기타 when it names none of the nine), each for a grade short of right only; a reply with no such
  * line grades as before 1.7.0. `asked` (1.9.0) reads the lines checkPrompt's `extra` asked for, else none of them:
  * `rule`, a team-rule practice's `규칙:` (F2), a line that broke the rule never right (right is read as 거의); `base`,
- * the `바탕:` line (F5).
+ * the `바탕:` line (F5) as written, short of right only and only under a `바탕 근거:` that names the answer's words
+ * (baseOf reads it as a concept).
  */
 export function parseCheck(text: string, asked: { rule?: true; base?: true } = {}): CheckReply | undefined {
   const words: Record<string, 'right' | 'partial' | 'wrong'> = {
@@ -5558,10 +5581,12 @@ export function parseCheck(text: string, asked: { rule?: true; base?: true } = {
     nudge: string | undefined,
     slip: string | undefined,
     type: unknown,
-    more: { rule?: unknown; base?: unknown },
+    more: { rule?: unknown; base?: unknown; baseWhy?: unknown },
   ): CheckReply => {
     const rule = asked.rule ? ruleKeptOf(more.rule) : undefined
-    const base = asked.base ? baseOf(more.base) : undefined
+    // A base with no words of the answer said for it is none (1.9.0 F5, 바탕 근거).
+    const baseWhy = asked.base ? baseSaid(more.baseWhy) : undefined
+    const base = baseWhy !== undefined ? baseSaid(more.base) : undefined
     // A line that does what it was to do but breaks the team's rule is never right (1.9.0 F2).
     const verdict = rule === 'broken' && said === 'right' ? 'partial' : said
     return {
@@ -5570,7 +5595,8 @@ export function parseCheck(text: string, asked: { rule?: true; base?: true } = {
       ...(verdict !== 'right' && nudge !== undefined ? { nudge } : {}),
       ...(verdict !== 'right' && slip !== undefined ? { slip, slipType: slipTypeOf(type) } : {}),
       ...(rule !== undefined ? { rule } : {}),
-      ...(base !== undefined ? { base } : {}),
+      // A base explains a slip (1.9.0 F5): none on a right answer, which keeps no slip.
+      ...(verdict !== 'right' && base !== undefined ? { base, baseWhy: baseWhy! } : {}),
     }
   }
   const json = /\{[\s\S]*\}/.exec(text)?.[0]
@@ -5584,6 +5610,7 @@ export function parseCheck(text: string, asked: { rule?: true; base?: true } = {
           return graded(verdict, String(r.feedback ?? '').trim(), nudgeOf(r.nudge ?? r['되묻기']), slipOf(r.slip ?? r['헷갈린 점'] ?? r['헷갈린점']), r.slipType ?? r.type ?? r['유형'], {
             rule: r.rule ?? r['규칙'],
             base: r.base ?? r['바탕'],
+            baseWhy: r.baseWhy ?? r['바탕 근거'] ?? r['바탕근거'],
           })
         }
       }
@@ -5595,7 +5622,11 @@ export function parseCheck(text: string, asked: { rule?: true; base?: true } = {
   const verdictWord = /^([^\s*·,.(]+)/.exec(parts.get('판정') ?? '')?.[1]?.toLowerCase()
   const verdict = verdictWord === undefined ? undefined : words[verdictWord]
   if (!verdict) return undefined
-  return graded(verdict, parts.get('피드백') ?? '', nudgeOf(parts.get('되묻기')), slipOf(parts.get('헷갈린점')), parts.get('유형'), { rule: parts.get('규칙'), base: parts.get('바탕') })
+  return graded(verdict, parts.get('피드백') ?? '', nudgeOf(parts.get('되묻기')), slipOf(parts.get('헷갈린점')), parts.get('유형'), {
+    rule: parts.get('규칙'),
+    base: parts.get('바탕'),
+    baseWhy: parts.get('바탕근거'),
+  })
 }
 
 /**
@@ -5708,20 +5739,25 @@ export function isSlipSaid(question: string, what: string): boolean {
   return said.length >= 4 && plain(question).includes(said)
 }
 
-/** What a graded answer showed wrong: the slip's words ('' for `blank`), its kind and the answer it was read from. */
-export type SlipFound = { what: string; type: LearnSlipType; mine: string }
+/**
+ * What a graded answer showed wrong: the slip's words ('' for `blank`), its kind and the answer it was read from; and the
+ * base concept its grade picked for it (1.9.0 F5, a key), when one did.
+ */
+export type SlipFound = { what: string; type: LearnSlipType; mine: string; base?: string }
 
 /**
  * The slip a graded typed answer showed: the first try's when the question was asked back over one (a try again is
- * graded with none asked for), else the answer's own; `blank` for an answer with nothing to read one from
- * (isForgotten), whatever Claude named. None for a grade with no typed answer (the learner's own, after the answer).
+ * graded with none asked for), else the answer's own, with the base its grade picked (1.9.0 F5, slipBase); `blank`
+ * for an answer with nothing to read one from (isForgotten), whatever Claude named, and no base. None for a grade with
+ * no typed answer (the learner's own, after the answer).
  */
-export function slipFrom(item: Pick<LearnQuizItem, 'mine' | 'slip' | 'slipType' | 'firstTry'>): SlipFound | undefined {
+export function slipFrom(item: Pick<LearnQuizItem, 'mine' | 'slip' | 'slipType' | 'slipBase' | 'firstTry'>): SlipFound | undefined {
   if (item.mine === undefined) return undefined
   const first = item.firstTry
-  const source = first !== undefined && !isBlankAnswer(first.mine) ? first : { mine: item.mine, slip: item.slip, slipType: item.slipType }
+  const source = first !== undefined && !isBlankAnswer(first.mine) ? first : { mine: item.mine, slip: item.slip, slipType: item.slipType, slipBase: item.slipBase }
   if (isForgotten(source.mine)) return { what: '', type: 'blank', mine: source.mine }
-  return source.slip !== undefined && source.slip !== '' ? { what: source.slip, type: source.slipType ?? 'other', mine: source.mine } : undefined
+  if (source.slip === undefined || source.slip === '') return undefined
+  return { what: source.slip, type: source.slipType ?? 'other', mine: source.mine, ...(source.slipBase !== undefined ? { base: source.slipBase } : {}) }
 }
 
 /**
@@ -5756,7 +5792,8 @@ export function slipChange(item: LearnQuizItem, how: { isHelped: boolean; isGrad
  * open counts on that one instead, its words and the question and answer that showed them kept: not recalling it
  * says nothing new of what was got wrong. Right on a question asked again (isRetry) on another day than the miss,
  * with no hint and no question asked back, mends it, as graduating does, and /learn 안다 (`mended`). What it keeps is
- * masked first (redactText) and cut short.
+ * masked first (redactText) and cut short. A miss keeps the base its grade picked (1.9.0 F5) unless it still counted
+ * right, and drops the one before; one with nothing to read a slip from keeps the slip's, as it keeps its words.
  */
 export function nextSlip(before: LearnSlip | undefined, change: SlipChange, at: number): LearnSlip | undefined {
   if (change.kind === 'none') return before
@@ -5764,6 +5801,7 @@ export function nextSlip(before: LearnSlip | undefined, change: SlipChange, at: 
     const masked = (text: string, max: number) => cut(redactText(text).text.replace(/\s+/g, ' '), max)
     const kept = { question: masked(change.question, SLIP_QUESTION), mine: masked(change.mine, SLIP_MINE), at }
     const right = change.isRight === true ? { isRight: true as const } : {}
+    const base = change.base !== undefined && change.isRight !== true ? { base: change.base } : {}
     if (before && change.type === 'blank' && before.type !== 'blank' && before.fixedAt === undefined) {
       const again: LearnSlip = { ...before, at, times: before.times + 1 }
       delete again.isRight
@@ -5773,9 +5811,10 @@ export function nextSlip(before: LearnSlip | undefined, change: SlipChange, at: 
       const again: LearnSlip = { ...before, ...kept, times: before.fixedAt !== undefined ? 1 : before.times + 1, ...right }
       delete again.fixedAt
       if (change.isRight !== true) delete again.isRight
-      return again
+      delete again.base
+      return { ...again, ...base }
     }
-    return { what: masked(change.what, SLIP_TEXT), type: change.type, ...kept, times: 1, ...right }
+    return { what: masked(change.what, SLIP_TEXT), type: change.type, ...kept, times: 1, ...right, ...base }
   }
   if (!before || before.fixedAt !== undefined) return before
   const isMended =
@@ -5796,6 +5835,11 @@ export function openSlip(slips: Readonly<Record<string, LearnSlip>>, key: string
 
 const SLIP_TYPES: readonly string[] = [...Object.keys(SLIP_TYPE_LABEL), 'blank']
 
+/** A base concept's key as the store keeps it (1.9.0 F5, LearnSlip.base, slipBase): a concept key of 200 characters at most. */
+export function isBaseKey(raw: unknown): raw is string {
+  return typeof raw === 'string' && raw.startsWith('c:') && raw.length > 2 && raw.length <= 200
+}
+
 /** One slip read back from the store, or from a quiz question's slipBefore; undefined when it is not one. */
 export function slipRecordOf(raw: unknown): LearnSlip | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
@@ -5810,6 +5854,7 @@ export function slipRecordOf(raw: unknown): LearnSlip | undefined {
     times: typeof r.times === 'number' && Number.isFinite(r.times) && r.times >= 1 ? Math.floor(r.times) : 1,
     ...(typeof r.fixedAt === 'number' && Number.isFinite(r.fixedAt) ? { fixedAt: r.fixedAt } : {}),
     ...(r.isRight === true ? { isRight: true as const } : {}),
+    ...(isBaseKey(r.base) ? { base: r.base } : {}),
   }
 }
 
@@ -5947,9 +5992,9 @@ export function noteSlipName(
  * The slips the store keeps, counted for /learn 진단 (1.8.0), with no name and no words: all, open and mended, of
  * kind 기타, with no words (`blank`), and open after two misses or more (`againOpen`, 열린 채 두 번 이상: what the
  * name says, a right answer after being asked back included, and not the worked examples the next quiz will show,
- * which rungOf picks by more than the slip).
+ * which rungOf picks by more than the slip); and open with a base concept (1.9.0 F5, `based`: 바탕 개념).
  */
-export type SlipCounts = { all: number; open: number; mended: number; other: number; blank: number; againOpen: number }
+export type SlipCounts = { all: number; open: number; mended: number; other: number; blank: number; againOpen: number; based: number }
 
 export function slipCounts(slips: Readonly<Record<string, LearnSlip>>): SlipCounts {
   const list = Object.values(slips)
@@ -5961,6 +6006,7 @@ export function slipCounts(slips: Readonly<Record<string, LearnSlip>>): SlipCoun
     other: list.filter(one => one.type === 'other').length,
     blank: list.filter(one => one.type === 'blank').length,
     againOpen: open.filter(one => one.times >= 2).length,
+    based: open.filter(one => one.base !== undefined).length,
   }
 }
 
@@ -5972,6 +6018,33 @@ export const SLIP_AGAIN = '같은 곳을 또 헷갈렸습니다'
 
 /** Said of a miss after which the next review quiz shows a worked example first (isWorkedNext, 1.8.0). */
 export const WORKED_NEXT = '다음 복습 퀴즈는 풀이부터 보여 줍니다'
+
+/**
+ * Whether a grade picks a base concept for a slip (1.9.0 F5, 바탕 개념): a typed answer to a question asked again (다시
+ * 도전) is graded with the concepts learned before it listed (baseCandidates), and may name the one the slip came from
+ * getting wrong (slipBase, then the slip's `base`); missed twice running, the next review quiz asks that one right before
+ * the worked example (baseFor). On only once its sample passes twice and 풀이 보고 풀기 is on (docs/qa/견본.md); off, the
+ * grade's prompt, the quiz, the store and /learn 진단 are 1.8.0's to the byte.
+ */
+export const IS_BASE_ASKED = false
+/**
+ * Concepts learned before it a grade lists for a base, at most: the ones that share the most files with it first. 8 in
+ * the plan; 5 since its first sample (docs/qa/견본.md), with each one sharing a file with it or named in its words.
+ */
+export const BASE_CANDIDATES = 5
+/** A base concept's question's place in its title (as 비슷한 코드's, rungName), and the dim line under that title. */
+export const BASE_LABEL = '바탕 개념'
+export const BASE_LEAD = '다음 문제의 바탕이 되는 개념을 먼저 확인합니다'
+/** WORKED_NEXT for a miss whose slip has a base (1.9.0 F5): the next review quiz asks the base first. No name is said. */
+export const WORKED_BASE_NEXT = '다음 복습 퀴즈는 바탕 개념과 풀이부터 보여 줍니다'
+
+/**
+ * What a miss that makes the next review quiz a worked example (isWorkedNext) says of it: WORKED_BASE_NEXT once its slip
+ * (`record`, as the store has it after the grade) has a base and bases are asked (1.9.0 F5), else WORKED_NEXT.
+ */
+export function workedNextText(record: Pick<LearnSlip, 'base'> | undefined, isBaseAsked = IS_BASE_ASKED): string {
+  return isBaseAsked && record?.base !== undefined ? WORKED_BASE_NEXT : WORKED_NEXT
+}
 
 /**
  * True when a graded question's concept is asked by a worked example in the next review quiz (rungOf): its slip
@@ -5998,13 +6071,15 @@ export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuiz
  * asked again missed again, mended on another day, or right again the same day (only with no hint and no question
  * asked back, `isHelped` false). Nothing when the grade kept none (the schema guard on, a store that refused it).
  * A worked example missed (1.8.0) is a question asked again missed again; a miss that makes the next review quiz show
- * a worked example (isWorkedNext) says so in place of the next quiz's other code (the callers add it to `again`).
+ * a worked example (isWorkedNext) says so in place of the next quiz's other code (the callers add it to `again`), its
+ * base first when the slip has one (workedNextText, 1.9.0 F5).
  */
 export function slipNotice(
   item: Pick<LearnQuizItem, 'result' | 'gradedAt' | 'isRetry' | 'mine' | 'slip' | 'slipType' | 'firstTry' | 'rung' | 'team'>,
   record: LearnSlip | undefined,
   isHelped: boolean,
   workedAfter = WORKED_AFTER_TIMES,
+  isBaseAsked = IS_BASE_ASKED,
 ): SlipNotice | undefined {
   const at = item.gradedAt
   if (item.result === undefined || at === undefined) return undefined
@@ -6017,18 +6092,113 @@ export function slipNotice(
     const isWorked = isWorkedNext(open, item, workedAfter)
     // An answer with nothing to read a slip from is said as such, though a slip with words stays open (nextSlip).
     const found = slipFrom(item)
+    const worked = workedNextText(open, isBaseAsked)
     if (open.type === 'blank' || found?.type === 'blank') {
-      const next = isWorked ? WORKED_NEXT : '다음 퀴즈에서 다시 풉니다'
+      const next = isWorked ? worked : '다음 퀴즈에서 다시 풉니다'
       return isNothingSaid(found?.mine ?? open.mine)
         ? { kind: 'blank', text: `떠오르지 않았습니다 · ${next}` }
         : { kind: 'blank', text: `답이 짧아 헷갈린 점은 적지 않았습니다 · ${next}` }
     }
-    return { kind: 'slip', text: `헷갈린 점: ${open.what} · ${isWorked ? WORKED_NEXT : '다음 퀴즈에서 다른 코드로 다시 묻습니다'}` }
+    return { kind: 'slip', text: `헷갈린 점: ${open.what} · ${isWorked ? worked : '다음 퀴즈에서 다른 코드로 다시 묻습니다'}` }
   }
   if (item.isRetry && record?.fixedAt === at) return { kind: 'fixed', text: '✓ 지난번 헷갈린 점을 바로잡았습니다' }
   if (isNow) return { kind: 'mended', text: '헷갈린 점을 바로 고쳤습니다 · 다른 날 다른 코드로 한 번 더 확인합니다' }
   if (item.isRetry && open && !isHelped && stamp(open.at).day === stamp(at).day) return { kind: 'soon', text: '바로 다시 맞혔습니다 · 다음 복습에서 한 번 더 확인합니다' }
   return undefined
+}
+
+/** A concept a grade may pick as a slip's base (1.9.0 F5): its key, and the name the grade is shown. */
+export type BaseCandidate = { key: string; name: string }
+
+/**
+ * The concepts a grade of the concept under `key` may pick a base from (1.9.0 F5): ones the learner met before it
+ * (first met earlier), not marked known, not itself, and no team term of any repository (`teamMarks`: asked by the team's
+ * words, their names no grade elsewhere is sent), that share a file with it or that its words name (its blurb); the
+ * ones that share the most files with it first, then the most met, then the latest met, BASE_CANDIDATES at most. None
+ * for a concept the index does not hold, the first one learned, or one that nothing learned before it is near.
+ */
+export function baseCandidates(
+  index: Readonly<Record<string, LearnConcept>>,
+  key: string,
+  teamMarks: Readonly<Record<string, readonly string[]>> = {},
+): BaseCandidate[] {
+  const x = conceptAt(index, key)
+  if (!x) return []
+  const shared = (one: LearnConcept) => one.files.filter(file => x.files.includes(file)).length
+  const words = x.blurb.toLowerCase()
+  const isNamed = (one: LearnConcept) => one.name.trim().length >= 2 && words.includes(one.name.trim().toLowerCase())
+  return rankConcepts(index)
+    .filter(one => one.key !== key && !isKnown(one) && one.firstAt < x.firstAt && !isTeamTerm(teamMarks, one.key))
+    .map(one => ({ one, files: shared(one) }))
+    .filter(({ one, files }) => files > 0 || isNamed(one))
+    .sort((a, b) => b.files - a.files || b.one.count - a.one.count || b.one.lastAt - a.one.lastAt)
+    .slice(0, BASE_CANDIDATES)
+    .map(({ one }) => ({ key: one.key, name: one.name }))
+}
+
+/**
+ * The base a grade named (parseCheck's `base`, its `바탕:` line) read as one of the concepts it was shown (1.9.0 F5):
+ * its number in the list (1 the first; 0 none), or, backticks, stars, brackets, quotes and a full stop at its end aside,
+ * the same name (spaces and case aside) or the same concept key (conceptKey: a gloss in brackets on its end aside).
+ * Undefined for none, a number past the list, or a name not among them.
+ */
+export function baseOf(raw: string | undefined, candidates: readonly BaseCandidate[]): string | undefined {
+  if (raw === undefined) return undefined
+  const bare = raw.replace(/[`*"'“”‘’「」『』]/g, '').trim().replace(/[.。!]+$/, '').trim()
+  const numbered = /^(\d+)(?:\s*(?:번|[.)])|\s|$)/.exec(bare)
+  if (numbered) return candidates[Number(numbered[1]) - 1]?.key
+  const plain = (text: string) => squash(text.replace(/[`*"'“”‘’「」『』()（）[\]]/g, '')).replace(/[.。!]+$/, '').toLowerCase()
+  const said = plain(bare)
+  if (said === '') return undefined
+  const key = conceptKey(bare)
+  return candidates.find(one => plain(one.name) === said || one.key === key)?.key
+}
+
+/** Where a quiz asks a base concept (1.9.0 F5, baseFor): its key, the concept it is asked before, and the place it takes. */
+export type BaseFound = { key: string; before: string; slot: number }
+
+/**
+ * The base concept a review quiz asks right before a worked example (1.9.0 F5), if any. The worked example (X) is the
+ * first of `picks` asked again (`asking`), no team term of this repository, whose slip (`slipOf`, as it will stand once
+ * the quiz this one replaces is settled) is open, missed `workedAfter` (WORKED_AFTER_TIMES) times running and not set
+ * right on a try again, with a base: what rungOf makes a worked example. Its base, followed through merges, is asked
+ * when the index holds it, not known, not X, in no place of the quiz, gone over by no quiz since that slip was kept, with
+ * no slip of its own open in the store (`open`: asked again as its own, soon), and no team term of any repository
+ * (`teamMarks`). It takes the last place that is no slip asked again, not X and no concept answered wrong (a filler,
+ * then a team term not met yet, then a concept due); `slot` -1 adds it to a quiz of fewer than three. None without such
+ * a place: a slip asked again keeps its place.
+ */
+export function baseFor(
+  index: Readonly<Record<string, LearnConcept>>,
+  slipOf: (key: string) => Pick<LearnSlip, 'times' | 'isRight' | 'base' | 'at' | 'fixedAt'> | undefined,
+  picks: readonly QuizPick[],
+  asking: ReadonlySet<string>,
+  map: Readonly<Record<string, string>>,
+  open: Readonly<Record<string, LearnSlip>>,
+  { workedAfter = WORKED_AFTER_TIMES, teamMarks = {} }: { workedAfter?: number; teamMarks?: Readonly<Record<string, readonly string[]>> } = {},
+): BaseFound | undefined {
+  const isWorked = (one: QuizPick) => {
+    const slip = asking.has(one.key) && one.team !== true ? slipOf(one.key) : undefined
+    return slip !== undefined && slip.fixedAt === undefined && slip.times === workedAfter && slip.isRight !== true && slip.base !== undefined
+  }
+  const x = picks.find(isWorked)
+  const slip = x ? slipOf(x.key) : undefined
+  if (!x || !slip?.base) return undefined
+  const key = resolveKey(map, slip.base)
+  const one = conceptAt(index, key)
+  if (!one || isKnown(one) || key === x.key || picks.some(other => other.key === key)) return undefined
+  if ((one.reviewedAt ?? 0) > slip.at || openSlip(open, key) !== undefined || isTeamTerm(teamMarks, key)) return undefined
+  if (picks.length < 3) return { key, before: x.key, slot: -1 }
+  const slot = picks.findLastIndex(other => !asking.has(other.key) && other.key !== x.key && !isMissed(other))
+  return slot === -1 ? undefined : { key, before: x.key, slot }
+}
+
+/** A quiz's picks with its base concept (`pick`, marked isBase) right before the worked example, in the place baseFor found. */
+export function withBase<T extends QuizPick>(picks: readonly T[], found: BaseFound, pick: T): T[] {
+  const rest = picks.filter((_, j) => j !== found.slot)
+  const at = rest.findIndex(one => one.key === found.before)
+  if (at === -1) return [...picks]
+  return [...rest.slice(0, at), { ...pick, isBase: true as const }, ...rest.slice(at)]
 }
 
 /** Cells a text takes on a terminal row: two for a wide character (Hangul, CJK, full-width forms), else one. */
@@ -6078,7 +6248,22 @@ export function parseQuiz(text: string, picks: readonly QuizPick[]): LearnQuizIt
   const markers = picks.some(one => one.rung === 'new') ? 'QHATR' : 'QHAT'
   const aware = quizItems(quizParts(text, true, markers), picks)
   // A fence the model left open would hide every marker after it: then read it as if there were no code.
-  return aware.length >= picks.length ? aware : [aware, quizItems(quizParts(text, false, markers), picks)].reduce((a, b) => (b.length > a.length ? b : a))
+  const items = aware.length >= picks.length ? aware : [aware, quizItems(quizParts(text, false, markers), picks)].reduce((a, b) => (b.length > a.length ? b : a))
+  return items.some(item => item.isBase) ? basesKept(items, picks) : items
+}
+
+/**
+ * A quiz's questions with a base concept's mark (1.9.0 F5) kept only where the question right after it is the worked
+ * example it was picked for (the pick after it): one whose worked example could not be read is a question as any other.
+ */
+function basesKept(items: readonly LearnQuizItem[], picks: readonly QuizPick[]): LearnQuizItem[] {
+  return items.map((item, j) => {
+    if (!item.isBase) return item
+    const at = picks.findIndex(one => one.isBase && one.key === item.key)
+    if (at !== -1 && items[j + 1]?.key === picks[at + 1]?.key) return item
+    const { isBase, ...rest } = item
+    return rest
+  })
 }
 
 /** A line that only opens or closes a code block (a language name may follow): not one holding code on it too. */
@@ -6171,6 +6356,7 @@ function quizItems(parts: Map<string, string[]>, picks: readonly QuizPick[]): Le
           : {}),
         ...(one.team && one.teamTag !== undefined ? { teamTag: one.teamTag } : {}),
         ...(one.team && one.teamBlurb !== undefined ? { teamBlurb: one.teamBlurb } : {}),
+        ...(one.isBase ? { isBase: true as const } : {}),
       })
     }
   })
@@ -6990,6 +7176,8 @@ export type DiagInput = {
   unsaved?: number
   /** The slips the store keeps, counted (1.8.0, slipCounts: no name, no words); `unread` when it could not be read. */
   slips?: SlipCounts | 'unread'
+  /** True while grades pick base concepts (1.9.0 F5, IS_BASE_ASKED or a harness's): the slips' line counts the ones with a base. */
+  isBaseAsked?: boolean
   faults: readonly Fault[]
 }
 
@@ -7017,7 +7205,8 @@ export function oldWritesText(seen: OldWrites | 'unread' | undefined): string {
 /**
  * /learn 진단's text, to paste to whoever looks after the plugin: versions, the screen, the settings, today's
  * counts, the store's size and the index writes of builds before 1.9.0 seen (oldWritesText), the journal, the
- * slips counted (1.8.0), and the last FAULT_DAYS days' faults (newest first). The pane's refused focus is no
+ * slips counted (1.8.0; the open ones with a base concept too while bases are asked, 1.9.0 F5), and the last
+ * FAULT_DAYS days' faults (newest first). The pane's refused focus is no
  * failure: it is summed on a line of its own, never in today's failures nor among the listed ones, where a week of
  * quizzes would push a journal that failed out of sight. No path, request, code, concept name or slip's words.
  */
@@ -7091,7 +7280,7 @@ export function diagText(input: DiagInput): string {
             ? '- 오답 노트: 읽지 못함'
             : counted.all === 0
               ? '- 오답 노트: 아직 없습니다'
-              : `- 오답 노트 ${counted.all}개 (열림 ${counted.open} · 바로잡음 ${counted.mended}) · 유형 기타 ${counted.other} · 문장 없음 ${counted.blank} · 열린 채 두 번 이상 ${counted.againOpen}`,
+              : `- 오답 노트 ${counted.all}개 (열림 ${counted.open} · 바로잡음 ${counted.mended}) · 유형 기타 ${counted.other} · 문장 없음 ${counted.blank} · 열린 채 두 번 이상 ${counted.againOpen}${input.isBaseAsked ? ` · 바탕 개념 ${counted.based}` : ''}`,
         ]
   return [
     `learn-notes 진단 · ${day} ${time}`,

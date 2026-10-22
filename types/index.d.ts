@@ -242,6 +242,18 @@ export type LearnQuizItem = {
   slip?: string
   slipType?: LearnSlipType
   /**
+   * The base concept (its key, `c:`) the grade of this typed answer picked out of the concepts learned before it, the
+   * answer's slip coming from getting that one wrong (1.9.0 F5, 바탕 개념): asked of a question asked again only, absent
+   * when none was named, and on every grade while the switch is off (IS_BASE_ASKED).
+   */
+  slipBase?: string
+  /**
+   * True for a question asked about a base concept (1.9.0 F5, 바탕 개념): the concept the next question, a worked example
+   * of the one missed twice running, rests on, asked right before it. Graded as any question; a window of an older build
+   * drops it when it writes the quiz back, and the question is then one as any other.
+   */
+  isBase?: true
+  /**
    * The concept's slip as it was before this grade changed it (null for none), so turning the grade the other way
    * (f) starts from there; absent when the grade left it as it was.
    */
@@ -277,6 +289,8 @@ export type LearnQuizFirstTry = {
   /** The wrong idea Claude read in this answer, and its kind (1.7.0); absent when it named none, or for "모르겠어요". */
   slip?: string
   slipType?: LearnSlipType
+  /** The base concept the grade picked for this answer's slip (1.9.0 F5, LearnQuizItem.slipBase); absent when none. */
+  slipBase?: string
 }
 
 /**
@@ -294,8 +308,21 @@ export type LearnSlipType = 'order' | 'reference' | 'scope' | 'coercion' | 'boun
  * asks it again in other code (다시 도전).
  * `isRight` marks one the grade that kept it still counted right, on the try again after the question asked back
  * (헷갈린 점을 바로 고쳤습니다): that one is asked again on another day, by no quiz the same day.
+ * `base` (1.9.0 F5): the key of the concept learned before it that the grade read the slip as coming from (바탕 개념),
+ * asked right before the worked example once it was missed twice running; a window of an older build drops it when it
+ * writes the slips back.
  */
-export type LearnSlip = { what: string; type: LearnSlipType; question: string; mine: string; at: number; times: number; fixedAt?: number; isRight?: true }
+export type LearnSlip = {
+  what: string
+  type: LearnSlipType
+  question: string
+  mine: string
+  at: number
+  times: number
+  fixedAt?: number
+  isRight?: true
+  base?: string
+}
 
 /**
  * One day's learning: notes written, and quiz answers the learner graded right and wrong. `drills` (1.7.0): how many of

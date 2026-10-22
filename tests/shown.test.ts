@@ -128,7 +128,8 @@ describe('1.8.0: slipped concepts shown by name and counted, never their words (
   })
 
   test('the slips counted: open and mended, 기타 and no words by kind, open after two misses or more (열린 채 두 번 이상)', () => {
-    expect(slipCounts({})).toEqual({ all: 0, open: 0, mended: 0, other: 0, blank: 0, againOpen: 0 })
+    // 1.9.0 F5 counts the open ones with a base concept too (`based`, shown only while bases are asked).
+    expect(slipCounts({})).toEqual({ all: 0, open: 0, mended: 0, other: 0, blank: 0, againOpen: 0, based: 0 })
     const counted = slipCounts({
       a: slip('scope', DAY, { times: 2 }),
       b: slip('other', DAY, { times: 3, fixedAt: NOW }),
@@ -136,7 +137,7 @@ describe('1.8.0: slipped concepts shown by name and counted, never their words (
       d: slip('state', DAY),
       e: slip('blank', DAY, { times: 1 }),
     })
-    expect(counted).toEqual({ all: 5, open: 4, mended: 1, other: 1, blank: 2, againOpen: 2 })
+    expect(counted).toEqual({ all: 5, open: 4, mended: 1, other: 1, blank: 2, againOpen: 2, based: 0 })
     // The commonest way there: missed on the try again, then right after being asked back. Still open, missed twice:
     // counted, whatever the next quiz makes of it (the name says what is counted, and the plan's 바탕 개념 reads it so).
     expect(slipCounts({ a: slip('scope', DAY, { times: 2, isRight: true }), b: slip('scope', DAY, { times: 3, isRight: true }) }).againOpen).toBe(2)
