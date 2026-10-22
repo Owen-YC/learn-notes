@@ -1524,18 +1524,43 @@ const DRILL_ASK = [
 ]
 
 /**
+ * Whether a note may make its practice one of a team rule (1.9.0 F2): in a repository whose team file has rules, the
+ * line its "왜 이렇게 바꿨을까" says may differ from one (`팀 규칙과 다를 수 있음: …`) changed as the rule says, its task
+ * marked on its label (`- 할 일 (팀 규칙):`, which no window before 1.9.0 reads as a task: none of them grades it).
+ * Graded apart from the concepts (no step, no slip; the day's count only). On only once samples N1 and N2 passed
+ * (docs/qa/견본.md): in 1.9.0 N2 passed and N1 did not, before and after its one fix, so it ships off. Off, the
+ * note's prompt is 1.8.0's to the byte, and a practice the model marked by itself is none.
+ */
+export const IS_RULE_DRILL = false
+
+/**
+ * What a note is asked for on top of DRILL_ASK while IS_RULE_DRILL is on and the team file has rules: the practice of
+ * the rule its "다를 수 있음" line named, on one line of the changed code, in place of the first concept's; only its
+ * task line changes, marked on its label. Led by the line N1's first samples called for (docs/qa/견본.md): a note
+ * that said the change only touches a rule (`팀 규칙: …`) marked its practice all the same, which then had none.
+ */
+const DRILL_RULE_ASK = [
+  '("팀 규칙과 다를 수 있음:" 줄을 쓴 노트에서만 아래를 따른다)',
+  '(위에 "팀 규칙과 다를 수 있음:" 줄을 썼고 바뀐 뒤 코드의 한 줄만 고쳐 그 규칙을 지킬 수 있으면, 배울 개념 대신 그 규칙으로 연습을 낸다. 할 일 줄만 아래 줄로 바꾼다)',
+  '- 할 일 (팀 규칙): 그 규칙대로 고치는 일 한 문장',
+  '(그 줄을 쓰지 않았으면 "(팀 규칙)"을 쓰지 않는다)',
+]
+
+/**
  * The one user message the model reads for a note. `known`: the concepts
  * met before (see knownNames; a plain list is all `rest`), the ones the learner
  * knows kept out of what the note teaches and the ones practiced in quizzes
  * named in a line. `team`: the repository's team file, its rules and terms put
  * before the concepts already learned, so a concept the team has a term for is
- * named as the team names it.
+ * named as the team names it. `isRuleDrill` (1.9.0 F2, IS_RULE_DRILL): with rules
+ * in the team file, a practice may be one of a team rule (DRILL_RULE_ASK).
  */
 export function notePrompt(
   note: Pick<LearnNote, 'prompt' | 'answer' | 'changes' | 'moreFiles' | 'withheld'>,
   level: Level,
   known: readonly string[] | KnownNames = [],
   team?: TeamFile,
+  isRuleDrill = IS_RULE_DRILL,
 ): string {
   const hasRules = (team?.rules.length ?? 0) > 0
   const names: KnownNames = 'rest' in known ? known : { known: [], practiced: [], rest: [...known] }
@@ -1584,6 +1609,7 @@ export function notePrompt(
     '(1~3개. "- **개념 이름**: 설명 — 그 개념이 쓰인 코드 한 줄을 백틱으로 인용". 개념 이름은 짧은 용어만 쓰고 쉬운 말 풀이는 이름 뒤 설명에 쓴다. 줄 번호는 쓰지 마라)',
     '### 직접 해 보기',
     ...DRILL_ASK,
+    ...(hasRules && isRuleDrill ? DRILL_RULE_ASK : []),
   ].join('\n')
 }
 
@@ -1723,7 +1749,8 @@ export const ASKS_KEPT = 3
  * openThink: 1.8.0) has that walk-through in full and its question right after
  * it, the field's words read as an answer to check or a question to answer;
  * the walk-through is then left out of the questions before. Without `think`
- * the prompt is 1.7.0's, to the byte.
+ * the prompt is 1.7.0's, to the byte. `isRuleDrill`: as hideDrillAnswer reads
+ * a team-rule practice (1.9.0 F2).
  */
 export function askPrompt(
   note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles' | 'asks' | 'withheld'>,
@@ -1731,6 +1758,7 @@ export function askPrompt(
   level: Level,
   team?: TeamFile,
   think?: { question: string; trace: string },
+  isRuleDrill = IS_RULE_DRILL,
 ): string {
   const recent = (note.asks ?? []).slice(-2)
   const earlier = think ? recent.slice(0, -1) : recent
@@ -1750,7 +1778,7 @@ export function askPrompt(
     '',
     '## 학습 노트',
     // Its practice's line and example answer left out (1.7.0): e's plainer words would show them under the note.
-    note.status === 'ready' ? cut(hideDrillAnswer(note.text), 4000) : '(노트가 아직 없다. 코드 전후만 보고 답한다)',
+    note.status === 'ready' ? cut(hideDrillAnswer(note.text, undefined, { isRuleDrill }), 4000) : '(노트가 아직 없다. 코드 전후만 보고 답한다)',
     '',
     '## 바뀐 코드',
     ...diffBlocks(note, PROMPT_DIFF_BUDGET),
@@ -1789,7 +1817,9 @@ export function askSection(note: Pick<LearnNote, 'at' | 'prompt'>, question: str
  * works (확인, '' when the note gave none), the line to change as the changed code has it (`line`, its indent apart
  * in `indent`: the field holds the rest, so a language whose indent means something keeps it), the example answer
  * (예시 답), and where the line is: its file as the note shows it and its path, its number on the new side counted
- * from its hunk's start, and the lines just above and below it in that hunk (undefined at its edge).
+ * from its hunk's start, and the lines just above and below it in that hunk (undefined at its edge). A team-rule
+ * practice (1.9.0 F2) has `rule`: what the note's "다를 수 있음" line says of the rule (ruleOf), read off the note's
+ * text each time, never stored.
  */
 export type Drill = {
   task: string
@@ -1802,12 +1832,19 @@ export type Drill = {
   n: number
   above?: string
   below?: string
+  rule?: string
 }
 
 /** A practice section's heading: `### 직접 해 보기`, bold or numbered too. 1.6's `직접 확인해 볼 것` is none. */
 const DRILL_HEADING = /^(?:#{1,6}\s*|\*\*\s*)(?:\d+[.)]\s*)?[^\p{L}\p{N}]*직접\s*해\s*보기/u
-/** One of a practice's four labelled lines (할 일 · 고칠 줄 · 확인 · 예시 답), bold or not, on a bullet or not. */
-const DRILL_LABEL = /^\s*(?:[-*+•]\s+)?(?:\*\*)?\s*(할\s*일|고칠\s*줄|확인|예시\s*답)\s*(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*)$/
+/**
+ * One of a practice's four labelled lines (할 일 · 고칠 줄 · 확인 · 예시 답), bold or not, on a bullet or not; a team-rule
+ * practice's task (1.9.0 F2) marked on its label, `할 일 (팀 규칙)` in its own shape and the bold one only (ruleLabelled
+ * puts the others in that shape before a note is kept). Windows before 1.9.0 read no such line as a task.
+ */
+const DRILL_LABEL = /^\s*(?:[-*+•]\s+)?(?:\*\*)?\s*(할\s*일(?:\s*\(\s*팀\s*규칙\s*\))?|고칠\s*줄|확인|예시\s*답)\s*(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*)$/
+/** A team-rule practice's task label as drillParts reads it, its spaces taken out. */
+const RULE_TASK_LABEL = '할일(팀규칙)'
 /** The labels whose lines give the practice away, hidden wherever the note is read but the journal (hideDrillAnswer). */
 const DRILL_ANSWER_LABELS: readonly string[] = ['고칠줄', '예시답']
 /** A bold line alone (`**참고**`): it ends a section, as a heading does. */
@@ -1829,14 +1866,22 @@ function labelValue(m: RegExpExecArray): string {
   return m[2]!.replace(/\*\*$/, '').trim()
 }
 
-/** The practice's labelled lines by label (spaces taken out: 할일 · 고칠줄 · 확인 · 예시답), the first of each; a label alone takes the next line. */
-function drillParts(lines: readonly string[]): Map<string, string> {
+/**
+ * The practice's labelled lines by label (spaces taken out: 할일 · 고칠줄 · 확인 · 예시답), the first of each; a label
+ * alone takes the next line. `isRule` (1.9.0 F2): a task line is marked as a team rule's, and then the first marked
+ * one is its task, wherever an unmarked one stands.
+ */
+function drillParts(lines: readonly string[]): { parts: Map<string, string>; isRule: boolean } {
   const parts = new Map<string, string>()
+  let isRule = false
   for (const [i, line] of lines.entries()) {
     const m = DRILL_LABEL.exec(line)
     if (!m) continue
-    const label = m[1]!.replace(/\s+/g, '')
-    if (parts.has(label)) continue
+    const raw = m[1]!.replace(/\s+/g, '')
+    const isMarked = raw === RULE_TASK_LABEL
+    const label = isMarked ? '할일' : raw
+    if (parts.has(label) && !(isMarked && !isRule)) continue
+    if (isMarked) isRule = true
     let value = labelValue(m)
     if (value === '') {
       // The next line that is not blank, a bullet or not (hideDrillAnswer hides that line); in a fence, its first
@@ -1851,7 +1896,103 @@ function drillParts(lines: readonly string[]): Map<string, string> {
     }
     parts.set(label, value)
   }
-  return parts
+  return { parts, isRule }
+}
+
+/** Characters of a team rule's line a practice keeps (Drill.rule): what the grade is told of the rule. */
+const DRILL_RULE_MAX = 200
+/** A line saying the change may differ from a team rule (1.6.0's `팀 규칙과 다를 수 있음: …`), bold, bulleted or quoted too. */
+const RULE_LINE = /^[^\p{L}\p{N}]*팀\s*규칙과\s*다를\s*수\s*있음\s*(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*)$/u
+
+/**
+ * What a note's first `팀 규칙과 다를 수 있음:` line says, among its lines before `end` (its practice's heading): the
+ * words after the label, a closing `**` off, cut to DRILL_RULE_MAX; undefined for no such line, or one that says
+ * nothing ("없음").
+ */
+function ruleOf(lines: readonly string[], end: number): string | undefined {
+  for (const line of lines.slice(0, end)) {
+    const m = RULE_LINE.exec(line.trim())
+    if (!m) continue
+    const said = cut(m[1]!.replace(/\*\*\s*$/, '').trim(), DRILL_RULE_MAX)
+    return said === '' || NONE_SAID.test(said) ? undefined : said
+  }
+  return undefined
+}
+
+/** The mark of a team-rule task in the shapes a model writes it: `(팀 규칙)`, `[팀규칙]`, full-width brackets. */
+const RULE_MARK = '[(（\\[［]\\s*팀\\s*규칙\\s*[)）\\]］]'
+/**
+ * A practice's task line in any shape a model writes it: its bullet, a bold opened before the label (1), a mark after
+ * the label (2), a bold closed after it (3), a mark after that (4), a bold after the colon (5), then its words (6).
+ */
+const TASK_LINE = new RegExp(`^\\s*(?:[-*+•]\\s+)?(\\*\\*)?\\s*할\\s*일\\s*(${RULE_MARK})?\\s*(\\*\\*)?\\s*(${RULE_MARK})?\\s*[:：]\\s*(\\*\\*)?\\s*(.*)$`, 'u')
+/** A task's words led by the mark (`(팀 규칙) …`, `**(팀 규칙)** …`): the bold before it (1), after it (2), the words (3). */
+const LEADING_MARK = new RegExp(`^(\\*\\*)?\\s*${RULE_MARK}\\s*(\\*\\*)?\\s*(.*)$`, 'u')
+/** The shape a team-rule task line is kept in (1.9.0 F2): the one DRILL_LABEL reads as marked and windows before 1.9.0 read as no task. */
+const RULE_TASK_HEAD = '- 할 일 (팀 규칙):'
+
+/**
+ * A task line's words and whether it is marked as a team rule's (TASK_LINE), a bold opened before its label closed at
+ * its end taken off, one opened after its colon kept; undefined for a line that is no task.
+ */
+function taskLineOf(line: string): { words: string; isMarked: boolean } | undefined {
+  const m = TASK_LINE.exec(line)
+  if (!m) return undefined
+  const [, before, markA, after, markB, colon, rest] = m
+  let words = rest!.trimEnd()
+  // `**할 일: X**`: the bold around the whole line goes; `- 할 일: **X**`: a bold of the words stays.
+  if (before !== undefined && after === undefined && colon === undefined) words = words.replace(/\*\*$/, '').trimEnd()
+  else if (colon !== undefined && (before === undefined || after !== undefined)) words = `**${words}`
+  let isMarked = markA !== undefined || markB !== undefined
+  const lead = LEADING_MARK.exec(words)
+  if (lead) {
+    isMarked = true
+    words = lead[3]!
+    // `**(팀 규칙) X**`: the bold the mark opened closes at the end of the words.
+    if (lead[1] !== undefined && lead[2] === undefined) words = words.replace(/\*\*$/, '').trimEnd()
+  }
+  return { words, isMarked }
+}
+
+/**
+ * A written note with its team-rule practice's task lines in the one shape kept (1.9.0 F2, RULE_TASK_HEAD), before the
+ * store, the journal or any window reads it; run whether IS_RULE_DRILL is on or off. In its practice section (from
+ * its heading to the next heading, a bold line alone not ending it), a task line marked in any shape a model writes
+ * (TASK_LINE) puts every task line there in the kept shape, so a window before 1.9.0 reads none of them as its task
+ * (it would grade a rule's line as a concept practice, and reset the concept). So does a task that names a team rule
+ * (`팀 규칙`) under a note whose "다를 수 있음" line ruleOf reads. A label alone keeps its words on the next line.
+ * The rest of the note is as it was, byte for byte; run twice, it is the same.
+ */
+export function ruleLabelled(text: string): string {
+  const lines = text.split('\n')
+  const start = lines.findIndex(line => DRILL_HEADING.test(line.trim()))
+  if (start === -1) return text
+  const after = lines.slice(start + 1).findIndex(line => ANY_HEADING.test(line.trim()))
+  const end = after === -1 ? lines.length : start + 1 + after
+  const tasks: { at: number; words: string; isMarked: boolean }[] = []
+  let fence: string | undefined
+  for (let i = start + 1; i < end; i += 1) {
+    const trimmed = lines[i]!.trim()
+    if (fence !== undefined) {
+      if (trimmed.startsWith(fence)) fence = undefined
+      continue
+    }
+    const opens = FENCE.exec(trimmed)
+    if (opens) {
+      fence = opens[1]!
+      continue
+    }
+    const task = taskLineOf(lines[i]!)
+    if (task) tasks.push({ at: i, ...task })
+  }
+  if (tasks.length === 0) return text
+  // A label alone: its words are on the next line that is not blank.
+  const wordsOf = (task: (typeof tasks)[number]) => (task.words !== '' ? task.words : (lines.slice(task.at + 1, end).find(one => one.trim() !== '') ?? ''))
+  const isRule = tasks.some(task => task.isMarked) || (ruleOf(lines, start) !== undefined && tasks.some(task => /팀\s*규칙/.test(wordsOf(task))))
+  if (!isRule) return text
+  const out = [...lines]
+  for (const task of tasks) out[task.at] = task.words === '' ? RULE_TASK_HEAD : `${RULE_TASK_HEAD} ${task.words}`
+  return out.join('\n')
 }
 
 /**
@@ -1908,13 +2049,17 @@ function drillSpot(
  * code; undefined for none: a note before 1.7.0, `할 일: 없음` (a change with no line to change: a setting, a style, a
  * document), no line or example quoted, either cut off by the store (CUT_SHORT), a line longer than DRILL_LINE_MAX,
  * one the changed code does not hold (a secret masked in it too), or an example that is that line as a practice
- * compares them (sameLine). The line is the code's own, its indent apart.
+ * compares them (sameLine). The line is the code's own, its indent apart. A task marked as a team rule's (1.9.0 F2)
+ * is a team-rule practice, its rule the note's "다를 수 있음" line (ruleOf); none while `isRuleDrill` is off, nor
+ * with no such line over it. An unmarked one is read as 1.8.0 reads it.
  */
-export function drillOf(text: string, changes: readonly Pick<LearnChange, 'file' | 'path' | 'diff'>[]): Drill | undefined {
+export function drillOf(text: string, changes: readonly Pick<LearnChange, 'file' | 'path' | 'diff'>[], isRuleDrill = IS_RULE_DRILL): Drill | undefined {
   const lines = text.split('\n')
   const span = drillSpan(lines)
   if (!span) return undefined
-  const parts = drillParts(lines.slice(span.start + 1, span.end))
+  const { parts, isRule } = drillParts(lines.slice(span.start + 1, span.end))
+  const rule = isRule ? ruleOf(lines, span.start) : undefined
+  if (isRule && (!isRuleDrill || rule === undefined)) return undefined
   const task = (parts.get('할일') ?? '').trim()
   if (task === '' || NONE_SAID.test(task)) return undefined
   // A note the store cut inside its line or its example (a later session's copy, forHistory): no practice.
@@ -1940,6 +2085,7 @@ export function drillOf(text: string, changes: readonly Pick<LearnChange, 'file'
     n: spot.n,
     ...(spot.above !== undefined ? { above: spot.above } : {}),
     ...(spot.below !== undefined ? { below: spot.below } : {}),
+    ...(rule !== undefined ? { rule } : {}),
   }
 }
 
@@ -1952,7 +2098,7 @@ export function drillHunk(note: Pick<LearnNote, 'status' | 'text' | 'changes'>):
   const lines = note.text.split('\n')
   const span = drillSpan(lines)
   if (!span) return undefined
-  const quote = quotedCode(drillParts(lines.slice(span.start + 1, span.end)).get('고칠줄') ?? '')
+  const quote = quotedCode(drillParts(lines.slice(span.start + 1, span.end)).parts.get('고칠줄') ?? '')
   const spot = quote === undefined ? undefined : drillSpot(quote, note.changes)
   return spot ? { change: spot.change, hunk: spot.hunk } : undefined
 }
@@ -1960,15 +2106,19 @@ export function drillHunk(note: Pick<LearnNote, 'status' | 'text' | 'changes'>):
 /**
  * A note's text as the learner reads it outside the journal (1.7.0): its practice with no line to change and no
  * example answer (both shown in the pane once tried), its heading naming `file` when given; a practice that says
- * there is none (`할 일: 없음`) left out whole. A note with no practice comes back as it is.
+ * there is none (`할 일: 없음`) left out whole. A note with no practice comes back as it is. A team-rule practice
+ * (1.9.0 F2) is left out whole as that one is while `how.isRuleDrill` is off, with no "다를 수 있음" line over it,
+ * and for the record tool (`how.isTool`: the main Claude would take the team's own fix for a thing to do).
  */
-export function hideDrillAnswer(text: string, file?: string): string {
+export function hideDrillAnswer(text: string, file?: string, how: { isRuleDrill?: boolean; isTool?: boolean } = {}): string {
   const lines = text.split('\n')
   const span = drillSpan(lines)
   if (!span) return text
   const section = lines.slice(span.start + 1, span.end)
-  const task = drillParts(section).get('할일')
-  if (task !== undefined && (task.trim() === '' || NONE_SAID.test(task.trim()))) {
+  const { parts, isRule } = drillParts(section)
+  const task = parts.get('할일')
+  const isRuleLeft = isRule && (!(how.isRuleDrill ?? IS_RULE_DRILL) || how.isTool === true || ruleOf(lines, span.start) === undefined)
+  if (isRuleLeft || (task !== undefined && (task.trim() === '' || NONE_SAID.test(task.trim())))) {
     return [...lines.slice(0, span.start), ...lines.slice(span.end)].join('\n').replace(/\n+$/, '')
   }
   const kept: string[] = []
@@ -2132,6 +2282,17 @@ export const DRILL_KOREAN = '코드는 영문 상태에서 적습니다'
 export const DRILL_HEAD = '✎ 연습입니다 · 파일은 바뀌지 않습니다'
 /** The hint after "모르겠어요" in a practice, which has none of its own: a try again with no model call. */
 export const DRILL_HINT = '할 일과 확인을 다시 읽고, 이 줄에서 바꿀 곳 한 군데를 찾아보세요'
+/**
+ * A team-rule practice's hint after its first "모르겠어요" (1.9.0 F2): the note's own rule line, cut short, since in a
+ * pane docked 56 columns wide it stands far above the field. No model call.
+ */
+export function drillRuleHint(rule: string): string {
+  return `팀 규칙과 다를 수 있음: ${cut(rule, 80)} · 이 줄에서 바꿀 곳 한 군데를 찾아보세요`
+}
+/** A team-rule practice's feedback once a second "모르겠어요" ends it (no model call): its concept is none to meet again. */
+export const DRILL_RULE_BLANK = 'a로 예시 답을 읽어 보세요.'
+/** The dim line under a team-rule practice once it is over: the practice changed no file, and Claude makes the real fix. */
+export const DRILL_RULE_AFTER = '팀 규칙대로 고치려면 Claude에게 부탁하세요'
 
 /** What stands over a practice's line waiting for its try again: how far the first try got, or after "모르겠어요" the hint. */
 export function drillTryHead(first: Pick<LearnQuizFirstTry, 'mine' | 'verdict'>): string {
@@ -2145,15 +2306,18 @@ export function drillVerdictText(state: Pick<LearnDrill, 'verdict' | 'isRetried'
   return `${head}${state.isAnswerSeen ? ' · 예시 답 봄' : ''}`
 }
 
-/** A practice's last grade as a journal section, as a question is kept (askSection): the note, what to do, the line and its grade. */
-export function drillSection(note: Pick<LearnNote, 'at' | 'prompt'>, drill: Pick<Drill, 'task'>, state: LearnDrill, at: number): string {
+/**
+ * A practice's last grade as a journal section, as a question is kept (askSection): the note, what to do, the line
+ * and its grade; a team-rule practice's task under its own label (1.9.0 F2).
+ */
+export function drillSection(note: Pick<LearnNote, 'at' | 'prompt'>, drill: Pick<Drill, 'task' | 'rule'>, state: LearnDrill, at: number): string {
   const feedback = (state.feedback ?? '').replace(/\s+/g, ' ').trim()
   return [
     `## ${stamp(at).day} 직접 해 보기 (${stamp(at).time})`,
     '',
     `**노트**: ${stamp(note.at).day} ${stamp(note.at).time} · ${note.prompt === '' ? '(요청 없음)' : cut(note.prompt.replace(/\s+/g, ' '), 120)}`,
     '',
-    `**할 일**: ${drill.task}`,
+    `**할 일${drill.rule !== undefined ? ' (팀 규칙)' : ''}**: ${drill.task}`,
     '',
     `**내 줄**: ${state.mine === undefined || state.mine === '' ? '(없음)' : inlineCode(state.mine)}`,
     '',
@@ -5098,12 +5262,22 @@ const KIND_CHECK: Readonly<Record<QuizKind, string>> = {
 }
 
 /**
+ * How a team-rule practice is graded (1.9.0 F2), in KIND_CHECK's place: whether the line keeps the rule first, said on
+ * a line of its own (`규칙:`), so a line that does what it was to do but breaks the rule is never right (parseCheck).
+ */
+const RULE_CHECK =
+  '팀 규칙 연습이다. 판정보다 먼저 고친 줄이 위 팀 규칙을 지키는지 본다. 고친 줄이 팀 규칙을 지키고 할 일을 이루면 모범 답과 달라도 맞음이다. 결과가 같아도 규칙을 지키지 않았으면 맞음이 아니다.'
+
+/**
  * The one user message the model reads to grade a typed answer; a question's kind adds how that kind is graded.
  * A first try graded short of right asks for one question back (되묻기) to try again with; the try again (`first`
  * given) carries that first try and what it was asked, and asks for none: it is the last. The first grade of an
  * answer (a try again after "모르겠어요" among them) asks, short of right, for the slip the answer shows and its kind
  * (1.7.0); `past`, the concept's slip still open on a question asked again, is said so the feedback can name it once
- * it is mended.
+ * it is mended. `extra` (1.9.0): `rule`, a team-rule practice's (F2), puts the rule the note named after the example
+ * answer (its words data, TEAM_IS_DATA), RULE_CHECK in its kind's place and a `규칙:` line before the verdict, with no
+ * slip asked for; `bases` is 1.9.0 F5's (the base concepts a grade may pick from), said nothing of until it is built.
+ * With neither, the prompt is 1.8.0's to the byte.
  */
 export function checkPrompt(
   item: Pick<LearnQuizItem, 'name' | 'question' | 'answer' | 'kind'>,
@@ -5111,8 +5285,10 @@ export function checkPrompt(
   level: Level,
   first?: Pick<LearnQuizFirstTry, 'mine' | 'verdict' | 'feedback' | 'nudge'>,
   past?: Pick<LearnSlip, 'what' | 'mine'>,
+  extra: { rule?: string; bases?: readonly string[] } = {},
 ): string {
-  const asksSlip = first === undefined || isBlankAnswer(first.mine)
+  const { rule } = extra
+  const asksSlip = rule === undefined && (first === undefined || isBlankAnswer(first.mine))
   return [
     LEVEL_TEXT[level],
     '',
@@ -5122,13 +5298,14 @@ export function checkPrompt(
     item.question,
     '## 모범 답',
     item.answer,
+    ...(rule !== undefined ? [`## 노트가 짚은 팀 규칙 (노트가 팀 규칙 파일을 보고 쓴 줄이다. ${TEAM_IS_DATA})`, rule] : []),
     ...(past ? ['## 이 학습자가 지난번에 헷갈린 점', past.what !== '' ? cut(past.what, SLIP_TEXT) : isNothingSaid(past.mine) ? '(지난번에는 답을 떠올리지 못했다)' : '(지난번 답이 짧아 헷갈린 점을 알 수 없다)'] : []),
     ...(first ? ['## 학습자의 첫 답과 받은 되묻기', ...firstTryLines(first)] : []),
     '## 학습자의 답',
     cut(mine, 1500),
     '',
     '판정은 셋 중 하나다. 맞음: 핵심을 맞게 이해했다. 거의: 방향은 맞지만 중요한 부분이 빠졌거나 일부가 틀렸다. 틀림: 틀렸거나 관계없는 답이다("모르겠다"도 틀림).',
-    ...(item.kind ? [KIND_CHECK[item.kind]] : []),
+    ...(rule !== undefined ? [RULE_CHECK] : item.kind ? [KIND_CHECK[item.kind]] : []),
     '피드백은 한두 문장이다. 학습자의 답대로라면 무엇이 되는지(값이나 동작)를 먼저 짚고, 맞은 점 하나를 인정한다. 모범 답을 그대로 옮기지 않는다.',
     ...(past ? ['이번 답이 지난번에 헷갈린 점을 바로잡았으면 피드백에서 한 마디로 짚는다.'] : []),
     first
@@ -5141,6 +5318,7 @@ export function checkPrompt(
         ]
       : []),
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
+    ...(rule !== undefined ? ['규칙: (지킴 · 안 지킴 중 하나)'] : []),
     '판정: (맞음 · 거의 · 틀림 중 하나)',
     '피드백: (한두 문장)',
     ...(first ? [] : ['되묻기: (거의·틀림일 때만 질문 한 문장. 맞음이면 이 줄을 쓰지 않는다)']),
@@ -5165,16 +5343,26 @@ function firstTryLines(first: Pick<LearnQuizFirstTry, 'mine' | 'verdict' | 'feed
  */
 const CHECK_LABEL = /^\s*(?:\*\*)?(판정|피드백|되묻기|헷갈린\s*점|유형)(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*)$/
 
-/** Each label's text in a grade's reply (see CHECK_LABEL), with the lines under it; a label seen twice keeps its first. */
-function checkParts(text: string): Map<string, string> {
+/**
+ * CHECK_LABEL with the labels a grade asked for on top (1.9.0): `규칙` for a team-rule practice's (F2), `바탕` for a base
+ * concept's (F5). Only then are they labels: else a line that starts so is the feedback's, as in 1.8.0.
+ */
+function checkLabel(asked: { rule?: true; base?: true }): RegExp {
+  if (!asked.rule && !asked.base) return CHECK_LABEL
+  const more = [...(asked.rule ? ['규칙'] : []), ...(asked.base ? ['바탕'] : [])].join('|')
+  return new RegExp(`^\\s*(?:\\*\\*)?(판정|피드백|되묻기|헷갈린\\s*점|유형|${more})(?:\\*\\*)?\\s*[:：]\\s*(?:\\*\\*)?\\s*(.*)$`)
+}
+
+/** Each label's text in a grade's reply (see CHECK_LABEL, or `label`), with the lines under it; a label seen twice keeps its first. */
+function checkParts(text: string, label: RegExp = CHECK_LABEL): Map<string, string> {
   const parts = new Map<string, string[]>()
   let current: string[] | undefined
   for (const line of text.split('\n')) {
-    const m = CHECK_LABEL.exec(line)
-    const label = m ? m[1]!.replace(/\s+/g, '') : undefined
-    if (m && label !== undefined && !parts.has(label)) {
+    const m = label.exec(line)
+    const name = m ? m[1]!.replace(/\s+/g, '') : undefined
+    if (m && name !== undefined && !parts.has(name)) {
       current = [m[2]!]
-      parts.set(label, current)
+      parts.set(name, current)
     } else if (m) {
       current = undefined
     } else if (current) {
@@ -5203,27 +5391,72 @@ function slipOf(raw: unknown): string | undefined {
   return cut(text, SLIP_TEXT)
 }
 
-/** A grade as parseCheck reads it: the verdict and feedback, and short of right the question asked back and the slip with its kind. */
-export type CheckReply = { verdict: 'right' | 'partial' | 'wrong'; feedback: string; nudge?: string; slip?: string; slipType?: Exclude<LearnSlipType, 'blank'> }
+/**
+ * A grade as parseCheck reads it: the verdict and feedback, and short of right the question asked back and the slip
+ * with its kind. Asked for (1.9.0): whether a team-rule practice's line kept its rule (`rule`, F2), and the base
+ * concept a grade named as it wrote it (`base`, F5).
+ */
+export type CheckReply = {
+  verdict: 'right' | 'partial' | 'wrong'
+  feedback: string
+  nudge?: string
+  slip?: string
+  slipType?: Exclude<LearnSlipType, 'blank'>
+  rule?: 'kept' | 'broken'
+  base?: string
+}
+
+/** A team-rule grade's `규칙:` line read (1.9.0 F2): 지킴 kept; 안 지킴, 어김 broken; undefined for any other word or none. */
+function ruleKeptOf(raw: unknown): 'kept' | 'broken' | undefined {
+  if (typeof raw !== 'string') return undefined
+  const said = raw.replace(/[*`]/g, '').trim().toLowerCase()
+  if (/^(?:안\s*지[킴키켰]|지키지\s*않|못\s*지[킴키켰]|어[김겼기]|위반|broken|no\b)/.test(said)) return 'broken'
+  if (/^(?:지[킴키켰]|kept|yes\b)/.test(said)) return 'kept'
+  return undefined
+}
+
+/** A base concept as a grade wrote it on its `바탕:` line (1.9.0 F5), one line and cut short; undefined for none. */
+function baseOf(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const text = raw.replace(/\s+/g, ' ').trim()
+  return text === '' || NONE_SAID.test(text) ? undefined : cut(text, 120)
+}
 
 /**
  * The grade read back from the model's reply (the labelled lines asked for, or a JSON object), or undefined when it
  * is not one. `nudge` is the question asked back (되묻기), and `slip` the wrong idea the answer showed (헷갈린 점) with
  * its kind (유형, 기타 when it names none of the nine), each for a grade short of right only; a reply with no such
- * line grades as before 1.7.0.
+ * line grades as before 1.7.0. `asked` (1.9.0) reads the lines checkPrompt's `extra` asked for, else none of them:
+ * `rule`, a team-rule practice's `규칙:` (F2), a line that broke the rule never right (right is read as 거의); `base`,
+ * the `바탕:` line (F5).
  */
-export function parseCheck(text: string): CheckReply | undefined {
+export function parseCheck(text: string, asked: { rule?: true; base?: true } = {}): CheckReply | undefined {
   const words: Record<string, 'right' | 'partial' | 'wrong'> = {
     맞음: 'right', 정답: 'right', right: 'right', correct: 'right',
     거의: 'partial', 부분: 'partial', 부분정답: 'partial', partial: 'partial',
     틀림: 'wrong', 오답: 'wrong', wrong: 'wrong', incorrect: 'wrong',
   }
-  const graded = (verdict: 'right' | 'partial' | 'wrong', feedback: string, nudge: string | undefined, slip: string | undefined, type: unknown): CheckReply => ({
-    verdict,
-    feedback: cut(feedback.replace(/\n{2,}/g, '\n'), 600),
-    ...(verdict !== 'right' && nudge !== undefined ? { nudge } : {}),
-    ...(verdict !== 'right' && slip !== undefined ? { slip, slipType: slipTypeOf(type) } : {}),
-  })
+  const graded = (
+    said: 'right' | 'partial' | 'wrong',
+    feedback: string,
+    nudge: string | undefined,
+    slip: string | undefined,
+    type: unknown,
+    more: { rule?: unknown; base?: unknown },
+  ): CheckReply => {
+    const rule = asked.rule ? ruleKeptOf(more.rule) : undefined
+    const base = asked.base ? baseOf(more.base) : undefined
+    // A line that does what it was to do but breaks the team's rule is never right (1.9.0 F2).
+    const verdict = rule === 'broken' && said === 'right' ? 'partial' : said
+    return {
+      verdict,
+      feedback: cut(feedback.replace(/\n{2,}/g, '\n'), 600),
+      ...(verdict !== 'right' && nudge !== undefined ? { nudge } : {}),
+      ...(verdict !== 'right' && slip !== undefined ? { slip, slipType: slipTypeOf(type) } : {}),
+      ...(rule !== undefined ? { rule } : {}),
+      ...(base !== undefined ? { base } : {}),
+    }
+  }
   const json = /\{[\s\S]*\}/.exec(text)?.[0]
   if (json) {
     try {
@@ -5232,18 +5465,21 @@ export function parseCheck(text: string): CheckReply | undefined {
         const r = raw as Record<string, unknown>
         const verdict = typeof r.verdict === 'string' ? words[r.verdict.trim().toLowerCase()] : undefined
         if (verdict) {
-          return graded(verdict, String(r.feedback ?? '').trim(), nudgeOf(r.nudge ?? r['되묻기']), slipOf(r.slip ?? r['헷갈린 점'] ?? r['헷갈린점']), r.slipType ?? r.type ?? r['유형'])
+          return graded(verdict, String(r.feedback ?? '').trim(), nudgeOf(r.nudge ?? r['되묻기']), slipOf(r.slip ?? r['헷갈린 점'] ?? r['헷갈린점']), r.slipType ?? r.type ?? r['유형'], {
+            rule: r.rule ?? r['규칙'],
+            base: r.base ?? r['바탕'],
+          })
         }
       }
     } catch {
       // Not JSON after all: the lines below.
     }
   }
-  const parts = checkParts(text)
+  const parts = checkParts(text, checkLabel(asked))
   const verdictWord = /^([^\s*·,.(]+)/.exec(parts.get('판정') ?? '')?.[1]?.toLowerCase()
   const verdict = verdictWord === undefined ? undefined : words[verdictWord]
   if (!verdict) return undefined
-  return graded(verdict, parts.get('피드백') ?? '', nudgeOf(parts.get('되묻기')), slipOf(parts.get('헷갈린점')), parts.get('유형'))
+  return graded(verdict, parts.get('피드백') ?? '', nudgeOf(parts.get('되묻기')), slipOf(parts.get('헷갈린점')), parts.get('유형'), { rule: parts.get('규칙'), base: parts.get('바탕') })
 }
 
 /**
@@ -7004,11 +7240,16 @@ function shareBody(text: string): string {
  * it left out; and an empty `묻고 싶은 것` to fill in. Neither the request, the questions asked under the note, a
  * diff nor where the project lies goes in (an absolute path keeps its last name alone); the secrets are masked last.
  */
-export function shareText(note: Pick<LearnNote, 'at' | 'text' | 'changes' | 'moreFiles' | 'withheld' | 'root'>, names: readonly string[]): string {
+export function shareText(
+  note: Pick<LearnNote, 'at' | 'text' | 'changes' | 'moreFiles' | 'withheld' | 'root'>,
+  names: readonly string[],
+  isRuleDrill = IS_RULE_DRILL,
+): string {
   const summary = summaryOf(note.text).replace(/\*\*/g, '').trim()
   const facts = [stamp(note.at).day.slice(5), `파일 ${note.changes.length + note.moreFiles}개`, ...(names.length > 0 ? [`개념: ${names.join(' · ')}`] : [])]
   // Its practice with no line to change and no example answer (1.7.0): the mentor reads what to try, not its answer.
-  const body = shareBody(hideDrillAnswer(note.text))
+  // A team-rule practice (1.9.0 F2) as the pane shows it, `isRuleDrill` the build's switch.
+  const body = shareBody(hideDrillAnswer(note.text, undefined, { isRuleDrill }))
   // A file left out from outside the project is named as the pane names it: by its name alone.
   const withheld = (note.withheld ?? []).map(one => ({ ...one, file: shortPath(one.file) }))
   const parts = [

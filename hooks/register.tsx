@@ -288,10 +288,14 @@ import {
   DRILL_HEAD,
   DRILL_HINT,
   DRILL_KOREAN,
+  DRILL_RULE_AFTER,
+  DRILL_RULE_BLANK,
   DRILL_UNCHANGED,
+  IS_RULE_DRILL,
   type Drill,
   drillOf,
   drillQuestion,
+  drillRuleHint,
   drillSection,
   drillStateOf,
   drillTryHead,
@@ -301,6 +305,7 @@ import {
   inlineCode,
   isDrillOver,
   isKoreanTyped,
+  ruleLabelled,
   sameLine,
 } from './notes'
 
@@ -631,6 +636,13 @@ function enqueue<T>(lane: keyof typeof lanes, work: () => Promise<T>): Promise<T
 }
 /** This build's version, read from its plugin.json at session start (/learn 도움말, /learn 진단); undefined until then, or when unreadable. */
 let myVersion: string | undefined
+/**
+ * The model-gated items' switches this load runs with (1.9.0): each its constant in notes.ts, which a release sets
+ * by its samples (docs/qa/견본.md) — `isRuleDrill`, IS_RULE_DRILL (F2). A test's harness turns one the other way
+ * through the plugin.json it serves (its `harness` object, read with the version at session start, readManifest),
+ * so both states are tested whichever one ships. A release's plugin.json has none: only the build's own files can.
+ */
+const build = { isRuleDrill: IS_RULE_DRILL }
 /** This session's id, read at session start: the key of its stamp (SESSIONS_KEY); undefined when it cannot be read. */
 let mySessionId: string | undefined
 /** True once the store's layout is newer than this build's (SCHEMA_KEY): the concepts are left alone until a reload (isStoreAhead). */
@@ -988,14 +1000,26 @@ async function isBookkeeping($: EngineInterface, path: string): Promise<boolean>
   return temps.some(dir => dir !== undefined && dir !== '' && isUnder(path, dir))
 }
 
-/** This build's version as its plugin.json (under `$.plugin.root`) gives it; undefined when it cannot be read. */
-async function readVersion($: EngineInterface): Promise<string | undefined> {
+/**
+ * This build's plugin.json (under `$.plugin.root`): its version, undefined when it cannot be read; and a test
+ * harness's switches for the model-gated items (`harness`, 1.9.0: see `build`), which a release's has none of.
+ */
+async function readManifest($: EngineInterface): Promise<{ version?: string; harness?: Record<string, unknown> }> {
   try {
     const raw: unknown = JSON.parse(String(await $.fs.read(`${$.plugin.root.replace(/[\\/]+$/, '')}/.claude-plugin/plugin.json`)))
-    return isRecord(raw) && typeof raw.version === 'string' && /^\d+\.\d+\.\d+[0-9A-Za-z.+-]*$/.test(raw.version) ? raw.version : undefined
+    if (!isRecord(raw)) return {}
+    return {
+      ...(typeof raw.version === 'string' && /^\d+\.\d+\.\d+[0-9A-Za-z.+-]*$/.test(raw.version) ? { version: raw.version } : {}),
+      ...(isRecord(raw.harness) ? { harness: raw.harness } : {}),
+    }
   } catch {
-    return undefined
+    return {}
   }
+}
+
+/** This build's version as its plugin.json gives it (readManifest); undefined when it cannot be read. */
+async function readVersion($: EngineInterface): Promise<string | undefined> {
+  return (await readManifest($)).version
 }
 
 /** True in a cloud session (Claude Code on the web, an app's cloud session): its own terminal is drawn for no one. */
@@ -3163,7 +3187,7 @@ async function askNote(
   // with the walk-through in full and its 생각해 보기, to be checked as an answer or answered as a question.
   const askedAt = await $.clock.now()
   const think = label === question ? openThink(shown.asks, askedAt) : undefined
-  const asked = await askModel($, cfg, 'ask', { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules, think), maxTokens: 900 })
+  const asked = await askModel($, cfg, 'ask', { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules, think, build.isRuleDrill), maxTokens: 900 })
   if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
   const answer = cut(asked.text, 4000)
   const now = await $.clock.now()
@@ -3349,7 +3373,7 @@ async function drillConcept($: EngineInterface, note: LearnNote): Promise<{ key:
 async function checkDrill($: EngineInterface, cfg: Config, id: string, text: string): Promise<void> {
   const note = (await read($, notes)).find(one => one.id === id)
   if (!note || note.status !== 'ready') return
-  const drill = drillOf(note.text, note.changes)
+  const drill = drillOf(note.text, note.changes, build.isRuleDrill)
   const state = note.drill
   if (!drill || isDrillOver(state)) return
   const first = state?.firstTry
@@ -3400,26 +3424,32 @@ async function checkDrill($: EngineInterface, cfg: Config, id: string, text: str
  * A practice line graded (1.7.0), as a quiz's typed answer is: "모르겠어요" with no call (the hint the first time, then
  * over); the example's own line right with no call; any other checked by Claude once against what to do, the check
  * and the example, the lines around it sent with it (the note screened first). Short of right the first time, with a
- * question asked back, it waits for one try again; else it is over (finishDrill).
+ * question asked back, it waits for one try again; else it is over (finishDrill). A team-rule practice (1.9.0 F2,
+ * `drill.rule`) has the note's rule line for its hint and its own word once over, and is graded against the rule as
+ * the screened note says it (checkPrompt's `rule`): a line that breaks it is never right (parseCheck), and no slip is
+ * asked for or kept.
  */
 async function gradeDrill($: EngineInterface, cfg: Config, note: LearnNote, drill: Drill, mine: string): Promise<{ isFirstTry?: true } | { error: string }> {
   const first = note.drill?.firstTry
   const now = await $.clock.now()
   const line = cut(mine, 1500)
+  const isRule = drill.rule !== undefined
   if (isBlankAnswer(mine)) {
-    if (first === undefined) return keepDrillTry($, note.id, { mine: line, verdict: 'wrong', feedback: '', nudge: DRILL_HINT, at: now })
-    return finishDrill($, cfg, note, drill, { mine: line, verdict: 'wrong', feedback: DRILL_BLANK_FEEDBACK }, { first, at: now })
+    // The rule's own line, which a pane docked 56 columns wide shows far above the field.
+    if (first === undefined) return keepDrillTry($, note.id, { mine: line, verdict: 'wrong', feedback: '', nudge: isRule ? drillRuleHint(drill.rule!) : DRILL_HINT, at: now })
+    return finishDrill($, cfg, note, drill, { mine: line, verdict: 'wrong', feedback: isRule ? DRILL_RULE_BLANK : DRILL_BLANK_FEEDBACK }, { first, at: now })
   }
   if (sameLine(drill, mine, drill.example)) return finishDrill($, cfg, note, drill, { mine: line, verdict: 'right', feedback: '' }, { first, at: now })
   // The code as it may go to a model: a file the settings or the team file leave out now is not sent.
   const shown = await screened($, cfg, note)
-  const sent = drillOf(shown.text, shown.changes)
+  const sent = drillOf(shown.text, shown.changes, build.isRuleDrill)
   if (!sent) return { error: '이 줄은 지금 노트에서 빼는 파일에 있어 확인하지 않았습니다' }
-  const name = (await drillConcept($, note))?.one.name ?? '직접 해 보기'
-  const prompt = checkPrompt({ name, question: drillQuestion(sent), answer: sent.example, kind: 'modify' }, `${sent.indent}${mine}`, cfg.level, first)
+  const name = isRule ? '팀 규칙' : ((await drillConcept($, note))?.one.name ?? '직접 해 보기')
+  const extra = sent.rule !== undefined ? { rule: sent.rule } : {}
+  const prompt = checkPrompt({ name, question: drillQuestion(sent), answer: sent.example, kind: 'modify' }, `${sent.indent}${mine}`, cfg.level, first, undefined, extra)
   const asked = await askModel($, cfg, 'grade', { system: CHECK_SYSTEM, prompt, maxTokens: 480, timeoutMs: 60_000 })
   if ('error' in asked) return { error: `확인하지 못했습니다: ${asked.error}` }
-  const graded = parseCheck(asked.text)
+  const graded = parseCheck(asked.text, sent.rule !== undefined ? { rule: true } : {})
   if (!graded) {
     void fault($, 'grade', 'unreadable', '직접 해 보기의 확인 결과를 읽지 못했습니다')
     return { error: '확인 결과를 읽지 못했습니다. 다시 Enter를 눌러 보세요.' }
@@ -3427,8 +3457,8 @@ async function gradeDrill($: EngineInterface, cfg: Config, note: LearnNote, dril
   // The note written again meanwhile (w): its practice is another, and this line's grade is not kept on it.
   const latest = (await read($, notes)).find(one => one.id === note.id)
   if (!latest || latest.text !== note.text || isDrillOver(latest.drill)) return { error: '그사이 노트를 다시 써서 이 줄은 확인하지 않았습니다' }
-  // The slip this line showed, asked for on its first grade only (after "모르겠어요" too), as a quiz's.
-  const slip = (first === undefined || isBlankAnswer(first.mine)) && graded.slip !== undefined ? { slip: graded.slip, slipType: graded.slipType ?? ('other' as const) } : {}
+  // The slip this line showed, asked for on its first grade only (after "모르겠어요" too), as a quiz's; a team rule's has none.
+  const slip = !isRule && (first === undefined || isBlankAnswer(first.mine)) && graded.slip !== undefined ? { slip: graded.slip, slipType: graded.slipType ?? ('other' as const) } : {}
   const nudge = first === undefined && graded.verdict !== 'right' ? keptNudge(graded.nudge, sent.example) : undefined
   if (nudge !== undefined && graded.verdict !== 'right') {
     return keepDrillTry($, note.id, { mine: line, verdict: graded.verdict, feedback: graded.feedback, nudge, at: now, ...slip })
@@ -3482,7 +3512,7 @@ async function settleDrillTries($: EngineInterface, cfg: Config, now: number): P
     for (const where of new Set(waiting.map(note => note.root || root))) for (const one of await storedNotes($, where)) stored.set(one.id, one)
     for (const note of waiting) {
       const first = note.drill!.firstTry!
-      const drill = note.status === 'ready' ? drillOf(note.text, note.changes) : undefined
+      const drill = note.status === 'ready' ? drillOf(note.text, note.changes, build.isRuleDrill) : undefined
       if (!drill || isDrillOver(stored.get(note.id)?.drill)) continue
       const grade = { mine: first.mine, verdict: first.verdict, feedback: first.feedback, ...(first.slip !== undefined ? { slip: first.slip, slipType: first.slipType } : {}) }
       await finishDrill($, cfg, note, drill, grade, { at: first.at })
@@ -3497,7 +3527,8 @@ async function settleDrillTries($: EngineInterface, cfg: Config, now: number): P
  * taught, unless marked known) marked: right a step on (when due), right after a question asked back or the hint, or
  * once the example was seen (`isSeen`), its step kept; partly right a step back; wrong back to the first, and first in
  * the next quiz. A miss keeps its slip, the line as the answer. The day counts it right or wrong, as a practice (not
- * toward the day's review); no quiz is touched. The journal gets a section for it.
+ * toward the day's review); no quiz is touched. The journal gets a section for it. A team-rule practice (1.9.0 F2)
+ * marks no concept and keeps no slip: only the day's count and the journal.
  */
 async function finishDrill(
   $: EngineInterface,
@@ -3521,7 +3552,7 @@ async function finishDrill(
   await setNote($, note.id, { drill: state })
   dropDrillDrafts(note.id)
   void persist($)
-  const found = await drillConcept($, note)
+  const found = drill.rule !== undefined ? undefined : await drillConcept($, note)
   if (found && !isKnown(found.one)) {
     const mark: Mark = how.isSeen || (isRight && isHelped) ? markHelped : isRight ? markReviewed : grade.verdict === 'partial' ? markPartial : markWrong
     if (await markConcepts($, cfg, mark, [found.key], at)) {
@@ -3567,7 +3598,7 @@ async function showDrillAnswer($: EngineInterface, cfg: Config, id: string, surf
 /** showDrillAnswer's work, one at a time for a note. */
 async function showDrillAnswerOnce($: EngineInterface, cfg: Config, id: string, surface?: RenderSurface): Promise<void> {
   const note = (await read($, notes)).find(one => one.id === id)
-  const drill = note && note.status === 'ready' ? drillOf(note.text, note.changes) : undefined
+  const drill = note && note.status === 'ready' ? drillOf(note.text, note.changes, build.isRuleDrill) : undefined
   if (!note || !drill || drillChecking === id) return
   const state = note.drill
   if (state?.isAnswerSeen === true) return
@@ -3599,7 +3630,7 @@ function saveDrill($: EngineInterface, cfg: Config, note: LearnNote, drill: Dril
   return enqueue('saving', async () => {
     try {
       const shown = await screened($, cfg, note)
-      const section = drillSection(shown, { task: redactText(drill.task).text }, state, state.at)
+      const section = drillSection(shown, { task: redactText(drill.task).text, ...(drill.rule !== undefined ? { rule: drill.rule } : {}) }, state, state.at)
       // Into the journal of the note's own day: a practice never makes a journal day with no notes.
       return await appendJournal($, cfg, note.root || (await $.session.root()), note.at, section)
     } catch (error) {
@@ -3686,7 +3717,7 @@ async function writeNote(
       {
         system: SYSTEM,
         // A note kept before 1.6.0, written again, was never screened.
-        prompt: notePrompt(await screened($, cfg, note), cfg.level, knownNames(await read($, concepts)), rules),
+        prompt: notePrompt(await screened($, cfg, note), cfg.level, knownNames(await read($, concepts)), rules, build.isRuleDrill),
         maxTokens: 1500,
       },
       isRetry ? 'retry' : isAuto ? 'auto' : 'manual',
@@ -3722,10 +3753,12 @@ async function writeNote(
         return
       }
     }
+    // A team-rule practice's task kept in its one shape (1.9.0 F2, ruleLabelled): no window before 1.9.0 reads it as a
+    // task, so none grades a rule's line as its concept's. The store, the journal and every window read that shape.
     const patch: Partial<LearnNote> =
       'error' in asked
         ? { status: 'failed', text: asked.fail ? noteFailText(asked.fail, cfg.model) : `${asked.error} · w로 다시 쓰기`, retry: undefined, previous: undefined }
-        : { status: 'ready', text: closeConceptBold(cut(asked.text, 9000)), retry: undefined, drill: undefined, previous: undefined }
+        : { status: 'ready', text: ruleLabelled(closeConceptBold(cut(asked.text, 9000))), retry: undefined, drill: undefined, previous: undefined }
     // A note cleared from the pane meanwhile, or left behind by a /cd, is still saved and stored from this copy.
     let done = (await setNote($, id, patch)) ?? { ...note, ...patch }
     // Written again, its practice is a new one: what was typed for the old one goes.
@@ -4755,7 +4788,9 @@ export const register: Register = (on, options) => {
       void fault($, 'tool', 'unregistered', '학습 기록 도구를 등록하지 못했습니다')
     }
     isInteractive = e.isInteractive
-    myVersion = await readVersion($)
+    const manifest = await readManifest($)
+    myVersion = manifest.version
+    build.isRuleDrill = typeof manifest.harness?.isRuleDrill === 'boolean' ? manifest.harness.isRuleDrill : IS_RULE_DRILL
     mySessionId = await $.session.id().catch(() => undefined)
     // The guard first, before anything writes the concepts; then this session's stamp for the other windows.
     await enqueue('storing', () => keepSchema($))
@@ -5430,7 +5465,7 @@ export const register: Register = (on, options) => {
     // Above the code, the note's own words on what the change does differently.
     const summary = note.status === 'ready' ? changeSection(note.text) : undefined
     // Its practice (1.7.0): a line of its code to change, t under it.
-    const drill = note.status === 'ready' ? drillOf(note.text, note.changes) : undefined
+    const drill = note.status === 'ready' ? drillOf(note.text, note.changes, build.isRuleDrill) : undefined
     const practice = await read($, drillRun)
 
     const body =
@@ -5910,6 +5945,12 @@ function drillView($: EngineInterface, cfg: Config, note: LearnNote, drill: Dril
           {state!.verdict !== 'right' && (state!.isAnswerSeen ? example : <Box>{answer}</Box>)}
         </Box>
       )}
+      {/* A team-rule practice over (1.9.0 F2): it changed no file, and the real fix is Claude's. Nothing to press. */}
+      {isOver && drill.rule !== undefined && (
+        <Text dimColor wrap="wrap">
+          {DRILL_RULE_AFTER}
+        </Text>
+      )}
     </Box>
   )
 }
@@ -5954,7 +5995,7 @@ function noteBody(note: LearnNote, isBusy: boolean, off: string, el: ElementTabl
   const { Box, Text, Markdown } = el
   if (note.status === 'ready') {
     // Wherever the practice stands in the note, before or after the change section.
-    const text = hideDrillAnswer(note.text, drill ? baseName(drill.file) : undefined)
+    const text = hideDrillAnswer(note.text, drill ? baseName(drill.file) : undefined, { isRuleDrill: build.isRuleDrill })
     const section = changeSection(text)
     if (!section) return <Markdown text={text} />
     return (
@@ -6328,7 +6369,7 @@ function conceptForTool(one: LearnConcept, now: number): string {
 function noteForTool(note: LearnNote, now: number): string {
   const request = note.prompt === '' ? '(없음)' : cut(note.prompt.replace(/\s+/g, ' '), 300)
   const asks = (note.asks ?? []).map(one => `- ${KEYED_LABELS.includes(one.question) ? one.question : `질문 · ${one.question}`}\n  답: ${cut(one.answer.replace(/\s+/g, ' '), 600)}`)
-  return [`## ${when(note.at, now)} 노트`, `요청: ${request}`, '', noteAsText(note), ...(asks.length > 0 ? ['', '노트 아래에서 나눈 질문과 답', ...asks] : [])].join('\n')
+  return [`## ${when(note.at, now)} 노트`, `요청: ${request}`, '', noteAsText(note, true), ...(asks.length > 0 ? ['', '노트 아래에서 나눈 질문과 답', ...asks] : [])].join('\n')
 }
 
 /**
@@ -6579,7 +6620,7 @@ async function shareOf($: EngineInterface, cfg: Config, note: LearnNote): Promis
   const names = keys
     .flatMap(key => conceptAt(index, resolveKey(map, key))?.name ?? written.find(one => one.key === key)?.name ?? [])
     .filter((name, i, all) => all.indexOf(name) === i)
-  return shareText(await screened($, cfg, note), names)
+  return shareText(await screened($, cfg, note), names, build.isRuleDrill)
 }
 
 /**
@@ -7304,12 +7345,16 @@ function noteState(note: LearnNote): string {
   return '자동 노트가 꺼져 있습니다'
 }
 
-/** A note as /learn says it where no pane can show: its time and files (each with its whole path), then its text. */
-function noteAsText(note: LearnNote): string {
+/**
+ * A note as /learn says it where no pane can show: its time and files (each with its whole path), then its text. For
+ * the record tool (`isTool`, 1.9.0 F2), a team-rule practice is left out whole: the main Claude would take the team's
+ * own fix for a thing to do.
+ */
+function noteAsText(note: LearnNote, isTool = false): string {
   const files = note.changes.map(c => `${c.file} (+${c.added} −${c.removed})`).join(', ')
   const more = note.moreFiles > 0 ? ` 외 ${note.moreFiles}개` : ''
   // Its practice with no line to change and no example answer (1.7.0): those are shown once tried, in the pane.
-  const body = note.status === 'ready' ? hideDrillAnswer(note.text) : `(${noteState(note)})`
+  const body = note.status === 'ready' ? hideDrillAnswer(note.text, undefined, { isRuleDrill: build.isRuleDrill, isTool }) : `(${noteState(note)})`
   const withheld = (note.withheld ?? []).length > 0 ? `\n\n노트에서 뺀 파일: ${withheldText(note.withheld ?? [])}` : ''
   return `**${stamp(note.at).time} · ${files}${more}**${withheld}\n\n${body}`
 }
@@ -7321,7 +7366,7 @@ function noteAsText(note: LearnNote): string {
  * file. The record tool has no such line.
  */
 function lastNoteText(note: LearnNote, isCloud = false): string {
-  if (note.status !== 'ready' || !drillOf(note.text, note.changes)) return noteAsText(note)
+  if (note.status !== 'ready' || !drillOf(note.text, note.changes, build.isRuleDrill)) return noteAsText(note)
   const tail = isCloud
     ? '직접 해 보기: 데스크톱 앱에서 이 세션을 열면 패널에서 t로 고쳐 확인합니다'
     : `직접 해 보기: 패널에서 t로 고쳐 확인합니다${note.savedAs === 'ready' ? ' · 예시 답은 일지 파일에 있습니다' : ''}`
