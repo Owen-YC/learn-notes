@@ -7,6 +7,7 @@ import {
   IS_RULE_DRILL,
   RUNG_CHANGED_STEP,
   RUNG_NEW_STEP,
+  STAMP_KEPT_MS,
   WORKED_AFTER_TIMES,
   WRITER_MARK,
   cleanConcepts,
@@ -376,6 +377,28 @@ function world(
           newString: e.new_string,
           originalFile: 'init()\nrun()\n',
           structuredPatch: [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, lines: ['-init()', ' run()', '+init()'] }],
+          userModified: false,
+          replaceAll: false,
+        },
+      }
+    }
+    // An edit far down a file (1.9.0 F3): the library it uses was imported at its top, above the hunk.
+    if (e.file_path.endsWith('posts.js')) {
+      return {
+        result: {
+          filePath: e.file_path,
+          oldString: e.old_string,
+          newString: e.new_string,
+          originalFile: '',
+          structuredPatch: [
+            {
+              oldStart: 18,
+              oldLines: 4,
+              newStart: 18,
+              newLines: 5,
+              lines: ['   try {', '-    const res = await fetch("/api/posts")', '+    const res = await axios.get("/api/posts", { params: { page: 1 } })', '+    return res.data', '   } catch (err) {', '     return []'],
+            },
+          ],
           userModified: false,
           replaceAll: false,
         },
@@ -13838,7 +13861,7 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     await again.unmount()
   })
 
-  test('off while a window before 1.8.0 stamped within the half hour: asked in its code changed, the sentence for code never seen not sent; past it, in code never seen', async ($, on) => {
+  test('off while a window before 1.8.0 stamped within the day: asked in its code changed, the sentence for code never seen not sent; past the half hour still (3/5 검토), past the day in code never seen', async ($, on) => {
     const store = storeOf({ [NAME]: 4 }, 31 * DAY)
     store.set('sessions', { 'session-old': { v: '1.7.1', at: NOW - 20 * 60_000 }, 'session-new': { v: '1.8.0', at: NOW - 60_000 } })
     const w = await opened($, on, store, [NAME], { rungNewStep: 4, rungChangedStep: 2 })
@@ -13851,8 +13874,15 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(quizItems(store)[0]).toMatchObject({ rung: 'changed' })
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 비슷한 코드 · 예측$/ })).toBeDefined()
     await ui.unmount()
-    // Past the half hour that window is taken for closed: the next quiz asks it in code never seen.
+    // Past the half hour (3/5 검토): a 1.7 window stamps only as it starts and as it keeps a note, so one left open
+    // grading this quiz may have written none since. Still in its code changed.
     await w.clock.advance(11 * 60_000)
+    w.answer = changed
+    await learn($, '퀴즈 새로')
+    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n')
+    expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
+    // Past the day its stamp is gone: the next quiz asks it in code never seen.
+    await w.clock.advance(STAMP_KEPT_MS - 31 * 60_000 + 60_000)
     w.answer = fresh(1)
     expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (처음 보는 코드) 아래 코드는')
     expect(w.models.at(-1)).toContain('   칸: 처음 보는 코드 (ts로)')
@@ -14042,6 +14072,136 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(await ui.find({ type: 'Text', text: new RegExp(`^헷갈린 점: ${WHAT} · 다음 퀴즈에서 다른 코드로 다시 묻습니다`) })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /풀이부터 보여 줍니다/ })).toBeUndefined()
     await ui.unmount()
+  })
+
+  test('(3/5 검토) an edit far down a file that imports a library at its top: the file read for its imports, asked in its code changed; with none, or the file gone, as it reads', async ($, on) => {
+    const AXIOS = 'axios 응답'
+    const POSTS = '/proj/src/api/posts.js'
+    const store = storeOf({ [AXIOS]: 4 }, 31 * DAY)
+    const w = world(on, 'ok', null, true, store)
+    w.harness = { rungNewStep: 4, rungChangedStep: 2 }
+    w.files.set(POSTS, 'import axios from "axios"\n\nexport async function fetchPosts() {\n  try {\n    const res = await axios.get("/api/posts")\n    return res.data\n  } catch (err) {\n    return []\n  }\n}\n')
+    await start($)
+    w.answer = CONCEPT_NOTE([AXIOS])
+    await turn($, () => $.tool.call({ tool: 'Edit', tool_use_id: 'u9', file_path: POSTS, old_string: 'fetch(', new_string: 'axios.get(' }))
+    await finish(w)
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    // The lines a question quotes have no import: the file's own top says axios.
+    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (posts.js):')
+    expect(w.models.at(-1)).toContain('axios.get("/api/posts", { params: { page: 1 } })')
+    expect(w.models.at(-1)).not.toContain('import axios')
+    expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
+    expect(quizItems(store)[0]!.rung).toBe('changed')
+    // The same edit in a file that imports nothing from a package: code never seen.
+    w.files.set(POSTS, "import { axios } from './http.js'\n\nexport async function fetchPosts() {}\n")
+    await w.clock.advance(60_000)
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(w.models.at(-1)).toContain('   칸: 처음 보는 코드 (js로)')
+    expect(quizItems(store)[0]!.rung).toBe('new')
+    // The file gone (or kept from Read): its imports unknown, so as it reads, never code never seen.
+    w.statFails = new Map([[POSTS, 'ENOENT']])
+    await w.clock.advance(60_000)
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n')
+    expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
+  })
+
+  test('(3/5 검토) with code never seen off (a release\'s constant) no file is read for its imports; on, once a quiz', async ($, on) => {
+    const AXIOS = 'axios 응답'
+    const POSTS = '/proj/src/api/posts.js'
+    let reads = 0
+    on('fs.stat', { path: POSTS }, (_$, e, next) => {
+      reads += 1
+      return next(e)
+    })
+    const store = storeOf({ [AXIOS]: 4 }, 31 * DAY)
+    const w = world(on, 'ok', null, true, store)
+    w.harness = { rungNewStep: null, rungChangedStep: 2 }
+    w.files.set(POSTS, 'import axios from "axios"\n')
+    await start($)
+    w.answer = CONCEPT_NOTE([AXIOS])
+    await turn($, () => $.tool.call({ tool: 'Edit', tool_use_id: 'u9', file_path: POSTS, old_string: 'fetch(', new_string: 'axios.get(' }))
+    await finish(w)
+    const before = reads
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store)[0]!.rung).toBe('changed')
+    expect(reads).toBe(before)
+    // On: read once a quiz for its imports.
+    w.harness = { rungNewStep: 4, rungChangedStep: 2 }
+    await start($)
+    await w.clock.advance(60_000)
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(reads).toBe(before + 1)
+    expect(quizItems(store)[0]!.rung).toBe('changed')
+  })
+
+  test('(3/5 검토) a note that wrote a React file whole: its import in the code sent, asked in its code changed (or its own), never code never seen', async ($, on) => {
+    const HOOK = 'useState 함수형 업데이트'
+    const store = storeOf({ [HOOK]: 4 }, 31 * DAY)
+    const w = world(on, 'ok', null, true, store)
+    w.harness = { rungNewStep: 4, rungChangedStep: 2 }
+    await start($)
+    w.answer = CONCEPT_NOTE([HOOK])
+    const content = "import { useState } from 'react'\n\nexport function Like() {\n  const [n, setN] = useState(0)\n  return n\n}\n"
+    await turn($, () => $.tool.call({ tool: 'Write', tool_use_id: 'u9', file_path: '/proj/src/Like.js', content }))
+    await finish(w)
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (Like.js):')
+    expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
+    expect(quizItems(store)[0]!.rung).toBe('changed')
+    // A file the note made whole is not read again: its diff has every line from the top.
+    expect(w.files.has('/proj/src/Like.js')).toBe(false)
+  })
+
+  test('(3/5 검토) the stamps unreadable: code never seen off for that quiz, as for a window before 1.8.0; readable again, on', async ($, on) => {
+    let isUnread = false
+    on('store.get', { key: 'sessions' }, (_$, e, next) => (isUnread ? { deny: 'learn-notes: $.store.get: the store could not be read' } : next(e)))
+    const store = storeOf({ [NAME]: 4 }, 31 * DAY)
+    const w = await opened($, on, store, [NAME], { rungNewStep: 4, rungChangedStep: 2 })
+    isUnread = true
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (a.ts):')
+    expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
+    isUnread = false
+    await w.clock.advance(60_000)
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(w.models.at(-1)).toContain('   칸: 처음 보는 코드 (ts로)')
+  })
+
+  test('(3/5 검토) /learn 퀴즈 틀림 while another window\'s quiz takes this one\'s place: the sentence for misses as 1.8.0 said it, none for code never seen', async ($, on) => {
+    // Once the concept is marked (armed below), another window's quiz of one question is the one every window shows.
+    let isArmed = false
+    let isMoved = false
+    const store = storeOf({ [NAME]: 0, [OTHER]: 0 }, 31 * DAY)
+    on('store.set', { key: 'concepts' }, async (_$, e, next) => {
+      const result = await next(e)
+      if (isArmed && !isMoved) {
+        isMoved = true
+        store.set('quiz', { at: NOW + 5 * 60_000, items: [{ key: conceptKey(NAME), name: NAME, question: '다른 창의 문제', answer: '1' }], isRevealed: false })
+      }
+      return result
+    })
+    on('state.get', { plugin: 'learn-notes', key: 'quiz' }, (_$, e, next) => (isMoved ? { value: { value: null, version: 0 } } : next(e)))
+    const w = await opened($, on, store, [NAME, OTHER])
+    w.answer = [fresh(1), fresh(2)].join('\n')
+    await learn($, '퀴즈 새로')
+    // The second question, past the one question of the quiz that takes this one's place: no grade there to read back.
+    const second = quizItems(store)[1]!
+    expect(second.rung).toBe('mine')
+    await learn($, '퀴즈 정답 2')
+    isArmed = true
+    const text = (await learn($, '퀴즈 틀림 2')).text ?? ''
+    expect(isMoved).toBe(true)
+    expect(text).toBe(`틀린 것으로 적었습니다: 2. ${String(second.name)}. 복습할 개념 맨 앞에 올라 다음 퀴즈에 먼저 나옵니다.`)
+    expect(text).not.toContain(NEW_MISS)
   })
 
   test('/learn 진단 names a ladder switch the build runs the other way from its constant; null is off, and no step a whole number leaves the constant', async ($, on) => {

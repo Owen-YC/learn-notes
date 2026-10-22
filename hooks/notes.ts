@@ -4697,7 +4697,11 @@ export function gatherPath(raw: string, home: string | undefined, root: string):
  * as a team term of another repository (`isTeamMarked`) is asked as any concept, its words the team's all the same.
  */
 export type QuizPick = RankedConcept & {
-  code?: { file: string; text: string }
+  /**
+   * The learner's code the concept is asked about; `isLibrary` (1.9.0 F3) when the change it came from needs a library,
+   * a framework or a browser, read wider than these lines (isUnrunnableChange): set only where code never seen could ask it.
+   */
+  code?: { file: string; text: string; isLibrary?: true }
   noteId?: string
   slip?: Pick<LearnSlip, 'what' | 'question' | 'mine'>
   team?: true
@@ -4797,49 +4801,84 @@ export function extOf(file: string): string | undefined {
  * team's words and lines, as in 1.7); a worked example once its open slip, asked again, was missed `workedAfter`
  * (WORKED_AFTER_TIMES) times running and not set right on the try again (`isRight`); none for any other open slip
  * (다시 도전, as in 1.7) or a concept with no code (asked why); code never seen from `newStep` on, for a concept due
- * whose code a sample could run and needs nothing but its language (1.9.0: none that a library, a framework or a
- * browser runs, isUnrunnableCode, asked as before); its code changed from `changedStep` (RUNG_CHANGED_STEP) on (any
- * language, a concept filling the quiz before it is due too); else its own code.
+ * whose code a sample could run and needs nothing but its language (isNewAskable; 1.9.0: none that a library, a
+ * framework or a browser runs, its lines by isUnrunnableCode and its change by `isLibrary`, asked as before); its code
+ * changed from `changedStep` (RUNG_CHANGED_STEP) on (any language, a concept filling the quiz before it is due too);
+ * else its own code.
  */
 export function rungOf(
   one: LearnConcept,
-  how: { code?: { file: string; text?: string }; slip?: Pick<LearnSlip, 'times' | 'isRight'>; isAsking: boolean; isTeam: boolean; isDue: boolean },
+  how: {
+    code?: { file: string; text?: string; isLibrary?: boolean }
+    slip?: Pick<LearnSlip, 'times' | 'isRight'>
+    isAsking: boolean
+    isTeam: boolean
+    isDue: boolean
+  },
   newStep = RUNG_NEW_STEP,
   { changedStep = RUNG_CHANGED_STEP, workedAfter = WORKED_AFTER_TIMES }: Partial<LadderSteps> = {},
 ): QuizRung | undefined {
   if (how.isTeam) return undefined
   if (how.slip) return how.isAsking && how.slip.times >= workedAfter && how.slip.isRight !== true ? 'worked' : undefined
   if (!how.code) return undefined
-  const step = stepOf(one)
-  const ext = extOf(how.code.file)
-  const isRunnable = how.code.text === undefined || !isUnrunnableCode(how.code.text)
-  if (step >= newStep && how.isDue && ext !== undefined && RUNG_NEW_EXTS.includes(ext) && isRunnable) return 'new'
-  return step >= changedStep ? 'changed' : 'mine'
+  const isRunnable = how.code.isLibrary !== true && (how.code.text === undefined || !isUnrunnableCode(how.code.text))
+  if (isNewAskable(one, how.code.file, how.isDue, newStep) && isRunnable) return 'new'
+  return stepOf(one) >= changedStep ? 'changed' : 'mine'
+}
+
+/**
+ * Whether a concept could be asked in code never seen by all but its code's own lines (1.9.0 F3): at `newStep` or past
+ * it, due, its code in a language its samples could run (RUNG_NEW_EXTS). Only then is its change read wider for a
+ * library (isUnrunnableChange), its file's imports too.
+ */
+export function isNewAskable(one: LearnConcept, file: string, isDue: boolean, newStep = RUNG_NEW_STEP): boolean {
+  const ext = extOf(file)
+  return stepOf(one) >= newStep && isDue && ext !== undefined && RUNG_NEW_EXTS.includes(ext)
 }
 
 /** A module named by its bare name (`'react'`, `"lodash/debounce"`), not by a path (`./`, `../`, `/`) or `node:`. */
 const BARE_MODULE = String.raw`(['"\x60])(?!\.{0,2}\/|node:)[^'"\x60\s]+\1`
 /**
+ * A library brought in: a module imported (`from 'react'`, `import('x')`) or required by its bare name, or a Python
+ * import line (the standard library's too, to be safe; not one relative to its package, `from .models import`).
+ */
+const LIBRARY_IMPORTS: readonly RegExp[] = [
+  new RegExp(String.raw`(?<![\w$.])(?:from\s*|import\s*\(?\s*|require\s*\(\s*)${BARE_MODULE}`),
+  /^[ \t]*(?:import[ \t]+[A-Za-z_][\w.]*|from[ \t]+[A-Za-z_][\w.]*[ \t]+import\b)[^'"`\n]*$/m,
+]
+/**
  * Code a learner met that a library, a framework or a browser runs, which a question in code never seen (1.9.0 F3)
- * could not show working in the language alone: a module imported (`from 'react'`, `import('x')`) or required by its
- * bare name, a JSX component (`<Button`, not `a < B` or a type's `Array<Item>`), a hook called (`useState(`), an
- * Express handler's `(req, res`, the browser's page, window, storage, events or alert, or a Python import line (the
- * standard library's too, to be safe; not one relative to its package, `from .models import`).
+ * could not show working in the language alone: a library brought in (LIBRARY_IMPORTS), a JSX component (`<Button`,
+ * not `a < B` or a type's `Array<Item>`), a hook called (`useState(`), an Express handler's `(req, res`, or the
+ * browser's page, window, storage, events or alert.
  */
 const UNRUNNABLE: readonly RegExp[] = [
-  new RegExp(String.raw`(?<![\w$.])(?:from\s*|import\s*\(?\s*|require\s*\(\s*)${BARE_MODULE}`),
+  ...LIBRARY_IMPORTS,
   /(?<![\w$)\]])<[A-Z][\w.]*[\s/>]/,
   /(?<![\w$])use[A-Z]\w*\s*(?:<[^>\n]*>)?\s*\(/,
   /\(\s*req\s*,\s*res\b/,
   /(?<![\w$.])(?:document|window|localStorage|sessionStorage)\s*\./,
   /\baddEventListener\s*\(/,
   /(?<![\w$.])alert\s*\(/,
-  /^[ \t]*(?:import[ \t]+[A-Za-z_][\w.]*|from[ \t]+[A-Za-z_][\w.]*[ \t]+import\b)[^'"`\n]*$/m,
 ]
 
 /** True when code a learner met needs a library, a framework or a browser to run (UNRUNNABLE). */
 export function isUnrunnableCode(text: string): boolean {
   return UNRUNNABLE.some(pattern => pattern.test(text))
+}
+
+/**
+ * True when the change a concept's code came from needs a library, a framework or a browser (1.9.0 F3), read wider
+ * than the lines a question quotes (codeFor: a few lines around the quote, its imports seldom among them): every
+ * hunk's lines after the change (isUnrunnableCode), and for a file it did not make whole, the file as it stands now
+ * (`file`, read on this device for its imports alone, LIBRARY_IMPORTS: nothing of it is shown or sent). An edit whose
+ * file was not read is taken to need one, as code never seen is asked only where its code is known to run alone.
+ */
+export function isUnrunnableChange(change: Pick<LearnChange, 'diff' | 'kind'>, file: string | undefined): boolean {
+  const after = parseDiff(change.diff).map(h => beforeAfter(h).after)
+  if (isUnrunnableCode(after.join('\n'))) return true
+  if (change.kind === 'create') return false
+  return file === undefined || LIBRARY_IMPORTS.some(pattern => pattern.test(file))
 }
 
 /**
@@ -7137,12 +7176,15 @@ export function newerBuild(stamps: Readonly<Record<string, SessionStamp>>, id: s
 }
 
 /**
- * True when another session (not `id`) of a build before 1.8.0 stamped within STAMP_LIVE_MS (1.9.0 F3): that window
+ * True when another session (not `id`) of a build before 1.8.0 stamped within STAMP_KEPT_MS (1.9.0 F3): that window
  * reads the quiz every window shares and knows no rung, so a miss there in code never seen would put the concept back
- * to its first step; a quiz made meanwhile asks in no code never seen.
+ * to its first step; a quiz made meanwhile asks in no code never seen. Not STAMP_LIVE_MS, the half hour a newer
+ * build's notice goes by: a 1.7 window stamps only as it starts and as it keeps a note (at most every STAMP_EVERY_MS),
+ * so one left open grading the shared quiz writes none. A day of no code never seen costs a question or two; the
+ * other way, a concept's weeks of steps.
  */
 export function isOldGraderOpen(stamps: Readonly<Record<string, SessionStamp>>, id: string | undefined, now: number): boolean {
-  return Object.entries(stamps).some(([other, one]) => other !== id && now - one.at <= STAMP_LIVE_MS && compareVersions(one.v, '1.8.0') < 0)
+  return Object.entries(stamps).some(([other, one]) => other !== id && now - one.at < STAMP_KEPT_MS && compareVersions(one.v, '1.8.0') < 0)
 }
 
 /** The other sessions' stamps (not `id`), the newest first: /learn 진단's 다른 창 line. */

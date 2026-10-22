@@ -38,7 +38,9 @@ import {
   markWrong,
   marksOf,
   bankQuestion,
+  isNewAskable,
   isOldGraderOpen,
+  isUnrunnableChange,
   isWorkedNext,
   pickForRung,
   rungOf,
@@ -2497,9 +2499,17 @@ async function askModel(
 /**
  * Each concept with the note it is asked from, while a note still holds it: that note's id, and the learner's
  * code from it. That note is the latest that taught the concept. Its code is screened first (a note kept before
- * 1.6.0 may hold a .env), so a file left out is never quoted.
+ * 1.6.0 may hold a .env), so a file left out is never quoted. A concept code never seen could ask (from `newStep`,
+ * due, isNewAskable) has its change read wider for a library, its file's imports too (isUnrunnableChange, 1.9.0 F3).
  */
-async function withCode($: EngineInterface, cfg: Config, picks: readonly RankedConcept[], map: Readonly<Record<string, string>>): Promise<QuizPick[]> {
+async function withCode(
+  $: EngineInterface,
+  cfg: Config,
+  picks: readonly RankedConcept[],
+  map: Readonly<Record<string, string>>,
+  newStep: number,
+  now: number,
+): Promise<QuizPick[]> {
   const written = (await allNotes($)).filter(note => note.status === 'ready').sort((a, b) => b.at - a.at)
   const found: QuizPick[] = []
   for (const one of picks) {
@@ -2515,13 +2525,36 @@ async function withCode($: EngineInterface, cfg: Config, picks: readonly RankedC
     for (const change of changes) {
       const text = codeFor(change, one.blurb)
       if (text) {
-        code = { file: baseName(change.file), text }
+        const isAskable = isNewAskable(one, change.file, isDue(one, now), newStep)
+        const isLibrary = isAskable && isUnrunnableChange(change, change.kind === 'create' ? undefined : await importsText($, change.path))
+        code = { file: baseName(change.file), text, ...(isLibrary ? { isLibrary: true as const } : {}) }
         break
       }
     }
     found.push({ ...one, noteId: note.id, ...(code ? { code } : {}) })
   }
   return found
+}
+
+/** Bytes past which the file a concept's code came from is not read for its imports (1.9.0 F3): taken to need a library. */
+const IMPORTS_READ_MAX = 1_000_000
+
+/**
+ * The file a concept's code came from, as it stands now, read for its imports alone (isUnrunnableChange, 1.9.0 F3):
+ * nothing of it is shown, kept or sent. None for one gone, not a file, past IMPORTS_READ_MAX, not text, or kept from
+ * Read by the permission rules (where its link leads too).
+ */
+async function importsText($: EngineInterface, path: string | undefined): Promise<string | undefined> {
+  if (typeof path !== 'string' || path === '') return undefined
+  try {
+    const stat = await $.fs.stat(path, { resolve: true })
+    if (stat.kind !== 'file' || stat.size > IMPORTS_READ_MAX || stat.realPath === undefined) return undefined
+    if ((await isReadDenied($, path)) || (stat.realPath !== path && (await isReadDenied($, stat.realPath)))) return undefined
+    const text = String(await $.fs.read(path))
+    return text.includes('\u0000') ? undefined : text
+  } catch {
+    return undefined
+  }
 }
 
 /** Concepts a review quiz looks through: twice the questions it asks, so it can take them from different notes. */
@@ -2615,9 +2648,13 @@ async function makeQuiz(
     if (isTeamQuiz) return { error: terms.length > 0 ? TEAM_ALL_KNOWN : NO_TEAM_TERMS }
     return { error: Object.keys(index).length > 0 ? ALL_KNOWN_TEXT : NO_CONCEPTS_FOR_QUIZ }
   }
+  // Code never seen (1.9.0 F3) only while no window of a build before 1.8.0 stamped on this device within the day:
+  // that window reads this quiz too, and would put a concept missed there back to its first step. The stamps are read
+  // once a quiz, and only with the rung on; a store that cannot be read keeps it off for this quiz.
+  const newStep = build.rungNewStep === Infinity ? Infinity : await newStepNow($, now)
   // A review quiz goes over more than one note where it can (three concepts from one note make one lesson
   // again), the slips to ask again and the concepts due before any other, then the team terms not met yet.
-  const found = await withCode($, cfg, chosen, map)
+  const found = await withCode($, cfg, chosen, map, newStep, now)
   // A concept that came in as a team term: of this repository (any of its terms, in a team quiz) asked as one, by the
   // team's words; of another, its words are the team's all the same.
   const marks = await storedTeamTerms($, map)
@@ -2635,10 +2672,6 @@ async function makeQuiz(
   // In the quiz's order: the concepts due, then the team terms not met, then the rest (a team quiz: the terms not met first).
   const candidates = isTeamQuiz ? [...fresh, ...marked] : [...marked.filter(isFirst), ...fresh, ...marked.filter(one => !isFirst(one))]
   const spread = spreadPicks(candidates, 3, isFirst, isAsking)
-  // Code never seen (1.9.0 F3) only while no window of a build before 1.8.0 stamped on this device within the half
-  // hour: that window reads this quiz too, and would put a concept missed there back to its first step. The stamps
-  // are read once a quiz, and only with the rung on; a store that cannot be read keeps it off for this quiz.
-  const newStep = build.rungNewStep === Infinity ? Infinity : await newStepNow($, now)
   // Each team term asked by the lines its words name (three files read at most), over the learner's code; then its slip.
   // It keeps this repository and the words its grade puts in the concept index: a quiz may be graded in any window.
   const picks: QuizPick[] = []

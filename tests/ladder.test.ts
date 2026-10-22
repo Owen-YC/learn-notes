@@ -5,6 +5,7 @@ import {
   QUIZ_SYSTEM,
   RUNG_CHANGED_STEP,
   RUNG_NEW_STEP,
+  STAMP_KEPT_MS,
   STAMP_LIVE_MS,
   WORKED_AFTER_TIMES,
   WORKED_DEFAULT_ASK,
@@ -12,8 +13,11 @@ import {
   addToBank,
   bankQuestion,
   cleanStamps,
+  codeFor,
   extOf,
+  isNewAskable,
   isOldGraderOpen,
+  isUnrunnableChange,
   isUnrunnableCode,
   isWorkedNext,
   markFor,
@@ -528,17 +532,107 @@ describe('1.9.0: 처음 보는 코드 from the fifth step, for concepts due met 
     expect(parseQuiz('Q1: 문제\nH1: 실마리\nR1: 따라가기\nA1: 답', plainPicks)[0]!.hint).toBe('실마리\nR1: 따라가기')
   })
 
-  test('a window of a build before 1.8.0 stamped within the half hour keeps code never seen off; 1.8.0 and later, this session\'s own, or an older stamp do not', () => {
+  test('a window of a build before 1.8.0 stamped within the day keeps code never seen off; 1.8.0 and later, this session\'s own, or a stamp a day old do not', () => {
     const now = NOW
     const at = (v: string, ago: number) => ({ v, at: now - ago })
     const open = (stamps: Record<string, { v: string; at: number }>) => isOldGraderOpen(cleanStamps(stamps, now), 'mine', now)
     expect(open({ other: at('1.7.1', 29 * 60_000) })).toBe(true)
     expect(open({ other: at('1.7.0', STAMP_LIVE_MS) })).toBe(true)
-    expect(open({ other: at('1.7.1', 31 * 60_000) })).toBe(false)
+    // (3/5 검토) Past the half hour too: a 1.7 window stamps only as it starts and keeps a note, so one left open
+    // grading the shared quiz writes no stamp for hours.
+    expect(open({ other: at('1.7.1', 31 * 60_000) })).toBe(true)
+    expect(open({ other: at('1.7.1', 2 * 60 * 60_000) })).toBe(true)
+    expect(open({ other: at('1.6.0', STAMP_KEPT_MS - 60_000) })).toBe(true)
+    expect(open({ other: at('1.7.1', STAMP_KEPT_MS) })).toBe(false)
+    expect(isOldGraderOpen({ other: at('1.7.1', STAMP_KEPT_MS) }, 'mine', now)).toBe(false)
     expect(open({ other: at('1.8.0', 60_000), third: at('1.9.0', 60_000) })).toBe(false)
     expect(open({ mine: at('1.7.1', 60_000) })).toBe(false)
     expect(open({})).toBe(false)
     expect(isOldGraderOpen({ other: at('1.7.1', 60_000) }, undefined, now)).toBe(true)
+  })
+
+  test('(3/5 검토) the code check reads a change wider than the lines a question quotes: every hunk after it, and an edit\'s file for its imports alone', () => {
+    // An edit at line 18 of a file whose `import axios` stands on line 1: the lines quoted (codeFor) do not show it.
+    const axiosEdit = {
+      kind: 'update' as const,
+      diff: [
+        '@@ -18,4 +18,5 @@ export async function fetchPosts() {',
+        '   try {',
+        '-    const res = await fetch("/api/posts")',
+        '+    const res = await axios.get("/api/posts", { params: { page: 1 } })',
+        '+    return res.data',
+        '   } catch (err) {',
+        '     return []',
+      ].join('\n'),
+    }
+    const quoted = codeFor(axiosEdit, 'axios 응답의 내용은 data에 있습니다 — `return res.data`')!
+    expect(quoted).toContain('axios.get(')
+    expect(isUnrunnableCode(quoted)).toBe(false)
+    const head = 'import axios from "axios"\n\nexport async function fetchPosts() {\n  try {\n'
+    expect(isUnrunnableChange(axiosEdit, head)).toBe(true)
+    expect(isUnrunnableChange(axiosEdit, "import { get } from './http.js'\nconst fs = require('node:fs')\n")).toBe(false)
+    // Its file not read (gone, too big, kept from Read): unknown, so never code never seen.
+    expect(isUnrunnableChange(axiosEdit, undefined)).toBe(true)
+    // A Python file's import line, the standard library's too.
+    const pandasEdit = { kind: 'update' as const, diff: '@@ -30,2 +30,3 @@ def summary(df):\n     rows = df[df["score"] > 0]\n-    return rows\n+    by_team = rows.groupby("team")["score"].mean()\n+    print(by_team["a"])' }
+    expect(isUnrunnableCode(codeFor(pandasEdit, '그룹별 평균 — `groupby("team")`')!)).toBe(false)
+    expect(isUnrunnableChange(pandasEdit, 'import pandas as pd\n\n\ndef summary(df):\n')).toBe(true)
+    expect(isUnrunnableChange(pandasEdit, 'def summary(df):\n    pass\n')).toBe(false)
+    // The file is read for its imports alone: a page touched elsewhere in it is not this code's.
+    expect(isUnrunnableChange(pandasEdit, "const el = document.querySelector('#a')\nel.addEventListener('click', go)")).toBe(false)
+    // Every hunk, not only the one quoted: a hook called in another hunk of the change.
+    const twoHunks = {
+      kind: 'update' as const,
+      diff: '@@ -1,2 +1,2 @@\n-const step = 1\n+const step = 2\n console.log(step)\n@@ -40,1 +40,2 @@\n const [n, setN] = useState(0)\n+setN(c => c + step)',
+    }
+    expect(codeFor(twoHunks, '`const step = 2`')).toContain('const step = 2')
+    expect(isUnrunnableChange(twoHunks, '')).toBe(true)
+    // A file the change made whole: its diff has every line from the top, so no file is needed.
+    expect(isUnrunnableChange({ kind: 'create', diff: '@@ -0,0 +1,2 @@\n+const xs = [1, 2].map(x => x * 2)\n+console.log(xs[1])' }, undefined)).toBe(false)
+    expect(isUnrunnableChange({ kind: 'create', diff: "@@ -0,0 +1,2 @@\n+import { useState } from 'react'\n+const [n, setN] = useState(0)" }, undefined)).toBe(true)
+  })
+
+  test('(3/5 검토) a change read as needing a library keeps code never seen off whatever its lines; isNewAskable is rungOf\'s test before the code', () => {
+    const library = { ...CODE, isLibrary: true }
+    expect(rungOf(at(4), { ...plain, code: library }, 4, ON)).toBe('changed')
+    expect(rungOf(at(5), { ...plain, code: library }, 4, { changedStep: Infinity })).toBe('mine')
+    expect(rungOf(at(4), { ...plain, code: { ...CODE, isLibrary: false } }, 4, ON)).toBe('new')
+    expect(isNewAskable(at(4), 'src/cart.js', true, 4)).toBe(true)
+    expect(isNewAskable(at(5), 'app/evens.py', true, 4)).toBe(true)
+    expect(isNewAskable(at(3), 'src/cart.js', true, 4)).toBe(false)
+    expect(isNewAskable(at(4), 'src/cart.js', false, 4)).toBe(false)
+    expect(isNewAskable(at(4), 'src/App.tsx', true, 4)).toBe(false)
+    expect(isNewAskable(at(5), 'src/cart.js', true, Infinity)).toBe(false)
+    expect(isNewAskable(at(5), 'src/cart.js', true)).toBe(RUNG_NEW_STEP <= 5)
+  })
+
+  test('(3/5 검토) a reply whose first fence the model left open is read again markers and all: the R line is a marker there too, its trace in no hint', () => {
+    const picks = [pickForRung(pick('A', { code: CODE }), 'new'), pickForRung(pick('B', { code: CODE }), 'new')]
+    const text = [
+      'T1: 예측',
+      'Q1: 아래 코드는 무엇을 찍을까요?',
+      '```js',
+      'const xs = [3, 4]',
+      'let s = 0',
+      'for (const x of xs) s += x',
+      'console.log(s)',
+      'H1: 하나씩 더해 보세요',
+      'R1: s는 0에서 3, 다시 7이 된다',
+      'A1: 7',
+      'T2: 왜',
+      'Q2: 왜 let으로 썼을까요?',
+      'H2: 바뀌는 값',
+      'R2: s가 두 번 바뀐다',
+      'A2: 다시 대입하므로',
+    ].join('\n')
+    const items = parseQuiz(text, picks)
+    expect(items.map(one => [one.name, one.hint, one.answer])).toEqual([
+      ['A', '하나씩 더해 보세요', '7'],
+      ['B', '바뀌는 값', '다시 대입하므로'],
+    ])
+    expect(items[0]!.question).toBe('아래 코드는 무엇을 찍을까요?\n```js\nconst xs = [3, 4]\nlet s = 0\nfor (const x of xs) s += x\nconsole.log(s)\n```')
+    expect(JSON.stringify(items)).not.toContain('0에서 3')
+    expect(JSON.stringify(items)).not.toContain('두 번 바뀐다')
   })
 })
 
