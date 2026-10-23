@@ -14528,4 +14528,156 @@ describe('1.9.0: 바탕 개념, a base concept asked right before the worked exa
     expect(off).toContain('· 열린 채 두 번 이상 1\n')
     expect(off).not.toContain('바탕 개념')
   })
+
+  test('set right after being asked back, then missed with a base on its try again (its third miss running): the worked example comes with no base, and the line says so (4/5 검토)', async ($, on) => {
+    const store = storeOf({ times: 2, isRight: true })
+    const w = await opened($, on, store)
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => [one.name, one.isRetry, one.rung])).toEqual([[X, true, undefined], [D, undefined, undefined], [F, undefined, undefined]])
+    w.answer = atOnce()
+    const reply = (await learn($, '퀴즈 1 전역에 남아요')).text ?? ''
+    expect(reply).toContain('\n같은 곳을 또 헷갈렸습니다 · 다음 복습 퀴즈는 풀이부터 보여 줍니다')
+    expect(reply).not.toContain(WORKED_BASE_NEXT)
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 3 })
+    // /learn 진단 counts no base a quiz will not ask.
+    expect((await learn($, '진단')).text).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 0\n')
+    await w.clock.advance(60_000)
+    w.answer = [worked(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => [one.name, one.isBase, one.rung])).toEqual([
+      [X, undefined, 'worked'],
+      [D, undefined, undefined],
+      [F, undefined, undefined],
+    ])
+  })
+
+  test('the worked example after its base answered too short to read a slip from: no base kept nor promised, none before it next time (4/5 검토)', async ($, on) => {
+    const store = storeOf({ times: 2, base: conceptKey(B) })
+    const w = await opened($, on, store)
+    const ui = await quizIn($, w, [plainQ(1, '바탕'), worked(2), plainQ(3)].join('\n'))
+    expect(quizItems(store).map(one => [one.name, one.isBase, one.rung])).toEqual([[B, true, undefined], [X, undefined, 'worked'], [D, undefined, undefined]])
+    await answer(ui, w, mineKey(store, 0), '함수 안에서만 보여요', RIGHT)
+    await answer(ui, w, mineKey(store, 1), '10', AGAIN_WRONG)
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 3 })
+    expect(slipsOf(store)[conceptKey(X)]).not.toHaveProperty('base')
+    expect(await ui.find({ type: 'Text', text: '같은 곳을 또 헷갈렸습니다 · 다음 복습 퀴즈는 풀이부터 보여 줍니다' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: new RegExp(WORKED_BASE_NEXT) })).toBeUndefined()
+    await ui.unmount()
+    await w.clock.advance(60_000)
+    w.answer = [worked(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store)[0]).toMatchObject({ name: X, rung: 'worked' })
+    expect(quizItems(store).some(one => 'isBase' in one)).toBe(false)
+  })
+
+  test('"모르겠어요" the second miss running, after a miss of another kind kept a base: no model call and no base, 1.8.0\'s line and quiz (4/5 검토)', async ($, on) => {
+    const store = storeOf({ type: 'reference' })
+    const w = await opened($, on, store)
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    w.answer = atOnce()
+    expect((await learn($, '퀴즈 1 전역에 남아요')).text).toContain(`\n헷갈린 점: ${WHAT} · 다음 퀴즈에서 다른 코드로 다시 묻습니다`)
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ type: 'scope', times: 1, base: conceptKey(B) })
+    await w.clock.advance(2 * DAY)
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store)[0]).toMatchObject({ name: X, isRetry: true })
+    const calls = w.models.length
+    const reply = (await learn($, '퀴즈 1 모르겠어요')).text ?? ''
+    expect(w.models).toHaveLength(calls)
+    expect(reply).toContain('\n같은 곳을 또 헷갈렸습니다 · 다음 복습 퀴즈는 풀이부터 보여 줍니다')
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ type: 'scope', times: 2 })
+    expect(slipsOf(store)[conceptKey(X)]).not.toHaveProperty('base')
+    await w.clock.advance(60_000)
+    w.answer = [worked(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store)[0]).toMatchObject({ name: X, rung: 'worked' })
+    expect(quizItems(store).some(one => 'isBase' in one)).toBe(false)
+  })
+
+  test('a team term asked again is graded with no list and keeps no base (계획: 팀 용어 문제이면 안 생김, 4/5 검토)', async ($, on) => {
+    const store = storeOf()
+    // fetcher: this repository's team term, met after the others and in their file, its slip open since two days ago.
+    const concepts = store.get('concepts') as Record<string, unknown>
+    concepts[conceptKey('fetcher')] = { name: 'fetcher', count: 2, firstAt: NOW - 20 * DAY, lastAt: NOW - 20 * DAY, blurb: '우리 팀의 API 호출 함수입니다', files: ['counter.js'], step: 0, reviewedAt: NOW - 3 * DAY }
+    store.set('teamTerms', { [conceptKey('fetcher')]: [rootTag('/proj')] })
+    store.set('slips', { ...slipsOf(store), [conceptKey('fetcher')]: { what: 'fetcher가 오류를 삼킨다고 봄', type: 'scope', question: '지난 문제', mine: '삼켜요', at: NOW - 2 * DAY, times: 1 } })
+    const w = world(on, 'ok', null, true, store)
+    w.harness = { isBaseAsked: true }
+    w.files.set('/proj/.claude/learn-notes.md', '# 팀\n\n## 용어\n- **fetcher**: 우리 팀의 API 호출 함수입니다\n')
+    await start($)
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    const at = quizItems(store).findIndex(one => one.name === 'fetcher')
+    expect(quizItems(store)[at]).toMatchObject({ team: true, isRetry: true })
+    w.answer = atOnce('1')
+    await learn($, `퀴즈 ${at + 1} 오류를 삼켜요`)
+    const graded = w.models.at(-1)!
+    expect(graded).toContain('## 이 학습자가 지난번에 헷갈린 점\nfetcher가 오류를 삼킨다고 봄\n')
+    expect(graded).not.toContain('전에 배운 개념')
+    expect(graded).not.toContain('바탕')
+    expect(quizItems(store)[at]).not.toHaveProperty('slipBase')
+    expect(slipsOf(store)[conceptKey('fetcher')]).toMatchObject({ times: 2 })
+    expect(slipsOf(store)[conceptKey('fetcher')]).not.toHaveProperty('base')
+  })
+
+  test('a first try with its base left waiting when the next quiz is made: settled with its base, which that quiz asks before the worked example (4/5 검토)', async ($, on) => {
+    const store = storeOf()
+    const w = await opened($, on, store)
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    w.answer = based()
+    await learn($, '퀴즈 1 전역에 남아요')
+    expect(quizItems(store)[0]).toMatchObject({ firstTry: { slipBase: conceptKey(B) } })
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 1 })
+    await w.clock.advance(60_000)
+    w.answer = [plainQ(1, '바탕'), worked(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 2, base: conceptKey(B) })
+    expect(quizItems(store).map(one => [one.name, one.isBase, one.rung])).toEqual([
+      [B, true, undefined],
+      [X, undefined, 'worked'],
+      [D, undefined, undefined],
+    ])
+  })
+
+  test('the base question\'s mark read back from the store: after another question is graded on the quiz the store holds, its title and dim line stay (4/5 검토)', async ($, on) => {
+    const store = storeOf({ times: 2, base: conceptKey(B) })
+    const w = await opened($, on, store)
+    w.answer = [plainQ(1, '바탕'), worked(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    w.answer = RIGHT
+    await learn($, '퀴즈 3 답 3')
+    expect(quizItems(store)[2]).toMatchObject({ result: 'right' })
+    expect(quizItems(store)[0]).toMatchObject({ isBase: true })
+    expect((await learn($, '퀴즈')).text).toContain('\n1. (바탕 개념) 바탕 1')
+    const ui = await quizPane($)
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/3 · 바탕 개념 · 예측$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: BASE_LEAD })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a harness\'s 풀이 보고 풀기 after three misses running: the base promised and asked at the third, /learn 진단 counting by the same step (4/5 검토)', async ($, on) => {
+    const store = storeOf({ times: 2 })
+    const w = await opened($, on, store, { isBaseAsked: true, workedAfterTimes: 3 })
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => [one.name, one.isRetry, one.rung])).toEqual([[X, true, undefined], [D, undefined, undefined], [F, undefined, undefined]])
+    w.answer = atOnce()
+    expect((await learn($, '퀴즈 1 전역에 남아요')).text).toContain(`\n같은 곳을 또 헷갈렸습니다 · ${WORKED_BASE_NEXT}`)
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 3, base: conceptKey(B) })
+    const ui = await quizPane($)
+    expect(await ui.find({ type: 'Text', text: `같은 곳을 또 헷갈렸습니다 · ${WORKED_BASE_NEXT}` })).toBeDefined()
+    await ui.unmount()
+    expect((await learn($, '진단')).text).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 1\n')
+    await w.clock.advance(60_000)
+    w.answer = [plainQ(1, '바탕'), worked(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => [one.name, one.isBase, one.rung])).toEqual([
+      [B, true, undefined],
+      [X, undefined, 'worked'],
+      [D, undefined, undefined],
+    ])
+  })
 })

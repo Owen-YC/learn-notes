@@ -4512,7 +4512,7 @@ async function slipLineText($: EngineInterface, item: LearnQuizItem): Promise<st
   const taught = item.noteId !== undefined ? ` · 이 개념을 배운 노트: /learn 찾기 ${item.name}` : ''
   // Missed twice running (1.8.0): the next review quiz shows a worked example first (its base first, 1.9.0 F5), said
   // before where the note is.
-  return `${notice.text}${isWorkedNext(record, item, build.workedAfterTimes) ? ` · ${workedNextText(record, build.isBaseAsked)}` : ''}${taught}`
+  return `${notice.text}${isWorkedNext(record, item, build.workedAfterTimes) ? ` · ${workedNextText(record, build.isBaseAsked, build.workedAfterTimes)}` : ''}${taught}`
 }
 
 /**
@@ -6865,10 +6865,10 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
   const has = (record: object) => Object.prototype.hasOwnProperty.call(record, day)
   const root = (await read($, paneRoot)) ?? (await quiet($.session.root(), undefined))
   const unsaved = root === undefined ? undefined : (await quiet(allNotes($), [])).filter(note => (note.root || root) === root && note.isUnsaved === true).length
-  // The slips counted (1.8.0), merges followed: no name, no words.
+  // The slips counted (1.8.0), merges followed: no name, no words. The ones with a base by the ladder this load runs (1.9.0 F5).
   const map = await quiet(read($, aliases), {})
   const slipped = await $.store.get(SLIPS_KEY).then(
-    raw => slipCounts(cleanSlips(raw, map, now)),
+    raw => slipCounts(cleanSlips(raw, map, now), build.workedAfterTimes),
     () => 'unread' as const,
   )
   // The index writes of builds before 1.9.0 seen (1.9.0): times and a count alone.
@@ -7225,7 +7225,7 @@ function quizView(
               {notice && (
                 <Text color={notice.kind === 'fixed' ? 'green' : undefined} dimColor={notice.kind !== 'fixed'} wrap="wrap">
                   {notice.kind === 'again' && isWorkedNext(record, item, build.workedAfterTimes)
-                    ? `${notice.text}${taught ? ' · n: 이 개념을 배운 노트' : ''} · ${workedNextText(record, build.isBaseAsked)}`
+                    ? `${notice.text}${taught ? ' · n: 이 개념을 배운 노트' : ''} · ${workedNextText(record, build.isBaseAsked, build.workedAfterTimes)}`
                     : notice.kind === 'again' && taught
                       ? `${notice.text} · n: 이 개념을 배운 노트 · 거기서 r로 따라가기`
                       : notice.text}

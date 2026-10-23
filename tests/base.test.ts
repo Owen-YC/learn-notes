@@ -7,6 +7,7 @@ import {
   BASE_LEAD,
   IS_BASE_ASKED,
   SLIP_AGAIN,
+  WORKED_AFTER_TIMES,
   WORKED_BASE_NEXT,
   WORKED_NEXT,
   baseCandidates,
@@ -14,6 +15,7 @@ import {
   baseOf,
   checkPrompt,
   isBaseKey,
+  isWorkedNext,
   nextSlip,
   parseCheck,
   parseQuiz,
@@ -70,10 +72,15 @@ describe('1.9.0: a base concept picked when a question asked again is graded (F5
     expect(BASE_LEAD).toBe('다음 문제의 바탕이 되는 개념을 먼저 확인합니다')
     expect(WORKED_BASE_NEXT).toBe('다음 복습 퀴즈는 바탕 개념과 풀이부터 보여 줍니다')
     // No concept's name in either (the concept map 1.7 dropped).
-    expect(workedNextText({ base: 'c:변수범위' }, true)).toBe(WORKED_BASE_NEXT)
-    expect(workedNextText({}, true)).toBe(WORKED_NEXT)
-    expect(workedNextText(undefined, true)).toBe(WORKED_NEXT)
-    expect(workedNextText({ base: 'c:변수범위' }, false)).toBe(WORKED_NEXT)
+    expect(workedNextText({ base: 'c:변수범위', times: 2 }, true, 2)).toBe(WORKED_BASE_NEXT)
+    expect(workedNextText({ times: 2 }, true, 2)).toBe(WORKED_NEXT)
+    expect(workedNextText(undefined, true, 2)).toBe(WORKED_NEXT)
+    expect(workedNextText({ base: 'c:변수범위', times: 2 }, false, 2)).toBe(WORKED_NEXT)
+    // Only the miss that makes it a worked example `workedAfter` times running, the one baseFor asks a base before: a
+    // third miss (after one set right on its try again) is asked as a worked example with no base, and said so (4/5 검토).
+    expect(workedNextText({ base: 'c:변수범위', times: 3 }, true, 2)).toBe(WORKED_NEXT)
+    expect(workedNextText({ base: 'c:변수범위', times: 1 }, true, 2)).toBe(WORKED_NEXT)
+    expect(workedNextText({ base: 'c:변수범위', times: 2 }, true, Infinity)).toBe(WORKED_NEXT)
   })
 
   test('baseCandidates: met before it, not known, not itself, no team term, near it (a file shared, or named in its words); most files shared first, 5 at most', () => {
@@ -105,6 +112,14 @@ describe('1.9.0: a base concept picked when a question asked again is graded (F5
     expect(baseCandidates(index, 'c:없음', marks)).toEqual([])
     expect(baseCandidates({}, k('클로저'))).toEqual([])
     // Five at most.
+    // As many files shared: the most met first, whichever was met last (4/5 검토).
+    const tie: Record<string, LearnConcept> = {
+      [k('클로저')]: concept('클로저', 5, { files: ['a.js', 'b.js'] }),
+      [k('적게')]: concept('적게', 9, { files: ['a.js'], count: 1, lastAt: NOW - DAY }),
+      [k('많이')]: concept('많이', 8, { files: ['b.js'], count: 4, lastAt: NOW - 7 * DAY }),
+      [k('둘 다')]: concept('둘 다', 7, { files: ['a.js', 'b.js'], count: 1, lastAt: NOW - 7 * DAY }),
+    }
+    expect(baseCandidates(tie, k('클로저')).map(one => one.name)).toEqual(['둘 다', '많이', '적게'])
     const many: Record<string, LearnConcept> = { [k('클로저')]: concept('클로저', 5, { files: ['x.js'] }) }
     for (let i = 0; i < 12; i += 1) many[`c:개념${i}`] = concept(`개념${i}`, 10 + i, { files: ['x.js'] })
     expect(baseCandidates(many, k('클로저'))).toHaveLength(BASE_CANDIDATES)
@@ -149,13 +164,13 @@ describe('1.9.0: a base concept picked when a question asked again is graded (F5
     const reply = (said: string, verdict = '틀림', why = '바탕 근거: "반복마다 i가 하나"') =>
       ['판정: ' + verdict, '피드백: 적은 대로면 3이 세 번 나옵니다.', '되묻기: i는 몇 개일까요?', '헷갈린 점: 반복마다 i가 하나라고 봄', why, said, '유형: 변수 범위'].join('\n')
     const read = (said: string, verdict?: string, why?: string) => baseOf(parseCheck(reply(said, verdict, why), { base: true })?.base, shown)
-    for (const said of ['바탕: 1', '**바탕**: 1', '바탕: `1`', '바탕: **1**', '바탕: 1.', '바탕: 1번', '바탕: 1. 변수 범위', '**바탕:** 1', '바탕: 변수 범위', '바탕: `변수 범위`', '바탕: 변수범위', '바탕: 변수 범위 (scope)', '바탕: (변수 범위)']) {
+    for (const said of ['바탕: 1', '**바탕**: 1', '바탕: `1`', '바탕: **1**', '바탕: 1.', '바탕: 1번', '바탕: 1. 변수 범위', '**바탕:** 1', '바탕: 변수 범위', '바탕: `변수 범위`', '바탕: 변수범위', '바탕: 변수 범위 (scope)', '바탕: (변수 범위)', '바탕: (1)', '바탕: [1]', '바탕: （1）', '바탕: (1번)', '바탕: **(1)**', '바탕: (1) 변수 범위', '바탕: [1]. 변수 범위']) {
       expect(read(said)).toBe('c:변수범위')
     }
     expect(read('바탕: 3')).toBe('c:arraymap')
     expect(read('바탕: Array.map')).toBe('c:arraymap')
     // None said, no line, a number past the list or 0, a name it was not shown, a right grade: none.
-    for (const said of ['바탕: 0', '바탕: 4', '바탕: 없음', '바탕: (없음)', '바탕: 해당 없음', '바탕: -', '바탕: 클로저', '바탕: 변수 범위와 화살표 함수', '']) expect(read(said)).toBeUndefined()
+    for (const said of ['바탕: 0', '바탕: (0)', '바탕: [4]', '바탕: 4', '바탕: 없음', '바탕: (없음)', '바탕: 해당 없음', '바탕: -', '바탕: 클로저', '바탕: 변수 범위와 화살표 함수', '']) expect(read(said)).toBeUndefined()
     expect(read('바탕: 1', '맞음')).toBeUndefined()
     expect(parseCheck(reply('바탕: 1', '맞음'), { base: true })?.base).toBeUndefined()
     // No words of the answer said for it (바탕 근거 없음, or no such line): no base, whatever number follows.
@@ -195,7 +210,7 @@ describe('1.9.0: a base concept picked when a question asked again is graded (F5
     expect(slipChange(item, { isHelped: false, isGraduated: false })).toMatchObject({ kind: 'missed', base: 'c:변수범위' })
   })
 
-  test('nextSlip · slipRecordOf: a miss keeps its grade\'s base (none drops the one before), never one still counted right; "모르겠어요" keeps the slip\'s', () => {
+  test('nextSlip · slipRecordOf: a miss keeps its grade\'s base (none drops the one before), never one still counted right nor "모르겠어요"', () => {
     const open: LearnSlip = { what: 'i가 하나라고 봄', type: 'scope', question: 'Q1', mine: '3 3 3', at: NOW - DAY, times: 1 }
     const missed = (more: object = {}) => ({ kind: 'missed' as const, question: 'Q2', what: 'i가 하나라고 봄', type: 'scope' as const, mine: '3 3 3', ...more })
     const twice = nextSlip(open, missed({ base: 'c:변수범위' }), NOW)!
@@ -207,11 +222,18 @@ describe('1.9.0: a base concept picked when a question asked again is graded (F5
     expect(right.isRight).toBe(true)
     expect(right).not.toHaveProperty('base')
     expect(nextSlip(undefined, missed({ base: 'c:변수범위', isRight: true }), NOW)).not.toHaveProperty('base')
-    // "모르겠어요" on an open slip with words: that slip as it was, its base too (no new grade read it).
-    const blank = nextSlip(twice, { kind: 'missed', question: 'Q3', what: '', type: 'blank', mine: '모르겠어요' }, NOW + DAY)!
-    expect(blank).toMatchObject({ what: 'i가 하나라고 봄', times: 3, base: 'c:변수범위' })
-    // Another kind takes its place, with its own base or none.
-    expect(nextSlip(twice, missed({ type: 'order', base: 'c:화살표함수' }), NOW + DAY)).toMatchObject({ type: 'order', times: 1, base: 'c:화살표함수' })
+    // "모르겠어요" on an open slip with words: that slip's words as they were, counted once more, but no base: no grade
+    // read this answer for one, and the plan asks none after it (4/5 검토; 1.9.0's first build kept the one before).
+    const forgot = { kind: 'missed' as const, question: 'Q3', what: '', type: 'blank' as const, mine: '모르겠어요' }
+    const blank = nextSlip(twice, forgot, NOW + DAY)!
+    expect(blank).toMatchObject({ what: 'i가 하나라고 봄', times: 3 })
+    expect(blank).not.toHaveProperty('base')
+    // Another kind takes its place, with its own base or none; "모르겠어요" after it makes its second miss no base's either.
+    const other = nextSlip(twice, missed({ type: 'order', base: 'c:화살표함수' }), NOW + DAY)!
+    expect(other).toMatchObject({ type: 'order', times: 1, base: 'c:화살표함수' })
+    const second = nextSlip(other, forgot, NOW + 3 * DAY)!
+    expect(second).toMatchObject({ type: 'order', times: 2 })
+    expect(second).not.toHaveProperty('base')
     expect(nextSlip(twice, missed({ type: 'order' }), NOW + DAY)).not.toHaveProperty('base')
     // A right answer mends or keeps: the base stays with the slip (turned back with f from slipBefore, as it was).
     expect(nextSlip(twice, { kind: 'mended' }, NOW + DAY)).toMatchObject({ base: 'c:변수범위', fixedAt: NOW + DAY })
@@ -227,10 +249,14 @@ describe('1.9.0: a base concept picked when a question asked again is graded (F5
     expect(base).toBe('c:변수범위')
   })
 
-  test('slipCounts: the open slips with a base, by count alone', () => {
+  test('slipCounts: the open slips with a base a quiz would ask before its worked example, by count alone', () => {
     const slip = (more: Partial<LearnSlip>): LearnSlip => ({ what: 'w', type: 'scope', question: 'q', mine: 'm', at: NOW, times: 2, ...more })
-    expect(slipCounts({ a: slip({ base: 'c:x' }), b: slip({ base: 'c:y', fixedAt: NOW }), c: slip({}) }).based).toBe(1)
+    expect(slipCounts({ a: slip({ base: 'c:x' }), b: slip({ base: 'c:y', fixedAt: NOW }), c: slip({}) }, 2).based).toBe(1)
     expect(slipCounts({}).based).toBe(0)
+    // Missed once or three times running, or set right on its try again: a base no quiz asks is not counted (4/5 검토).
+    expect(slipCounts({ a: slip({ base: 'c:x', times: 3 }), b: slip({ base: 'c:y', times: 1 }), c: slip({ base: 'c:z', isRight: true }) }, 2).based).toBe(0)
+    expect(slipCounts({ a: slip({ base: 'c:x' }) }, Infinity).based).toBe(0)
+    expect(slipCounts({ a: slip({ base: 'c:x', times: 2 }) }).based).toBe(2 === WORKED_AFTER_TIMES ? 1 : 0)
   })
 
   test('slipNotice: a second miss that makes the next quiz a worked example says the base comes first, only with one and bases asked', () => {
@@ -240,7 +266,10 @@ describe('1.9.0: a base concept picked when a question asked again is graded (F5
     expect(slipNotice(item, record, false, 2, false)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_NEXT}`)
     const { base, ...none } = record
     expect(slipNotice(item, none, false, 2, true)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_NEXT}`)
-    expect(slipNotice({ ...item, mine: '모르겠어요' }, record, false, 2, true)?.text).toBe(`떠오르지 않았습니다 · ${WORKED_BASE_NEXT}`)
+    // "모르겠어요" asks no base (4/5 검토): 1.8.0's line, whatever the record holds.
+    expect(slipNotice({ ...item, mine: '모르겠어요' }, record, false, 2, true)?.text).toBe(`떠오르지 않았습니다 · ${WORKED_NEXT}`)
+    // Missed a third time running: a worked example with no base before it (baseFor), and said so.
+    expect(slipNotice(item, { ...record, times: 3 }, false, 2, true)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_NEXT}`)
     // Missed once: no worked example, no base said.
     expect(slipNotice(item, { ...record, times: 1 }, false, 2, true)?.text).toBe('헷갈린 점: i가 하나라고 봄 · 다음 퀴즈에서 다른 코드로 다시 묻습니다')
     // A question asked again: the callers add workedNextText after SLIP_AGAIN.
@@ -318,6 +347,16 @@ describe('1.9.0: where a quiz asks the base concept (F5, baseFor · withBase · 
     expect(find([{ ...X, team: true }, D, F])).toBeUndefined()
     // 풀이 보고 풀기 off (F4's Infinity): no worked example, no base.
     expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: Infinity })).toBeUndefined()
+  })
+
+  test('the line under a miss promises the base just where baseFor asks one: missed workedAfter times running, not set right (4/5 검토)', () => {
+    for (const times of [1, 2, 3, 4]) {
+      for (const isRight of [false, true]) {
+        const x = slip({ times, at: NOW, ...(isRight ? { isRight: true as const } : {}) })
+        const said = isWorkedNext(x, { gradedAt: NOW }, 2) && workedNextText(x, true, 2) === WORKED_BASE_NEXT
+        expect([times, isRight, said]).toEqual([times, isRight, find([X, D, F], x) !== undefined])
+      }
+    }
   })
 
   test('parseQuiz keeps the base\'s mark only while X\'s question follows it; the quiz prompt is the same with the mark or without', () => {
