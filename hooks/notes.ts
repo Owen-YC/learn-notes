@@ -1825,8 +1825,12 @@ const THINK_QUESTION_RULE =
 const THINK_ASK_END = /[?？][\s~ㅠㅜ.!]*$/u
 /** A polite ask at the end (주세요 and the like); not 줘요, which says what the code does (`빈 배열을 돌려줘요`). */
 const THINK_ASK_PLEASE = /(?:주세요|주실래요|주시겠어요)[\s~ㅠㅜ.!]*$/u
-/** A question word anywhere, a particle on it or not, as a word of its own. */
-const THINK_ASK_WORD = /(?:^|\s)(?:왜|뭐(?:가|를|야|예요|에요)?|무슨|무엇(?:이|을)?|어떻게|어디(?:서|에)?|언제|몇|어느)(?=\s|$)/u
+/**
+ * A question word anywhere, at a word's start, whatever ending or particle is on it (왜요, 왜그래요, 뭐지, 뭔가요,
+ * 몇번, 어디에서, 무엇인가요: often typed so); not the few words built on one that ask nothing (왜곡, 왜냐하면, 뭐든,
+ * 뭐라도, 뭔가 …, 무엇보다, 어떻게든, 어디든, 언제나, 몇몇, 어느새).
+ */
+const THINK_ASK_WORD = /(?:^|\s)(?:왜(?!곡|냐)|뭐(?!든|라도|랄)|뭘|뭔(?!가\s)|무슨|무엇(?!이든|보다)|어떻게(?!든)|어디(?!든|선가|엔가)|언제(?!나|든)|몇(?!몇)|어느(?!새|덧))/u
 /** Words that ask to be told or say what is unclear. */
 const THINK_ASK_HELP = /모르겠|궁금|헷갈|이해가\s*안|알려|설명|가르쳐/u
 
@@ -1908,28 +1912,47 @@ export function thinkCheckPrompt(
 /** Claude's grade of a typed answer, as the pane and /learn quiz say it; a checked guess at a 생각해 보기 is headed so too (1.9.0 F6). */
 export const VERDICT_TEXT: Readonly<Record<'right' | 'partial' | 'wrong', string>> = { right: '맞혔습니다.', partial: '거의 맞았습니다.', wrong: '아쉽지만 틀렸습니다.' }
 
-/** The right result's line in a check's reply (thinkCheckPrompt), bold or not; what it says. */
-const THINK_RESULT = /^\s*(?:\*\*)?바른\s*결과(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*?)(?:\*\*)?\s*$/m
+/** The right result's line in a check's reply (thinkCheckPrompt), bold or not; what it says on that line, never past it. */
+const THINK_RESULT = /^[^\S\n]*(?:\*\*)?바른[^\S\n]*결과(?:\*\*)?[^\S\n]*[:：][^\S\n]*(?:\*\*)?[^\S\n]*(.*?)(?:\*\*)?[^\S\n]*$/m
 /** A check's verdict that the words were a question after all (판정: 질문), however bold. */
 const THINK_ASKED_VERDICT = /^(?:질문|question)/i
 
 /**
- * A check's reply (thinkCheckPrompt) as the answer under the note (1.9.0 F6), or undefined when it cannot be read
- * (the reply is then shown as it came). The right result's line is read and taken out wherever it stands, so it never
- * runs into the feedback; the rest is read as a quiz grade is (parseCheck: the labelled lines or a JSON object).
- * Right: `**맞혔습니다.** feedback`. Nearly or wrong: the head and the feedback, a blank line, `바른 결과: …` (when it
- * said one). "모르겠어요" (`isBlank`): the right result's line, a blank line, the feedback, no verdict's word. 판정:
- * 질문: the feedback alone, its answer, with no verdict's word.
+ * A check's reply with its right result's line read and taken out, wherever it stands. A line with the label alone
+ * takes the next line as what it says, unless that line is empty or a label's own (판정:, 피드백: …): an empty result
+ * never takes the verdict away (5/5 검토).
+ */
+function thinkResultOf(text: string): { result: string | undefined; rest: string } {
+  const found = THINK_RESULT.exec(text)
+  if (!found) return { result: undefined, rest: text }
+  let result = found[1]!
+  let end = found.index + found[0].length
+  const next = result.trim() === '' ? /^\n([^\n]*)/.exec(text.slice(end)) : null
+  const below = next?.[1]!.trim() ?? ''
+  if (next && below !== '' && !CHECK_LABEL.test(below)) {
+    result = below.replace(/^\*\*\s*|\s*\*\*$/g, '')
+    end += next[0].length
+  }
+  return { result, rest: `${text.slice(0, found.index)}${text.slice(end)}` }
+}
+
+/**
+ * A check's reply (thinkCheckPrompt) as the answer under the note (1.9.0 F6), or undefined when it cannot be read or
+ * leaves nothing to show (the reply is then shown as it came). The right result's line is read and taken out wherever
+ * it stands, so it never runs into the feedback; the rest is read as a quiz grade is (parseCheck: the labelled lines,
+ * or a JSON object with a verdict: braces in the feedback's code are no reply in JSON). Right: `**맞혔습니다.**
+ * feedback`. Nearly or wrong: the head and the feedback, a blank line, `바른 결과: …` (when it said one). "모르겠어요"
+ * (`isBlank`): the right result's line, a blank line, the feedback, no verdict's word. 판정: 질문: the feedback alone,
+ * its answer, with no verdict's word.
  */
 export function thinkReply(text: string, isBlank: boolean): string | undefined {
-  const found = THINK_RESULT.exec(text)
-  const rest = found ? `${text.slice(0, found.index)}${text.slice(found.index + found[0].length)}` : text
+  const { result: found, rest } = thinkResultOf(text)
   let json: Record<string, unknown> | undefined
   const object = /\{[\s\S]*\}/.exec(rest)?.[0]
   if (object) {
     try {
       const raw: unknown = JSON.parse(object)
-      if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) json = raw as Record<string, unknown>
+      if (typeof raw === 'object' && raw !== null && !Array.isArray(raw) && ('verdict' in raw || '판정' in raw)) json = raw as Record<string, unknown>
     } catch {
       // Not JSON after all: the lines.
     }
@@ -1938,18 +1961,19 @@ export function thinkReply(text: string, isBlank: boolean): string | undefined {
     const value = json ? [key, ...more].map(name => json![name]).find(one => one !== undefined) : undefined
     return typeof value === 'string' ? value.trim() : value === undefined ? undefined : String(value).trim()
   }
-  const result = (found?.[1] ?? said('바른 결과', '바른결과', 'result', 'correct') ?? '').trim()
+  const result = (found ?? said('바른 결과', '바른결과', 'result', 'correct') ?? '').trim()
   const line = result === '' ? undefined : `바른 결과: ${result}`
+  // What there is to show, or undefined for nothing (a verdict alone): the reply as it came, never an empty answer.
+  const shown = (...pieces: (string | undefined)[]) => pieces.filter(one => one !== undefined && one !== '').join('\n\n') || undefined
   const parts = json ? undefined : checkParts(rest)
   const verdict = (json ? said('verdict', '판정') : parts!.get('판정'))?.replace(/[*`]/g, '').trim() ?? ''
   if (THINK_ASKED_VERDICT.test(verdict)) {
     const feedback = (json ? said('feedback', '피드백') : parts!.get('피드백'))?.replace(/\n{2,}/g, '\n').trim() ?? ''
-    if (feedback === '') return undefined
-    return isBlank && line ? `${line}\n\n${feedback}` : feedback
+    return feedback === '' ? undefined : shown(isBlank ? line : undefined, feedback)
   }
   const graded = parseCheck(rest)
   if (!graded) return undefined
-  if (isBlank) return [line, graded.feedback].filter(one => one !== undefined && one !== '').join('\n\n')
+  if (isBlank) return shown(line, graded.feedback)
   const head = `**${VERDICT_TEXT[graded.verdict]}**${graded.feedback === '' ? '' : ` ${graded.feedback}`}`
   return graded.verdict === 'right' || line === undefined ? head : `${head}\n\n${line}`
 }

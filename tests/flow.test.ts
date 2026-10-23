@@ -14784,6 +14784,10 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
     expect(w.models.at(-1)).toContain(`${GUESSED}\n(모르겠다고 했다)\n`)
     expect(last()).toBe('바른 결과: 3\n\n`b`에 넣은 3을 마지막 줄이 그대로 읽습니다.')
     expect(last()).not.toContain('틀렸습니다')
+    // A verdict alone, nothing to show under it (5/5 검토): the reply as it came, never an empty answer.
+    await trace(ui, w)
+    await typed(ui, w, '모르겠어요', '판정: 틀림\n피드백:')
+    expect(last()).toBe('판정: 틀림\n피드백:')
     await trace(ui, w)
     await typed(ui, w, '상수로 바꿔도 돼요', checked('질문', '`const`로 바꿔도 다시 대입하지 않으면 됩니다.', '해당 없음'))
     expect(last()).toBe('`const`로 바꿔도 다시 대입하지 않으면 됩니다.')
@@ -14820,6 +14824,14 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
       expect(asksOf(store).at(-1)!.answer).toBe('네, 3이 나옵니다.')
       expect(await ui.find({ type: 'Text', text: `이어서 · ${question}` })).toBeDefined()
     }
+    // A bare question word with its ending on it is a question too (5/5 검토), and a question's answer is never read as
+    // a check's: one that happens to say 판정: 맞음 stays as it came, with no head.
+    await trace(ui, w)
+    await typed(ui, w, '왜요', checked('맞음'))
+    expect(w.systems.at(-1)).toBe(ASK_SYSTEM)
+    expect(w.budgets.at(-1)).toBe(900)
+    expect(asksOf(store).at(-1)!.answer).toBe(checked('맞음'))
+    expect(await ui.find({ type: 'Markdown', text: checked('맞음') })).toBeDefined()
     await trace(ui, w)
     await ui.unmount()
     const phone = await $.ui.mount({ plugin: 'learn-notes', surface: 'mobile', component: 'Pane', requestId: 'learn-notes', props: PANE_PROPS })

@@ -407,12 +407,27 @@ describe('1.9.0: 생각해 보기 back on behind IS_THINK_ASKED: a guess checked
       '한 번 더 따라가 주시겠어요',
       '몇 번 도나요',
       '어떻게 0이 돼요',
+      // 주세요 and 주실래요 with no word asking to be told (설명 · 알려 …).
+      '예시 하나 더 보여 주세요',
+      '다시 따라가 주실래요',
+      // A question word with its ending or particle on it, as it is often typed (5/5 검토).
+      '왜요',
+      '왜죠',
+      '왜그래요',
+      '어떻게요',
+      '뭔가요',
+      '이거 뭔가요',
+      '이게 뭐지',
+      '무엇인가요',
+      '몇번 돌아요',
+      '어디에서 바뀌어요',
+      '언제요',
     ]
     for (const one of guesses) expect([one, isThinkQuestion(one)]).toEqual([one, false])
     for (const one of questions) expect([one, isThinkQuestion(one)]).toEqual([one, true])
-    // A question word is a word of its own: inside another it says nothing (뭐든 · 몇몇 aside, 어느새 is no question).
-    expect(isThinkQuestion('왜곡 없이 2000이요')).toBe(false)
-    expect(isThinkQuestion('어느새 0이 돼요')).toBe(false)
+    // A word built on a question word that asks nothing is no question.
+    for (const one of ['왜곡 없이 2000이요', '어느새 0이 돼요', '왜냐하면 0원이라 2000이요', '뭐든 0이에요', '언제나 0이에요', '몇몇 값이 0이 돼요', '어떻게든 끝나요', '뭔가 0이 나올 것 같아요'])
+      expect([one, isThinkQuestion(one)]).toEqual([one, false])
   })
 
   test('thinkCheckPrompt: the question, its walk-through, the guess, the request, the note, the code, the rule, then the three lines alone; no question section, no team', () => {
@@ -482,10 +497,25 @@ describe('1.9.0: 생각해 보기 back on behind IS_THINK_ASKED: a guess checked
     expect(thinkReply(`**바른 결과**: 2000\n**판정**: 거의\n**피드백**: ${feedback}`, false)).toBe(`**거의 맞았습니다.** ${feedback}\n\n바른 결과: 2000`)
     // A JSON object, as a grade may come.
     expect(thinkReply(`{"바른 결과": "2000", "verdict": "wrong", "feedback": "${feedback}"}`, false)).toBe(`**아쉽지만 틀렸습니다.** ${feedback}\n\n바른 결과: 2000`)
+    expect(thinkReply('{"result": "해당 없음", "verdict": "question", "feedback": "`i++`는 `i`에 1을 더합니다."}', false)).toBe('`i++`는 `i`에 1을 더합니다.')
     // No right result said: the head alone.
     expect(thinkReply(`판정: 틀림\n피드백: ${feedback}`, false)).toBe(`**아쉽지만 틀렸습니다.** ${feedback}`)
+    // A right result's line left empty takes no labelled line under it as its value (5/5 검토): the verdict stays read.
+    expect(thinkReply('바른 결과:\n판정: 질문\n피드백: `i++`는 1을 더합니다.', false)).toBe('`i++`는 1을 더합니다.')
+    expect(thinkReply(`바른 결과:\n판정: 맞음\n피드백: ${feedback}`, false)).toBe(`**맞혔습니다.** ${feedback}`)
+    expect(thinkReply(`**바른 결과:**\n**판정:** 틀림\n**피드백:** ${feedback}`, false)).toBe(`**아쉽지만 틀렸습니다.** ${feedback}`)
+    expect(thinkReply(`바른 결과:\n피드백: ${feedback}\n판정: 틀림`, false)).toBe(`**아쉽지만 틀렸습니다.** ${feedback}`)
+    // Its value on the next line, when that line is no label: read, and taken out.
+    expect(thinkReply(`바른 결과:\n\`2000\`\n판정: 틀림\n피드백: ${feedback}`, false)).toBe(`**아쉽지만 틀렸습니다.** ${feedback}\n\n바른 결과: \`2000\``)
+    // Braces in the feedback are its code, not a reply in JSON (5/5 검토).
+    expect(thinkReply('바른 결과: 해당 없음\n판정: 질문\n피드백: 빈 객체 `{}`는 키가 없는 객체입니다.', false)).toBe('빈 객체 `{}`는 키가 없는 객체입니다.')
+    expect(thinkReply('바른 결과: -\n판정: 질문\n피드백: `{"a": 1}`처럼 찍힙니다.', false)).toBe('`{"a": 1}`처럼 찍힙니다.')
+    expect(thinkReply('바른 결과: `{}`\n판정: 틀림\n피드백: 빈 객체 `{}`를 돌려줍니다.', false)).toBe('**아쉽지만 틀렸습니다.** 빈 객체 `{}`를 돌려줍니다.\n\n바른 결과: `{}`')
     // Unread: no verdict, an empty answer to a question, words only. The reply is then shown as it came (askNote).
     for (const text of [`바른 결과: 2000\n피드백: ${feedback}`, '판정: 질문\n피드백: ', '2000이 맞습니다.', ''])
       expect([text, thinkReply(text, false)]).toEqual([text, undefined])
+    // 모르겠어요 with a verdict alone, no right result and no feedback: nothing to show, so unread (5/5 검토).
+    for (const text of ['판정: 틀림', '판정: 틀림\n피드백:', '바른 결과:\n판정: 틀림\n피드백:'])
+      expect([text, thinkReply(text, true)]).toEqual([text, undefined])
   })
 })
