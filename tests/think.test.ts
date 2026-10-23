@@ -6,6 +6,8 @@ import {
   EASIER_QUESTION,
   IS_THINK_ASKED,
   THINK_ASK,
+  THINK_SYSTEM,
+  VERDICT_TEXT,
   THINK_OPEN_MS,
   TRACE_LABEL,
   TRACE_QUESTION,
@@ -14,10 +16,15 @@ import {
   changeOf,
   cut,
   isThinkFollow,
+  isThinkQuestion,
   journalEntries,
   openThink,
   parseTeamFile,
+  thinkCheckPrompt,
   thinkOf,
+  thinkReply,
+  traceQuestion,
+  withoutDrill,
 } from '../hooks/notes'
 
 /** A walk-through as r's answer ends on one (1.8.0, 생각해 보기). */
@@ -183,11 +190,11 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
     const long = thinkOf(`1. a\n**생각해 보기:** ${'값'.repeat(400)}?`)!
     expect(long).toHaveLength(300)
     expect(long.endsWith('…')).toBe(true)
-    // A question with no `?` at all is still one.
-    expect(thinkOf('1. a\n**생각해 보기:** 입력이 0이면 무엇이 찍힐지 떠올려 보세요.')).toBe('입력이 0이면 무엇이 찍힐지 떠올려 보세요.')
+    // A line with no `?` at all asks nothing (1.9.0 F6: 1.8.0 took it for a question).
+    expect(thinkOf('1. a\n**생각해 보기:** 입력이 0이면 무엇이 찍힐지 떠올려 보세요.')).toBeUndefined()
   })
 
-  test('thinkOf takes a question only once its sentence ends: a reply cut inside the line (the r call\'s token cap) opens nothing, unless the cut stops on a sentence\'s end', () => {
+  test('thinkOf takes a question only once it ends on its question mark (1.9.0 F6): a reply cut inside the line (the r call\'s token cap) opens nothing, wherever the cut stops', () => {
     const steps = '1. `sum([2, 3])`을 부르면 `total`은 0입니다.\n2. `n`이 2일 때 `total`은 2입니다.\n\n'
     // $.model.complete says nothing of a reply cut at maxTokens: its text so far comes back answered.
     for (const cutOff of ['**생각해 보기:** 배열이 `[]`이면 `tot', '**생각해 보기:** 배열이 `[]`이면 `total`은', '**생각해 보기:** `b`를 3으로 바꾸면 마지막에', '**생각해 보기**\n배열이 `[]`이면 `total`은 얼마', '**생각해 보기:** 입력이 `[1, 2]`가 아니라 `[3]`이면'])
@@ -197,23 +204,22 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
     expect(long.endsWith('…')).toBe(true)
     expect(thinkOf(long)).toBeUndefined()
     expect(openThink([{ question: TRACE_LABEL, answer: `${steps}**생각해 보기:** 배열이 \`[]\`이면 \`tot`, at: 1 }], 2)).toBeUndefined()
-    // A sentence ended with no `?` is still a question: on 요, 까, 다 or a full stop, bold or bracketed after it.
-    const ended: [string, string][] = [
-      ['**생각해 보기:** 배열이 `[]`이면 `total`은 얼마일까요', '배열이 `[]`이면 `total`은 얼마일까요'],
-      ['**생각해 보기:** `total`은 얼마가 될까', '`total`은 얼마가 될까'],
-      ['**생각해 보기:** 배열이 비면 결과가 어떻게 되는지 떠올려 봅시다', '배열이 비면 결과가 어떻게 되는지 떠올려 봅시다'],
-      ['**생각해 보기: 입력이 0이면 무엇이 찍힐지 떠올려 보세요.**', '입력이 0이면 무엇이 찍힐지 떠올려 보세요.'],
-      ['생각해 보기: (입력이 0이면 무엇이 찍힐지 떠올려 보세요!)', '(입력이 0이면 무엇이 찍힐지 떠올려 보세요!)'],
+    // A sentence ended with no `?` is no question now, in both states (1.9.0 F6): on 요, 까, 다, a full stop or `!`,
+    // bold or bracketed after it. 1.8.0 opened each of these.
+    const noMark = [
+      '**생각해 보기:** 배열이 `[]`이면 `total`은 얼마일까요',
+      '**생각해 보기:** `total`은 얼마가 될까',
+      '**생각해 보기:** 배열이 비면 결과가 어떻게 되는지 떠올려 봅시다',
+      '**생각해 보기: 입력이 0이면 무엇이 찍힐지 떠올려 보세요.**',
+      '생각해 보기: (입력이 0이면 무엇이 찍힐지 떠올려 보세요!)',
+      '**생각해 보기:** 입력을 바꿔 결과를 따져 보세요.',
     ]
-    for (const [last, said] of ended) expect([last, thinkOf(`${steps}${last}`)]).toEqual([last, said])
-    // Only the last character is read (docs/qa/견본.md says so): a cut that stops on one of these reads as ended and
-    // opens, a statement's piece too (`된다면` at `된다`, a cut just past the line's first full stop).
-    const stoppedOn: [string, string][] = [
-      ['**생각해 보기:** 두 번째 항목의 `qty`가 0이 된다', '두 번째 항목의 `qty`가 0이 된다'],
-      ['**생각해 보기:** 두 번째 항목의 `qty`를 0으로 바꿉니다.', '두 번째 항목의 `qty`를 0으로 바꿉니다.'],
-    ]
-    for (const [last, said] of stoppedOn) expect([last, thinkOf(`${steps}${last}`)]).toEqual([last, said])
-    expect(openThink([{ question: TRACE_LABEL, answer: `${steps}${stoppedOn[0]![0]}`, at: 1 }], 2)?.question).toBe(stoppedOn[0]![1])
+    for (const last of noMark) expect([last, thinkOf(`${steps}${last}`)]).toEqual([last, undefined])
+    // A cut that stops on a sentence's end opened in 1.8.0 (교차 검토 4 pinned it): a statement's piece (`된다면` at
+    // `된다`, a cut just past the line's first full stop). It opens nothing now: only a cut just past a `?` opens.
+    const stoppedOn = ['**생각해 보기:** 두 번째 항목의 `qty`가 0이 된다', '**생각해 보기:** 두 번째 항목의 `qty`를 0으로 바꿉니다.', '**생각해 보기:** `nums`에 `[5]`를 넣으면 어떻게 될까']
+    for (const last of stoppedOn) expect([last, thinkOf(`${steps}${last}`)]).toEqual([last, undefined])
+    expect(openThink([{ question: TRACE_LABEL, answer: `${steps}${stoppedOn[0]}`, at: 1 }], 2)).toBeUndefined()
   })
 
   test('openThink: only r\'s walk-through last, ending on a question, THINK_OPEN_MS after it came at most', () => {
@@ -267,7 +273,8 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
     expect(askPrompt(NOTE, '0이요', 'beginner', undefined, undefined)).toBe(PLAIN_170)
 
     const think = openThink(NOTE.asks, 2)!
-    const prompt = askPrompt(NOTE, '0이요', 'beginner', undefined, think)
+    // 1.8.0's rule (THINK_RULE): the words read as an answer or a question, as IS_THINK_ASKED off sends them (1.9.0 F6).
+    const prompt = askPrompt(NOTE, '0이요', 'beginner', undefined, think, undefined, false)
     const section = [
       "## 바로 앞 '예시로 따라가기'의 답과, 그 끝에 학습자에게 던진 생각해 보기",
       TRACE,
@@ -283,22 +290,21 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
     // The rest as 1.7.0 has it.
     expect(prompt.slice(prompt.indexOf('## 그 노트의 요청'))).toBe(PLAIN_170.slice(PLAIN_170.indexOf('## 그 노트의 요청')))
     // The walk-through alone under the note: no questions before.
-    const alone = askPrompt({ ...NOTE, asks: [NOTE.asks[1]!] }, '0이요', 'beginner', TEAM, think)
+    const alone = askPrompt({ ...NOTE, asks: [NOTE.asks[1]!] }, '0이요', 'beginner', TEAM, think, undefined, false)
     expect(alone).toContain(section)
     expect(alone).not.toContain('## 앞서 이 노트에 대해')
     expect(alone.indexOf(section)).toBeLessThan(alone.indexOf('## 이 저장소의 팀 규칙과 용어'))
   })
 
   test('the line r would ask for is by values and names, its answer left out; off in 1.8.0, r\'s prompt and the others are 1.7.0\'s; the journal says which question followed it', () => {
-    expect(THINK_ASK).toContain('`**생각해 보기:**`')
     expect(THINK_ASK).toContain('번호 없이')
     expect(THINK_ASK).toContain('그 답은 쓰지 마세요')
     expect(THINK_ASK).toContain('단계 번호 대신 입력 값과 변수·줄 이름으로')
     expect(THINK_ASK).toContain('따라갈 실행 흐름이 없는 변경이면 이 줄은 빼 주세요')
-    // The answer check stayed under its bar on held-out answers (docs/qa/견본.md): the sentence ships out, as decided.
-    expect(IS_THINK_ASKED).toBe(false)
-    expect(TRACE_QUESTION).toBe(TRACE_170)
-    expect(TRACE_QUESTION).not.toContain('생각해 보기')
+    // r's prompt is 1.7.0's while the line is not asked for (IS_THINK_ASKED, set by 1.9.0's samples: F6's tests).
+    expect(traceQuestion(false)).toBe(TRACE_170)
+    expect(traceQuestion(false)).not.toContain('생각해 보기')
+    expect(TRACE_QUESTION === TRACE_170).toBe(!IS_THINK_ASKED)
     expect(ASK_SYSTEM).toBe(ASK_SYSTEM_170)
     expect(EASIER_QUESTION).toBe(EASIER_170)
     expect(TRACE_LABEL).toBe('예시로 따라가기')
@@ -314,5 +320,172 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
     expect(after.split('\n')[0]).toBe(plain.split('\n')[0])
     expect(after.replace(' (생각해 보기 뒤)', '')).toBe(plain)
     expect(journalEntries(`# 일지\n\n${after}`)).toEqual(journalEntries(`# 일지\n\n${plain}`))
+  })
+})
+
+describe('1.9.0: 생각해 보기 back on behind IS_THINK_ASKED: a guess checked by a call of its own, a question answered (F6)', () => {
+  const steps = '1. `sum([2, 3])`을 부르면 `total`은 0입니다.\n2. `n`이 2일 때 `total`은 2입니다.\n\n'
+  /** THINK_QUESTION_RULE as the plan words it, and 1.8.0's THINK_RULE (test above), each the think section's last line. */
+  const QUESTION_RULE =
+    "학습자의 질문 칸 글은 이 생각해 보기 뒤에 적은 질문이다. 학습자는 이 코드를 실행하지 않았다. '멈추나요?' · '에러 나나요?'처럼 묻는 말도 실제로 겪은 일이 아니라 결과에 대한 짐작이다. 원인을 찾거나 오류 메시지·코드를 달라고 하지 않는다. 위 따라가기와 노트, 바뀐 코드를 바탕으로 평소처럼 답하고, 결과를 짐작하며 묻는 말이면 그 짐작이 맞는지부터 말하고 바른 결과를 쓴다. 생각해 보기를 새로 쓰지 않는다."
+  const RULE_18 =
+    '학습자의 질문 칸 글은 이 물음에 대한 답일 수도, 새 질문일 수도 있다. 결과를 짐작한 말(값, "오류가 나요", "그대로예요" 같은 말)이면 이 물음에 대한 답으로 읽는다. 답이면 맞았는지 틀렸는지부터 말하고 맞은 점을 짚는다. 틀린 데가 있으면 학습자의 답대로라면 무엇이 되는지 한 문장, 바른 결과와 그 까닭을 한두 문장으로 쓴다. 다섯 문장을 넘기지 않는다. 새 질문이면 평소처럼 답한다. 어느 쪽이든 생각해 보기를 새로 쓰지 않는다.'
+
+  test('thinkOf opens a line that ends on its question mark alone (`?` · `？` · `?**` · `?)`), in both states; a backtick left alone after the label goes; openThink alike', () => {
+    const asked: [string, string][] = [
+      ['**생각해 보기:** `nums`에 `[5]`를 넣으면 최종 결과는 무엇이 될까요?', '`nums`에 `[5]`를 넣으면 최종 결과는 무엇이 될까요?'],
+      ['**생각해 보기:** 입력이 0이면 결과는 무엇일까요？', '입력이 0이면 결과는 무엇일까요？'],
+      ['**생각해 보기: 입력이 0이면 결과는 무엇일까요?**', '입력이 0이면 결과는 무엇일까요?'],
+      ['생각해 보기: (입력이 0이면 결과는 무엇일까요?)', '(입력이 0이면 결과는 무엇일까요?)'],
+      ['**생각해 보기:** 입력이 0이면 결과는 무엇일까요?  ', '입력이 0이면 결과는 무엇일까요?'],
+      // The label written in backticks (a reply copying 1.8.0's THINK_ASK): its odd backtick goes, the code's stay.
+      ['`**생각해 보기:**` `nums`에 `[5]`를 넣으면 결과는 무엇일까요?', '`nums`에 `[5]`를 넣으면 결과는 무엇일까요?'],
+      ['`생각해 보기:` 입력이 0이면 결과는 무엇일까요?', '입력이 0이면 결과는 무엇일까요?'],
+      // Backticks in pairs from the question's start are its code, kept.
+      ['**생각해 보기:** `nums`가 `[]`이면 무엇이 나올까요?', '`nums`가 `[]`이면 무엇이 나올까요?'],
+    ]
+    for (const [last, said] of asked) expect([last, thinkOf(`${steps}${last}`)]).toEqual([last, said])
+    // Anything else asks nothing: a statement, a cut piece, a line asking to think it through.
+    for (const last of ['**생각해 보기:** 두 번째 항목의 `qty`가 0이 된다', '**생각해 보기:** `qty`를 0으로 바꿉니다.', '**생각해 보기:** 입력을 바꿔 결과를 따져 보세요.', '**생각해 보기:** `nums`에 `[5]`를 넣으면 어떻게 될까'])
+      expect([last, thinkOf(`${steps}${last}`)]).toEqual([last, undefined])
+    const at = 1_000_000
+    expect(openThink([{ question: TRACE_LABEL, answer: `${steps}**생각해 보기:** 입력을 바꿔 결과를 따져 보세요.`, at }], at)).toBeUndefined()
+    expect(openThink([{ question: TRACE_LABEL, answer: `${steps}**생각해 보기:** 입력이 0이면 결과는 무엇일까요?`, at }], at)?.question).toBe('입력이 0이면 결과는 무엇일까요?')
+  })
+
+  test('r\'s line asks one final result, ending on `?`, its label bare; r\'s prompt ends on it while asked for; the question rule says the learner ran nothing; with it off every prompt is 1.8.0\'s', () => {
+    expect(THINK_ASK).toContain('물음표로 끝나는')
+    expect(THINK_ASK).toContain('하나만 묻고')
+    expect(THINK_ASK).toContain('최종 결과가 무엇이 되는지')
+    expect(THINK_ASK).toContain('굵게 쓴 생각해 보기:')
+    expect(THINK_ASK).not.toContain('`')
+    expect(traceQuestion(true)).toBe(`${TRACE_170} ${THINK_ASK}`)
+    expect(traceQuestion(false)).toBe(TRACE_170)
+    expect(TRACE_QUESTION).toBe(traceQuestion(IS_THINK_ASKED))
+    expect(TRACE_QUESTION.endsWith(THINK_ASK)).toBe(IS_THINK_ASKED)
+    expect(ASK_SYSTEM).toBe(ASK_SYSTEM_170)
+    expect(EASIER_QUESTION).toBe(EASIER_170)
+    // No 생각해 보기 open: 1.7.0's to the byte, in either state.
+    for (const isOn of [true, false]) {
+      expect(askPrompt(NOTE, '0이요', 'beginner', undefined, undefined, undefined, isOn)).toBe(PLAIN_170)
+      expect(askPrompt(NOTE, '0이요', 'intermediate', TEAM, undefined, undefined, isOn)).toBe(TEAM_170)
+    }
+    const think = openThink(NOTE.asks, 2)!
+    const on = askPrompt(NOTE, '2000 나오나요?', 'beginner', TEAM, think, undefined, true)
+    const off = askPrompt(NOTE, '2000 나오나요?', 'beginner', TEAM, think, undefined, false)
+    expect(on).toContain(`생각해 보기: ${QUESTION}\n${QUESTION_RULE}\n\n`)
+    expect(on).toContain('학습자는 이 코드를 실행하지 않았다.')
+    expect(on).not.toContain(RULE_18)
+    expect(off).toContain(`생각해 보기: ${QUESTION}\n${RULE_18}\n\n`)
+    expect(off).not.toContain('실행하지 않았다')
+    // The rule is all that differs.
+    expect(on.replace(QUESTION_RULE, RULE_18)).toBe(off)
+    expect(askPrompt(NOTE, '2000 나오나요?', 'beginner', TEAM, think)).toBe(IS_THINK_ASKED ? on : off)
+  })
+
+  test('isThinkQuestion leans to the question: a `?` at the end, 주세요 and the like, a question word anywhere, asking to be told; a value, a guessed error or what code does, and a bare 모르겠어요 are guesses', () => {
+    const guesses = ['2000이요', '0 곱하면 터질 것 같아요', '에러로 끝나요', '빈 배열을 돌려줘요', '에러 메시지를 보여 줘요', '합계를 찍어 줘요', '모르겠어요', '잘 모르겠습니다', '몰라요', '모름', '  2000  ', '[]']
+    const questions = [
+      '2000 나오나요?ㅠ',
+      '2000?',
+      '에러 나지 않을까요?',
+      '0 나오나?',
+      'i++는 무슨 뜻이에요?',
+      '??',
+      '왜 0부터 시작해요',
+      '이 코드는 왜 0부터 시작해요',
+      '뭐가 달라요',
+      '무엇이 바뀌나요',
+      '어디서 값이 바뀌어요',
+      '이 부분 이해가 안 돼요',
+      '여기가 헷갈려요',
+      '초깃값이 궁금해요',
+      '이게 왜 그런지 모르겠어요',
+      '초깃값 설명해 주세요',
+      '다시 알려 줘요',
+      '2000 맞나요？~',
+      '한 번 더 따라가 주시겠어요',
+      '몇 번 도나요',
+      '어떻게 0이 돼요',
+    ]
+    for (const one of guesses) expect([one, isThinkQuestion(one)]).toEqual([one, false])
+    for (const one of questions) expect([one, isThinkQuestion(one)]).toEqual([one, true])
+    // A question word is a word of its own: inside another it says nothing (뭐든 · 몇몇 aside, 어느새 is no question).
+    expect(isThinkQuestion('왜곡 없이 2000이요')).toBe(false)
+    expect(isThinkQuestion('어느새 0이 돼요')).toBe(false)
+  })
+
+  test('thinkCheckPrompt: the question, its walk-through, the guess, the request, the note, the code, the rule, then the three lines alone; no question section, no team', () => {
+    const think = openThink(NOTE.asks, 2)!
+    const prompt = thinkCheckPrompt(NOTE, think, '2000이요', 'beginner')
+    const lines = prompt.split('\n')
+    expect(lines[0]).toBe('읽는 사람은 코딩을 막 배우는 입문자다. 전문 용어는 처음 나올 때 괄호 안에 쉬운 말로 풀어 쓰고, 비유를 하나쯤 써도 좋다.')
+    const order = [
+      `## 생각해 보기 물음\n${QUESTION}\n`,
+      `## 그 물음이 붙은 '예시로 따라가기'\n${TRACE}\n`,
+      '## 학습자의 짐작\n2000이요\n',
+      '## 그 노트의 요청\n합계를 구해 줘\n',
+      '## 학습 노트\n### 한 줄 요약\n',
+      '## 바뀐 코드\n### src/sum.js (수정, +2 −1)\n',
+      '먼저 물음대로 입력을 바꾼 최종 결과를 따라가기와 지금의 바뀐 코드로 직접 구해, 바른 결과 줄에 값이나 동작 하나로 쓴다. 그다음 학습자의 짐작과 견준다.',
+      '판정은 넷 중 하나다.',
+      '피드백은 두 문장 이내다.',
+      '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.\n바른 결과: (값이나 동작 한 줄)\n판정: (맞음 · 거의 · 틀림 · 질문 중 하나)\n피드백: (두 문장 이내, 질문이면 세 문장 이내)',
+    ]
+    const at = order.map(one => prompt.indexOf(one))
+    expect(at.every(one => one !== -1)).toBe(true)
+    expect([...at].sort((a, b) => a - b)).toEqual(at)
+    expect(prompt.endsWith('피드백: (두 문장 이내, 질문이면 세 문장 이내)')).toBe(true)
+    expect(prompt).toContain('질문: 결과를 짐작하지 않고 무엇을 묻거나 모른다고 했다.')
+    expect(prompt).toContain('물음이 여러 가지를 물어도 최종 결과를 맞혔으면 맞음')
+    // Told by the final result alone (the sample's second wording): a wrong guess right in part is wrong, not nearly.
+    expect(prompt).toContain('거의: 최종 결과는 맞혔지만 덧붙인 까닭에 틀린 데가 있다.')
+    expect(prompt).toContain('과정이나 중간 값, 일부가 맞아도 최종 결과가 다르면 틀림')
+    expect(prompt).not.toContain('큰 방향은 맞지만')
+    expect(prompt).toContain('생각해 보기를 새로 쓰지 않는다.')
+    // The note with no practice at all (withoutDrill): its check line is the result after the learner's change.
+    expect(prompt).toContain('## 학습 노트\n### 한 줄 요약\n합계를 0에서 시작하게 했습니다\n\n## 바뀐 코드')
+    for (const gone of ['직접 해 보기', '할 일:', '고칠 줄', '예시 답']) expect(prompt).not.toContain(gone)
+    expect(withoutDrill(NOTE_TEXT)).toBe('### 한 줄 요약\n합계를 0에서 시작하게 했습니다')
+    expect(withoutDrill('### 한 줄 요약\n없음')).toBe('### 한 줄 요약\n없음')
+    for (const none of ['## 학습자의 질문', '## 이 저장소의 팀 규칙과 용어', '## 앞서 이 노트에 대해', '오류 메시지']) expect(prompt).not.toContain(none)
+    expect(thinkCheckPrompt(NOTE, think, '모르겠어요', 'beginner')).toContain('## 학습자의 짐작\n(모르겠다고 했다)\n')
+    const long = thinkCheckPrompt(NOTE, think, '값'.repeat(1500), 'beginner')
+    expect(long).toContain(`## 학습자의 짐작\n${cut('값'.repeat(1500), 1000)}\n`)
+    // A note not written yet: the code alone.
+    expect(thinkCheckPrompt({ ...NOTE, status: 'writing', text: '' }, think, '2000이요', 'beginner')).toContain('## 학습 노트\n(노트가 아직 없다. 코드 전후만 보고 판정한다)\n')
+    expect(THINK_SYSTEM).toContain('실제로 겪은 일이 아니라 결과에 대한 짐작이다')
+    expect(THINK_SYSTEM).toContain('코드를 실행하지 않고 머릿속으로 짐작해 적었다')
+    expect(THINK_SYSTEM).toContain('내용을 싣지 않은 파일은 값을 짐작하지 말고 이름으로만 말한다.')
+    expect(THINK_SYSTEM).toContain('문장은 합니다체')
+    expect(THINK_SYSTEM).not.toContain('질문했다')
+  })
+
+  test('thinkReply heads the reply with the quiz\'s words: right alone, nearly and wrong with the right result under them, 모르겠어요 with no verdict, 판정: 질문 its answer alone; unread is undefined', () => {
+    expect(VERDICT_TEXT).toEqual({ right: '맞혔습니다.', partial: '거의 맞았습니다.', wrong: '아쉽지만 틀렸습니다.' })
+    const feedback = '두 번째 항목이 0원이라 합계가 2000에서 멈춥니다.'
+    const reply = (verdict: string, result = '`2000`') => `바른 결과: ${result}\n판정: ${verdict}\n피드백: ${feedback}`
+    expect(thinkReply(reply('맞음'), false)).toBe(`**맞혔습니다.** ${feedback}`)
+    expect(thinkReply(reply('거의'), false)).toBe(`**거의 맞았습니다.** ${feedback}\n\n바른 결과: \`2000\``)
+    expect(thinkReply(reply('틀림'), false)).toBe(`**아쉽지만 틀렸습니다.** ${feedback}\n\n바른 결과: \`2000\``)
+    // 모르겠어요: the right result first, then why, no verdict's word whatever the reply graded.
+    for (const verdict of ['틀림', '질문', '맞음'])
+      expect([verdict, thinkReply(reply(verdict), true)]).toEqual([verdict, `바른 결과: \`2000\`\n\n${feedback}`])
+    // 판정: 질문: the words were a question after all; its answer alone, however bold.
+    expect(thinkReply('바른 결과: 해당 없음\n판정: 질문\n피드백: `i++`는 `i`에 1을 더합니다.', false)).toBe('`i++`는 `i`에 1을 더합니다.')
+    expect(thinkReply('**바른 결과:** 해당 없음\n**판정:** **질문**\n**피드백:** `i++`는 `i`에 1을 더합니다.', false)).toBe('`i++`는 `i`에 1을 더합니다.')
+    // The right result after the feedback, or bold: read once, never run into the feedback.
+    const after = thinkReply(`판정: 틀림\n피드백: ${feedback}\n바른 결과: 2000`, false)!
+    expect(after).toBe(`**아쉽지만 틀렸습니다.** ${feedback}\n\n바른 결과: 2000`)
+    expect(after.split('바른 결과')).toHaveLength(2)
+    expect(thinkReply(`**바른 결과:** \`2000\`\n**판정:** 맞음\n**피드백:** ${feedback}`, false)).toBe(`**맞혔습니다.** ${feedback}`)
+    expect(thinkReply(`**바른 결과**: 2000\n**판정**: 거의\n**피드백**: ${feedback}`, false)).toBe(`**거의 맞았습니다.** ${feedback}\n\n바른 결과: 2000`)
+    // A JSON object, as a grade may come.
+    expect(thinkReply(`{"바른 결과": "2000", "verdict": "wrong", "feedback": "${feedback}"}`, false)).toBe(`**아쉽지만 틀렸습니다.** ${feedback}\n\n바른 결과: 2000`)
+    // No right result said: the head alone.
+    expect(thinkReply(`판정: 틀림\n피드백: ${feedback}`, false)).toBe(`**아쉽지만 틀렸습니다.** ${feedback}`)
+    // Unread: no verdict, an empty answer to a question, words only. The reply is then shown as it came (askNote).
+    for (const text of [`바른 결과: 2000\n피드백: ${feedback}`, '판정: 질문\n피드백: ', '2000이 맞습니다.', ''])
+      expect([text, thinkReply(text, false)]).toEqual([text, undefined])
   })
 })

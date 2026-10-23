@@ -1626,27 +1626,37 @@ export const ASK_SYSTEM = [
 /** What `r` under a note asks: its changed code followed step by step on one example, kept under the note as this label. */
 export const TRACE_LABEL = '예시로 따라가기'
 /**
- * What r's walk-through is asked to end with (1.8.0, 생각해 보기): one question on the example just followed, one
- * input changed, for the learner to answer in the question field under the note (openThink). Said by values and
- * names, not step numbers, so the question reads on its own. Left out of TRACE_QUESTION, no reply ends on one and
- * the rest reads as 1.7.0 (thinkOf finds nothing).
+ * What r's walk-through is asked to end with (생각해 보기): one question on the example just followed, one input
+ * changed and the final result asked for alone (1.9.0 F6: 1.8.0's asked how the result changed, and half of a
+ * sample's questions asked two things, so no answer could be told right from nearly), for the learner to answer in
+ * the question field under the note (openThink). Said by values and names, not step numbers, so the question reads
+ * on its own; ending on its question mark, the one end thinkOf reads; its label named bare, not in backticks (a
+ * sample's reply copied them). Left out of r's prompt (traceQuestion), no reply ends on one and the rest reads as
+ * 1.7.0 (thinkOf finds nothing).
  */
 export const THINK_ASK =
-  '마지막 줄에는 번호 없이 `**생각해 보기:**`로 시작하는 질문 한 문장을 더해 주세요. 방금 따라간 예시에서 입력 값 하나를 바꾸면 결과가 어떻게 달라지는지, 단계 번호 대신 입력 값과 변수·줄 이름으로 묻고 그 답은 쓰지 마세요. 따라갈 실행 흐름이 없는 변경이면 이 줄은 빼 주세요.'
+  "마지막 줄에는 번호 없이, 굵게 쓴 생각해 보기: 로 시작하고 물음표로 끝나는 질문 한 문장을 더해 주세요. 방금 따라간 예시에서 입력 값 하나를 바꾸면 최종 결과가 무엇이 되는지 하나만 묻고('각각'이나 두 가지를 함께 묻지 마세요), 단계 번호 대신 입력 값과 변수·줄 이름으로 묻고 그 답은 쓰지 마세요. 따라갈 실행 흐름이 없는 변경이면 이 줄은 빼 주세요."
 /**
- * Whether r asks for THINK_ASK's line (1.8.0): off. The check of an answer to it stayed under its bar on answers the
- * rule was not worded from (docs/qa/견본.md: a guessed stop or crash read as a bug report), and the decisions ship
- * the sentence out then. Off, r's prompt is 1.7.0's to the byte, the help says nothing of it, and the rest (thinkOf,
- * the dim line, 이어서) waits on a reply that ends on one by itself. On again once a sample clears the bar.
+ * Whether r asks for THINK_ASK's line, and an answer to it is checked by a call of its own (1.9.0 F6: THINK_SYSTEM,
+ * thinkCheckPrompt, thinkReply) and a question after it answered by THINK_QUESTION_RULE. Set by the samples in
+ * docs/qa/견본.md ((가) the line and its cut, (나) the check, twice): off in 1.9.0. (가) put the line under four of six
+ * changes with no run to follow and let one question say its answer, for which the plan names no mending; (나), mended
+ * once, still missed its bar once. Off, r's prompt and a question's are 1.8.0's to the byte, the help says nothing of
+ * it, no check is called, and the rest (thinkOf, the dim line, 이어서) waits on a reply that ends on a question by
+ * itself, answered as 1.8.0 answers it (THINK_RULE).
  */
 export const IS_THINK_ASKED = false
-export const TRACE_QUESTION = [
-  '바뀐 코드를 구체적인 예시 입력 하나로 한 단계씩 따라가 주세요.',
-  '번호 목록으로, 단계마다 어느 줄이 실행되고 변수 값이 어떻게 바뀌는지 적고 마지막에 결과를 적어 주세요.',
-  '바뀌기 전 코드였다면 어느 단계에서 결과가 달라지는지 한 줄로 짚어 주세요.',
-  '따라갈 실행 흐름이 없는 변경(설정, 스타일, 문서 등)이면 그렇다고 한 줄로 말하고, 바뀐 결과가 화면이나 동작에서 어떻게 보이는지 설명해 주세요.',
-  ...(IS_THINK_ASKED ? [THINK_ASK] : []),
-].join(' ')
+/** What r asks (TRACE_LABEL): its walk-through, and the line it ends on while `isThinkAsked` (IS_THINK_ASKED, or a test harness's). */
+export function traceQuestion(isThinkAsked = IS_THINK_ASKED): string {
+  return [
+    '바뀐 코드를 구체적인 예시 입력 하나로 한 단계씩 따라가 주세요.',
+    '번호 목록으로, 단계마다 어느 줄이 실행되고 변수 값이 어떻게 바뀌는지 적고 마지막에 결과를 적어 주세요.',
+    '바뀌기 전 코드였다면 어느 단계에서 결과가 달라지는지 한 줄로 짚어 주세요.',
+    '따라갈 실행 흐름이 없는 변경(설정, 스타일, 문서 등)이면 그렇다고 한 줄로 말하고, 바뀐 결과가 화면이나 동작에서 어떻게 보이는지 설명해 주세요.',
+    ...(isThinkAsked ? [THINK_ASK] : []),
+  ].join(' ')
+}
+export const TRACE_QUESTION = traceQuestion()
 
 /**
  * How long a walk-through's 생각해 보기 stays open after its answer came (1.8.0): the dim line under it, the field's
@@ -1662,19 +1672,21 @@ const THINK_GIVEN = /답\s*[:：]|정답/
 /** Characters that may close a question after its last `?`: bold's stars, a bracket, spaces. */
 const THINK_CLOSE = /^[\s*)）]*$/
 /**
- * How a question's sentence ends: a question mark or a full stop, or 요, 까, 다 or 죠 with none, closed as THINK_CLOSE
- * lets. A line ending on none was cut, not asked: by the r call's maxTokens (of which $.model.complete says nothing,
- * the text so far coming back answered), or by askNote's own cut and its ellipsis. Only the last character is read:
- * a cut that stops on one of these (`된다면` at `된다`, `될까요?` at `될까`, just past a full stop) reads as ended.
+ * How a question ends (1.9.0 F6): on its question mark, closed as THINK_CLOSE lets. A line ending on anything else was
+ * cut, not asked: by the r call's maxTokens (of which $.model.complete says nothing, the text so far coming back
+ * answered), or by askNote's own cut and its ellipsis; or it was no question (`…따져 보세요.`). Only a line cut just
+ * past its question mark opens, and such a line is whole. 1.8.0 took a full stop, 요, 까, 다 or 죠 too, and so opened a
+ * cut that stopped on one (`된다면` at `된다`, a statement's piece just past a full stop): in both states now.
  */
-const THINK_END = /(?:[?？.!！。]|[요까다죠])[\s*)）]*$/u
+const THINK_END = /[?？][\s*)）]*$/u
 
 /**
  * The question a walk-through ends on (생각해 보기, THINK_ASK), or undefined: its last line that is not blank, or
  * the line after a label alone (`**생각해 보기**` with the question on the next line, the last). None when the
- * question is empty, says its answer (`답:`, 정답), goes on past its last `?` or stops short of its sentence's end
- * (THINK_END, a reply cut inside the line, unless it stops on a sentence mark, 요, 까, 다 or 죠): such a line stays in the
- * answer as written, but nothing opens for it.
+ * question is empty, says its answer (`답:`, 정답), goes on past its last `?` or ends on no question mark (THINK_END:
+ * a reply cut inside the line, or a line that asks nothing): such a line stays in the answer as written, but nothing
+ * opens for it. A backtick left alone after the label (the label written in backticks, `` `**생각해 보기:**` ``) is
+ * dropped (1.9.0 F6), so the question reads as it was meant.
  * Cut to 300 characters.
  */
 export function thinkOf(answer: string): string | undefined {
@@ -1684,7 +1696,11 @@ export function thinkOf(answer: string): string | undefined {
     .filter(line => line !== '')
   const last = lines.at(-1)
   if (last === undefined) return undefined
-  const label = (line: string | undefined) => (line === undefined ? undefined : THINK_LINE.exec(line)?.[1]?.replace(/\*\*$/, '').trim())
+  const label = (line: string | undefined) => {
+    const said = line === undefined ? undefined : THINK_LINE.exec(line)?.[1]?.replace(/\*\*$/, '').trim()
+    // The closing backtick of a label written in backticks: the one an odd count of them has over.
+    return said !== undefined && said.startsWith('`') && (said.match(/`/g)?.length ?? 0) % 2 === 1 ? said.slice(1).trim() : said
+  }
   const own = label(last)
   // A label alone on the last line asks nothing; one alone on the line before gives that line its question.
   const said = own !== undefined ? own : label(lines.at(-2)) === '' ? last.replace(/^(?:[-*+•]\s+|>\s*)+/, '').replace(/\*\*$/, '').trim() : undefined
@@ -1750,7 +1766,9 @@ export const ASKS_KEPT = 3
  * it, the field's words read as an answer to check or a question to answer;
  * the walk-through is then left out of the questions before. Without `think`
  * the prompt is 1.7.0's, to the byte. `isRuleDrill`: as hideDrillAnswer reads
- * a team-rule practice (1.9.0 F2).
+ * a team-rule practice (1.9.0 F2). `isThinkAsked` (IS_THINK_ASKED, 1.9.0 F6):
+ * the words are a question (isThinkQuestion; a guess goes to thinkCheckPrompt
+ * instead), read by THINK_QUESTION_RULE; else 1.8.0's THINK_RULE, to the byte.
  */
 export function askPrompt(
   note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles' | 'asks' | 'withheld'>,
@@ -1759,6 +1777,7 @@ export function askPrompt(
   team?: TeamFile,
   think?: { question: string; trace: string },
   isRuleDrill = IS_RULE_DRILL,
+  isThinkAsked = IS_THINK_ASKED,
 ): string {
   const recent = (note.asks ?? []).slice(-2)
   const earlier = think ? recent.slice(0, -1) : recent
@@ -1768,7 +1787,7 @@ export function askPrompt(
     '## 학습자의 질문',
     cut(question, 1000),
     '',
-    ...(think ? ["## 바로 앞 '예시로 따라가기'의 답과, 그 끝에 학습자에게 던진 생각해 보기", think.trace, '', `생각해 보기: ${think.question}`, THINK_RULE, ''] : []),
+    ...(think ? ["## 바로 앞 '예시로 따라가기'의 답과, 그 끝에 학습자에게 던진 생각해 보기", think.trace, '', `생각해 보기: ${think.question}`, isThinkAsked ? THINK_QUESTION_RULE : THINK_RULE, ''] : []),
     ...(earlier.length > 0
       ? ['## 앞서 이 노트에 대해 나눈 질문과 답 (이어지는 질문일 수 있다)', ...earlier.flatMap(one => [`- 질문: ${cut(one.question, 300)}`, `  답: ${cut(one.answer.replace(/\s+/g, ' '), 600)}`]), '']
       : []),
@@ -1792,6 +1811,148 @@ export function askPrompt(
  */
 const THINK_RULE =
   '학습자의 질문 칸 글은 이 물음에 대한 답일 수도, 새 질문일 수도 있다. 결과를 짐작한 말(값, "오류가 나요", "그대로예요" 같은 말)이면 이 물음에 대한 답으로 읽는다. 답이면 맞았는지 틀렸는지부터 말하고 맞은 점을 짚는다. 틀린 데가 있으면 학습자의 답대로라면 무엇이 되는지 한 문장, 바른 결과와 그 까닭을 한두 문장으로 쓴다. 다섯 문장을 넘기지 않는다. 새 질문이면 평소처럼 답한다. 어느 쪽이든 생각해 보기를 새로 쓰지 않는다.'
+
+/**
+ * How a question typed after an open walk-through is read while IS_THINK_ASKED (1.9.0 F6, askPrompt's `isThinkAsked`):
+ * a question (isThinkQuestion sent it here), answered as usual, and the learner ran nothing, so a stop or a crash
+ * asked of is a guess at the result, not one met (1.8.0's sample: such words were read as a bug report); a guess
+ * asked as a question is told right or wrong first, with the right result. In THINK_RULE's place.
+ */
+const THINK_QUESTION_RULE =
+  "학습자의 질문 칸 글은 이 생각해 보기 뒤에 적은 질문이다. 학습자는 이 코드를 실행하지 않았다. '멈추나요?' · '에러 나나요?'처럼 묻는 말도 실제로 겪은 일이 아니라 결과에 대한 짐작이다. 원인을 찾거나 오류 메시지·코드를 달라고 하지 않는다. 위 따라가기와 노트, 바뀐 코드를 바탕으로 평소처럼 답하고, 결과를 짐작하며 묻는 말이면 그 짐작이 맞는지부터 말하고 바른 결과를 쓴다. 생각해 보기를 새로 쓰지 않는다."
+
+/** Ends that make the words a question (isThinkQuestion): a question mark, with a sob, a tilde or a mark after it. */
+const THINK_ASK_END = /[?？][\s~ㅠㅜ.!]*$/u
+/** A polite ask at the end (주세요 and the like); not 줘요, which says what the code does (`빈 배열을 돌려줘요`). */
+const THINK_ASK_PLEASE = /(?:주세요|주실래요|주시겠어요)[\s~ㅠㅜ.!]*$/u
+/** A question word anywhere, a particle on it or not, as a word of its own. */
+const THINK_ASK_WORD = /(?:^|\s)(?:왜|뭐(?:가|를|야|예요|에요)?|무슨|무엇(?:이|을)?|어떻게|어디(?:서|에)?|언제|몇|어느)(?=\s|$)/u
+/** Words that ask to be told or say what is unclear. */
+const THINK_ASK_HELP = /모르겠|궁금|헷갈|이해가\s*안|알려|설명|가르쳐/u
+
+/**
+ * Whether words typed after an open walk-through are a question, not a guess at its 생각해 보기 (1.9.0 F6): one ending
+ * on a question mark (`2000 나오나요?`, `2000?`), on 주세요 and the like, holding a question word anywhere (왜, 뭐가,
+ * 어디서 …), or asking to be told (모르겠, 궁금, 헷갈, 설명 …). Leaning to the question: a question checked as a guess
+ * is told it is wrong, worse than a guess answered as a question. A bare "모르겠어요" (isBlankAnswer) is no question:
+ * it is checked, and told the right result. "??" is a question (isBlankAnswer leaves it be).
+ */
+export function isThinkQuestion(text: string): boolean {
+  const said = text.trim()
+  return !isBlankAnswer(said) && (THINK_ASK_END.test(said) || THINK_ASK_PLEASE.test(said) || THINK_ASK_WORD.test(said) || THINK_ASK_HELP.test(said))
+}
+
+/**
+ * The system prompt of the call that checks a guess at a walk-through's 생각해 보기 (1.9.0 F6): the learner ran
+ * nothing and guessed, so whatever the words say is a guess, never a thing that happened (1.8.0's check, a question's
+ * call, read a guessed stop or crash as a bug report and four times in its sample said nothing of right or wrong).
+ */
+export const THINK_SYSTEM = [
+  '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 코딩 튜터다.',
+  "학습자는 '예시로 따라가기'를 읽고, 그 끝의 생각해 보기 물음대로 입력을 바꾸면 결과가 어떻게 될지 코드를 실행하지 않고 머릿속으로 짐작해 적었다.",
+  '학습자의 글은 무엇을 말하든 실제로 겪은 일이 아니라 결과에 대한 짐작이다. 원인을 찾거나 더 보여 달라고 하지 말고, 그 짐작이 맞는지 판정한다.',
+  '표현이 달라도 뜻이 같으면 맞다. 맞춤법·말투·길이는 보지 않는다.',
+  WITHHELD_RULE,
+  '코드는 백틱(`)으로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
+  TONE,
+  BOLD,
+].join(' ')
+
+/**
+ * The one user message for the check of a guess at a walk-through's 생각해 보기 (1.9.0 F6, THINK_SYSTEM): the
+ * question, the walk-through it ends (openThink's, to 2000 characters), the guess ("모르겠어요" said as such), then
+ * the note's request, the note with no practice (withoutDrill: its check line is the result once the learner has
+ * changed the code, which a sample's check took for the code's own) and its code as askPrompt has them. The right
+ * result worked out first from the code as it is, then the guess against it; four verdicts told by the final result
+ * alone (a sample's first wording graded a wrong guess right in part as nearly), the fourth (질문) for a question that
+ * came this way after all; three lines only, with no room to ask for an error message. No team section and no
+ * questions before: how the code runs is all it is.
+ */
+export function thinkCheckPrompt(
+  note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles' | 'withheld'>,
+  think: { question: string; trace: string },
+  mine: string,
+  level: Level,
+): string {
+  return [
+    LEVEL_TEXT[level],
+    '',
+    '## 생각해 보기 물음',
+    think.question,
+    '',
+    "## 그 물음이 붙은 '예시로 따라가기'",
+    think.trace,
+    '',
+    '## 학습자의 짐작',
+    isBlankAnswer(mine) ? '(모르겠다고 했다)' : cut(mine, 1000),
+    '',
+    '## 그 노트의 요청',
+    note.prompt === '' ? '(요청 문장 없음)' : cut(note.prompt, 1000),
+    '',
+    '## 학습 노트',
+    note.status === 'ready' ? cut(withoutDrill(note.text), 4000) : '(노트가 아직 없다. 코드 전후만 보고 판정한다)',
+    '',
+    '## 바뀐 코드',
+    ...diffBlocks(note, PROMPT_DIFF_BUDGET),
+    '',
+    '먼저 물음대로 입력을 바꾼 최종 결과를 따라가기와 지금의 바뀐 코드로 직접 구해, 바른 결과 줄에 값이나 동작 하나로 쓴다. 그다음 학습자의 짐작과 견준다.',
+    '판정은 넷 중 하나다. 맞음: 최종 결과를 맞게 짐작했다(값만 적었거나 까닭이나 이름을 빠뜨려도, 물음이 여러 가지를 물어도 최종 결과를 맞혔으면 맞음). 거의: 최종 결과는 맞혔지만 덧붙인 까닭에 틀린 데가 있다. 틀림: 최종 결과가 다르거나 물음과 관계없는 말이다(과정이나 중간 값, 일부가 맞아도 최종 결과가 다르면 틀림. 모르겠다도 틀림). 질문: 결과를 짐작하지 않고 무엇을 묻거나 모른다고 했다.',
+    '피드백은 두 문장 이내다. 맞음이면 왜 그렇게 되는지 짚는다. 거의·틀림이면 짐작과 무엇이 다른지와 바른 결과의 까닭을 쓴다. 질문이면 그 물음에 세 문장 이내로 답한다. 생각해 보기를 새로 쓰지 않는다.',
+    '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
+    '바른 결과: (값이나 동작 한 줄)',
+    '판정: (맞음 · 거의 · 틀림 · 질문 중 하나)',
+    '피드백: (두 문장 이내, 질문이면 세 문장 이내)',
+  ].join('\n')
+}
+
+/** Claude's grade of a typed answer, as the pane and /learn quiz say it; a checked guess at a 생각해 보기 is headed so too (1.9.0 F6). */
+export const VERDICT_TEXT: Readonly<Record<'right' | 'partial' | 'wrong', string>> = { right: '맞혔습니다.', partial: '거의 맞았습니다.', wrong: '아쉽지만 틀렸습니다.' }
+
+/** The right result's line in a check's reply (thinkCheckPrompt), bold or not; what it says. */
+const THINK_RESULT = /^\s*(?:\*\*)?바른\s*결과(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*?)(?:\*\*)?\s*$/m
+/** A check's verdict that the words were a question after all (판정: 질문), however bold. */
+const THINK_ASKED_VERDICT = /^(?:질문|question)/i
+
+/**
+ * A check's reply (thinkCheckPrompt) as the answer under the note (1.9.0 F6), or undefined when it cannot be read
+ * (the reply is then shown as it came). The right result's line is read and taken out wherever it stands, so it never
+ * runs into the feedback; the rest is read as a quiz grade is (parseCheck: the labelled lines or a JSON object).
+ * Right: `**맞혔습니다.** feedback`. Nearly or wrong: the head and the feedback, a blank line, `바른 결과: …` (when it
+ * said one). "모르겠어요" (`isBlank`): the right result's line, a blank line, the feedback, no verdict's word. 판정:
+ * 질문: the feedback alone, its answer, with no verdict's word.
+ */
+export function thinkReply(text: string, isBlank: boolean): string | undefined {
+  const found = THINK_RESULT.exec(text)
+  const rest = found ? `${text.slice(0, found.index)}${text.slice(found.index + found[0].length)}` : text
+  let json: Record<string, unknown> | undefined
+  const object = /\{[\s\S]*\}/.exec(rest)?.[0]
+  if (object) {
+    try {
+      const raw: unknown = JSON.parse(object)
+      if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) json = raw as Record<string, unknown>
+    } catch {
+      // Not JSON after all: the lines.
+    }
+  }
+  const said = (key: string, ...more: string[]) => {
+    const value = json ? [key, ...more].map(name => json![name]).find(one => one !== undefined) : undefined
+    return typeof value === 'string' ? value.trim() : value === undefined ? undefined : String(value).trim()
+  }
+  const result = (found?.[1] ?? said('바른 결과', '바른결과', 'result', 'correct') ?? '').trim()
+  const line = result === '' ? undefined : `바른 결과: ${result}`
+  const parts = json ? undefined : checkParts(rest)
+  const verdict = (json ? said('verdict', '판정') : parts!.get('판정'))?.replace(/[*`]/g, '').trim() ?? ''
+  if (THINK_ASKED_VERDICT.test(verdict)) {
+    const feedback = (json ? said('feedback', '피드백') : parts!.get('피드백'))?.replace(/\n{2,}/g, '\n').trim() ?? ''
+    if (feedback === '') return undefined
+    return isBlank && line ? `${line}\n\n${feedback}` : feedback
+  }
+  const graded = parseCheck(rest)
+  if (!graded) return undefined
+  if (isBlank) return [line, graded.feedback].filter(one => one !== undefined && one !== '').join('\n\n')
+  const head = `**${VERDICT_TEXT[graded.verdict]}**${graded.feedback === '' ? '' : ` ${graded.feedback}`}`
+  return graded.verdict === 'right' || line === undefined ? head : `${head}\n\n${line}`
+}
 
 /**
  * A /learn ask question and its answer as a journal section; not a note, so day contents and recaps pass over it.
@@ -2114,6 +2275,13 @@ export function drillHunk(note: Pick<LearnNote, 'status' | 'text' | 'changes'>):
   const quote = quotedCode(drillParts(lines.slice(span.start + 1, span.end)).parts.get('고칠줄') ?? '')
   const spot = quote === undefined ? undefined : drillSpot(quote, note.changes)
   return spot ? { change: spot.change, hunk: spot.hunk } : undefined
+}
+
+/** A note's text with no 직접 해 보기 section at all (1.9.0 F6, thinkCheckPrompt): its task, check and answer gone. */
+export function withoutDrill(text: string): string {
+  const lines = text.split('\n')
+  const span = drillSpan(lines)
+  return span ? [...lines.slice(0, span.start), ...lines.slice(span.end)].join('\n').replace(/\n+$/, '') : text
 }
 
 /**

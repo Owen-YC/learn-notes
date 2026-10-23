@@ -242,14 +242,19 @@ import {
   sideBySide,
   type ShownLine,
   TRACE_LABEL,
-  TRACE_QUESTION,
+  traceQuestion,
   EASIER_LABEL,
   EASIER_QUESTION,
   KEYED_LABELS,
   isThinkFollow,
+  isThinkQuestion,
   IS_THINK_ASKED,
   openThink,
   THINK_OPEN_MS,
+  THINK_SYSTEM,
+  thinkCheckPrompt,
+  thinkReply,
+  VERDICT_TEXT,
   type RankedConcept,
   shortPath,
   stamp,
@@ -655,7 +660,7 @@ let myVersion: string | undefined
  * The model-gated items' switches this load runs with (1.9.0): each its constant in notes.ts, which a release sets
  * by its samples (docs/qa/견본.md) — `isRuleDrill`, IS_RULE_DRILL (F2); the question ladder's steps (F3, F4):
  * `rungNewStep` RUNG_NEW_STEP, `rungChangedStep` RUNG_CHANGED_STEP, `workedAfterTimes` WORKED_AFTER_TIMES, each
- * Infinity for its rung off; `isBaseAsked`, IS_BASE_ASKED (F5). A test's harness turns one the other way through the
+ * Infinity for its rung off; `isBaseAsked`, IS_BASE_ASKED (F5); `isThinkAsked`, IS_THINK_ASKED (F6). A test's harness turns one the other way through the
  * plugin.json it serves (its `harness` object, read with the version at session start, readManifest; a step there a
  * whole number, or null for off), so both states are tested whichever one ships. A release's plugin.json has none: only the build's own files
  * can, and /learn 진단 names a switch that runs the other way (switched), so a copy someone turned one in is seen to be.
@@ -666,6 +671,7 @@ const build = {
   rungChangedStep: RUNG_CHANGED_STEP,
   workedAfterTimes: WORKED_AFTER_TIMES,
   isBaseAsked: IS_BASE_ASKED,
+  isThinkAsked: IS_THINK_ASKED,
 }
 /** The switches as the build's constants set them, which no harness turns: /learn 진단 names one that differs (switched). */
 const RELEASE: Readonly<typeof build> = { ...build }
@@ -676,6 +682,7 @@ const SWITCH_NAMES: Record<keyof typeof build, string> = {
   rungChangedStep: '비슷한 코드 단계',
   workedAfterTimes: '풀이 보고 풀기 오답 수',
   isBaseAsked: '바탕 개념',
+  isThinkAsked: '생각해 보기',
 }
 
 /** The switches this load runs the other way from its build's constants (a harness's), with their state, for /learn 진단. */
@@ -2384,9 +2391,6 @@ function reviewDoneText(review: { due: number; left: number }, days: Readonly<Re
   return today && today.right + today.wrong - (today.drills ?? 0) > 0 ? '오늘 복습을 마쳤습니다' : undefined
 }
 
-/** Claude's grade of a typed answer, as the pane and /learn quiz say it. */
-const VERDICT_TEXT: Record<'right' | 'partial' | 'wrong', string> = { right: '맞혔습니다.', partial: '거의 맞았습니다.', wrong: '아쉽지만 틀렸습니다.' }
-
 /** True for a question Claude graded partly right, its grade still standing: counted wrong, its concept a step back. */
 function isPartly(item: LearnQuizItem): boolean {
   return item.result === 'wrong' && item.verdict === 'partial' && item.isLearnerGraded !== true
@@ -3326,9 +3330,20 @@ async function askNote(
   // with the walk-through in full and its 생각해 보기, to be checked as an answer or answered as a question.
   const askedAt = await $.clock.now()
   const think = label === question ? openThink(shown.asks, askedAt) : undefined
-  const asked = await askModel($, cfg, 'ask', { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules, think, build.isRuleDrill), maxTokens: 900 })
+  // A guess at it, while the check is on (1.9.0 F6): a call of its own, its reply headed by its verdict; a question
+  // (isThinkQuestion, leaning that way) goes as before.
+  const isCheck = build.isThinkAsked && think !== undefined && !isThinkQuestion(masked)
+  const asked = await askModel(
+    $,
+    cfg,
+    'ask',
+    isCheck
+      ? { system: THINK_SYSTEM, prompt: thinkCheckPrompt(shown, think, masked, level), maxTokens: THINK_CHECK_TOKENS }
+      : { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules, think, build.isRuleDrill, build.isThinkAsked), maxTokens: 900 },
+  )
   if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
-  const answer = cut(asked.text, 4000)
+  // A check's reply not in its format is shown as it came.
+  const answer = cut((isCheck ? thinkReply(asked.text, isBlankAnswer(masked)) : undefined) ?? asked.text, 4000)
   const now = await $.clock.now()
   const latest = (await read($, notes)).find(one => one.id === id) ?? note
   await setNote($, id, { asks: [...(latest.asks ?? []), { question: cut(kept, 1000), answer, at: now }].slice(-ASKS_KEPT) })
@@ -3336,6 +3351,9 @@ async function askNote(
   const path = cfg.isAutoSave ? await saveAsk($, cfg, shown, kept, answer, now, think !== undefined) : undefined
   return { answer, note, path, at: now }
 }
+
+/** The output budget of the check of a guess at a 생각해 보기 (1.9.0 F6): three short lines, as a quiz grade's. */
+const THINK_CHECK_TOKENS = 480
 
 /** True while the pane shows this note's own view, where its questions and answers are drawn. */
 async function isNoteShown($: EngineInterface, id: string): Promise<boolean> {
@@ -4943,6 +4961,7 @@ export const register: Register = (on, options) => {
     build.rungChangedStep = harnessStep(manifest.harness?.rungChangedStep, RUNG_CHANGED_STEP)
     build.workedAfterTimes = harnessStep(manifest.harness?.workedAfterTimes, WORKED_AFTER_TIMES)
     build.isBaseAsked = typeof manifest.harness?.isBaseAsked === 'boolean' ? manifest.harness.isBaseAsked : IS_BASE_ASKED
+    build.isThinkAsked = typeof manifest.harness?.isThinkAsked === 'boolean' ? manifest.harness.isThinkAsked : IS_THINK_ASKED
     mySessionId = await $.session.id().catch(() => undefined)
     // The guard first, before anything writes the concepts; then this session's stamp for the other windows.
     await enqueue('storing', () => keepSchema($))
@@ -5942,7 +5961,7 @@ function noteTools(
           label={EASIER_LABEL}
           onPress={() => void askInPane($, cfg, note.id, EASIER_QUESTION, EASIER_LABEL, 'beginner')}
         />
-        <Button key="trace" hotkey="r" plain dimColor={ask.isAsking} label={TRACE_LABEL} onPress={() => void askInPane($, cfg, note.id, TRACE_QUESTION, TRACE_LABEL)} />
+        <Button key="trace" hotkey="r" plain dimColor={ask.isAsking} label={TRACE_LABEL} onPress={() => void askInPane($, cfg, note.id, traceQuestion(build.isThinkAsked), TRACE_LABEL)} />
         {Input && (
           <Button key="ask-type" hotkey="i" plain label="질문하기" onPress={() => void $.ui.focus({ requestId: PANE, key: fieldKey }).catch(() => undefined)} />
         )}
@@ -7411,23 +7430,25 @@ function taughtBy(list: readonly LearnNote[], map: Readonly<Record<string, strin
  * /learn 도움말 (commandHelp): as many lines as 1.6.1's. Every command and every key of the pane is named; the rare
  * commands share the 가끔 line, and the names kept out of it are listed at COMMAND_WORDS.
  */
-const HELP = [
-  'learn-notes 명령',
-  '',
-  '- `/learn`: 패널 열기 · 패널의 키를 쓰려면 터미널은 `ctrl+x tab`(또는 패널 클릭), 데스크톱 앱은 패널 클릭, Esc로 대화로 돌아갑니다 (숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다)',
-  '- `/learn 복습`: 오늘 복습을 패널 퀴즈로 바로 시작 · 답 칸에 바로 적고 Enter (패널이 없는 화면에서는 대화창에 문제를 냅니다)',
-  '- 패널: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작 · `p`·`n` 이전·다음 노트 · `w` 노트 쓰기, 다시 쓰기',
-  // r's 생각해 보기 named only while r asks for it (IS_THINK_ASKED, off in 1.8.0): 1.7.0's line otherwise.
-  `- 노트 아래: \`t\` 직접 해 보기(한 번 고친 뒤 \`a\` 예시 답) · \`e\` 더 쉽게 · \`r\` 예시로 따라가기${IS_THINK_ASKED ? '(끝의 생각해 보기는 `i`로 답하기)' : ''} · \`i\` 질문하기 · \`c\` 복사`,
-  '- 퀴즈(`4`): 답을 적고 Enter로 채점 · 틀리면 되묻기를 보고 한 번 더 (모르면 `모르겠어요`) · Tab으로 버튼에 가서 `h` 힌트 · `i` 답 적기 · `a` 정답(한 번 적은 뒤 · 첫 판정대로 매김) · `f` 채점 바꾸기 · `s` 새 문제(남은 문제가 있으면 두 번) · `n` 틀린 개념을 배운 노트 · 정답을 채점 전에 봤으면(입력칸이 없는 화면 · 채점 실패 · `/learn 퀴즈 정답`) `o`·`x`로 채점',
-  '- `/learn 퀴즈`: 대화창에서 풀기 · 풀던 퀴즈, 없으면 복습할 개념으로 새 퀴즈 · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트`(`힌트 2`) · `정답`',
-  '- `/learn 정리`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
-  '- `/learn 질문 …`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기',
-  '- `/learn 기록`: 연속 학습일 · 정답률 · 복습할 개념 · 배운 개념 · 모델 호출 수',
-  '- `/learn 보고서`: 코드 없는 학습 보고서를 클립보드와 파일로 (최근 7일 · `이번주` · `어제`도 됩니다) · 리더는 `/learn 보고서 모으기 파일`로 팀 학습 지도',
-  '- `/learn 공유`: 고른 노트를 요청·경로 없이 복사해 멘토에게 묻기(`c`와 같음) · `/learn 퀴즈 팀`: 이 저장소의 팀 용어만으로 퀴즈',
-  '- 가끔: `/learn 찾기 말` 노트 찾기 · `/learn 일지` 오늘 노트 목차(`어제` · `목록`도) · `/learn 합치기 A = B` 개념 합치기 · `/learn 안다 이름` 복습에서 빼기 · `/learn 모른다 이름` 되돌리기 · `/learn 안키` Anki 카드 · `/learn 비우기` 패널 비우기 · `/learn 진단` 막히면 담당자에게',
-].join('\n')
+function helpLines(isThinkAsked: boolean): string {
+  return [
+    'learn-notes 명령',
+    '',
+    '- `/learn`: 패널 열기 · 패널의 키를 쓰려면 터미널은 `ctrl+x tab`(또는 패널 클릭), 데스크톱 앱은 패널 클릭, Esc로 대화로 돌아갑니다 (숫자 키는 한/영 상관없이, 글자 키는 영문 상태에서. 한글 상태면 `q`가 `ㅂ`으로 들어갑니다)',
+    '- `/learn 복습`: 오늘 복습을 패널 퀴즈로 바로 시작 · 답 칸에 바로 적고 Enter (패널이 없는 화면에서는 대화창에 문제를 냅니다)',
+    '- 패널: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작 · `p`·`n` 이전·다음 노트 · `w` 노트 쓰기, 다시 쓰기',
+    // r's 생각해 보기 named only while r asks for it (isThinkAsked: IS_THINK_ASKED, or a harness's): 1.7.0's line otherwise.
+    `- 노트 아래: \`t\` 직접 해 보기(한 번 고친 뒤 \`a\` 예시 답) · \`e\` 더 쉽게 · \`r\` 예시로 따라가기${isThinkAsked ? '(끝의 생각해 보기는 `i`로 답하기)' : ''} · \`i\` 질문하기 · \`c\` 복사`,
+    '- 퀴즈(`4`): 답을 적고 Enter로 채점 · 틀리면 되묻기를 보고 한 번 더 (모르면 `모르겠어요`) · Tab으로 버튼에 가서 `h` 힌트 · `i` 답 적기 · `a` 정답(한 번 적은 뒤 · 첫 판정대로 매김) · `f` 채점 바꾸기 · `s` 새 문제(남은 문제가 있으면 두 번) · `n` 틀린 개념을 배운 노트 · 정답을 채점 전에 봤으면(입력칸이 없는 화면 · 채점 실패 · `/learn 퀴즈 정답`) `o`·`x`로 채점',
+    '- `/learn 퀴즈`: 대화창에서 풀기 · 풀던 퀴즈, 없으면 복습할 개념으로 새 퀴즈 · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트`(`힌트 2`) · `정답`',
+    '- `/learn 정리`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
+    '- `/learn 질문 …`: 패널에서 고른 노트(없으면 마지막 노트)에 대해 묻기',
+    '- `/learn 기록`: 연속 학습일 · 정답률 · 복습할 개념 · 배운 개념 · 모델 호출 수',
+    '- `/learn 보고서`: 코드 없는 학습 보고서를 클립보드와 파일로 (최근 7일 · `이번주` · `어제`도 됩니다) · 리더는 `/learn 보고서 모으기 파일`로 팀 학습 지도',
+    '- `/learn 공유`: 고른 노트를 요청·경로 없이 복사해 멘토에게 묻기(`c`와 같음) · `/learn 퀴즈 팀`: 이 저장소의 팀 용어만으로 퀴즈',
+    '- 가끔: `/learn 찾기 말` 노트 찾기 · `/learn 일지` 오늘 노트 목차(`어제` · `목록`도) · `/learn 합치기 A = B` 개념 합치기 · `/learn 안다 이름` 복습에서 빼기 · `/learn 모른다 이름` 되돌리기 · `/learn 안키` Anki 카드 · `/learn 비우기` 패널 비우기 · `/learn 진단` 막히면 담당자에게',
+  ].join('\n')
+}
 /** The pane's two lines when drawing it failed (the Pane render's .catch). */
 const RENDER_FAILED = '패널을 그리지 못했습니다 · /learn 진단을 복사해 팀에 보내 주세요'
 const RENDER_STILL = '대화창의 /learn 퀴즈 · /learn 기록은 그대로 됩니다'
@@ -7438,9 +7459,9 @@ const TOOL_FAILED = '학습 기록을 읽지 못했습니다. 잠시 뒤 다시 
 /** Said at the top of the help while the learning record tool is there (hasTool): the record answers a plain question. */
 const CHAT_HINT = '대화창에 그냥 물어봐도 됩니다: "오늘 배운 거 알려 줘"'
 
-/** /learn 도움말: HELP, its title naming this build's version once read, with CHAT_HINT under it while the tool is registered. */
+/** /learn 도움말: helpLines as this load runs (build), its title naming this build's version once read, with CHAT_HINT under it while the tool is registered. */
 function commandHelp(): string {
-  const [title = '', ...rest] = HELP.split('\n')
+  const [title = '', ...rest] = helpLines(build.isThinkAsked).split('\n')
   const head = myVersion === undefined ? title : title.replace('learn-notes', `learn-notes ${myVersion}`)
   return [head, ...(hasTool ? [CHAT_HINT] : []), ...rest].join('\n')
 }
