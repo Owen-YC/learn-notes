@@ -4940,8 +4940,8 @@ export const RUNG_CHANGED_STEP = Infinity
  * The review step from which a concept due is asked in code never seen (처음 보는 코드). Off in 1.8.0: that question's
  * answer is the model's too, and a wrong one would cost a concept weeks of steps; on (4) once a sample shows it right.
  * Off in 1.9.0 too: in its run-checked sample (docs/qa/견본.md) the answers were right once the R line was in, but too
- * many replies ran out of room (maxTokens), the last question cut or none at all, and the grade took an answer with one
- * value of several wrong for 거의 more often than the bar allows.
+ * many replies ran out of room (maxTokens, 1600 then; register.tsx's QUIZ_LONG_TOKENS since), the last question cut or
+ * none at all, and the grade took an answer with one value of several wrong for 거의 more often than the bar allows.
  */
 export const RUNG_NEW_STEP = Infinity
 /**
@@ -4949,8 +4949,9 @@ export const RUNG_NEW_STEP = Infinity
  * first: two as 1.8.0 shipped it. Off from 1.9.0 (교차 검토 2): measured again as the plugin calls (effort low,
  * docs/qa/견본.md), a worked example of a concept met in code passed, but one of a concept no code met did not, nor
  * once its line was mended (WORKED_PLAIN_ASK): some lost their marks or the example, stated a result the example does
- * not give, or asked for what the example showed, and with the line some replies ran out of room. A concept missed
- * twice running is asked again as 1.7 did (다시 도전) until a sample shows it right.
+ * not give, or asked for what the example showed, and with the line some replies ran out of room (maxTokens, 1600 then;
+ * register.tsx's QUIZ_LONG_TOKENS since). A concept missed twice running is asked again as 1.7 did (다시 도전) until a
+ * sample shows it right.
  */
 export const WORKED_AFTER_TIMES = Infinity
 /**

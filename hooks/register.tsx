@@ -2490,6 +2490,24 @@ type CallKind = 'auto' | 'manual' | 'retry'
 const MODEL_TIMEOUT_MS = 90_000
 /** An `aborted` call that ran this close to its whole time limit was cut by that limit, not by a reload. */
 const TIMEOUT_SLACK_MS = 1_000
+/**
+ * The output budget of a note's call (writeNote: a turn's end, w, the one try again, a reload's take-up). The engine
+ * sends maxTokens + 2048 to a model that cannot stop thinking (haiku, the default), and the thinking counts against
+ * it: at 1.8.0's 1500, 28 of 106 notes of a sample came back cut (their 직접 해 보기 lost) or empty; at 3500, 1 (its
+ * slowest call 26 seconds, well inside MODEL_TIMEOUT_MS). Only what is written is spent (docs/qa/견본.md, 출력 상한).
+ */
+const NOTE_TOKENS = 3500
+/**
+ * The output budget of a quiz's call (makeQuiz, a team quiz's too) with no worked example and no code never seen in
+ * it, the engine's 2048 for thinking on top as for NOTE_TOKENS. 1.8.0's 1400 cut none of a sample's 38 such quizzes;
+ * raised by 2000 all the same, as QUIZ_LONG_TOKENS is, for about 1% more output a quiz (docs/qa/견본.md, 출력 상한).
+ */
+const QUIZ_TOKENS = 3400
+/**
+ * The output budget of a quiz with a worked example or code never seen in it, which writes code of its own: 1.8.0's
+ * 1600 cut 2 of a sample's 43 such quizzes (their third question lost), 2000 more none (docs/qa/견본.md, 출력 상한).
+ */
+const QUIZ_LONG_TOKENS = 3600
 
 /**
  * One model call for the learner: its text, or why there is none in words they
@@ -2747,7 +2765,7 @@ async function makeQuiz(
   }
   // A worked example (and code never seen) writes code of its own: room for it, spent only as far as it is used.
   const isLong = picks.some(one => one.rung === 'worked' || one.rung === 'new')
-  const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: isLong ? 1600 : 1400 })
+  const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: isLong ? QUIZ_LONG_TOKENS : QUIZ_TOKENS })
   if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
   const items = parseQuiz(asked.text, picks)
   if (items.length === 0) {
@@ -3888,7 +3906,7 @@ async function writeNote(
         system: SYSTEM,
         // A note kept before 1.6.0, written again, was never screened.
         prompt: notePrompt(await screened($, cfg, note), cfg.level, knownNames(await read($, concepts)), rules, build.isRuleDrill),
-        maxTokens: 1500,
+        maxTokens: NOTE_TOKENS,
       },
       isRetry ? 'retry' : isAuto ? 'auto' : 'manual',
     )

@@ -9,6 +9,10 @@ import {
   IS_RULE_DRILL,
   IS_THINK_ASKED,
   ASK_SYSTEM,
+  CHECK_SYSTEM,
+  QUIZ_SYSTEM,
+  RECAP_SYSTEM,
+  SYSTEM,
   THINK_SYSTEM,
   WORKED_BASE_NEXT,
   RUNG_CHANGED_STEP,
@@ -7472,8 +7476,8 @@ describe('1.7.0: a question asked back, and one try again (D4)', () => {
     expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 0, right: 1, wrong: 0 } })
     expect(focusesOf(w).at(-1)).toBe(mineKey(store, 1))
     expect(w.models).toHaveLength(3)
-    // A grade may write a line more than before: 480 tokens, the quiz's own budget as it was.
-    expect(w.budgets).toEqual([1400, 480, 480])
+    // A grade may write a line more than before: 480 tokens; the quiz's own is 1.9.0's (3400, raised by its sample).
+    expect(w.budgets).toEqual([3400, 480, 480])
     // Turned wrong with f and back right: still right after a question asked back, its step where that left it.
     await ui.press({ key: 'quiz-flip' })
     expect(concept(store, '클로저')).toMatchObject({ step: 0, missedAt: NOW })
@@ -11458,7 +11462,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     expect(prompt).toContain('비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 보여 주고 묻는다. 원래 코드의 답으로는 맞힐 수 없게 바꾼다.')
     expect(prompt).not.toContain('내 코드:')
     expect(prompt).not.toContain("'처음 보는 코드'·'풀이 보고 풀기' 칸은")
-    expect(w.budgets.at(-1)).toBe(1400)
+    expect(w.budgets.at(-1)).toBe(3400)
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 비슷한 코드 · 예측$/ })).toBeDefined()
     expect(quizItems(store)[0]).toMatchObject({ rung: 'changed' })
     expect((await learn($, '퀴즈')).text).toContain('\n1. (비슷한 코드) 아래 코드는 b를 무엇으로 찍을까요?')
@@ -11529,7 +11533,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     await finish(w)
     const ui = await quizIn($, w, [plainQ(1), plainQ(2)].join('\n'))
     expect(await ui.find({ type: 'Text', text: /^문제 1\/2 · 다시 도전 · 예측$/ })).toBeDefined()
-    expect(w.budgets.at(-1)).toBe(1400)
+    expect(w.budgets.at(-1)).toBe(3400)
     // In the pane, where the note that taught it is: n there, and what comes next.
     await answer(ui, w, mineKey(store, 0), '전역에 남아요', missed())
     expect(await ui.find({ type: 'Text', text: /^같은 곳을 또 헷갈렸습니다 · n: 이 개념을 배운 노트 · 다음 복습 퀴즈는 풀이부터 보여 줍니다$/ })).toBeDefined()
@@ -11552,7 +11556,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     expect(prompt).not.toContain('학습자가 만든 코드')
     expect(prompt).not.toContain('const b = 2')
     expect(prompt).not.toContain('헷갈린 점을 문제나 힌트에 쓰지 않는다')
-    expect(w.budgets.at(-1)).toBe(1600)
+    expect(w.budgets.at(-1)).toBe(3600)
     expect(listed).toContain('\n1. (풀이 보고 풀기) 풀이: `let n = 0;')
     expect(quizItems(store).map(one => [one.rung, one.isRetry])).toEqual([['worked', undefined], ['worked', undefined]])
     const next = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
@@ -11940,7 +11944,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     expect(prompt).toContain('칸: 풀이 보고 풀기')
     // What the quiz is told of the last try is the store's as the quiz was made, as in 1.7 ('a first try left waiting when a new quiz is made').
     expect(prompt).toContain("지난번 문제 '지난 문제의 코드' · 학습자 답 '전역 변수'")
-    expect(w.budgets.at(-1)).toBe(1600)
+    expect(w.budgets.at(-1)).toBe(3600)
     expect(quizItems(store).map(one => [one.rung, one.isRetry])).toEqual([['worked', undefined]])
   })
 
@@ -14049,7 +14053,7 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(prompt).not.toContain('const a = 1')
     expect(prompt).not.toContain('for (const n of nums)')
     expect(prompt).not.toContain('for (const item of items)')
-    expect(w.budgets.at(-1)).toBe(1600)
+    expect(w.budgets.at(-1)).toBe(3600)
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 처음 보는 코드 · 예측$/ })).toBeDefined()
     expect(quizItems(store)[0]).toMatchObject({ rung: 'new', kind: 'predict', hint: '하나씩 더해 보세요', answer: '7' })
     // The trace is dropped: in no window's quiz, the hint and the answer neither.
@@ -14072,7 +14076,7 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (a.ts):')
     expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
     expect(w.models.at(-1)).not.toContain('R1:')
-    expect(w.budgets.at(-1)).toBe(1400)
+    expect(w.budgets.at(-1)).toBe(3400)
     expect(quizItems(store)[0]).toMatchObject({ rung: 'changed' })
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 비슷한 코드 · 예측$/ })).toBeDefined()
     await ui.unmount()
@@ -14103,7 +14107,7 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(prompt.includes('\n   칸: 비슷한 코드\n')).toBe(rungs.includes('changed'))
     expect(prompt.includes('비슷한 코드: 학습자 코드에서')).toBe(rungs.includes('changed'))
     expect(prompt.includes('\n   칸: 내 코드\n')).toBe(rungs.includes('mine'))
-    expect(w.budgets.at(-1)).toBe(RUNG_NEW_STEP <= 4 ? 1600 : 1400)
+    expect(w.budgets.at(-1)).toBe(RUNG_NEW_STEP <= 4 ? 3600 : 3400)
     expect(quizItems(store).map(one => one.rung).sort()).toEqual([...rungs].sort())
   })
 
@@ -15251,4 +15255,139 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
     expect((await fieldOf(ui)).props.placeholder).toBe(SHUT)
     await ui.unmount()
   })
+})
+
+describe('1.9.0: the note and quiz calls\' output caps, raised by their sample (docs/qa/견본.md, 출력 상한)', () => {
+  const DAY = 86_400_000
+  const BUSY: Reply = { status: 529, error: 'overloaded' }
+  /** The budgets the plugin asks for (register.tsx NOTE_TOKENS, QUIZ_TOKENS, QUIZ_LONG_TOKENS), the engine's 2048 for thinking aside. */
+  const NOTE = 3500
+  const QUIZ = 3400
+  const QUIZ_LONG = 3600
+  const TEAM_PATH = '/proj/.claude/learn-notes.md'
+  const TERMS = ['## 용어', '- **캐시 키**: 요청마다 캐시를 나누는 이름입니다', '- **페이지네이션 커서**: 다음 쪽을 가리키는 값입니다', ''].join('\n')
+  const RIGHT = '판정: 맞음\n피드백: 정확합니다.'
+  const plainQ = (n: number) => [`T${n}: 예측`, `Q${n}: 문제 ${n}`, `A${n}: 답 ${n}`].join('\n')
+  const worked = (n: number) =>
+    [`T${n}: 예측`, `Q${n}: 풀이: \`let n = 0; const up = () => ++n; up()\` 뒤 n은 1입니다.`, '이제 풀어 보세요: `let c = 10; const add = () => ++c; add()` 뒤 c는?', `H${n}: 바깥 c`, `A${n}: 11`].join('\n')
+  const fresh = (n: number) =>
+    [`T${n}: 예측`, `Q${n}: 아래 코드는 무엇을 찍을까요?`, '```ts', 'const xs = [3, 4]', 'let s = 0', 'for (const x of xs) s += x', 'console.log(s)', '```', `H${n}: 하나씩 더해 보세요`, `R${n}: s는 3, 다시 7이 됩니다`, `A${n}: 7`].join('\n')
+  /** Each model call's budget with the system prompt it went with, in order. */
+  const callsOf = (w: World) => w.budgets.map((budget, i) => ({ budget, system: w.systems[i] }))
+  const quizItems = (store: Map<string, unknown>) => (store.get('quiz') as { items: Record<string, unknown>[] }).items
+  /** Concepts by name at their steps, each met 30 days ago and gone over `ago` days ago, with their step copies, and `slips`. */
+  const storeOf = (steps: Record<string, number>, ago: number, slips: Record<string, unknown> = {}) => {
+    const concepts = Object.fromEntries(
+      Object.entries(steps).map(([name, step]) => [
+        conceptKey(name),
+        { name, count: 2, firstAt: NOW - 30 * DAY, lastAt: NOW - 30 * DAY, blurb: `${name} 설명`, files: [], step, reviewedAt: NOW - ago * DAY },
+      ]),
+    )
+    return new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['slips', slips]])
+  }
+
+  test('every call that sends a note\'s prompt asks for 3500: a turn\'s end, its one try again, w, and a reload\'s take-up', async ($, on) => {
+    const w = world(on)
+    await start($)
+    // A turn's end with the server busy, then its try again half a minute on.
+    w.replies = [BUSY, 'ok']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    await w.clock.advance(35_000)
+    expect(w.models).toHaveLength(2)
+    expect(w.models[1]).toBe(w.models[0])
+    // w: the note written again.
+    const ui = await pane($)
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    await ui.unmount()
+    // Another turn's note cut short as a reload cuts it, taken up by the next load.
+    w.replies = ['cut']
+    await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't2')
+    await finish(w)
+    await start($)
+    await w.clock.advance(5)
+    expect(w.models).toHaveLength(5)
+    expect(w.models[4]).toBe(w.models[3])
+    expect(callsOf(w)).toEqual(Array.from({ length: 5 }, () => ({ budget: NOTE, system: SYSTEM })))
+  })
+
+  test('a quiz asks for 3400, in the pane, in the conversation and of the team\'s terms; its grade 480, r and e 900, a recap 1200, as before', async ($, on) => {
+    const w = world(on)
+    w.files.set(TEAM_PATH, TERMS)
+    await start($)
+    w.answer = CONCEPT_NOTE(['클로저'])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    // r and e under the note.
+    w.answer = '1. `const a = 1`: `a`는 1입니다.'
+    await ui.press({ key: 'trace' })
+    await w.clock.settle()
+    w.answer = '`const`는 한 번 정한 값을 다시 바꾸지 못하게 합니다.'
+    await ui.press({ key: 'easier' })
+    await w.clock.settle()
+    // The pane's quiz, then its grade.
+    w.answer = plainQ(1)
+    await ui.press({ key: 'view-quiz' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(quizItems(w.store)).toHaveLength(1)
+    w.answer = RIGHT
+    await ui.input({ key: mineKey(w.store, 0), text: '답 1' })
+    await w.clock.settle()
+    expect(quizItems(w.store)[0]).toMatchObject({ result: 'right' })
+    await ui.unmount()
+    // In the conversation: a new quiz, a team quiz, a recap.
+    w.answer = plainQ(1)
+    await learn($, '퀴즈 새로')
+    w.answer = [plainQ(1), plainQ(2)].join('\n')
+    await learn($, '퀴즈 팀')
+    expect(quizItems(w.store).map(one => one.name).sort()).toEqual(['캐시 키', '페이지네이션 커서'])
+    w.answer = '### 한 일\n반복문을 바꿨다'
+    expect((await learn($, '정리')).text).toContain('오늘 정리')
+    expect(callsOf(w)).toEqual([
+      { budget: NOTE, system: SYSTEM },
+      { budget: 900, system: ASK_SYSTEM },
+      { budget: 900, system: ASK_SYSTEM },
+      { budget: QUIZ, system: QUIZ_SYSTEM },
+      { budget: 480, system: CHECK_SYSTEM },
+      { budget: QUIZ, system: QUIZ_SYSTEM },
+      { budget: QUIZ, system: QUIZ_SYSTEM },
+      { budget: 1200, system: RECAP_SYSTEM },
+    ])
+  })
+
+  test('a quiz with a worked example in it (on by a harness) asks for 3600; its grade 480 as before', async ($, on) => {
+    // A worked example: 클로저 missed twice running where it was asked again.
+    const slip = { what: '함수가 끝나면 바깥 변수도 사라진다고 봄', type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * DAY, times: 2 }
+    const store = storeOf({ 클로저: 1 }, 3, { [conceptKey('클로저')]: slip })
+    const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
+    await start($)
+    w.answer = worked(1)
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => one.rung)).toEqual(['worked'])
+    expect(callsOf(w)).toEqual([{ budget: QUIZ_LONG, system: QUIZ_SYSTEM }])
+    // Its grade: 480 as before.
+    w.answer = RIGHT
+    await learn($, '퀴즈 1 11')
+    expect(callsOf(w).at(-1)).toEqual({ budget: 480, system: CHECK_SYSTEM })
+  })
+
+  for (const isOn of [true, false]) {
+    test(`code never seen ${isOn ? 'on (a harness\'s step 4): 3600' : 'off: the same concept asked in its own code, 3400'}`, async ($, on) => {
+      const store = storeOf({ 'for...of 반복문': 4 }, 31)
+      const w = world(on, 'ok', null, true, store)
+      w.harness = { rungNewStep: isOn ? 4 : null, rungChangedStep: null }
+      await start($)
+      w.answer = CONCEPT_NOTE(['for...of 반복문'])
+      await turn($, () => $.tool.call(EDIT_A))
+      await finish(w)
+      w.answer = isOn ? fresh(1) : plainQ(1)
+      await learn($, '퀴즈 새로')
+      expect(quizItems(store).map(one => one.rung)).toEqual([isOn ? 'new' : 'mine'])
+      expect(callsOf(w)).toEqual([{ budget: NOTE, system: SYSTEM }, { budget: isOn ? QUIZ_LONG : QUIZ, system: QUIZ_SYSTEM }])
+    })
+  }
 })
