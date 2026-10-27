@@ -232,7 +232,8 @@ export type LearnQuizItem = {
   /**
    * Which code the question asks in (1.8.0, the question ladder): the learner's own (`mine`), that code with one thing
    * changed (`changed`, 비슷한 코드: off from 1.9.0), code never seen (`new`, 처음 보는 코드: off in 1.8.0 and 1.9.0), or
-   * a worked example first and a like question after it (`worked`, 풀이 보고 풀기: off from 1.9.0), once its concept was
+   * a worked example first and a like question after it (`worked`, 풀이 보고 풀기: from 1.9.0 only for a concept a note met
+   * in code; one a 1.8.0 quiz made of a concept with none is read and graded as 1.8.0 did), once its concept was
    * missed twice running. Absent on quizzes made before, and where the model did not keep to it. A 1.7 window knows no such field
    * and drops it when it writes the quiz back: the question is then one as any other, a right answer a step on,
    * mending no slip.

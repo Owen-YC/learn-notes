@@ -45,6 +45,8 @@ const concept = (name: string, daysAgo: number, more: Partial<LearnConcept> = {}
   ...more,
 })
 const k = (name: string) => `c:${name.toLowerCase().replace(/[\s()（）"'`.…\-–—_·]+/g, '')}`
+/** The code a note met a concept in (1.9.0: a worked example, and the base asked before it, only for one met in code). */
+const CODE = { file: 'a.js', text: 'for (var i = 0; i < 3; i++) setTimeout(() => console.log(i))' }
 
 /** What 1.8.0 (3690021) kept of a slip it read back, word for word: no base (a 1.8 window writes the slips back so). */
 function slipRecordOf18(raw: unknown): LearnSlip | undefined {
@@ -251,29 +253,33 @@ describe('1.9.0: a base concept picked when a question asked again is graded (F5
 
   test('slipCounts: the open slips with a base a quiz would ask before its worked example, by count alone', () => {
     const slip = (more: Partial<LearnSlip>): LearnSlip => ({ what: 'w', type: 'scope', question: 'q', mine: 'm', at: NOW, times: 2, ...more })
-    expect(slipCounts({ a: slip({ base: 'c:x' }), b: slip({ base: 'c:y', fixedAt: NOW }), c: slip({}) }, 2).based).toBe(1)
+    // Each concept met in code (1.9.0: a worked example, and its base, only then).
+    const inCode = () => CODE
+    expect(slipCounts({ a: slip({ base: 'c:x' }), b: slip({ base: 'c:y', fixedAt: NOW }), c: slip({}) }, 2, inCode).based).toBe(1)
     expect(slipCounts({}).based).toBe(0)
     // Missed once or three times running, or set right on its try again: a base no quiz asks is not counted (4/5 검토).
-    expect(slipCounts({ a: slip({ base: 'c:x', times: 3 }), b: slip({ base: 'c:y', times: 1 }), c: slip({ base: 'c:z', isRight: true }) }, 2).based).toBe(0)
-    expect(slipCounts({ a: slip({ base: 'c:x' }) }, Infinity).based).toBe(0)
-    expect(slipCounts({ a: slip({ base: 'c:x', times: 2 }) }).based).toBe(2 === WORKED_AFTER_TIMES ? 1 : 0)
+    expect(slipCounts({ a: slip({ base: 'c:x', times: 3 }), b: slip({ base: 'c:y', times: 1 }), c: slip({ base: 'c:z', isRight: true }) }, 2, inCode).based).toBe(0)
+    expect(slipCounts({ a: slip({ base: 'c:x' }) }, Infinity, inCode).based).toBe(0)
+    expect(slipCounts({ a: slip({ base: 'c:x', times: 2 }) }, undefined, inCode).based).toBe(2 === WORKED_AFTER_TIMES ? 1 : 0)
   })
 
   test('slipNotice: a second miss that makes the next quiz a worked example says the base comes first, only with one and bases asked', () => {
     const item = { result: 'wrong' as const, gradedAt: NOW, mine: '3 3 3', slip: 'i가 하나라고 봄', slipType: 'scope' as const }
     const record: LearnSlip = { what: 'i가 하나라고 봄', type: 'scope', question: 'Q', mine: '3 3 3', at: NOW, times: 2, base: 'c:변수범위' }
-    expect(slipNotice(item, record, false, 2, true)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_BASE_NEXT}`)
-    expect(slipNotice(item, record, false, 2, false)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_NEXT}`)
+    expect(slipNotice(item, record, false, 2, true, CODE)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_BASE_NEXT}`)
+    expect(slipNotice(item, record, false, 2, false, CODE)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_NEXT}`)
     const { base, ...none } = record
-    expect(slipNotice(item, none, false, 2, true)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_NEXT}`)
+    expect(slipNotice(item, none, false, 2, true, CODE)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_NEXT}`)
     // "모르겠어요" asks no base (4/5 검토): 1.8.0's line, whatever the record holds.
-    expect(slipNotice({ ...item, mine: '모르겠어요' }, record, false, 2, true)?.text).toBe(`떠오르지 않았습니다 · ${WORKED_NEXT}`)
+    expect(slipNotice({ ...item, mine: '모르겠어요' }, record, false, 2, true, CODE)?.text).toBe(`떠오르지 않았습니다 · ${WORKED_NEXT}`)
     // Missed a third time running: a worked example with no base before it (baseFor), and said so.
-    expect(slipNotice(item, { ...record, times: 3 }, false, 2, true)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_NEXT}`)
+    expect(slipNotice(item, { ...record, times: 3 }, false, 2, true, CODE)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_NEXT}`)
     // Missed once: no worked example, no base said.
-    expect(slipNotice(item, { ...record, times: 1 }, false, 2, true)?.text).toBe('헷갈린 점: i가 하나라고 봄 · 다음 퀴즈에서 다른 코드로 다시 묻습니다')
+    expect(slipNotice(item, { ...record, times: 1 }, false, 2, true, CODE)?.text).toBe('헷갈린 점: i가 하나라고 봄 · 다음 퀴즈에서 다른 코드로 다시 묻습니다')
+    // A concept no code met (1.9.0): no worked example, so no base either, as in 1.7.
+    expect(slipNotice(item, record, false, 2, true)?.text).toBe('헷갈린 점: i가 하나라고 봄 · 다음 퀴즈에서 다른 코드로 다시 묻습니다')
     // A question asked again: the callers add workedNextText after SLIP_AGAIN.
-    expect(slipNotice({ ...item, isRetry: true }, record, false, 2, true)).toEqual({ kind: 'again', text: SLIP_AGAIN })
+    expect(slipNotice({ ...item, isRetry: true }, record, false, 2, true, CODE)).toEqual({ kind: 'again', text: SLIP_AGAIN })
     expect(base).toBe('c:변수범위')
   })
 })
@@ -295,7 +301,8 @@ describe('1.9.0: where a quiz asks the base concept (F5, baseFor · withBase · 
     const open = slips(x, more)
     return baseFor(index, key => open[key], picks, new Set(asking), {}, open, { workedAfter: 2, ...how })
   }
-  const X = pick('클로저', { slip: { what: 'i가 하나라고 봄', question: 'Q', mine: '3 3 3' } })
+  // X met in code (1.9.0: a worked example, and its base, only then).
+  const X = pick('클로저', { slip: { what: 'i가 하나라고 봄', question: 'Q', mine: '3 3 3' }, code: CODE })
   const D = pick('비동기')
   const F = pick('채우기')
   const B = pick('변수 범위')
@@ -347,16 +354,24 @@ describe('1.9.0: where a quiz asks the base concept (F5, baseFor · withBase · 
     expect(find([{ ...X, team: true }, D, F])).toBeUndefined()
     // 풀이 보고 풀기 off (F4's Infinity): no worked example, no base.
     expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: Infinity })).toBeUndefined()
+    // X met in no code (1.9.0): asked again, not by a worked example, and no base before it.
+    const { code, ...bare } = X
+    expect(find([bare, D, F])).toBeUndefined()
+    expect(code).toEqual(CODE)
   })
 
-  test('the line under a miss promises the base just where baseFor asks one: missed workedAfter times running, not set right (4/5 검토)', () => {
+  test('the line under a miss promises the base just where baseFor asks one: missed workedAfter times running, not set right (4/5 검토), met in code (1.9.0)', () => {
+    const { code, ...bare } = X
     for (const times of [1, 2, 3, 4]) {
       for (const isRight of [false, true]) {
-        const x = slip({ times, at: NOW, ...(isRight ? { isRight: true as const } : {}) })
-        const said = isWorkedNext(x, { gradedAt: NOW }, 2) && workedNextText(x, true, 2) === WORKED_BASE_NEXT
-        expect([times, isRight, said]).toEqual([times, isRight, find([X, D, F], x) !== undefined])
+        for (const x of [X, bare] as QuizPick[]) {
+          const one = slip({ times, at: NOW, ...(isRight ? { isRight: true as const } : {}) })
+          const said = isWorkedNext(one, { gradedAt: NOW }, 2, x.code) && workedNextText(one, true, 2) === WORKED_BASE_NEXT
+          expect([times, isRight, x.code !== undefined, said]).toEqual([times, isRight, x.code !== undefined, find([x, D, F], one) !== undefined])
+        }
       }
     }
+    expect(code).toEqual(CODE)
   })
 
   test('parseQuiz keeps the base\'s mark only while X\'s question follows it; the quiz prompt is the same with the mark or without', () => {

@@ -42,6 +42,8 @@ import {
   isOldGraderOpen,
   isUnrunnableChange,
   isWorkedNext,
+  isWorkedSlip,
+  basedKeys,
   pickForRung,
   rungOf,
   RUNG_CHANGED_STEP,
@@ -2591,6 +2593,39 @@ async function withCode(
   return found
 }
 
+/**
+ * The code the next quiz would ask a concept in, found as makeQuiz finds it for rungOf (withCode, the concept under the
+ * key it counts under now): what a worked example rests on from 1.9.0 (isWorkedAskable), for what a grade's line
+ * promises (isWorkedNext) and what /learn 진단 counts (slipCounts). None for a concept the index does not hold.
+ */
+async function codeNow($: EngineInterface, cfg: Config, key: string): Promise<QuizPick['code']> {
+  const map = await read($, aliases)
+  const at = resolveKey(map, key)
+  const one = rankConcepts(await read($, concepts)).find(other => other.key === at)
+  if (!one) return undefined
+  // Code never seen is not asked here: nothing but whether there is code, so no file is read for its imports.
+  return (await withCode($, cfg, [one], map, Infinity, await $.clock.now()))[0]?.code
+}
+
+/** The code each grade's concept had when its line was first drawn (gradeCode), by its key and its grade's time. */
+const gradeCodes = new Map<string, QuizPick['code'] | null>()
+
+/**
+ * The code a graded question's concept is asked in next (codeNow), for its line under the grade (slipNotice,
+ * isWorkedNext): looked for only where its slip (`record`) would make the next quiz a worked example (isWorkedSlip), and
+ * looked for once a grade in each window, the pane drawing that line again and again. None elsewhere, or when the notes
+ * cannot be read: then no worked example is promised.
+ */
+async function gradeCode($: EngineInterface, cfg: Config, item: LearnQuizItem, record: LearnSlip | undefined): Promise<QuizPick['code']> {
+  if (!isWorkedSlip(record, item, build.workedAfterTimes)) return undefined
+  const at = `${item.key}\u0000${item.gradedAt}`
+  const kept = gradeCodes.get(at)
+  if (kept !== undefined) return kept ?? undefined
+  const code = await codeNow($, cfg, item.key).catch(() => undefined)
+  gradeCodes.set(at, code ?? null)
+  return code
+}
+
 /** Bytes past which the file a concept's code came from is not read for its imports (1.9.0 F3): taken to need a library. */
 const IMPORTS_READ_MAX = 1_000_000
 
@@ -2746,7 +2781,7 @@ async function makeQuiz(
     const origin = term && root ? { teamTag: rootTag(root), teamBlurb: termBlurb(term.blurb, TERM_SEED_TEXT) } : {}
     const slip = openSlip(open, one.key)
     // Which code it is asked in (1.8.0, the question ladder): by its review step, or by a worked example first once
-    // its slip, asked again, was missed twice running.
+    // its slip, asked again, was missed twice running (1.9.0: only where its note met it in code, `one.code`).
     const rung = rungOf(
       one,
       {
@@ -4553,15 +4588,17 @@ function teamMark(item: LearnQuizItem): string {
  * offers n for the note that taught it, the note is found by its name. Only while a note did (the quiz found it in
  * one): a team term no note taught (1.7.0 D6), or a concept whose notes are gone, has none to find.
  */
-async function slipLineText($: EngineInterface, item: LearnQuizItem): Promise<string | undefined> {
+async function slipLineText($: EngineInterface, cfg: Config, item: LearnQuizItem): Promise<string | undefined> {
   const record = slipAt(await read($, slips), resolveKey(await read($, aliases), item.key))
-  const notice: SlipNotice | undefined = slipNotice(item, record, isHelpedGrade(item), build.workedAfterTimes, build.isBaseAsked)
+  // Its code as the next quiz will find it (1.9.0): a worked example is promised only of a concept met in code.
+  const code = await gradeCode($, cfg, item, record)
+  const notice: SlipNotice | undefined = slipNotice(item, record, isHelpedGrade(item), build.workedAfterTimes, build.isBaseAsked, code)
   if (!notice) return undefined
   if (notice.kind !== 'again') return notice.text
   const taught = item.noteId !== undefined ? ` · 이 개념을 배운 노트: /learn 찾기 ${item.name}` : ''
   // Missed twice running (1.8.0): the next review quiz shows a worked example first (its base first, 1.9.0 F5), said
   // before where the note is.
-  return `${notice.text}${isWorkedNext(record, item, build.workedAfterTimes) ? ` · ${workedNextText(record, build.isBaseAsked, build.workedAfterTimes)}` : ''}${taught}`
+  return `${notice.text}${isWorkedNext(record, item, build.workedAfterTimes, code) ? ` · ${workedNextText(record, build.isBaseAsked, build.workedAfterTimes)}` : ''}${taught}`
 }
 
 /**
@@ -4667,7 +4704,7 @@ async function typedAnswer($: EngineInterface, cfg: Config, current: Quiz, n: nu
           : ''
     const done = graded.item
     const graduated = graduatedIn([done], index, await read($, aliases))
-    const slipLine = await slipLineText($, done)
+    const slipLine = await slipLineText($, cfg, done)
     const teamLine = await teamLineText($, done, slipLine !== undefined)
     return [
       ...(lead ? [lead, ''] : []),
@@ -4724,7 +4761,7 @@ async function answerText($: EngineInterface, cfg: Config, current: Quiz, said: 
   const mark = shown.result !== undefined ? ` · ${resultMark(shown)}` : ''
   // A first try graded so: what it showed wrong is kept for the next quiz, as after any grade.
   const isGradedNow = shown.result !== undefined && item.result === undefined
-  const slipLine = isGradedNow ? await slipLineText($, shown) : undefined
+  const slipLine = isGradedNow ? await slipLineText($, cfg, shown) : undefined
   const teamLine = isGradedNow ? await teamLineText($, shown, slipLine !== undefined) : undefined
   const below = [teamLine, slipLine].filter(line => line !== undefined).map(line => `\n${line}`).join('')
   return `${n}번 정답\n\n${item.answer}\n(개념: ${item.name}${mark})${below}${steps.length > 0 ? `\n\n${steps.join(' · ')}` : ''}`
@@ -4873,7 +4910,7 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
     const graded = ((await lastQuiz($))?.items ?? []).flatMap((item, i) => (changedAt.includes(i) ? [{ item, n: i + 1 }] : []))
     // A team term a grade put in the concept index says so (1.7.0 D6): a miss's place is said by the reply already.
     const slipLines = (
-      await Promise.all(graded.map(async ({ item, n }) => ({ n, lines: [await teamLineText($, item, true), await slipLineText($, item)] })))
+      await Promise.all(graded.map(async ({ item, n }) => ({ n, lines: [await teamLineText($, item, true), await slipLineText($, cfg, item)] })))
     ).flatMap(({ n, lines }) => lines.flatMap(line => (line === undefined ? [] : [graded.length > 1 ? `${n}번: ${line}` : line])))
     const slipped = slipLines.length > 0 ? `\n${slipLines.join('\n')}` : ''
     if (result === 'wrong') {
@@ -4993,6 +5030,7 @@ export const register: Register = (on, options) => {
     build.workedAfterTimes = harnessStep(manifest.harness?.workedAfterTimes, WORKED_AFTER_TIMES)
     build.isBaseAsked = typeof manifest.harness?.isBaseAsked === 'boolean' ? manifest.harness.isBaseAsked : IS_BASE_ASKED
     build.isThinkAsked = typeof manifest.harness?.isThinkAsked === 'boolean' ? manifest.harness.isThinkAsked : IS_THINK_ASKED
+    gradeCodes.clear()
     mySessionId = await $.session.id().catch(() => undefined)
     // The guard first, before anything writes the concepts; then this session's stamp for the other windows.
     await enqueue('storing', () => keepSchema($))
@@ -5091,8 +5129,10 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     const seen = { list: recentSubmits, lastRequest: lastRequestText }
-    // A file's read permission is asked again this turn: the rules may have changed since the last.
+    // A file's read permission is asked again this turn: the rules may have changed since the last. So is a grade's
+    // code (gradeCode): the notes and the files left out may have too.
     readDenied.clear()
+    gradeCodes.clear()
     await followRoot($)
     // The team file (TEAM_FILE) of the project the turn works in, so its `## 빼기` holds for every edit; read again only if it changed.
     await loadTeam($)
@@ -5578,6 +5618,10 @@ export const register: Register = (on, options) => {
     // What s asks before a quiz's first, as makeQuiz fills it: the places the review leaves free go to the terms not met.
     const quizStart = quizStartText(teamSlots(unmet.length, filled), Object.values(index).filter(one => !isKnown(one)).length)
     const isAdded = (item: LearnQuizItem) => isTeamAdded(item, index, map)
+    // The code each question missed is asked in next (1.9.0, gradeCode): its line promises a worked example only of a
+    // concept met in code. Looked for only where the slip would make one, once a grade.
+    const nextCodes = await Promise.all((current?.items ?? []).map(item => (item.result === 'wrong' ? gradeCode($, cfg, item, slipOf(item.key)) : undefined)))
+    const codeOf = (i: number) => nextCodes[i]
 
     const at = shownAt(list, wanted)
     const note = list[at]
@@ -5646,7 +5690,7 @@ export const register: Register = (on, options) => {
           {canQuiz && shown !== 'note' ? (
             <Box marginTop={1} flexDirection="column">
               {shown === 'quiz'
-                ? quizView($, cfg, current, run, canQuiz, now, review, list, isTerminalFocus, el, e.surface, slipOf, quizStart, isAdded)
+                ? quizView($, cfg, current, run, canQuiz, now, review, list, isTerminalFocus, el, e.surface, slipOf, quizStart, isAdded, codeOf)
                 : conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el, slipRecord, team, marks)}
             </Box>
           ) : (
@@ -5672,7 +5716,7 @@ export const register: Register = (on, options) => {
 
     const body =
       shown === 'quiz' ? (
-        quizView($, cfg, current, run, canQuiz, now, review, list, isTerminalFocus, el, e.surface, slipOf, quizStart, isAdded)
+        quizView($, cfg, current, run, canQuiz, now, review, list, isTerminalFocus, el, e.surface, slipOf, quizStart, isAdded, codeOf)
       ) : shown === 'concepts' ? (
         conceptsView($, index, map, list, now, cfg.isAutoSave, stats, review.left, el, slipRecord, team, marks)
       ) : shown === 'note' ? (
@@ -6915,10 +6959,16 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
   const has = (record: object) => Object.prototype.hasOwnProperty.call(record, day)
   const root = (await read($, paneRoot)) ?? (await quiet($.session.root(), undefined))
   const unsaved = root === undefined ? undefined : (await quiet(allNotes($), [])).filter(note => (note.root || root) === root && note.isUnsaved === true).length
-  // The slips counted (1.8.0), merges followed: no name, no words. The ones with a base by the ladder this load runs (1.9.0 F5).
+  // The slips counted (1.8.0), merges followed: no name, no words. The ones with a base by the ladder this load runs (1.9.0 F5),
+  // their concepts met in code as the next quiz finds them (1.9.0: a base comes only before a worked example).
   const map = await quiet(read($, aliases), {})
   const slipped = await $.store.get(SLIPS_KEY).then(
-    raw => slipCounts(cleanSlips(raw, map, now), build.workedAfterTimes),
+    async raw => {
+      const clean = cleanSlips(raw, map, now)
+      const codes = new Map<string, QuizPick['code']>()
+      for (const key of basedKeys(clean, build.workedAfterTimes)) codes.set(key, await codeNow($, cfg, key).catch(() => undefined))
+      return slipCounts(clean, build.workedAfterTimes, key => codes.get(key))
+    },
     () => 'unread' as const,
   )
   // The index writes of builds before 1.9.0 seen (1.9.0): times and a count alone.
@@ -7166,7 +7216,9 @@ function conceptsView(
  * opened up (unless a try again is on show), with the note that taught its
  * concept (n) when it was wrong and the pane holds that note. `start`: what
  * s says it asks before a quiz's first (quizStartText, 1.7.0 D6: the team
- * terms not met yet in the places the review leaves free).
+ * terms not met yet in the places the review leaves free). `codeOf`: the code
+ * question i's concept is asked in next (gradeCode, 1.9.0), so its line
+ * promises a worked example only of one met in code.
  */
 function quizView(
   $: EngineInterface,
@@ -7183,6 +7235,7 @@ function quizView(
   slipOf: (key: string) => LearnSlip | undefined = () => undefined,
   start = quizStartText(0, 0),
   isAdded: (item: LearnQuizItem) => boolean = () => false,
+  codeOf: (i: number) => QuizPick['code'] = () => undefined,
 ) {
   const { Box, Text, Markdown, Button } = el
   // The mobile app draws no text field yet: there the answer is shown and graded by hand.
@@ -7253,7 +7306,9 @@ function quizView(
           const isElsewhere = item.result === 'wrong' && item.noteId !== undefined && taught === undefined
           // What the grade did with its concept's slip (1.7.0), dim under the feedback; green once one asked again is mended.
           const record = slipOf(item.key)
-          const notice = slipNotice(item, record, isHelpedGrade(item), build.workedAfterTimes, build.isBaseAsked)
+          // A worked example is promised only of a concept met in code (1.9.0): its code as the next quiz will find it.
+          const code = codeOf(i)
+          const notice = slipNotice(item, record, isHelpedGrade(item), build.workedAfterTimes, build.isBaseAsked, code)
           // A team term this grade put in the concept index (1.7.0 D6); a miss's place in the next quiz unless the notice says it.
           const added = isAdded(item) ? teamAddedText(isFullMiss(item) && !notice) : undefined
           return (
@@ -7274,7 +7329,7 @@ function quizView(
               )}
               {notice && (
                 <Text color={notice.kind === 'fixed' ? 'green' : undefined} dimColor={notice.kind !== 'fixed'} wrap="wrap">
-                  {notice.kind === 'again' && isWorkedNext(record, item, build.workedAfterTimes)
+                  {notice.kind === 'again' && isWorkedNext(record, item, build.workedAfterTimes, code)
                     ? `${notice.text}${taught ? ' · n: 이 개념을 배운 노트' : ''} · ${workedNextText(record, build.isBaseAsked, build.workedAfterTimes)}`
                     : notice.kind === 'again' && taught
                       ? `${notice.text} · n: 이 개념을 배운 노트 · 거기서 r로 따라가기`

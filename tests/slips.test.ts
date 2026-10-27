@@ -294,9 +294,12 @@ describe('1.7.0: a slip kept, asked again and mended (D5)', () => {
     expect(slipNotice(wrong, { ...SLIP, what: '', type: 'blank', mine: '[]', at }, false)).toEqual(short)
     // "모르겠어요" where a slip with words stays open (not asked again): said as nothing recalled, its words kept for the next quiz.
     // Counted twice on it by now: 1.8.0 (E3) says the next review quiz shows a worked example first, while they are on
-    // (two misses, as 1.8.0 shipped them); with them off (the 1.9.0 release's constant, 교차 검토 2) it says the next quiz.
-    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, { ...SLIP, at, times: 2 }, false, 2)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 복습 퀴즈는 풀이부터 보여 줍니다' })
-    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, { ...SLIP, at, times: 2 }, false, Infinity)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다' })
+    // (two misses, as 1.8.0 shipped them) and, from 1.9.0, of a concept met in code (its code given); with them off, or
+    // of a concept no code met, it says the next quiz.
+    const code = { file: 'a.js' }
+    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, { ...SLIP, at, times: 2 }, false, 2, false, code)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 복습 퀴즈는 풀이부터 보여 줍니다' })
+    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, { ...SLIP, at, times: 2 }, false, 2)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다' })
+    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, { ...SLIP, at, times: 2 }, false, Infinity, false, code)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다' })
     expect(slipNotice({ ...wrong, mine: '모르겠어요', isRetry: true }, { ...SLIP, at, times: 2 }, false)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
     // Kept by no grade (the schema guard on, a store that refused it): nothing promised.
     expect(slipNotice(wrong, SLIP, false)).toBeUndefined()

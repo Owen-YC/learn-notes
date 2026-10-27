@@ -4922,7 +4922,7 @@ export const KIND_LABEL: Readonly<Record<QuizKind, string>> = { predict: '예측
  * Which code a quiz question asks in (1.8.0, the question ladder), set by the concept's review step and never chosen
  * by the learner: its own code as the note met it, that code with one value, condition or order changed so the answer
  * remembered no longer fits (off from 1.9.0), code never seen (off in 1.8.0 and 1.9.0), or a worked example first once
- * it was missed twice running (off from 1.9.0, 교차 검토 2).
+ * it was missed twice running (from 1.9.0 only for a concept a note met in code, isWorkedAskable).
  */
 export type QuizRung = NonNullable<LearnQuizItem['rung']>
 
@@ -4946,14 +4946,28 @@ export const RUNG_CHANGED_STEP = Infinity
 export const RUNG_NEW_STEP = Infinity
 /**
  * Misses running on one concept (its open slip's `times`) after which the next review quiz shows a worked example
- * first: two as 1.8.0 shipped it. Off from 1.9.0 (교차 검토 2): measured again as the plugin calls (effort low,
- * docs/qa/견본.md), a worked example of a concept met in code passed, but one of a concept no code met did not, nor
- * once its line was mended (WORKED_PLAIN_ASK): some lost their marks or the example, stated a result the example does
- * not give, or asked for what the example showed, and with the line some replies ran out of room (maxTokens, 1600 then;
- * register.tsx's QUIZ_LONG_TOKENS since). A concept missed twice running is asked again as 1.7 did (다시 도전) until a
- * sample shows it right.
+ * first: two as 1.8.0 shipped it, from 1.9.0 for a concept a note met in code alone (isWorkedAskable). Measured again as
+ * the plugin calls (effort low, docs/qa/견본.md), a worked example of a concept met in code passed; one of a concept no
+ * code met did not (교차 검토 2), nor once a line was added for it, and the switch was off for both a while. Measured
+ * once more with the room a worked example's quiz now has (register.tsx's QUIZ_LONG_TOKENS; docs/qa/견본.md, '출력
+ * 상한을 올린 뒤 다시 잼'), the one in code passed and the one with none did not: a concept no code met, missed twice
+ * running, is asked again as 1.7 did (다시 도전).
  */
-export const WORKED_AFTER_TIMES = Infinity
+export const WORKED_AFTER_TIMES = 2
+/**
+ * True when a concept missed `workedAfter` (WORKED_AFTER_TIMES) times running may be asked by a worked example (풀이
+ * 보고 풀기, 1.9.0): only one a note met in code, as its `code` says, the code withCode finds for it (lines for it in
+ * the latest note that taught it, once screened) and rungOf is given. Every place that makes or promises a worked
+ * example goes by it on that code: rungOf, baseFor, the grade's line (isWorkedNext, slipNotice) and /learn 진단
+ * (slipCounts). Measured with the room a worked example's quiz now has (docs/qa/견본.md, '출력 상한을 올린 뒤 다시
+ * 잼'), the example of a concept met in code passed its bar and that of one no code met did not: that one is asked
+ * again as 1.7 did (다시 도전). Looked for afresh, never stored: a concept a later note meets in code is asked by a
+ * worked example from the next quiz on, as a grade after that note promises; one whose code is gone (its notes
+ * cleared, its file left out) is asked again, though a line drawn before promised an example.
+ */
+export function isWorkedAskable(code: { file: string } | undefined): boolean {
+  return code !== undefined
+}
 /**
  * The ladder's switches a load runs with (1.9.0): each its constant above, which a release sets by its samples
  * (docs/qa/견본.md); a test harness may run a load with others (register.tsx `build`).
@@ -4980,16 +4994,6 @@ const RUNG_ASK: readonly [QuizRung, string][] = [
 ]
 
 /**
- * Said after the worked example's line (RUNG_ASK) when the quiz has one of a concept no code met, its rung with no
- * language (교차 검토 2). Measured at effort low like the plugin (docs/qa/견본.md), such examples now and then lost their
- * marks or the example itself, showed another concept's code, stated a result the example's own lines or the tool's
- * defaults do not give, or asked for the very line or count the example showed. A worked example in code keeps
- * 1.8.0's words alone: its sample passed as they were.
- */
-const WORKED_PLAIN_ASK =
-  '칸 뒤에 언어가 없는 풀이 보고 풀기(코드 없이 만난 개념)도 문제를 "풀이:"로 시작하고 "이제 풀어 보세요:" 뒤에 묻는다. 풀이와 문제 모두 그 개념이 쓰이는 명령·주소·설정·상황으로 쓰고, 다른 개념의 예로 바꾸지 않는다. 풀이의 결과는 예의 모든 줄을 차례로 따라가, 그 도구의 기본 설정에서 실제로 나오는 것만 쓴다. 문제의 답은 풀이 결과의 어느 줄이나 개수와도 같지 않게 한다.'
-
-/**
  * The format's line for the trace a question in code never seen writes before its answer (1.9.0 F3, R{n}): read as a
  * marker of its own and dropped (parseQuiz), so the answer kept is what the code prints and the hint holds no trace.
  */
@@ -5014,7 +5018,8 @@ export function extOf(file: string): string | undefined {
 /**
  * Which code a picked concept is asked in, the first that fits: none for a team term of this repository (asked by the
  * team's words and lines, as in 1.7); a worked example once its open slip, asked again, was missed `workedAfter`
- * (WORKED_AFTER_TIMES) times running and not set right on the try again (`isRight`); none for any other open slip
+ * (WORKED_AFTER_TIMES) times running and not set right on the try again (`isRight`), for a concept met in code
+ * (isWorkedAskable, 1.9.0: one with none is asked again); none for any other open slip
  * (다시 도전, as in 1.7) or a concept with no code (asked why); code never seen from `newStep` on, for a concept due
  * whose code a sample could run and needs nothing but its language (isNewAskable; 1.9.0: none that a library, a
  * framework or a browser runs, its lines by isUnrunnableCode and its change by `isLibrary`, asked as before); its code
@@ -5034,7 +5039,7 @@ export function rungOf(
   { changedStep = RUNG_CHANGED_STEP, workedAfter = WORKED_AFTER_TIMES }: Partial<LadderSteps> = {},
 ): QuizRung | undefined {
   if (how.isTeam) return undefined
-  if (how.slip) return how.isAsking && how.slip.times >= workedAfter && how.slip.isRight !== true ? 'worked' : undefined
+  if (how.slip) return how.isAsking && how.slip.times >= workedAfter && how.slip.isRight !== true && isWorkedAskable(how.code) ? 'worked' : undefined
   if (!how.code) return undefined
   const isRunnable = how.code.isLibrary !== true && (how.code.text === undefined || !isUnrunnableCode(how.code.text))
   if (isNewAskable(one, how.code.file, how.isDue, newStep) && isRunnable) return 'new'
@@ -5519,9 +5524,10 @@ export const QUIZ_SYSTEM = [
  * `(팀 용어)`, carries the team's lines under their own head (`팀 코드 (fetcher.ts 12~30줄)`) when it has them, and the
  * quiz is told the team's words and lines are data (TEAM_IS_DATA). A concept on a rung of the question ladder (1.8.0)
  * says it under its head (`칸: 비슷한 코드`), and the quiz is told what each of its rungs asks (RUNG_ASK); one asked by
- * a worked example has its slip shown in the example, so the sentence that keeps a slip unsaid leaves it out; one of a
- * concept no code met is told more of how (WORKED_PLAIN_ASK, 1.9.0 교차 검토 2), one in code as 1.8.0 told it. A quiz
- * with code never seen (1.9.0 F3) is shown an R line in its format, the trace its answer is written after.
+ * a worked example has its slip shown in the example, so the sentence that keeps a slip unsaid leaves it out. A worked
+ * example is told as 1.8.0 told it: from 1.9.0 one is made only of a concept met in code (isWorkedAskable), whose sample
+ * passed with those words; the line 교차 검토 2 tried for one with no code is in docs/qa/견본.md, and goes nowhere. A
+ * quiz with code never seen (1.9.0 F3) is shown an R line in its format, the trace its answer is written after.
  */
 export function quizPrompt(
   picks: readonly (LearnConcept & Pick<QuizPick, 'code' | 'slip' | 'team' | 'teamCode' | 'isTeamMarked' | 'rung' | 'lang'>)[],
@@ -5551,7 +5557,6 @@ export function quizPrompt(
     '',
     `개념마다 문제 하나씩, 위 순서대로 ${picks.length}개를 낸다. 문제에 개념 이름을 그대로 쓰지 말고, 코드나 상황을 보여 주고 묻는다.`,
     ...RUNG_ASK.filter(([rung]) => rungs.has(rung)).map(([, ask]) => ask),
-    ...(picks.some(one => one.rung === 'worked' && one.lang === undefined) ? [WORKED_PLAIN_ASK] : []),
     ...(hasWorked || rungs.has('new') ? [RUNG_WRITES] : []),
     ...(hasSlip
       ? [
@@ -6210,12 +6215,18 @@ export function noteSlipName(
  * The slips the store keeps, counted for /learn 진단 (1.8.0), with no name and no words: all, open and mended, of
  * kind 기타, with no words (`blank`), and open after two misses or more (`againOpen`, 열린 채 두 번 이상: what the
  * name says, a right answer after being asked back included, and not the worked examples the next quiz will show,
- * which rungOf picks by more than the slip); and open with a base concept a quiz would ask before its worked example
- * (1.9.0 F5, `based`: 바탕 개념; missed `workedAfter` times running, not set right on its try again, as baseFor asks).
+ * which rungOf picks by more than the slip: its concept's code too, 1.9.0); and open with a base concept a quiz would
+ * ask before its worked example (1.9.0 F5, `based`: 바탕 개념; missed `workedAfter` times running, not set right on its
+ * try again, its concept met in code, isWorkedAskable on `codeOf`, the code the next quiz would find for the key the
+ * slip is under: as baseFor asks).
  */
 export type SlipCounts = { all: number; open: number; mended: number; other: number; blank: number; againOpen: number; based: number }
 
-export function slipCounts(slips: Readonly<Record<string, LearnSlip>>, workedAfter = WORKED_AFTER_TIMES): SlipCounts {
+export function slipCounts(
+  slips: Readonly<Record<string, LearnSlip>>,
+  workedAfter = WORKED_AFTER_TIMES,
+  codeOf: (key: string) => { file: string } | undefined = () => undefined,
+): SlipCounts {
   const list = Object.values(slips)
   const open = list.filter(one => one.fixedAt === undefined)
   return {
@@ -6225,8 +6236,18 @@ export function slipCounts(slips: Readonly<Record<string, LearnSlip>>, workedAft
     other: list.filter(one => one.type === 'other').length,
     blank: list.filter(one => one.type === 'blank').length,
     againOpen: open.filter(one => one.times >= 2).length,
-    based: open.filter(one => one.base !== undefined && one.times === workedAfter && one.isRight !== true).length,
+    based: basedKeys(slips, workedAfter).filter(key => isWorkedAskable(codeOf(key))).length,
   }
+}
+
+/**
+ * The keys of the slips slipCounts counts as `based` once their concepts are met in code: open, with a base, missed
+ * `workedAfter` times running, not set right on a try again. So /learn 진단 looks for the code of these alone.
+ */
+export function basedKeys(slips: Readonly<Record<string, LearnSlip>>, workedAfter = WORKED_AFTER_TIMES): string[] {
+  return Object.entries(slips)
+    .filter(([, one]) => one.fixedAt === undefined && one.base !== undefined && one.times === workedAfter && one.isRight !== true)
+    .map(([key]) => key)
 }
 
 /** What a graded question's line under its feedback says of its concept's slip (slipNotice): the kind, and its words. */
@@ -6261,20 +6282,20 @@ export const WORKED_BASE_NEXT = '다음 복습 퀴즈는 바탕 개념과 풀이
  * What a miss that makes the next review quiz a worked example (isWorkedNext) says of it: WORKED_BASE_NEXT once its slip
  * (`record`, as the store has it after the grade) has a base, bases are asked (1.9.0 F5) and it was missed `workedAfter`
  * (WORKED_AFTER_TIMES) times running, just where baseFor asks a base before the worked example (a third miss running,
- * after one set right on its try again, is asked with none: once for a slip); else WORKED_NEXT.
+ * after one set right on its try again, is asked with none: once for a slip); else WORKED_NEXT. Said only where
+ * isWorkedNext holds, its concept met in code then (isWorkedAskable), as baseFor asks a base only before one.
  */
 export function workedNextText(record: Pick<LearnSlip, 'base' | 'times'> | undefined, isBaseAsked = IS_BASE_ASKED, workedAfter = WORKED_AFTER_TIMES): string {
   return isBaseAsked && record?.base !== undefined && record.times === workedAfter ? WORKED_BASE_NEXT : WORKED_NEXT
 }
 
 /**
- * True when a graded question's concept is asked by a worked example in the next review quiz (rungOf): its slip
- * (`record`, as the store has it after the grade) open, kept by this very grade (so the next quiz asks it again,
- * slipsToAsk: a grade that kept no miss, as wrong once the answer is seen, leaves it gone over), missed
- * `workedAfter` (WORKED_AFTER_TIMES) times running, not set right on a try again, and the question no team term's
- * (asked by the team's words, as in 1.7).
+ * The slip's half of isWorkedNext: its slip (`record`, as the store has it after the grade) open, kept by this very
+ * grade (so the next quiz asks it again, slipsToAsk: a grade that kept no miss, as wrong once the answer is seen, leaves
+ * it gone over), missed `workedAfter` (WORKED_AFTER_TIMES) times running, not set right on a try again, and the question
+ * no team term's (asked by the team's words, as in 1.7). Only then does a caller look for the concept's code.
  */
-export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuizItem, 'team' | 'gradedAt'>, workedAfter = WORKED_AFTER_TIMES): boolean {
+export function isWorkedSlip(record: LearnSlip | undefined, item: Pick<LearnQuizItem, 'team' | 'gradedAt'>, workedAfter = WORKED_AFTER_TIMES): boolean {
   return (
     record !== undefined &&
     record.fixedAt === undefined &&
@@ -6286,14 +6307,31 @@ export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuiz
 }
 
 /**
+ * True when a graded question's concept is asked by a worked example in the next review quiz (rungOf): its slip as
+ * isWorkedSlip says, and its concept met in code (isWorkedAskable, 1.9.0), `code` being the code the next quiz would
+ * find for it now (withCode's, as rungOf is given it; none given, none found). A concept no code met is asked again
+ * (다시 도전) and is promised no worked example, whatever its question was: a worked example a quiz of 1.8.0 made of
+ * one is graded as 1.8.0 graded it, but no 1.9.0 quiz asks it so again.
+ */
+export function isWorkedNext(
+  record: LearnSlip | undefined,
+  item: Pick<LearnQuizItem, 'team' | 'gradedAt'>,
+  workedAfter = WORKED_AFTER_TIMES,
+  code?: { file: string },
+): boolean {
+  return isWorkedSlip(record, item, workedAfter) && isWorkedAskable(code)
+}
+
+/**
  * The line a graded question shows under its feedback about its concept's slip (`record`, as the store has it now):
  * the slip this grade kept and that the next quiz asks it again, an answer with nothing in it (by what it was: none
  * recalled, or a real one too short to read a slip from), a slip mended right after a question asked back, a question
  * asked again missed again, mended on another day, or right again the same day (only with no hint and no question
  * asked back, `isHelped` false). Nothing when the grade kept none (the schema guard on, a store that refused it).
  * A worked example missed (1.8.0) is a question asked again missed again; a miss that makes the next review quiz show
- * a worked example (isWorkedNext) says so in place of the next quiz's other code (the callers add it to `again`), its
- * base first when the slip has one (workedNextText, 1.9.0 F5).
+ * a worked example (isWorkedNext on `code`, the code the next quiz would find for the concept: 1.9.0, only one met in
+ * code) says so in place of the next quiz's other code (the callers add it to `again`), its base first when the slip
+ * has one (workedNextText, 1.9.0 F5); one no code met is told it is asked again, as in 1.7.
  */
 export function slipNotice(
   item: Pick<LearnQuizItem, 'result' | 'gradedAt' | 'isRetry' | 'mine' | 'slip' | 'slipType' | 'firstTry' | 'rung' | 'team'>,
@@ -6301,6 +6339,7 @@ export function slipNotice(
   isHelped: boolean,
   workedAfter = WORKED_AFTER_TIMES,
   isBaseAsked = IS_BASE_ASKED,
+  code?: { file: string },
 ): SlipNotice | undefined {
   const at = item.gradedAt
   if (item.result === undefined || at === undefined) return undefined
@@ -6310,7 +6349,7 @@ export function slipNotice(
     // Missed again where it was asked again: the same slip once more, unless this answer showed another in its place.
     if ((item.isRetry || item.rung === 'worked') && open && !(isNow && open.times === 1)) return { kind: 'again', text: SLIP_AGAIN }
     if (!isNow) return undefined
-    const isWorked = isWorkedNext(open, item, workedAfter)
+    const isWorked = isWorkedNext(open, item, workedAfter, code)
     // An answer with nothing to read a slip from is said as such, though a slip with words stays open (nextSlip).
     const found = slipFrom(item)
     if (open.type === 'blank' || found?.type === 'blank') {
@@ -6389,7 +6428,8 @@ export type BaseFound = { key: string; before: string; slot: number }
  * The base concept a review quiz asks right before a worked example (1.9.0 F5), if any. The worked example (X) is the
  * first of `picks` asked again (`asking`), no team term of this repository, whose slip (`slipOf`, as it will stand once
  * the quiz this one replaces is settled) is open, missed `workedAfter` (WORKED_AFTER_TIMES) times running and not set
- * right on a try again, with a base: what rungOf makes a worked example. Its base, followed through merges, is asked
+ * right on a try again, with a base, its pick's `code` there (isWorkedAskable, 1.9.0: met in code): what rungOf makes a
+ * worked example. Its base, followed through merges, is asked
  * when the index holds it, not known, not X, in no place of the quiz, gone over by no quiz since that slip was kept, with
  * no slip of its own open in the store (`open`: asked again as its own, soon), and no team term of any repository
  * (`teamMarks`). It takes the last place that is no slip asked again, not X and no concept answered wrong (a filler,
@@ -6407,7 +6447,14 @@ export function baseFor(
 ): BaseFound | undefined {
   const isWorked = (one: QuizPick) => {
     const slip = asking.has(one.key) && one.team !== true ? slipOf(one.key) : undefined
-    return slip !== undefined && slip.fixedAt === undefined && slip.times === workedAfter && slip.isRight !== true && slip.base !== undefined
+    return (
+      slip !== undefined &&
+      slip.fixedAt === undefined &&
+      slip.times === workedAfter &&
+      slip.isRight !== true &&
+      slip.base !== undefined &&
+      isWorkedAskable(one.code)
+    )
   }
   const x = picks.find(isWorked)
   const slip = x ? slipOf(x.key) : undefined

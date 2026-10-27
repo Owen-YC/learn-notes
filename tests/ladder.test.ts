@@ -19,7 +19,12 @@ import {
   isOldGraderOpen,
   isUnrunnableChange,
   isUnrunnableCode,
+  isWorkedAskable,
   isWorkedNext,
+  isWorkedSlip,
+  basedKeys,
+  slipCounts,
+  SLIP_AGAIN,
   markFor,
   markHelped,
   markPartial,
@@ -71,11 +76,12 @@ describe('1.8.0: the question ladder, which code a question asks in (E3)', () =>
     expect(rungOf({ ...at(2), name: '다른 저장소 팀 용어' }, { ...plain, code: CODE }, Infinity, ON)).toBe('changed')
   })
 
-  test('an open slip asked again: 다시 도전 (no rung) at first; missed twice running, a worked example, with or without code', () => {
+  test('an open slip asked again: 다시 도전 (no rung) at first; missed twice running, a worked example of a concept met in code (1.9.0: one with none is asked again)', () => {
     const asking = { ...plain, isAsking: true }
     expect(rungOf(at(2), { ...asking, code: CODE, slip: { times: 1 } }, Infinity, ON)).toBeUndefined()
     expect(rungOf(at(2), { ...asking, code: CODE, slip: { times: 2 } }, Infinity, ON)).toBe('worked')
-    expect(rungOf(at(0), { ...asking, slip: { times: 3 } }, Infinity, ON)).toBe('worked')
+    expect(rungOf(at(0), { ...asking, code: CODE, slip: { times: 3 } }, Infinity, ON)).toBe('worked')
+    expect(rungOf(at(0), { ...asking, slip: { times: 3 } }, Infinity, ON)).toBeUndefined()
     expect(rungOf(at(2), { ...asking, code: CODE, slip: { times: 2 } })).toBe(2 >= WORKED_AFTER_TIMES ? 'worked' : undefined)
     // Set right on the try again (isRight): asked again with no example, another day.
     expect(rungOf(at(2), { ...asking, code: CODE, slip: { times: 2, isRight: true } }, Infinity, ON)).toBeUndefined()
@@ -365,38 +371,38 @@ describe('1.8.0: a worked example\'s flash card, its next quiz said, and how its
     expect(bankQuestion({ question: '문제' })).toBe('문제')
   })
 
-  test('a worked example missed is missed again; missed twice running, the line says the next quiz shows a worked example', () => {
+  test('a worked example missed is missed again; missed twice running in code, the line says the next quiz shows a worked example', () => {
     const graded = NOW + DAY
     const wrong = { result: 'wrong' as const, gradedAt: graded }
     const twice = { ...SLIP, at: graded, times: 2 }
-    expect(slipNotice({ ...wrong, rung: 'worked' }, twice, true, ON.workedAfter)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
+    expect(slipNotice({ ...wrong, rung: 'worked' }, twice, true, ON.workedAfter, false, CODE)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
     // Another kind in its place: a slip of its own, once.
-    expect(slipNotice({ ...wrong, rung: 'worked' }, { ...SLIP, what: '다른 것', at: graded }, true, ON.workedAfter)?.kind).toBe('slip')
+    expect(slipNotice({ ...wrong, rung: 'worked' }, { ...SLIP, what: '다른 것', at: graded }, true, ON.workedAfter, false, CODE)?.kind).toBe('slip')
     // The rare second miss on no question asked again (a practice, then a quiz made before it): the slip's line says it.
-    expect(slipNotice(wrong, twice, false, ON.workedAfter)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · ${WORKED_NEXT}` })
-    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, twice, false, ON.workedAfter)).toEqual({ kind: 'blank', text: `떠오르지 않았습니다 · ${WORKED_NEXT}` })
+    expect(slipNotice(wrong, twice, false, ON.workedAfter, false, CODE)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · ${WORKED_NEXT}` })
+    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, twice, false, ON.workedAfter, false, CODE)).toEqual({ kind: 'blank', text: `떠오르지 않았습니다 · ${WORKED_NEXT}` })
     // A team term's is said as in 1.7.
-    expect(slipNotice({ ...wrong, team: true }, twice, false, ON.workedAfter)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` })
+    expect(slipNotice({ ...wrong, team: true }, twice, false, ON.workedAfter, false, CODE)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` })
     expect(WORKED_NEXT).toBe('다음 복습 퀴즈는 풀이부터 보여 줍니다')
   })
 
-  test('the next quiz is a worked example only with the slip open, kept by this grade, twice or more, not set right, and no team term\'s', () => {
+  test('the next quiz is a worked example only with the slip open, kept by this grade, twice or more, not set right, no team term\'s, and met in code', () => {
     const item = { gradedAt: NOW }
-    expect(isWorkedNext({ ...SLIP, times: 2 }, item, ON.workedAfter)).toBe(true)
-    expect(isWorkedNext({ ...SLIP, times: 5 }, item, ON.workedAfter)).toBe(true)
-    expect(isWorkedNext({ ...SLIP, times: 1 }, item, ON.workedAfter)).toBe(false)
-    expect(isWorkedNext({ ...SLIP, times: 2, isRight: true }, item, ON.workedAfter)).toBe(false)
-    expect(isWorkedNext({ ...SLIP, times: 2, fixedAt: NOW }, item, ON.workedAfter)).toBe(false)
-    expect(isWorkedNext({ ...SLIP, times: 2 }, { team: true, gradedAt: NOW }, ON.workedAfter)).toBe(false)
-    expect(isWorkedNext(undefined, item, ON.workedAfter)).toBe(false)
+    expect(isWorkedNext({ ...SLIP, times: 2 }, item, ON.workedAfter, CODE)).toBe(true)
+    expect(isWorkedNext({ ...SLIP, times: 5 }, item, ON.workedAfter, CODE)).toBe(true)
+    expect(isWorkedNext({ ...SLIP, times: 1 }, item, ON.workedAfter, CODE)).toBe(false)
+    expect(isWorkedNext({ ...SLIP, times: 2, isRight: true }, item, ON.workedAfter, CODE)).toBe(false)
+    expect(isWorkedNext({ ...SLIP, times: 2, fixedAt: NOW }, item, ON.workedAfter, CODE)).toBe(false)
+    expect(isWorkedNext({ ...SLIP, times: 2 }, { team: true, gradedAt: NOW }, ON.workedAfter, CODE)).toBe(false)
+    expect(isWorkedNext(undefined, item, ON.workedAfter, CODE)).toBe(false)
     // As the build ships it (WORKED_AFTER_TIMES), and with worked examples off (1.9.0 F4): never.
-    expect(isWorkedNext({ ...SLIP, times: 2 }, item)).toBe(2 >= WORKED_AFTER_TIMES)
-    expect(isWorkedNext({ ...SLIP, times: 5 }, item, Infinity)).toBe(false)
-    expect(slipNotice({ result: 'wrong', gradedAt: NOW }, { ...SLIP, times: 2, at: NOW }, false, Infinity)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` })
+    expect(isWorkedNext({ ...SLIP, times: 2 }, item, undefined, CODE)).toBe(2 >= WORKED_AFTER_TIMES)
+    expect(isWorkedNext({ ...SLIP, times: 5 }, item, Infinity, CODE)).toBe(false)
+    expect(slipNotice({ result: 'wrong', gradedAt: NOW }, { ...SLIP, times: 2, at: NOW }, false, Infinity, false, CODE)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` })
     // A grade that kept no miss (wrong once the answer is seen, f with no slip read): the slip is the one before, gone
     // over by this grade, so the next quiz does not ask it again first, and no worked example is said.
-    expect(isWorkedNext({ ...SLIP, times: 2, at: NOW - 8 * DAY }, item, ON.workedAfter)).toBe(false)
-    expect(slipNotice({ result: 'wrong', gradedAt: NOW, rung: 'worked' }, { ...SLIP, times: 2, at: NOW - 8 * DAY }, true, ON.workedAfter)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
+    expect(isWorkedNext({ ...SLIP, times: 2, at: NOW - 8 * DAY }, item, ON.workedAfter, CODE)).toBe(false)
+    expect(slipNotice({ result: 'wrong', gradedAt: NOW, rung: 'worked' }, { ...SLIP, times: 2, at: NOW - 8 * DAY }, true, ON.workedAfter, false, CODE)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
   })
 
   test('a grade marks its concept as in 1.7, but a miss in code never seen steps back one, not to the first', () => {
@@ -636,48 +642,119 @@ describe('1.9.0: 처음 보는 코드 from the fifth step, for concepts due met 
   })
 })
 
-/** The line said after the worked example's own for one of a concept no code met (교차 검토 2, WORKED_PLAIN_ASK). */
+/** The line 교차 검토 2 said after the worked example's own for one of a concept no code met: from 1.9.0's last measure, no prompt's. */
 const WORKED_PLAIN =
   '칸 뒤에 언어가 없는 풀이 보고 풀기(코드 없이 만난 개념)도 문제를 "풀이:"로 시작하고 "이제 풀어 보세요:" 뒤에 묻는다. 풀이와 문제 모두 그 개념이 쓰이는 명령·주소·설정·상황으로 쓰고, 다른 개념의 예로 바꾸지 않는다. 풀이의 결과는 예의 모든 줄을 차례로 따라가, 그 도구의 기본 설정에서 실제로 나오는 것만 쓴다. 문제의 답은 풀이 결과의 어느 줄이나 개수와도 같지 않게 한다.'
 
-describe('1.9.0 (교차 검토 2): a worked example of a concept no code met is told more of how; one in code is told as in 1.8.0', () => {
+describe('1.9.0: 풀이 보고 풀기 of a concept met in code alone; one no code met is asked again (docs/qa/견본.md, 출력 상한을 올린 뒤 다시 잼)', () => {
   const GIT = { what: '커밋하지 않은 수정도 push로 올라간다고 봄', question: '커밋하지 않고 `git push`를 하면?', mine: '올라갑니다' }
-  const plainWorked = pickForRung(pick('git push', { slip: GIT }), rungOf(at(0), { ...plain, slip: { times: 2 }, isAsking: true }, Infinity, ON))
-  const codeWorked = pickForRung(pick('합계', { code: CODE, slip: SLIP }), rungOf(at(0), { ...plain, code: CODE, slip: { times: 2 }, isAsking: true }, Infinity, ON))
-  const retry = pickForRung(pick('git pull', { slip: GIT }), rungOf(at(0), { ...plain, slip: { times: 1 }, isAsking: true }, Infinity, ON))
+  const asking = { ...plain, isAsking: true }
+  const graded = NOW + DAY
+  const twice: LearnSlip = { ...SLIP, at: graded, times: 2 }
+  const item = { gradedAt: graded }
+  const wrong = { result: 'wrong' as const, gradedAt: graded }
+  const BARE = { file: 'Makefile', text: 'build:\n\tnode build.js' }
 
-  test('the line comes right after the worked example\'s own, once, when one of the quiz\'s worked examples has no language', () => {
-    expect([plainWorked.rung, plainWorked.lang, codeWorked.rung, codeWorked.lang, retry.rung]).toEqual(['worked', undefined, 'worked', 'js', undefined])
-    const alone = quizPrompt([plainWorked], 'beginner')
-    expect(alone).toContain('\n   칸: 풀이 보고 풀기\n\n')
-    expect(alone).toContain(`힌트에서 풀이를 되풀이하지 않는다.\n${WORKED_PLAIN}\n'처음 보는 코드'·'풀이 보고 풀기' 칸은`)
-    const both = quizPrompt([codeWorked, plainWorked], 'beginner')
-    expect(both.split(WORKED_PLAIN).length).toBe(2)
-    // Two of them in one quiz: still once.
-    const two = quizPrompt([plainWorked, { ...plainWorked, key: 'c:git pull', name: 'git pull' }], 'beginner')
-    expect(two.split(WORKED_PLAIN).length).toBe(2)
+  test('the switch as 1.8.0 shipped it (two misses running), and the rule: a concept met in code, by its code alone', () => {
+    expect(WORKED_AFTER_TIMES).toBe(2)
+    expect(isWorkedAskable(CODE)).toBe(true)
+    // Code in a file with no extension is code all the same (asked with no language, as 1.8.0 asked it).
+    expect(isWorkedAskable(BARE)).toBe(true)
+    expect(isWorkedAskable({ file: 'a.js' })).toBe(true)
+    expect(isWorkedAskable(undefined)).toBe(false)
   })
 
-  test('none for a worked example in code, nor for a quiz with no worked example: those prompts are as before', () => {
+  test('rungOf: missed twice running, a worked example in code; 다시 도전 with none; the same slip once a later note met it in code', () => {
+    // In code: as 1.8.0 made it, by the switch as it ships too.
+    expect(rungOf(at(2), { ...asking, code: CODE, slip: { times: 2 } })).toBe('worked')
+    expect(rungOf(at(2), { ...asking, code: BARE, slip: { times: 4 } })).toBe('worked')
+    // No code: asked again as 1.7 did, however many times it was missed.
+    for (const times of [2, 3, 7]) expect(rungOf(at(2), { ...asking, slip: { times } })).toBeUndefined()
+    expect(rungOf(at(2), { ...asking, slip: { times: 2 } }, Infinity, ON)).toBeUndefined()
+    // The same concept and slip, its code found later (a note met it in code since): a worked example from then on.
+    const one = at(2)
+    const slip = { times: 3 }
+    expect(rungOf(one, { ...asking, slip })).toBeUndefined()
+    expect(rungOf(one, { ...asking, slip, code: CODE })).toBe('worked')
+    // Still never for a team term of this repository, nor a slip set right on its try again, code or none.
+    expect(rungOf(one, { ...asking, isTeam: true, slip, code: CODE })).toBeUndefined()
+    expect(rungOf(one, { ...asking, slip: { times: 2, isRight: true }, code: CODE })).toBeUndefined()
+    // Asked again, its pick goes as any slip's: its words and slip, no rung, no language.
+    const again = pickForRung(pick('git push', { slip: GIT }), rungOf(at(0), { ...asking, slip: { times: 2 } }))
+    expect([again.rung, again.lang, again.slip]).toEqual([undefined, undefined, GIT])
+  })
+
+  test('isWorkedNext · slipNotice: the line promises a worked example only of a concept met in code; one with none is told as in 1.7; found later, promised', () => {
+    // The slip's half holds for both: only the code tells them apart.
+    expect(isWorkedSlip(twice, item)).toBe(true)
+    expect(isWorkedNext(twice, item, undefined, CODE)).toBe(true)
+    expect(isWorkedNext(twice, item)).toBe(false)
+    expect(isWorkedNext(twice, item, undefined, undefined)).toBe(false)
+    // The line under a second miss on no question asked again.
+    expect(slipNotice(wrong, twice, false, undefined, false, CODE)?.text).toBe(`헷갈린 점: ${SLIP.what} · ${WORKED_NEXT}`)
+    expect(slipNotice(wrong, twice, false)?.text).toBe(`헷갈린 점: ${SLIP.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다`)
+    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, twice, false, undefined, false, CODE)?.text).toBe(`떠오르지 않았습니다 · ${WORKED_NEXT}`)
+    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, twice, false)?.text).toBe('떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다')
+    // A question asked again, missed again: SLIP_AGAIN for both; the callers add WORKED_NEXT only where isWorkedNext holds.
+    for (const code of [CODE, undefined]) expect(slipNotice({ ...wrong, isRetry: true }, twice, false, undefined, false, code)).toEqual({ kind: 'again', text: SLIP_AGAIN })
+    // A worked example a 1.8.0 quiz made of a concept no code met, missed: missed again, as 1.8.0 said it, but no worked
+    // example is promised (1.9.0 asks it again); of one in code, promised as 1.8.0 promised it.
+    const third = { ...twice, times: 3 }
+    expect(slipNotice({ ...wrong, rung: 'worked' }, third, true)).toEqual({ kind: 'again', text: SLIP_AGAIN })
+    expect(isWorkedNext(third, item)).toBe(false)
+    expect(isWorkedNext(third, item, undefined, CODE)).toBe(true)
+    // Code the next quiz finds since (a later note): the same record and grade promise it.
+    expect([isWorkedNext(twice, item), isWorkedNext(twice, item, undefined, { file: 'later.ts' })]).toEqual([false, true])
+    // A team term's, or the switch off: none, code or not.
+    expect(isWorkedNext(twice, { ...item, team: true }, undefined, CODE)).toBe(false)
+    expect(isWorkedNext(twice, item, Infinity, CODE)).toBe(false)
+  })
+
+  test('slipCounts · basedKeys: /learn 진단\'s bases are the slips a quiz would ask a base for, of concepts met in code alone', () => {
+    const slip = (more: Partial<LearnSlip>): LearnSlip => ({ ...SLIP, times: 2, base: 'c:변수범위', ...more })
+    const slips = { 'c:a': slip({}), 'c:b': slip({}), 'c:c': slip({ times: 3 }), 'c:d': slip({ base: undefined }), 'c:e': slip({ fixedAt: NOW }) }
+    // The keys whose code /learn 진단 looks for: open, a base, missed twice running, not set right. Code aside.
+    expect(basedKeys(slips)).toEqual(['c:a', 'c:b'])
+    expect(basedKeys(slips, Infinity)).toEqual([])
+    expect(slipCounts(slips, 2, key => (key === 'c:a' ? CODE : undefined)).based).toBe(1)
+    expect(slipCounts(slips, 2, () => CODE).based).toBe(2)
+    expect(slipCounts(slips, 2).based).toBe(0)
+    // The other counts go by the slips alone, as in 1.8.0.
+    expect(slipCounts(slips, 2)).toEqual({ ...slipCounts(slips, 2, () => CODE), based: 0 })
+  })
+
+  test('quizPrompt: a worked example is told in 1.8.0\'s words, in a file with no extension too; the line for one with no code goes nowhere', () => {
+    const codeWorked = pickForRung(pick('합계', { code: CODE, slip: SLIP }), rungOf(at(0), { ...asking, code: CODE, slip: { times: 2 } }))
+    const bareWorked = pickForRung(pick('빌드', { code: BARE, slip: SLIP }), rungOf(at(0), { ...asking, code: BARE, slip: { times: 2 } }))
+    const plainAgain = pickForRung(pick('git push', { slip: GIT }), rungOf(at(0), { ...asking, slip: { times: 2 } }))
+    expect([codeWorked.rung, codeWorked.lang, bareWorked.rung, bareWorked.lang]).toEqual(['worked', 'js', 'worked', undefined])
     const inCode = quizPrompt([codeWorked], 'beginner')
     expect(inCode).toContain('\n   칸: 풀이 보고 풀기 (js로)\n')
-    expect(inCode).not.toContain('칸 뒤에 언어가 없는')
-    expect(quizPrompt([codeWorked, retry], 'beginner')).not.toContain('칸 뒤에 언어가 없는')
-    expect(quizPrompt([retry], 'beginner')).not.toContain('칸 뒤에 언어가 없는')
-    // With worked examples off (the release's constant, or a harness's Infinity), a concept missed twice is asked again.
-    const off = pickForRung(pick('git push', { slip: GIT }), rungOf(at(0), { ...plain, slip: { times: 2 }, isAsking: true }, Infinity, { changedStep: 2, workedAfter: Infinity }))
-    expect(off.rung).toBeUndefined()
-    expect(quizPrompt([off], 'beginner')).not.toContain('풀이 보고 풀기')
+    const bare = quizPrompt([bareWorked], 'beginner')
+    expect(bare).toContain('\n   칸: 풀이 보고 풀기\n')
+    for (const prompt of [inCode, bare, quizPrompt([codeWorked, plainAgain], 'beginner'), quizPrompt([bareWorked, plainAgain], 'beginner')]) {
+      expect(prompt).not.toContain('칸 뒤에 언어가 없는')
+      expect(prompt).not.toContain(WORKED_PLAIN)
+    }
+    // One no code met, missed twice: a question asked again, its slip unsaid, no rung and no code of the quiz's own.
+    const again = quizPrompt([plainAgain], 'beginner')
+    expect(again).not.toContain('풀이 보고 풀기')
+    expect(again).not.toContain('칸:')
+    expect(again).toContain('"지난번" 줄이 붙은 개념은 같은 헷갈림이 드러나는 다른 코드나 값으로 묻는다.')
   })
 })
 
-describe('1.9.0: a quiz with no code never seen is 1.8.0\'s to the byte, its 비슷한 코드 sentence and the line for a worked example no code met aside (F3 · F4 · 교차 검토 2)', () => {
+describe('1.9.0: a quiz with no code never seen is 1.8.0\'s to the byte, its 비슷한 코드 sentence aside; a worked example of a concept no code met is asked again, as 1.8.0 asked one missed once (F3 · F4 · 1.9.0 마무리)', () => {
   const CHANGED_18 = '비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 보여 주고 묻는다. 원래 코드의 답으로는 맞힐 수 없게 바꾼다.'
   const CHANGED_19 = `${CHANGED_18} 바꿔 보기로 낼 때도 학습자 코드를 그대로 보이거나 몇 줄만 떼어 보이지 않고, 한 곳을 바꾼 코드에서 묻는다.`
-  const WORKED_18 = '이어서 "이제 풀어 보세요:" 뒤에 같은 원리를 다른 값으로 묻는다. 풀이의 결과와 문제의 답이 같지 않게 한다. 힌트에서 풀이를 되풀이하지 않는다.'
+  /** The cases where 1.8.0 made a worked example of a concept no code met, and the same quiz with that slip missed once. */
+  const ASKED_AGAIN: Record<string, string> = { blank: 'blank-again' }
   for (const one of QUIZ_CASES_18) {
     test(`${one.id}: the rungs, the prompt and the questions read back, code never seen off or on (4)`, () => {
-      const want = QUIZ_OUTPUT_18[one.id]!
+      // Just the quizzes where 1.8.0 made a worked example with no code are 1.8.0's quiz of that slip missed once.
+      const isPlainWorked18 = QUIZ_OUTPUT_18[one.id]!.rungs.some((rung, i) => rung === 'worked' && one.picks[i]!.how.code === undefined)
+      expect(isPlainWorked18).toBe(one.id in ASKED_AGAIN)
+      const want = QUIZ_OUTPUT_18[ASKED_AGAIN[one.id] ?? one.id]!
       for (const newStep of [Infinity, 4]) {
         const picks = one.picks.map(p => {
           const rung = rungOf(p.one, { ...(p.how.code ? { code: p.how.code } : {}), ...(p.how.slip ? { slip: p.how.slip } : {}), isAsking: p.how.isAsking ?? false, isTeam: p.how.isTeam ?? false, isDue: p.how.isDue }, newStep, ON)
@@ -691,10 +768,9 @@ describe('1.9.0: a quiz with no code never seen is 1.8.0\'s to the byte, its 비
           return pickForRung(base, rung)
         })
         expect(picks.map(p => p.rung ?? null)).toEqual(want.rungs)
-        // A worked example of a concept no code met (교차 검토 2): one line more, right after the worked example's own.
-        const isPlainWorked = picks.some(p => p.rung === 'worked' && p.lang === undefined)
-        const prompt = want.prompt.replace(CHANGED_18, CHANGED_19)
-        expect(quizPrompt(picks, one.level)).toBe(isPlainWorked ? prompt.replace(WORKED_18, `${WORKED_18}\n${WORKED_PLAIN}`) : prompt)
+        const prompt = quizPrompt(picks, one.level)
+        expect(prompt).toBe(want.prompt.replace(CHANGED_18, CHANGED_19))
+        expect(prompt).not.toContain(WORKED_PLAIN)
         expect(JSON.parse(JSON.stringify(parseQuiz(QUIZ_REPLIES_18[one.id]!, picks)))).toEqual(JSON.parse(JSON.stringify(want.items)))
       }
       expect(QUIZ_NOW_18).toBeGreaterThan(0)
