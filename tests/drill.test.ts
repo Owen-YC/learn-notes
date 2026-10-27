@@ -689,6 +689,20 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     }
   })
 
+  test('ruleLabelled takes no time over a thousand spaces after 할 일 with no colon, the colon far on, or a stray line break in the words after one; a task\'s words after such a run are kept whole (cross-review 1)', () => {
+    const head = [...RULE_HEAD, '### 직접 해 보기']
+    const rest = RULE_PRACTICE.slice(2)
+    const pad = ' '.repeat(1000)
+    // None of them a task line: each tried every way to split its run before (seconds), once now.
+    const slow = [`- 할 일${pad}(아래에 적습니다)`, `- 할 일${pad}(아래): 적습니다`, `- 할 일:${pad}적습니다\r뒤`, `- 할 일: **${pad}적습니다 뒤`]
+    const note = [...head, ...slow, ...rest].join('\n')
+    const started = Date.now()
+    expect(ruleLabelled(note)).toBe(note)
+    expect(Date.now() - started).toBeLessThan(200)
+    const marked = [...head, `- 할 일 (팀 규칙):${pad}${RULE_TASK}`, ...rest].join('\n')
+    expect(ruleLabelled(marked)).toBe(RULE_NOTE)
+  })
+
   test('drillOf: the kept mark under a rule line gives the practice its rule, a closing ** off and 200 characters at most; else none', () => {
     const drill = drillOf(RULE_NOTE, [api()], true)
     expect(drill).toEqual({

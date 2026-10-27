@@ -1536,21 +1536,33 @@ async function storedIndex($: EngineInterface, map: Readonly<Record<string, stri
 /**
  * Writes the concept index: its known marks and steps first, apart
  * (KNOWN_KEY, STEPS_KEY), each written only when the store does not hold
- * the same already (setChanged), then the index with each name as it was
- * stored and the writer's mark (markedConcepts), every time (markedSeen),
- * and when 1.9.0 first marked it here (keepOldWrites). The known copy is
+ * the same already (read just before, as setChanged reads), then the index
+ * with each name as it was stored and the writer's mark (markedConcepts),
+ * every time (markedSeen), and when 1.9.0 first marked it here
+ * (keepOldWrites). No read of a marked index looks at the known copy, so
+ * what another window put in it after this one read the index is taken
+ * from it here, as 1.8.0's read through the copy took it: `read` is the
+ * index as it was read from the store for this write (undefined for none),
+ * and a mark the copy holds on a concept read with none (another window's
+ * /learn 안다, its copy written before its index) goes on the index
+ * (withKnownMarks: never on one missed since) before the copy is written
+ * over. A mark this one took off was on the concept read, and stays off;
+ * so does one on a concept not read, which 1.8.0 wrote the copy over too.
+ * A copy written with its index refused, by a window of any build, has its
+ * mark put on at the next write, as 1.8.0's next read put it. The copy is
  * read once more just before the index: one another window wrote over this
- * one's meanwhile has its marks put on the index written (withKnownMarks),
- * as 1.8.0's next read through the copy put them back, since no read of a
- * marked index looks at the copy. Every caller asks the schema guard
- * (isStoreAhead) first.
+ * one's meanwhile has its marks put on the index written too. Every caller
+ * asks the schema guard (isStoreAhead) first.
  */
-async function storeIndex($: EngineInterface, index: Readonly<Record<string, LearnConcept>>): Promise<void> {
-  const known = knownMarks(index)
-  await setChanged($, KNOWN_KEY, known)
-  await setChanged($, STEPS_KEY, stepMarks(index))
+async function storeIndex($: EngineInterface, index: Readonly<Record<string, LearnConcept>>, read?: Readonly<Record<string, LearnConcept>>): Promise<void> {
   const held = await $.store.get(KNOWN_KEY).catch(() => undefined)
-  const kept = held === undefined || JSON.stringify(held) === JSON.stringify(known) ? index : withKnownMarks(index, held)
+  const isReadUnmarked = (key: string) => read !== undefined && conceptAt(read, key) !== undefined && conceptAt(read, key)!.knownAt === undefined
+  const base = withKnownMarks(index, isRecord(held) ? Object.fromEntries(Object.entries(held).filter(([key]) => isReadUnmarked(key))) : {})
+  const known = knownMarks(base)
+  if (held === undefined || JSON.stringify(held) !== JSON.stringify(known)) await $.store.set(KNOWN_KEY, known)
+  await setChanged($, STEPS_KEY, stepMarks(base))
+  const again = await $.store.get(KNOWN_KEY).catch(() => undefined)
+  const kept = again === undefined || JSON.stringify(again) === JSON.stringify(known) ? base : withKnownMarks(base, again)
   const at = await $.clock.now()
   await $.store.set(CONCEPTS_KEY, markedConcepts(kept, at))
   markedSeen += 1
@@ -1688,14 +1700,15 @@ async function learnConceptsNow($: EngineInterface, cfg: Config, note: LearnNote
   if (await isStoreAhead($)) return keys
   try {
     const raw = await $.store.get(CONCEPTS_KEY)
+    const stored = isRecord(raw) ? await indexOf($, raw, map) : undefined
     const index = countConcepts(
-      isRecord(raw) ? await indexOf($, raw, map) : await read($, concepts),
+      stored ?? (await read($, concepts)),
       taught.map(({ line, ...one }) => ({ ...one, files: filesFor(line, note.changes) })),
       untaught,
       note.at,
       note.changes.map(change => change.file),
     )
-    await storeIndex($, index)
+    await storeIndex($, index, stored)
     await update($, concepts, () => index)
     await remind($, cfg)
     if (cfg.isAutoSave) await saveConcepts($, cfg, index)
@@ -1789,7 +1802,7 @@ function mergeConceptStored($: EngineInterface, cfg: Config, fromName: string, i
         const kept = folded[into]!
         folded[into] = { ...kept, count: Math.max(1, kept.count - both) }
       }
-      await storeIndex($, folded)
+      await storeIndex($, folded, index)
       await $.store.set(ALIASES_KEY, nextMap)
       await $.store.set(MERGES_KEY, nextMerges)
       await update($, concepts, () => folded)
@@ -1845,7 +1858,7 @@ function markKnownStored($: EngineInterface, cfg: Config, names: readonly string
         doneKeys.push(key)
       }
       if (result.done.length > 0) {
-        await storeIndex($, next)
+        await storeIndex($, next, index)
         // Known now: a slip still open on it is mended with it (1.7.0), and never asked again.
         if (toKnown) await changeSlipsNow($, doneKeys, before => nextSlip(before, { kind: 'mended' }, at))
         await update($, concepts, () => next)
@@ -2072,7 +2085,7 @@ function markConcepts(
       const first = resolved[0]
       const base = seed && first !== undefined && !conceptAt(prior, first) ? countConcepts(prior, [{ key: first, name: seed.name, blurb: seed.blurb, files: [] }], [], at, []) : prior
       const index = mark(base, resolved, at)
-      await storeIndex($, index)
+      await storeIndex($, index, prior)
       await update($, concepts, () => index)
       await remind($, cfg)
       if (cfg.isAutoSave) await saveConcepts($, cfg, index)

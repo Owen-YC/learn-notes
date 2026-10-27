@@ -2108,9 +2108,12 @@ function ruleOf(lines: readonly string[], end: number): string | undefined {
 const RULE_MARK = '[(（\\[［]\\s*팀\\s*규칙\\s*[)）\\]］]'
 /**
  * A practice's task line in any shape a model writes it: its bullet, a bold opened before the label (1), a mark after
- * the label (2), a bold closed after it (3), a mark after that (4), a bold after the colon (5), then its words (6).
+ * the label (2), a bold closed after it (3), a mark after that (4), a bold after the colon (5), then its words (6,
+ * undefined for none). Each part that may be missing takes the spaces before it in with it, and the words begin with
+ * no space, so no two runs of spaces stand side by side: a long run is tried once, never split every way (a line of
+ * spaces after `할 일` with no colon took seconds).
  */
-const TASK_LINE = new RegExp(`^\\s*(?:[-*+•]\\s+)?(\\*\\*)?\\s*할\\s*일\\s*(${RULE_MARK})?\\s*(\\*\\*)?\\s*(${RULE_MARK})?\\s*[:：]\\s*(\\*\\*)?\\s*(.*)$`, 'u')
+const TASK_LINE = new RegExp(`^\\s*(?:[-*+•]\\s+)?(?:(\\*\\*)\\s*)?할\\s*일(?:\\s*(${RULE_MARK}))?(?:\\s*(\\*\\*))?(?:\\s*(${RULE_MARK}))?\\s*[:：](?:\\s*(\\*\\*))?\\s*(\\S.*)?$`, 'u')
 /** A task's words led by the mark (`(팀 규칙) …`, `**(팀 규칙)** …`): the bold before it (1), after it (2), the words (3). */
 const LEADING_MARK = new RegExp(`^(\\*\\*)?\\s*${RULE_MARK}\\s*(\\*\\*)?\\s*(.*)$`, 'u')
 /** The shape a team-rule task line is kept in (1.9.0 F2): the one DRILL_LABEL reads as marked and windows before 1.9.0 read as no task. */
@@ -2124,7 +2127,7 @@ function taskLineOf(line: string): { words: string; isMarked: boolean } | undefi
   const m = TASK_LINE.exec(line)
   if (!m) return undefined
   const [, before, markA, after, markB, colon, rest] = m
-  let words = rest!.trimEnd()
+  let words = (rest ?? '').trimEnd()
   // `**할 일: X**`: the bold around the whole line goes; `- 할 일: **X**`: a bold of the words stays.
   if (before !== undefined && after === undefined && colon === undefined) words = words.replace(/\*\*$/, '').trimEnd()
   else if (colon !== undefined && (before === undefined || after !== undefined)) words = `**${words}`
