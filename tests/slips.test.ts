@@ -21,6 +21,7 @@ import {
   addToBank,
   addUsage,
   checkPrompt,
+  cleanOldWrites,
   cleanSlips,
   conceptKey,
   cutCells,
@@ -292,8 +293,10 @@ describe('1.7.0: a slip kept, asked again and mended (D5)', () => {
     expect(slipNotice({ ...wrong, mine: '7', firstTry: { mine: '10', verdict: 'wrong', feedback: '', nudge: '?', at, slip: '곱셈을 덧셈으로 봄', slipType: 'other' } }, { ...SLIP, what: '', type: 'blank', mine: '10', at }, false)).toEqual(short)
     expect(slipNotice(wrong, { ...SLIP, what: '', type: 'blank', mine: '[]', at }, false)).toEqual(short)
     // "모르겠어요" where a slip with words stays open (not asked again): said as nothing recalled, its words kept for the next quiz.
-    // Counted twice on it by now: 1.8.0 (E3) says the next review quiz shows a worked example first.
-    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, { ...SLIP, at, times: 2 }, false)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 복습 퀴즈는 풀이부터 보여 줍니다' })
+    // Counted twice on it by now: 1.8.0 (E3) says the next review quiz shows a worked example first, while they are on
+    // (two misses, as 1.8.0 shipped them); with them off (the 1.9.0 release's constant, 교차 검토 2) it says the next quiz.
+    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, { ...SLIP, at, times: 2 }, false, 2)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 복습 퀴즈는 풀이부터 보여 줍니다' })
+    expect(slipNotice({ ...wrong, mine: '모르겠어요' }, { ...SLIP, at, times: 2 }, false, Infinity)).toEqual({ kind: 'blank', text: '떠오르지 않았습니다 · 다음 퀴즈에서 다시 풉니다' })
     expect(slipNotice({ ...wrong, mine: '모르겠어요', isRetry: true }, { ...SLIP, at, times: 2 }, false)).toEqual({ kind: 'again', text: '같은 곳을 또 헷갈렸습니다' })
     // Kept by no grade (the schema guard on, a store that refused it): nothing promised.
     expect(slipNotice(wrong, SLIP, false)).toBeUndefined()
@@ -406,10 +409,11 @@ describe('1.7.0: asked again in other code (다시 도전, D5)', () => {
  * and D6's teamTerms and teamNudged) take about 0.18MB of it. The store refuses a write that would take it past
  * 4,194,304 in all (4 MiB): Claude Code counts the UTF-16 characters of its compact JSON, never more than the UTF-8
  * bytes counted here, so this byte test is the stricter one. About 0.52MB is left, and STORE_WORST holds the line so
- * no key grows into it unseen. 1.9.0 (F1) adds the writer's mark in the concept index and oldWrites, 72 bytes in all:
- * 3,671,370 bytes. 1.9.0 (F5) adds a base concept's key on every slip (the slips stay inside SLIPS_MAX_BYTES, fewer of
- * them) and on a quiz question, its first try and its slip before, with the mark of a question asked about one, each
- * key at the longest kept (200 characters): 3,675,861 bytes, about 0.52MB still left.
+ * no key grows into it unseen. 1.9.0 (F1) adds the writer's mark in the concept index and oldWrites (with the print of
+ * the old write counted last, 1/5 검토; counted here from 교차 검토 2), 86 bytes in all: 3,671,384 bytes. 1.9.0 (F5) adds a base concept's key on
+ * every slip (the slips stay inside SLIPS_MAX_BYTES, fewer of them) and on a quiz question, its first try and its slip
+ * before, with the mark of a question asked about one, each key at the longest kept (200 characters): 3,675,875
+ * bytes, about 0.52MB still left.
  */
 const STORE_LIMIT = 4 * 1024 * 1024
 const STORE_WORST = 3_676_000
@@ -544,8 +548,9 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
       welcomed: true,
       limitToast: '2026-10-03',
       quotaToast: '2026-10-03',
-      // 1.9.0's one new key (F1), at its longest.
-      oldWrites: { since: NOW, last: NOW, n: OLD_WRITES_MAX },
+      // 1.9.0's one new key (F1), at its longest: a count at its cap, and the print of the old write counted last at
+      // the longest indexPrint makes one (2^32 - 1 in base 36, seven characters).
+      oldWrites: { since: NOW, last: NOW, n: OLD_WRITES_MAX, w: (2 ** 32 - 1).toString(36) },
     }
     const sizes = Object.fromEntries(Object.entries(store).map(([key, value]) => [key, key === 'history' ? HISTORY_MAX_BYTES : jsonBytes(value)]))
     const total = Object.values(sizes).reduce((sum, n) => sum + n, 0)
@@ -555,7 +560,8 @@ describe('1.7.0: the store at its worst, in Hangul, stays clear of its 4 MiB (D5
     // 1.7.0's own keys, within what they were planned to take.
     const added = ['slips', 'faults', 'sessions', 'schema', 'quotaToast', 'teamTerms', 'teamNudged'].reduce((sum, key) => sum + sizes[key]!, 0)
     expect(added).toBeLessThanOrEqual(190_000)
-    // 1.9.0's (F1): the writer's mark in the index, and its one new key, under 100 bytes.
+    // 1.9.0's (F1): the writer's mark in the index, and its one new key, under 100 bytes at its longest, as read back too.
+    expect(cleanOldWrites(store.oldWrites)).toEqual(store.oldWrites as never)
     expect(sizes.oldWrites!).toBeLessThan(100)
     // 1.9.0's (F5): every slip with a base (inside SLIPS_MAX_BYTES all the same), and each question's base fields.
     expect(Object.values(store.slips as Record<string, LearnSlip>).every(one => one.base === BASE)).toBe(true)

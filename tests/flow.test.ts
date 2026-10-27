@@ -8639,6 +8639,8 @@ describe('1.7.0: what a quiz found wrong, asked again in other code (오답 노�
     const both = slipsOf(store)
     store.set('slips', { ...both, [conceptKey('구조 분해')]: { ...both['c:클로저']!, what: '배열을 복사한다고 봄', type: 'reference' }, 'c:map': { ...both['c:클로저']!, what: '원래 배열을 바꾼다고 봄', type: 'state' } })
     const w = world(on, 'ok', null, true, store)
+    // Worked examples on as 1.8.0 shipped them, whatever their constant (교차 검토 2 turned them off by its sample).
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     const ui = await quizIn($, w)
     expect(quizItems(store).map(one => one.isRetry)).toEqual([true, true, true])
@@ -8664,6 +8666,7 @@ describe('1.7.0: what a quiz found wrong, asked again in other code (오답 노�
   test('missed again in the pane, where the note that taught it is: n to that note, r there to walk it through', async ($, on) => {
     const store = new Map<string, unknown>([['slips', { 'c:클로저': { what: WHAT, type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * DAY, times: 1 } }]])
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     w.answer = CONCEPT_NOTE(['클로저'])
     await turn($, () => $.tool.call(EDIT_A))
@@ -9525,6 +9528,8 @@ describe('1.7.0: team-term practice from the team file\'s ## 용어 (D6)', () =>
       ['quiz', { at: NOW - 1000, isRevealed: false, items: [asked(conceptKey('캐시 키'), '캐시 키', { team: true }), asked('c:클로저', '클로저', { noteId: 'note-1' })] }],
     ])
     const w = world(on, 'ok', null, true, store)
+    // Worked examples on as 1.8.0 shipped them, whatever their constant (교차 검토 2 turned them off by its sample).
+    w.harness = { workedAfterTimes: 2 }
     withTeam(w)
     await start($)
     w.answer = '판정: 틀림\n피드백: 아직 아닙니다.\n헷갈린 점: 이름을 함수로 헷갈림\n유형: reference'
@@ -10819,6 +10824,9 @@ describe('1.7.0: 직접 해 보기, a note\'s practice on t (D8)', () => {
     await w.clock.settle()
     expect(slip()).toMatchObject({ type: 'nullish', times: 1 })
     await ui.unmount()
+    // Worked examples on as 1.8.0 shipped them, whatever their constant (교차 검토 2 turned them off by its sample).
+    w.harness = { workedAfterTimes: 2 }
+    await start($)
     w.answer = 'T1: 예측\nQ1: 문제 하나\nA1: 답 하나'
     expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (다시 도전) 문제 하나')
     w.answer = '판정: 틀림\n피드백: 아닙니다.\n헷갈린 점: 빈 문자열도 이름으로 봄\n유형: 없는 값'
@@ -11513,6 +11521,8 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
       }],
     ])
     const w = world(on, 'ok', null, true, store)
+    // Worked examples on as 1.8.0 shipped them, whatever their constant (교차 검토 2 turned them off by its sample).
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     w.answer = CONCEPT_NOTE(['클로저', 'map'])
     await turn($, () => $.tool.call(EDIT_A))
@@ -11554,6 +11564,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('right after the worked example: its step kept and copied as it is, · 풀이 봄, the slip still open; the review then asks it again with none, and right mends it', async ($, on) => {
     const store = storeOf(['클로저'], 2, 8 * DAY, false, { 클로저: { times: 2 } })
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     const ui = await quizIn($, w, worked(1))
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 풀이 보고 풀기 · 예측$/ })).toBeDefined()
@@ -11593,6 +11604,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('right only after the question asked back: asked again next with no example; missed again: a worked example again', async ($, on) => {
     const store = storeOf(['클로저', 'map'], 0, DAY, true, { 클로저: { times: 2 }, map: { what: '원래 배열을 바꾼다고 봄', type: 'state', times: 2 } })
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     const ui = await quizIn($, w, [worked(1), worked(2)].join('\n'))
     await answer(ui, w, mineKey(store, 0), '10이요', ASKED_BACK)
@@ -11621,6 +11633,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('"모르겠어요" twice running on one concept: the next review quiz shows a worked example of its plain use', async ($, on) => {
     const store = storeOf(['클로저'], 2, 8 * DAY, false)
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     w.answer = plainQ(1)
     await learn($, '퀴즈 새로')
@@ -11653,6 +11666,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('f turns a worked example\'s miss right: its step as before the grade, as after help; the slip it was asked over stays open', async ($, on) => {
     const store = storeOf(['클로저'], 2, 8 * DAY, false, { 클로저: { times: 2 } })
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     const ui = await quizIn($, w, worked(1))
     await answer(ui, w, mineKey(store, 0), '10', missed())
@@ -11671,6 +11685,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('a worked example graded wrong once its answer is seen keeps no new miss: no worked example is promised, and the next quiz asks it again with none', async ($, on) => {
     const store = storeOf(['클로저'], 2, 8 * DAY, false, { 클로저: { times: 2 } })
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     w.answer = worked(1)
     expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (풀이 보고 풀기) 풀이:')
@@ -11713,6 +11728,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('/learn 안키: a worked example whose question after its example is not marked makes no card, its example kept off the front', async ($, on) => {
     const store = storeOf(['클로저', 'map'], 0, DAY, true, { 클로저: { times: 2 } })
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     // The example shown (풀이:, so the rung stays) but no 이제 풀어 보세요 before its question.
     const unmarked = ['T1: 예측', `Q1: 풀이: 흔히 ${WHAT}. 하지만 바깥 변수는 남습니다. 아래 코드는 무엇을 찍을까요? \`let c = 1; (() => ++c)(); console.log(c)\``, 'A1: 2'].join('\n')
@@ -11731,6 +11747,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('/learn 퀴즈 맞음 over a worked example\'s first try: right, its step kept, and the reply says the interval stays', async ($, on) => {
     const store = storeOf(['클로저'], 2, 8 * DAY, false, { 클로저: { times: 2 } })
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     w.answer = worked(1)
     await learn($, '퀴즈 새로')
@@ -11744,6 +11761,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('/learn 퀴즈 맞음 over a worked example and a typed miss: the reply names the example among the help of the ones whose interval stays', async ($, on) => {
     const store = storeOf(['클로저', 'map'], 2, 8 * DAY, false, { 클로저: { times: 2 } })
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     w.answer = [worked(1), plainQ(2)].join('\n')
     await learn($, '퀴즈 새로')
@@ -11831,6 +11849,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('/learn 안키: a worked example\'s card asks only the question after its example', async ($, on) => {
     const store = storeOf(['클로저'], 0, DAY, true, { 클로저: { times: 2 } })
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     w.answer = worked(1)
     await learn($, '퀴즈 새로')
@@ -11853,6 +11872,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     // As a try again right on another day leaves it, or a 1.7 window did: set right, its count kept.
     const store = storeOf(['클로저'], 2, 8 * DAY, false, { 클로저: { times: 1, at: NOW - 20 * DAY, fixedAt: NOW - 15 * DAY } })
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     const ui = await quizIn($, w, plainQ(1))
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 예측$/ })).toBeDefined()
@@ -11881,6 +11901,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('a worked example with only code after 이제 풀어 보세요 asks what it prints: in the pane, the conversation, the card and the grade (교차 검토 2)', async ($, on) => {
     const store = storeOf(['클로저'], 0, DAY, true, { 클로저: { times: 2 } })
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     const code = ['```js', 'let c = 10', 'const add = () => ++c', 'add()', 'console.log(c)', '```']
     // As haiku wrote one in four of its worked examples with code: no words after the marker, and a T line naming the rung alone.
@@ -11901,6 +11922,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('a quiz replaced the same day over a first try asked back, the second miss running there: the new quiz is the worked example (교차 검토 2)', async ($, on) => {
     const store = storeOf(['클로저'], 0, 2 * DAY, true, { 클로저: {} })
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     w.answer = plainQ(1)
     expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (다시 도전) 문제 1')
@@ -11925,6 +11947,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('the same in the pane: asked back, then s twice the same day; the new quiz is the worked example (교차 검토 2)', async ($, on) => {
     const store = storeOf(['클로저'], 0, 2 * DAY, true, { 클로저: {} })
     const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2 }
     await start($)
     const ui = await quizIn($, w, plainQ(1))
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 다시 도전 · 예측$/ })).toBeDefined()
@@ -14232,6 +14255,31 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(w.models.at(-1)).not.toContain('풀이 보고 풀기')
   })
 
+  test('(교차 검토 2) with no harness the build\'s constant decides worked examples: a concept no code met, missed twice running, asked again as 1.7 did or shown one told the line for a concept with no code', async ($, on) => {
+    const GIT = 'git push'
+    const store = storeOf({ [GIT]: 0 }, DAY)
+    store.set('slips', { [conceptKey(GIT)]: { what: '커밋하지 않은 수정도 올라간다고 봄', type: 'other', question: '지난 문제', mine: '올라가요', at: NOW - DAY, times: 2 } })
+    const w = world(on, 'ok', null, true, store)
+    await start($)
+    w.answer = plainQ(1)
+    const listed = (await learn($, '퀴즈 새로')).text ?? ''
+    const isOn = 2 >= WORKED_AFTER_TIMES
+    expect(w.models.at(-1)!.includes('\n   칸: 풀이 보고 풀기\n')).toBe(isOn)
+    expect(w.models.at(-1)!.includes('칸 뒤에 언어가 없는 풀이 보고 풀기')).toBe(isOn)
+    expect(listed.includes('\n1. (다시 도전) 문제 1')).toBe(!isOn)
+    // A harness turning them on (as a sample run would): the line right after the worked example's own, once.
+    w.harness = { workedAfterTimes: 2 }
+    await start($)
+    await w.clock.advance(60_000)
+    w.answer = plainQ(1)
+    await learn($, '퀴즈 새로')
+    const prompt = w.models.at(-1)!
+    expect(prompt).toContain(`1. ${GIT} — ${GIT} 설명`)
+    expect(prompt).toContain('\n   칸: 풀이 보고 풀기\n')
+    expect(prompt).toContain('힌트에서 풀이를 되풀이하지 않는다.\n칸 뒤에 언어가 없는 풀이 보고 풀기(코드 없이 만난 개념)도 문제를 "풀이:"로 시작하고')
+    expect(prompt.split('칸 뒤에 언어가 없는 풀이 보고 풀기').length).toBe(2)
+  })
+
   test('풀이 보고 풀기 off: a second miss on a question not asked again says no worked example, in the conversation and the pane', async ($, on) => {
     const WHAT = '함수가 끝나면 바깥 변수도 사라진다고 봄'
     const store = storeOf({ 클로저: 0 }, DAY)
@@ -14336,6 +14384,92 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(quizItems(store)[0]!.rung).toBe('changed')
     // A file the note made whole is not read again: its diff has every line from the top.
     expect(w.files.has('/proj/src/Like.js')).toBe(false)
+  })
+
+  /**
+   * (교차 검토 2) A concept due at its fifth step, met by an edit to POSTS, whose file imports nothing from a package as
+   * it stands: asked in code never seen unless the file is kept from its import check. `setup` runs before the build
+   * starts; `harness` the ladder's switches. The reads of POSTS a test counts start after this returns.
+   */
+  const POSTS = '/proj/src/api/posts.js'
+  async function postsWorld($: Engine, on: On, setup: (w: World) => void = () => {}, harness: Record<string, unknown> = { rungNewStep: 4, rungChangedStep: 2 }) {
+    const AXIOS = 'axios 응답'
+    const store = storeOf({ [AXIOS]: 4 }, 31 * DAY)
+    const w = world(on, 'ok', null, true, store)
+    w.harness = harness
+    w.files.set(POSTS, "import { axios } from './http.js'\n\nexport async function fetchPosts() {}\n")
+    setup(w)
+    await start($)
+    w.answer = CONCEPT_NOTE([AXIOS])
+    await turn($, () => $.tool.call({ tool: 'Edit', tool_use_id: 'u9', file_path: POSTS, old_string: 'fetch(', new_string: 'axios.get(' }))
+    await finish(w)
+    return { w, store }
+  }
+  /** Counts the reads of POSTS from when `arm` is called: hooked before the world's own, so every read passes it. */
+  function postsReads(on: On) {
+    const count = { reads: 0, isArmed: false }
+    on('fs.read', { path: POSTS }, (_$, e, next) => {
+      if (count.isArmed) count.reads += 1
+      return next(e)
+    })
+    return count
+  }
+
+  test('(교차 검토 2) the file as the tests below start from: read once for its imports, none from a package, asked in code never seen', async ($, on) => {
+    const count = postsReads(on)
+    const { w, store } = await postsWorld($, on)
+    count.isArmed = true
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(count.reads).toBe(1)
+    expect(w.models.at(-1)).toContain('   칸: 처음 보는 코드 (js로)')
+    expect(quizItems(store)[0]!.rung).toBe('new')
+  })
+
+  test('(교차 검토 2) the file read for its imports as it stands: one past 1,000,000 bytes is not read, its imports unknown, asked in its code changed', async ($, on) => {
+    const count = postsReads(on)
+    const { w, store } = await postsWorld($, on, w => {
+      w.sizes = new Map([[POSTS, 1_000_001]])
+    })
+    count.isArmed = true
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(count.reads).toBe(0)
+    expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
+    expect(quizItems(store)[0]!.rung).toBe('changed')
+  })
+
+  test('(교차 검토 2) the file read for its imports holds a NUL: not text, its imports unknown, asked in its code changed', async ($, on) => {
+    const { w, store } = await postsWorld($, on, w => {
+      w.files.set(POSTS, "import { axios } from './http.js'\u0000\n\nexport async function fetchPosts() {}\n")
+    })
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
+    expect(quizItems(store)[0]!.rung).toBe('changed')
+  })
+
+  test('(교차 검토 2) the file read for its imports is a link to one the permission rules keep from Read: never read, asked in its code changed', async ($, on) => {
+    on('tool.check', { tool: 'Read' }, (_$, e) => ({ decision: String((e.input as { file_path?: string }).file_path).includes('/secret/') ? 'deny' : 'allow' }))
+    const count = postsReads(on)
+    const { w, store } = await postsWorld($, on, w => {
+      w.links.set(POSTS, '/proj/secret/posts.js')
+    })
+    count.isArmed = true
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(count.reads).toBe(0)
+    expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
+    expect(quizItems(store)[0]!.rung).toBe('changed')
+  })
+
+  test('(교차 검토 2) with code never seen off, a quiz reads no stamps for it: the sessions read as often as before the quiz', async ($, on) => {
+    const { w, store } = await postsWorld($, on, () => {}, { rungNewStep: null, rungChangedStep: 2 })
+    const before = w.gets.filter(key => key === 'sessions').length
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store)[0]!.rung).toBe('changed')
+    expect(w.gets.filter(key => key === 'sessions').length).toBe(before)
   })
 
   test('(3/5 검토) the stamps unreadable: code never seen off for that quiz, as for a window before 1.8.0; readable again, on', async ($, on) => {
@@ -14443,10 +14577,13 @@ describe('1.9.0: 바탕 개념, a base concept asked right before the worked exa
     const slips = { [conceptKey(X)]: { what: WHAT, type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * DAY, times: 1, ...slip } }
     return new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['slips', slips]])
   }
-  /** A world whose build asks bases (`isOn`, a harness's) or not, started. */
+  /**
+   * A world whose build asks bases or not (a harness's), started: with worked examples on as 1.8.0 shipped them unless
+   * the harness says otherwise (교차 검토 2 turned them off by its sample), as a base is asked only before one.
+   */
   async function opened($: Engine, on: On, store: Map<string, unknown>, harness: Record<string, unknown> = { isBaseAsked: true }) {
     const w = world(on, 'ok', null, true, store)
-    w.harness = harness
+    w.harness = { workedAfterTimes: 2, ...harness }
     await start($)
     return w
   }
@@ -14697,8 +14834,8 @@ describe('1.9.0: 바탕 개념, a base concept asked right before the worked exa
     const text = (await learn($, '진단')).text ?? ''
     expect(text).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 1\n')
     expect(text).not.toContain(B)
-    if (!IS_BASE_ASKED) expect(text).toContain('· 시험 스위치: 바탕 개념 켬')
-    w.harness = { isBaseAsked: false }
+    if (!IS_BASE_ASKED) expect(text).toMatch(/· 시험 스위치: (?:[^\n]* · )?바탕 개념 켬/)
+    w.harness = { workedAfterTimes: 2, isBaseAsked: false }
     await start($)
     const off = (await learn($, '진단')).text ?? ''
     expect(off).toContain('· 열린 채 두 번 이상 1\n')

@@ -407,12 +407,15 @@ describe('1.8.0: /learn 진단 counts the slips, with no name and no words (E2)'
     expect(diagText(input({ slips: 'unread' }))).toContain('\n- 일지: 못 쓴 노트 없음\n- 오답 노트: 읽지 못함\n')
     // Not given (as before 1.8.0): no line.
     expect(diagText(input())).not.toContain('오답 노트')
-    // While bases are asked (1.9.0 F5): the open ones with a base counted, no name; off, 1.8.0's line to the byte.
+    // While bases are asked (1.9.0 F5): the open ones with a base counted, no name; off, 1.8.0's line to the byte. A base
+    // is asked before a worked example only: counted with worked examples after two misses (a harness's; 교차 검토 2
+    // turned them off in the release), none with them off.
     const based = { ...slips, 'c:클로저': { ...slips['c:클로저']!, base: 'c:변수범위' }, 'c:비동기': { ...slips['c:비동기']!, base: 'c:promise' } }
-    expect(diagText(input({ slips: slipCounts(based), isBaseAsked: true }))).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 1\n')
+    expect(diagText(input({ slips: slipCounts(based, 2), isBaseAsked: true }))).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 1\n')
+    expect(diagText(input({ slips: slipCounts(based, Infinity), isBaseAsked: true }))).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 0\n')
     expect(diagText(input({ slips: slipCounts(based) }))).toBe(text)
     expect(diagText(input({ slips: slipCounts(based), isBaseAsked: false }))).toBe(text)
-    expect(diagText(input({ slips: slipCounts(based), isBaseAsked: true }))).not.toContain('변수범위')
+    expect(diagText(input({ slips: slipCounts(based, 2), isBaseAsked: true }))).not.toContain('변수범위')
   })
 })
 

@@ -4922,7 +4922,7 @@ export const KIND_LABEL: Readonly<Record<QuizKind, string>> = { predict: '예측
  * Which code a quiz question asks in (1.8.0, the question ladder), set by the concept's review step and never chosen
  * by the learner: its own code as the note met it, that code with one value, condition or order changed so the answer
  * remembered no longer fits (off from 1.9.0), code never seen (off in 1.8.0 and 1.9.0), or a worked example first once
- * it was missed twice running.
+ * it was missed twice running (off from 1.9.0, 교차 검토 2).
  */
 export type QuizRung = NonNullable<LearnQuizItem['rung']>
 
@@ -4944,8 +4944,15 @@ export const RUNG_CHANGED_STEP = Infinity
  * value of several wrong for 거의 more often than the bar allows.
  */
 export const RUNG_NEW_STEP = Infinity
-/** Misses running on one concept (its open slip's `times`) after which the next review quiz shows a worked example first. */
-export const WORKED_AFTER_TIMES = 2
+/**
+ * Misses running on one concept (its open slip's `times`) after which the next review quiz shows a worked example
+ * first: two as 1.8.0 shipped it. Off from 1.9.0 (교차 검토 2): measured again as the plugin calls (effort low,
+ * docs/qa/견본.md), a worked example of a concept met in code passed, but one of a concept no code met did not, nor
+ * once its line was mended (WORKED_PLAIN_ASK): some lost their marks or the example, stated a result the example does
+ * not give, or asked for what the example showed, and with the line some replies ran out of room. A concept missed
+ * twice running is asked again as 1.7 did (다시 도전) until a sample shows it right.
+ */
+export const WORKED_AFTER_TIMES = Infinity
 /**
  * The ladder's switches a load runs with (1.9.0): each its constant above, which a release sets by its samples
  * (docs/qa/견본.md); a test harness may run a load with others (register.tsx `build`).
@@ -4970,6 +4977,16 @@ const RUNG_ASK: readonly [QuizRung, string][] = [
     '풀이 보고 풀기: 문제를 "풀이:"로 시작해, "지난번" 줄의 헷갈림이 드러나는 4줄 이하 예와 그 결과, 까닭 한 문장을 먼저 보인다. 여기서는 까닭에 헷갈린 점을 풀어 써도 된다. 헷갈린 점이 없으면(떠올리지 못함) 그 개념의 기본 쓰임을 풀이로 보인다. 이어서 "이제 풀어 보세요:" 뒤에 같은 원리를 다른 값으로 묻는다. 풀이의 결과와 문제의 답이 같지 않게 한다. 힌트에서 풀이를 되풀이하지 않는다.',
   ],
 ]
+
+/**
+ * Said after the worked example's line (RUNG_ASK) when the quiz has one of a concept no code met, its rung with no
+ * language (교차 검토 2). Measured at effort low like the plugin (docs/qa/견본.md), such examples now and then lost their
+ * marks or the example itself, showed another concept's code, stated a result the example's own lines or the tool's
+ * defaults do not give, or asked for the very line or count the example showed. A worked example in code keeps
+ * 1.8.0's words alone: its sample passed as they were.
+ */
+const WORKED_PLAIN_ASK =
+  '칸 뒤에 언어가 없는 풀이 보고 풀기(코드 없이 만난 개념)도 문제를 "풀이:"로 시작하고 "이제 풀어 보세요:" 뒤에 묻는다. 풀이와 문제 모두 그 개념이 쓰이는 명령·주소·설정·상황으로 쓰고, 다른 개념의 예로 바꾸지 않는다. 풀이의 결과는 예의 모든 줄을 차례로 따라가, 그 도구의 기본 설정에서 실제로 나오는 것만 쓴다. 문제의 답은 풀이 결과의 어느 줄이나 개수와도 같지 않게 한다.'
 
 /**
  * The format's line for the trace a question in code never seen writes before its answer (1.9.0 F3, R{n}): read as a
@@ -5501,7 +5518,8 @@ export const QUIZ_SYSTEM = [
  * `(팀 용어)`, carries the team's lines under their own head (`팀 코드 (fetcher.ts 12~30줄)`) when it has them, and the
  * quiz is told the team's words and lines are data (TEAM_IS_DATA). A concept on a rung of the question ladder (1.8.0)
  * says it under its head (`칸: 비슷한 코드`), and the quiz is told what each of its rungs asks (RUNG_ASK); one asked by
- * a worked example has its slip shown in the example, so the sentence that keeps a slip unsaid leaves it out. A quiz
+ * a worked example has its slip shown in the example, so the sentence that keeps a slip unsaid leaves it out; one of a
+ * concept no code met is told more of how (WORKED_PLAIN_ASK, 1.9.0 교차 검토 2), one in code as 1.8.0 told it. A quiz
  * with code never seen (1.9.0 F3) is shown an R line in its format, the trace its answer is written after.
  */
 export function quizPrompt(
@@ -5532,6 +5550,7 @@ export function quizPrompt(
     '',
     `개념마다 문제 하나씩, 위 순서대로 ${picks.length}개를 낸다. 문제에 개념 이름을 그대로 쓰지 말고, 코드나 상황을 보여 주고 묻는다.`,
     ...RUNG_ASK.filter(([rung]) => rungs.has(rung)).map(([, ask]) => ask),
+    ...(picks.some(one => one.rung === 'worked' && one.lang === undefined) ? [WORKED_PLAIN_ASK] : []),
     ...(hasWorked || rungs.has('new') ? [RUNG_WRITES] : []),
     ...(hasSlip
       ? [

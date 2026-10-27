@@ -636,9 +636,45 @@ describe('1.9.0: 처음 보는 코드 from the fifth step, for concepts due met 
   })
 })
 
-describe('1.9.0: a quiz with no code never seen is 1.8.0\'s to the byte, its 비슷한 코드 sentence aside (F3 · F4)', () => {
+/** The line said after the worked example's own for one of a concept no code met (교차 검토 2, WORKED_PLAIN_ASK). */
+const WORKED_PLAIN =
+  '칸 뒤에 언어가 없는 풀이 보고 풀기(코드 없이 만난 개념)도 문제를 "풀이:"로 시작하고 "이제 풀어 보세요:" 뒤에 묻는다. 풀이와 문제 모두 그 개념이 쓰이는 명령·주소·설정·상황으로 쓰고, 다른 개념의 예로 바꾸지 않는다. 풀이의 결과는 예의 모든 줄을 차례로 따라가, 그 도구의 기본 설정에서 실제로 나오는 것만 쓴다. 문제의 답은 풀이 결과의 어느 줄이나 개수와도 같지 않게 한다.'
+
+describe('1.9.0 (교차 검토 2): a worked example of a concept no code met is told more of how; one in code is told as in 1.8.0', () => {
+  const GIT = { what: '커밋하지 않은 수정도 push로 올라간다고 봄', question: '커밋하지 않고 `git push`를 하면?', mine: '올라갑니다' }
+  const plainWorked = pickForRung(pick('git push', { slip: GIT }), rungOf(at(0), { ...plain, slip: { times: 2 }, isAsking: true }, Infinity, ON))
+  const codeWorked = pickForRung(pick('합계', { code: CODE, slip: SLIP }), rungOf(at(0), { ...plain, code: CODE, slip: { times: 2 }, isAsking: true }, Infinity, ON))
+  const retry = pickForRung(pick('git pull', { slip: GIT }), rungOf(at(0), { ...plain, slip: { times: 1 }, isAsking: true }, Infinity, ON))
+
+  test('the line comes right after the worked example\'s own, once, when one of the quiz\'s worked examples has no language', () => {
+    expect([plainWorked.rung, plainWorked.lang, codeWorked.rung, codeWorked.lang, retry.rung]).toEqual(['worked', undefined, 'worked', 'js', undefined])
+    const alone = quizPrompt([plainWorked], 'beginner')
+    expect(alone).toContain('\n   칸: 풀이 보고 풀기\n\n')
+    expect(alone).toContain(`힌트에서 풀이를 되풀이하지 않는다.\n${WORKED_PLAIN}\n'처음 보는 코드'·'풀이 보고 풀기' 칸은`)
+    const both = quizPrompt([codeWorked, plainWorked], 'beginner')
+    expect(both.split(WORKED_PLAIN).length).toBe(2)
+    // Two of them in one quiz: still once.
+    const two = quizPrompt([plainWorked, { ...plainWorked, key: 'c:git pull', name: 'git pull' }], 'beginner')
+    expect(two.split(WORKED_PLAIN).length).toBe(2)
+  })
+
+  test('none for a worked example in code, nor for a quiz with no worked example: those prompts are as before', () => {
+    const inCode = quizPrompt([codeWorked], 'beginner')
+    expect(inCode).toContain('\n   칸: 풀이 보고 풀기 (js로)\n')
+    expect(inCode).not.toContain('칸 뒤에 언어가 없는')
+    expect(quizPrompt([codeWorked, retry], 'beginner')).not.toContain('칸 뒤에 언어가 없는')
+    expect(quizPrompt([retry], 'beginner')).not.toContain('칸 뒤에 언어가 없는')
+    // With worked examples off (the release's constant, or a harness's Infinity), a concept missed twice is asked again.
+    const off = pickForRung(pick('git push', { slip: GIT }), rungOf(at(0), { ...plain, slip: { times: 2 }, isAsking: true }, Infinity, { changedStep: 2, workedAfter: Infinity }))
+    expect(off.rung).toBeUndefined()
+    expect(quizPrompt([off], 'beginner')).not.toContain('풀이 보고 풀기')
+  })
+})
+
+describe('1.9.0: a quiz with no code never seen is 1.8.0\'s to the byte, its 비슷한 코드 sentence and the line for a worked example no code met aside (F3 · F4 · 교차 검토 2)', () => {
   const CHANGED_18 = '비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 보여 주고 묻는다. 원래 코드의 답으로는 맞힐 수 없게 바꾼다.'
   const CHANGED_19 = `${CHANGED_18} 바꿔 보기로 낼 때도 학습자 코드를 그대로 보이거나 몇 줄만 떼어 보이지 않고, 한 곳을 바꾼 코드에서 묻는다.`
+  const WORKED_18 = '이어서 "이제 풀어 보세요:" 뒤에 같은 원리를 다른 값으로 묻는다. 풀이의 결과와 문제의 답이 같지 않게 한다. 힌트에서 풀이를 되풀이하지 않는다.'
   for (const one of QUIZ_CASES_18) {
     test(`${one.id}: the rungs, the prompt and the questions read back, code never seen off or on (4)`, () => {
       const want = QUIZ_OUTPUT_18[one.id]!
@@ -655,7 +691,10 @@ describe('1.9.0: a quiz with no code never seen is 1.8.0\'s to the byte, its 비
           return pickForRung(base, rung)
         })
         expect(picks.map(p => p.rung ?? null)).toEqual(want.rungs)
-        expect(quizPrompt(picks, one.level)).toBe(want.prompt.replace(CHANGED_18, CHANGED_19))
+        // A worked example of a concept no code met (교차 검토 2): one line more, right after the worked example's own.
+        const isPlainWorked = picks.some(p => p.rung === 'worked' && p.lang === undefined)
+        const prompt = want.prompt.replace(CHANGED_18, CHANGED_19)
+        expect(quizPrompt(picks, one.level)).toBe(isPlainWorked ? prompt.replace(WORKED_18, `${WORKED_18}\n${WORKED_PLAIN}`) : prompt)
         expect(JSON.parse(JSON.stringify(parseQuiz(QUIZ_REPLIES_18[one.id]!, picks)))).toEqual(JSON.parse(JSON.stringify(want.items)))
       }
       expect(QUIZ_NOW_18).toBeGreaterThan(0)
