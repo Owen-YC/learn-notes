@@ -15,6 +15,7 @@ import {
   SYSTEM,
   THINK_SYSTEM,
   WORKED_BASE_NEXT,
+  WORKED_NEXT,
   RUNG_CHANGED_STEP,
   RUNG_NEW_STEP,
   STAMP_KEPT_MS,
@@ -15769,9 +15770,72 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     })
   }
 
+  // The line under a grade that keeps a slip with a base (slipNotice's own, 1.9.0 F5) promises the base first only
+  // where the route asks bases: the pane and the conversation each hand it this route's switches (1/7 검토). A try again
+  // missed another way keeps a new slip, missed once, so only a route at one miss running says it there (a harness's
+  // step 1): at every value a route may ship (2, or off) a second miss running is a question asked again missed again,
+  // whose line the callers make (the worked example's tests above and in 1.9.0's 바탕 개념).
+  const SLIP_WHAT = '안쪽 함수가 값을 복사해 둔다고 봄'
+  /** 클로저 met after 변수 범위, in one file; its slip kept once two days ago (asked again: 다시 도전). */
+  function slipStore(): Map<string, unknown> {
+    const rows: Record<string, { step: number; ago: number; first: number }> = { 클로저: { step: 1, ago: 3, first: 30 }, '변수 범위': { step: 3, ago: 5, first: 60 } }
+    const concepts = Object.fromEntries(
+      Object.entries(rows).map(([name, one]) => [
+        conceptKey(name),
+        { name, count: 2, firstAt: NOW - one.first * ROUTE_DAY, lastAt: NOW - one.first * ROUTE_DAY, blurb: `${name} 설명`, files: ['counter.js'], step: one.step, reviewedAt: NOW - one.ago * ROUTE_DAY },
+      ]),
+    )
+    const slips = { [conceptKey('클로저')]: { what: '함수가 끝나면 바깥 변수도 사라진다고 봄', type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * ROUTE_DAY, times: 1 } }
+    return new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['slips', slips]])
+  }
+  for (const [model, row, tail] of [
+    ['sonnet', { workedAfterTimes: 1, isBaseAsked: true }, WORKED_BASE_NEXT],
+    ['sonnet', { workedAfterTimes: 1 }, WORKED_NEXT],
+    ['haiku', { workedAfterTimes: 1, isBaseAsked: true }, '다음 퀴즈에서 다른 코드로 다시 묻습니다'],
+  ] as const) {
+    test(`a try again missed another way, models.sonnet ${JSON.stringify(row)}, in the ${model} window: the pane and the conversation both say "${tail}"`, { options: { model } }, async ($, on) => {
+      const isBase = model === 'sonnet' && 'isBaseAsked' in row
+      const store = slipStore()
+      const w = world(on, 'ok', null, true, store)
+      w.harness = { models: { sonnet: { ...row } } }
+      await start($)
+      // Asked again: the reply holds no worked example, so none is kept.
+      w.answer = [routeQ(1), routeQ(2)].join('\n')
+      await learn($, '퀴즈 새로')
+      expect(itemsOf(store).map(one => [one.name, one.isRetry])[0]).toEqual(['클로저', true])
+      w.answer = ['판정: 틀림', '피드백: 아닙니다.', `헷갈린 점: ${SLIP_WHAT}`, ...(isBase ? ['바탕 근거: "값을 복사해요"', '바탕: 1'] : []), '유형: 값과 참조'].join('\n')
+      const said = (await learn($, '퀴즈 1 안쪽 함수가 값을 복사해요')).text ?? ''
+      expect(w.models.at(-1)!.includes('## 학습자가 전에 배운 개념\n1. 변수 범위\n')).toBe(isBase)
+      const slip = (store.get('slips') as Record<string, Record<string, unknown>>)[conceptKey('클로저')]!
+      expect(slip).toMatchObject({ what: SLIP_WHAT, type: 'reference', times: 1, at: NOW })
+      expect(slip.base).toBe(isBase ? conceptKey('변수 범위') : undefined)
+      const line = `헷갈린 점: ${SLIP_WHAT} · ${tail}`
+      expect(said).toContain(`\n${line}\n`)
+      const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+      await ui.press({ key: 'view-quiz' })
+      expect(await ui.find({ type: 'Text', text: line })).toBeDefined()
+      await ui.unmount()
+      expect(itemsOf(store)[0]!.slipBase).toBe(isBase ? conceptKey('변수 범위') : undefined)
+      // A window of another route (every switch off) grades the next question: the quiz it writes back keeps the base
+      // the grade picked, the slip its own.
+      w.harness = undefined
+      await start($)
+      w.answer = ROUTE_RIGHT
+      await learn($, '퀴즈 2 답 2')
+      expect(itemsOf(store)[1]!.result).toBe('right')
+      expect(itemsOf(store)[0]!.slipBase).toBe(isBase ? conceptKey('변수 범위') : undefined)
+      expect((store.get('slips') as Record<string, Record<string, unknown>>)[conceptKey('클로저')]!.base).toBe(isBase ? conceptKey('변수 범위') : undefined)
+    })
+  }
+
   test('decided at session start before any call: a reload takes up a cut note after the alias is read; another start runs the route its harness gives', { options: { model: 'sonnet' } }, async ($, on) => {
     const order: string[] = []
-    on('env.get', { name: /^ANTHROPIC_DEFAULT_/ }, (_$, e, next) => {
+    // While set, the alias's read takes a moment on the clock (1/7 검토): the note a reload takes up waits a moment
+    // too, so one put on the clock before the route is decided would go out while the read is still under way.
+    let isSlowRead = false
+    let w: World | undefined
+    on('env.get', { name: /^ANTHROPIC_DEFAULT_/ }, async (_$, e, next) => {
+      if (isSlowRead && w) await w.clock.advance(10)
       order.push('alias')
       return next(e)
     })
@@ -15779,7 +15843,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
       order.push('model')
       return next(e)
     })
-    const w = world(on)
+    w = world(on)
     w.harness = { models: { sonnet: { workedAfterTimes: 2 } } }
     await start($)
     expect(order).toEqual(['alias'])
@@ -15787,11 +15851,15 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     await turn($, () => $.tool.call(EDIT_A))
     await finish(w)
     expect(order).toEqual(['alias', 'model'])
-    // The reload: the route decided again (the alias read again) before the note it cut is taken up.
+    // The reload: the route decided again (the alias read again) before the note it cut is taken up, the clock moving
+    // on while the alias is read.
     order.length = 0
+    isSlowRead = true
     await start($)
+    expect(order).toEqual(['alias'])
     await w.clock.advance(60_000)
     expect(order).toEqual(['alias', 'model'])
+    isSlowRead = false
     expect(versionLine((await learn($, '진단')).text ?? '')).toContain('· 시험 스위치: 풀이 보고 풀기 오답 수 2')
     // A start with no harness: the shipped route (every switch off), nothing read.
     w.harness = undefined
@@ -15805,16 +15873,18 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
 
   for (const isOnFirst of [true, false]) {
     test(`a store another route wrote (${isOnFirst ? 'on, then off' : 'off, then on'}): its quiz kept as written, rung and base and slip; the next quiz by this route`, { options: { model: 'sonnet' } }, async ($, on) => {
-      // One more concept due, so the slip's base (변수 범위) is no pick of its own and goes right before the worked example.
+      // Two more concepts due, so the slip's base (변수 범위) is no pick of its own and goes right before the worked
+      // example, in the next quiz too once one of them is gone over.
       const store = routeStore()
       const concepts = {
         ...(store.get('concepts') as Record<string, unknown>),
         [conceptKey('배열')]: { name: '배열', count: 2, firstAt: NOW - 60 * ROUTE_DAY, lastAt: NOW - 60 * ROUTE_DAY, blurb: '배열 설명', files: ['list.js'], step: 1, reviewedAt: NOW - 3 * ROUTE_DAY },
+        [conceptKey('객체')]: { name: '객체', count: 2, firstAt: NOW - 60 * ROUTE_DAY, lastAt: NOW - 60 * ROUTE_DAY, blurb: '객체 설명', files: ['list.js'], step: 1, reviewedAt: NOW - 3 * ROUTE_DAY },
       }
       store.set('concepts', concepts)
       store.set('steps', ownSteps(concepts as never))
       const w = world(on, 'ok', null, true, store)
-      const onRow = { models: { sonnet: { workedAfterTimes: 2, isBaseAsked: true } } }
+      const onRow = { models: { sonnet: { ...ON } } }
       w.harness = isOnFirst ? onRow : undefined
       await start($)
       w.answer = [routeQ(1), isOnFirst ? routeWorked(2) : routeQ(2), routeQ(3)].join('\n')
@@ -15837,6 +15907,12 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
       expect((await learn($, '퀴즈')).text).toContain('1.')
       expect(itemsOf(store).map(one => [one.name, one.rung, one.isBase, one.isRetry])).toEqual(written)
       expect((store.get('slips') as Record<string, { base?: string }>)[conceptKey('클로저')]!.base).toBe(conceptKey('변수 범위'))
+      // It grades the last question (1/7 검토): the quiz written back keeps the others as written.
+      w.answer = ROUTE_RIGHT
+      await learn($, '퀴즈 3 답 3')
+      expect(itemsOf(store)[2]!.result).toBe('right')
+      expect(itemsOf(store).map(one => [one.name, one.rung, one.isBase, one.isRetry])).toEqual(written)
+      expect((store.get('slips') as Record<string, { base?: string }>)[conceptKey('클로저')]!.base).toBe(conceptKey('변수 범위'))
       // Its next quiz is its own route's.
       await w.clock.advance(60_000)
       w.answer = [routeQ(1), isOnFirst ? routeQ(2) : routeWorked(2), routeQ(3)].join('\n')
@@ -15845,5 +15921,111 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
       expect(next.some(one => one[1] === 'worked' || one[2] === true)).toBe(!isOnFirst)
       expect(next.some(one => one[0] === '클로저' && one[3] === true)).toBe(isOnFirst)
     })
+  }
+
+  // The rungs and the team rule's practice a route writes (1/7 검토): with every switch on, a review quiz asks a concept
+  // due at its fifth step in code never seen, or one at its second in its code changed, and a note may hold the team
+  // rule's practice. A window of the other route reads them as 1.9.0 does and writes them back as written; what it
+  // writes itself is its own route's.
+  const ROUTE_RULES = ['# 팀', '', '## 규칙', '- API 호출은 `fetch`를 바로 쓰지 말고 `fetcher`를 쓴다', ''].join('\n')
+  const ROUTE_API = ['export async function getUser(id) {', '  const res = await fetch(`/u/${id}`)', '  return res.json()', '}', ''].join('\n')
+  const ROUTE_RULE_NOTE = [
+    '### 한 줄 요약',
+    '사용자 정보를 가져오는 함수를 만들었습니다',
+    '### 무엇이 바뀌었나',
+    '- 전: 없음',
+    '- 후: `getUser(1)`이 1번 사용자 정보를 돌려줍니다',
+    '### 왜 이렇게 바꿨을까',
+    '화면에서 사용자 정보를 보이려고 만들었습니다.',
+    '팀 규칙과 다를 수 있음: API 호출은 `fetcher`로 하라는 규칙과 달리 `fetch`를 바로 씁니다',
+    '### 배울 개념',
+    '- **async/await**: 응답을 기다렸다 씁니다 — `return res.json()`',
+    '### 직접 해 보기',
+    '- 할 일 (팀 규칙): API 호출을 팀 규칙대로 fetcher로 바꿔 보세요',
+    '- 고칠 줄: `` const res = await fetch(`/u/${id}`) ``',
+    '- 확인: `getUser(1)` → 같은 사용자 정보가 나옵니다',
+    '- 예시 답: `` const res = await fetcher(`/u/${id}`) ``',
+  ].join('\n')
+  const ROUTE_RULE_ASK = '- 할 일 (팀 규칙): 그 규칙대로 고치는 일 한 문장'
+  /** A question in code of its own for question `n`, with the trace of an R line where code never seen is asked. */
+  const routeCode = (n: number, isTraced: boolean) =>
+    [`T${n}: 예측`, `Q${n}: 아래 코드는 무엇을 찍을까요?`, '```ts', 'const xs = [3, 4]', 'let s = 0', 'for (const x of xs) s += x', 'console.log(s)', '```', `H${n}: 하나씩 더해 보세요`, ...(isTraced ? [`R${n}: s는 3, 다시 7이 됩니다`] : []), `A${n}: 7`].join('\n')
+  type RouteNote = { id: string; text: string }
+  const notesOf = (store: Map<string, unknown>) => (store.get('history') as Record<string, { notes: RouteNote[] }>)['/proj']!.notes
+  for (const [rung, step, label] of [
+    ['new', 4, '처음 보는 코드'],
+    ['changed', 2, '비슷한 코드'],
+  ] as const) {
+    for (const isOnFirst of [true, false]) {
+      test(`a store another route wrote (${isOnFirst ? 'on, then off' : 'off, then on'}): a question in ${rung === 'new' ? 'code never seen' : 'its code changed'} and a note with the team rule's practice kept as written; what it writes, this route's`, { options: { model: 'sonnet' } }, async ($, on) => {
+        // Three concepts due a month on, met in a.ts: one at the rung's step, two at their first (asked in their code).
+        const steps: Record<string, number> = { 'for...of 반복문': step, 배열: 1, 객체: 1 }
+        const concepts = Object.fromEntries(
+          Object.entries(steps).map(([name, at]) => [
+            conceptKey(name),
+            { name, count: 2, firstAt: NOW - 200 * ROUTE_DAY, lastAt: NOW - 200 * ROUTE_DAY, blurb: `${name} 설명`, files: [], step: at, reviewedAt: NOW - 31 * ROUTE_DAY },
+          ]),
+        )
+        const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)]])
+        const w = world(on, 'ok', null, true, store)
+        w.files.set('/proj/.claude/learn-notes.md', ROUTE_RULES)
+        const onRow = { models: { sonnet: { ...ON } } }
+        const isTraced = rung === 'new'
+        const quizReply = () => [routeCode(1, isTraced), routeCode(2, isTraced), routeCode(3, isTraced)].join('\n')
+        const asked = (store: Map<string, unknown>) => itemsOf(store).map(one => [one.name, one.rung, one.kind, one.question])
+        const drillShown = async () => {
+          const ui = await pane($)
+          const button = await ui.find({ type: 'Button', key: 'note-drill' })
+          await ui.unmount()
+          return button !== undefined
+        }
+
+        // The first window: its concepts' note, the note with the rule's practice, a review quiz.
+        w.harness = isOnFirst ? onRow : undefined
+        await start($)
+        w.answer = CONCEPT_NOTE(Object.keys(steps))
+        await turn($, () => $.tool.call(EDIT_A))
+        await finish(w)
+        w.answer = ROUTE_RULE_NOTE
+        await turn($, () => $.tool.call({ tool: 'Write', tool_use_id: 'a1', file_path: '/proj/src/api.js', content: ROUTE_API }), 't2')
+        await finish(w)
+        expect(w.models.at(-1)!.includes(ROUTE_RULE_ASK)).toBe(isOnFirst)
+        const practiced = notesOf(store).at(-1)!
+        expect(practiced.text).toBe(ROUTE_RULE_NOTE)
+        expect(await drillShown()).toBe(isOnFirst)
+        w.answer = quizReply()
+        await learn($, '퀴즈 새로')
+        expect(w.models.at(-1)!.includes(`\n   칸: ${label}`)).toBe(isOnFirst)
+        const written = asked(store)
+        expect(written.map(one => one[0]).sort()).toEqual(Object.keys(steps).sort())
+        for (const one of written) expect(one[1]).toBe(isOnFirst && one[0] === 'for...of 반복문' ? rung : 'mine')
+        expect((await learn($, '퀴즈')).text?.includes(`(${label}) `)).toBe(isOnFirst)
+
+        // The other route's window: the quiz and the note as written, each shown as 1.9.0 shows it there.
+        w.harness = isOnFirst ? undefined : onRow
+        await start($)
+        expect(asked(store)).toEqual(written)
+        expect((await learn($, '퀴즈')).text?.includes(`(${label}) `)).toBe(isOnFirst)
+        expect(await drillShown()).toBe(!isOnFirst)
+        // It grades a question of another concept: the quiz written back as it was, that one graded.
+        const plain = itemsOf(store).findIndex(one => one.name === '배열')
+        w.answer = ROUTE_RIGHT
+        await learn($, `퀴즈 ${plain + 1} 7`)
+        expect(itemsOf(store)[plain]!.result).toBe('right')
+        expect(asked(store)).toEqual(written)
+        // It writes a note of its own (its route's prompt); the note with the practice kept as written.
+        w.answer = CONCEPT_NOTE(['배열'])
+        await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't3')
+        await finish(w)
+        expect(w.models.at(-1)!.includes(ROUTE_RULE_ASK)).toBe(!isOnFirst)
+        expect(notesOf(store).find(one => one.id === practiced.id)?.text).toBe(ROUTE_RULE_NOTE)
+        // Its next quiz is its own route's.
+        await w.clock.advance(60_000)
+        w.answer = quizReply()
+        await learn($, '퀴즈 새로')
+        expect(w.models.at(-1)!.includes(`\n   칸: ${label}`)).toBe(!isOnFirst)
+        expect(itemsOf(store).find(one => one.name === 'for...of 반복문')?.rung).toBe(isOnFirst ? 'mine' : rung)
+      })
+    }
   }
 })
