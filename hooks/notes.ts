@@ -7605,12 +7605,13 @@ export type MeasuredModel = 'haiku' | 'sonnet'
 /**
  * The switches each model setting runs with (1.10.0 G7). A cell is turned on only by its feature's samples run with
  * that model, in the commit after its decision (docs/qa/견본.md, '1.10.0 모델별 갈래 (G7): 두 모델을 재는 공통 입장'
- * and the feature's own section); never carried from one model to the other. Both rows all off until then.
- * A row with isRuleDrill on has isRuleWide on too (1.10.0 G6: a team rule's practice was measured on notes kept so).
+ * and the feature's own section); never carried from one model to the other. A row with isRuleDrill on has isRuleWide
+ * on too (1.10.0 G6: a team rule's practice was measured on notes kept so). On now: isRuleWide in both rows (1.10.0 G6:
+ * its samples passed with each model; the team rule's practice did not, and stays off).
  */
 export const MODEL_SWITCHES: Readonly<Record<MeasuredModel, Readonly<Switches>>> = Object.freeze({
-  haiku: Object.freeze({ ...SWITCHES_OFF }),
-  sonnet: Object.freeze({ ...SWITCHES_OFF }),
+  haiku: Object.freeze({ ...SWITCHES_OFF, isRuleWide: true }),
+  sonnet: Object.freeze({ ...SWITCHES_OFF, isRuleWide: true }),
 })
 
 /** The explanation level every feature was measured at (D17): any other runs with every switch off. */

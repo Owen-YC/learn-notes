@@ -44,8 +44,8 @@ const ON_VALUES: Readonly<Record<keyof Switches, readonly (boolean | number)[]>>
  * docs/qa/견본.md ('모델별 결정') turns that model's cell on, in the commit after it, this table with it.
  */
 const SHIPPED: Readonly<Record<MeasuredModel, Switches>> = {
-  haiku: { isRuleDrill: false, isRuleWide: false, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false },
-  sonnet: { isRuleDrill: false, isRuleWide: false, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false },
+  haiku: { isRuleDrill: false, isRuleWide: true, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false },
+  sonnet: { isRuleDrill: false, isRuleWide: true, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false },
 }
 /** Two tables a route may run, one model's row unlike the other's. */
 const SPLIT: Readonly<Record<MeasuredModel, Readonly<Switches>>> = {
@@ -168,7 +168,11 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
         for (const remap of ['kept', 'remapped', 'unreadable'] as const) expect(routeOf(model, level, remap, SWITCHES_OFF, ALL_OFF)).toBeUndefined()
       }
     }
-    expect(routeOf('haiku', 'beginner', 'kept', SWITCHES_OFF)).toBeUndefined()
+    expect(routeOf('haiku', 'beginner', 'kept', SWITCHES_OFF, ALL_OFF)).toBeUndefined()
+    // The table as shipped (1.10.0 G6: 팀 규칙 표지 넓힘 on in both rows) names it in either model's window at beginner.
+    expect(routeOf('haiku', 'beginner', 'kept', MODEL_SWITCHES.haiku)).toEqual({ on: ['팀 규칙 표지 넓힘'] })
+    expect(routeOf('sonnet', 'beginner', 'kept', MODEL_SWITCHES.sonnet)).toEqual({ on: ['팀 규칙 표지 넓힘'] })
+    expect(routeOf('haiku', 'intermediate', 'kept', SWITCHES_OFF)).toBe('level')
     expect(routeOf('sonnet', 'beginner', 'kept', SPLIT.sonnet, SPLIT)).toEqual({ on: ['풀이 보고 풀기', '바탕 개념'] })
     expect(routeOf('haiku', 'beginner', 'kept', SPLIT.haiku, SPLIT)).toEqual({ on: ['생각해 보기'] })
     // One row on is enough to name every window's route, the other model's none.

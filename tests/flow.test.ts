@@ -23,6 +23,7 @@ import {
   RUNG_NEW_STEP,
   STAMP_KEPT_MS,
   SWITCH_KINDS,
+  MODEL_SWITCHES,
   WORKED_AFTER_TIMES,
   WRITER_MARK,
   cleanConcepts,
@@ -5813,7 +5814,8 @@ describe('1.7.0: /learn 진단, and failures that say their cause', () => {
     expect(lines[3]).toMatch(/^learn-notes 진단 · 2026-10-0[23] \d\d:\d\d$/)
     expect(lines).toContain('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
     expect(lines).toContain('- 화면: terminal · 패널 오른쪽 60칸 · 터미널 200칸 · 키는 대화에 · Windows Terminal · tmux · vscode')
-    expect(reply).toContain('- 설정: 자동 노트 켬 · haiku · 하루 한도 40(관리자 잠금) · 일지 켬(기본 폴더) · 패널 자동 열기 켬 · 설명 수준 beginner')
+    // The table as shipped turns 팀 규칙 표지 넓힘 on for haiku (1.10.0 G6): the settings line names it.
+    expect(reply).toContain('- 설정: 자동 노트 켬 · haiku(이 모델에서 켠 기능: 팀 규칙 표지 넓힘) · 하루 한도 40(관리자 잠금) · 일지 켬(기본 폴더) · 패널 자동 열기 켬 · 설명 수준 beginner')
     expect(lines).toContain('- 오늘: 노트 1개 · 모델 호출 1번 · 실패 0번')
     expect(reply).toMatch(/\n- 저장소: \d+KB \/ 4MB \(history \d+KB · /)
     expect(lines).toContain('- 일지: 못 쓴 노트 없음')
@@ -13707,9 +13709,9 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
    * a team file with rules, and the note `text` written for a new api.js; its id. On, a note with a rule line has its
    * team rule's practice asked by a call of its own (1.10.0 G6), answered `drill` (RULE_REPLY: RULE_NOTE's practice).
    */
-  async function written($: Engine, on: On, isOn: boolean, store = new Map<string, unknown>(), text = OWN_NOTE, isPlaced = true, drill = RULE_REPLY) {
+  async function written($: Engine, on: On, isOn: boolean, store = new Map<string, unknown>(), text = OWN_NOTE, isPlaced = true, drill = RULE_REPLY, extra: Record<string, unknown> = {}) {
     const w = world(on, 'ok', null, isPlaced, store)
-    w.harness = { isRuleDrill: isOn }
+    w.harness = { isRuleDrill: isOn, ...extra }
     w.files.set('/proj/.claude/learn-notes.md', TEAM_FILE)
     await start($)
     w.answer = text
@@ -13970,8 +13972,9 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
   test('on: a practice of a concept under a rule line is 1.8.0\'s: over, its concept marked and no line under it for a team rule', async ($, on) => {
     const store = new Map<string, unknown>()
     const plain = RULE_NOTE.replace(`- 할 일 (팀 규칙): ${TASK}`, '- 할 일: API 호출을 fetcher로 바꿔 보세요')
-    // The rule practice's own call answers none, and isRuleWide is off (1.10.0 G6): the note's own practice stays its concept's.
-    const { w, id } = await written($, on, true, store, plain, true, '- 할 일: 없음')
+    // The rule practice's own call answers none, and isRuleWide is off (1.10.0 G6; the harness turns off the wider label
+    // the shipped row has on): the note's own practice stays its concept's.
+    const { w, id } = await written($, on, true, store, plain, true, '- 할 일: 없음', { isRuleWide: false })
     expect(noteOf(store).text).toBe(plain)
     const ui = await pane($)
     await ui.press({ key: 'note-drill' })
@@ -15611,19 +15614,22 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     return reads
   }
 
-  // With every switch off a window sends what 1.9.0 sent: the table as shipped has no cell on (when one turns on, its
-  // model's case here goes to the harness-off tests below), any level, either model.
+  // The table as shipped turns 팀 규칙 표지 넓힘 on in both rows (1.10.0 G6, docs/qa/견본.md '모델별 결정'). This day's
+  // note brings no rule's name in, so a window still sends what 1.9.0 sent, any level, either model; at beginner it
+  // reads its alias variable and /learn 진단 names the route, at another level every switch is off and none is read.
+  // Every switch off at beginner (1.9.0's route) is the flat-keys test below.
   for (const level of ['beginner', 'intermediate', 'advanced'] as const) {
     for (const model of ['haiku', 'sonnet'] as const) {
-      test(`as shipped, ${model} at ${level}: 1.9.0's requests to the byte with the setting as each call's model; /learn 진단 as 1.9.0 said it; no alias read`, { options: { model, level } }, async ($, on) => {
+      test(`as shipped, ${model} at ${level}: 1.9.0's requests to the byte with the setting as each call's model; /learn 진단 as 1.9.0 said it but its route; ${level === 'beginner' ? 'its alias read' : 'no alias read'}`, { options: { model, level } }, async ($, on) => {
         const reads = aliasReads(on)
         const { calls, diag } = await routeDay($, on)
         expect(calls).toEqual(ROUTE19_CALLS[level].map(call => ({ model, ...call })))
+        const route = level === 'beginner' ? '(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)' : '(설명 수준이 beginner가 아님 · 모델별 기능 모두 끔)'
         const said = ROUTE19_DIAG[`${model}/${level}`]
-        if (said !== undefined) expect(diag).toBe(said)
-        expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · ${model}${SETTINGS_TAIL} ${level}`)
+        if (said !== undefined) expect(diag).toBe(said.replace(`- 설정: 자동 노트 켬 · ${model} · `, `- 설정: 자동 노트 켬 · ${model}${route} · `))
+        expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · ${model}${route}${SETTINGS_TAIL} ${level}`)
         expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
-        expect(reads).toEqual([])
+        expect(reads).toEqual(level === 'beginner' ? [model === 'haiku' ? HAIKU_ALIAS : SONNET_ALIAS] : [])
       })
     }
   }
@@ -15651,19 +15657,21 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     expect(calls.filter(call => call.maxTokens === 3600)).toHaveLength(1)
     expect(calls.every(call => call.model === 'sonnet' && call.effort === 'low')).toBe(true)
     expect(reads).toEqual([SONNET_ALIAS])
-    // The route's own table turns nothing on: the harness's row is named as a test switch, each one.
-    expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · sonnet(이 모델에서 켠 기능 없음)${SETTINGS_TAIL} beginner`)
-    expect(versionLine(diag)).toBe(`- 버전: learn-notes 1.7.0 · Claude Code 2.1.296 · 시험 스위치: ${switchKeys().map(key => ON_NAMED[key]).join(' · ')}`)
+    // The route's own table turns 팀 규칙 표지 넓힘 on (1.10.0 G6): the harness's row is named as a test switch where
+    // it differs from that table, each one; a cell the shipped row has on already is none.
+    expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)${SETTINGS_TAIL} beginner`)
+    expect(versionLine(diag)).toBe(`- 버전: learn-notes 1.7.0 · Claude Code 2.1.296 · 시험 스위치: ${switchKeys().filter(key => ON[key] !== MODEL_SWITCHES.sonnet[key]).map(key => ON_NAMED[key]).join(' · ')}`)
+    expect(versionLine(diag)).not.toContain(ON_NAMED.isRuleWide)
   })
 
-  test('haiku runs its own row: a harness turning sonnet\'s on leaves haiku 1.9.0\'s, no alias read, /learn 진단 saying none is on here', { options: { model: 'haiku' } }, async ($, on) => {
+  test('haiku runs its own row: a harness turning sonnet\'s on leaves haiku its shipped row (1.9.0\'s requests this day), its own alias read, /learn 진단 naming its own route', { options: { model: 'haiku' } }, async ($, on) => {
     const reads = aliasReads(on)
     const { calls, diag } = await routeDay($, on, w => {
       w.harness = { models: { sonnet: { ...ON } } }
     })
     expect(calls).toEqual(ROUTE19_CALLS.beginner.map(call => ({ model: 'haiku', ...call })))
-    expect(reads).toEqual([])
-    expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · haiku(이 모델에서 켠 기능 없음)${SETTINGS_TAIL} beginner`)
+    expect(reads).toEqual([HAIKU_ALIAS])
+    expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · haiku(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)${SETTINGS_TAIL} beginner`)
     expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
   })
 
@@ -15723,7 +15731,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         env,
       )
       expect(reads).toEqual([SONNET_ALIAS])
-      expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · sonnet(이 모델에서 켠 기능 없음)${SETTINGS_TAIL} beginner`)
+      expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)${SETTINGS_TAIL} beginner`)
       expect(versionLine(diag)).toContain('· 시험 스위치: 풀이 보고 풀기 오답 수 2')
     })
   }
@@ -15743,24 +15751,26 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         env,
       )
       expect(reads).toEqual([HAIKU_ALIAS])
-      expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · haiku(${isKept ? '이 모델에서 켠 기능 없음' : '별칭을 다른 모델로 바꿔 둠 · 모델별 기능 모두 끔'})${SETTINGS_TAIL} beginner`)
+      expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · haiku(${isKept ? '이 모델에서 켠 기능: 팀 규칙 표지 넓힘' : '별칭을 다른 모델로 바꿔 둠 · 모델별 기능 모두 끔'})${SETTINGS_TAIL} beginner`)
       expect(versionLine(diag)?.includes('시험 스위치')).toBe(isKept)
     })
   }
 
   // Each switch on its own through a harness's models row: the sonnet window runs it, the haiku window does not (the
-  // table's every key, one more included).
+  // table's every key, one more included). Both rows as shipped turn 팀 규칙 표지 넓힘 on (1.10.0 G6), so each window
+  // reads its own alias variable, and a cell its shipped row has on already is no test switch (G7 1/7 follow-up).
   for (const key of switchKeys()) {
     for (const model of ['haiku', 'sonnet'] as const) {
-      test(`models.sonnet turning ${key} on: ${model === 'sonnet' ? 'run by the sonnet window, its alias read' : 'not run by the haiku window, nothing read'}`, { options: { model } }, async ($, on) => {
+      const isSwitched = model === 'sonnet' && ON[key] !== MODEL_SWITCHES.sonnet[key]
+      test(`models.sonnet turning ${key} on: ${model === 'sonnet' ? `run by the sonnet window, its alias read${isSwitched ? '' : ', no test switch (its shipped row has it on)'}` : 'not run by the haiku window, which reads its own alias for its own row'}`, { options: { model } }, async ($, on) => {
         const reads = aliasReads(on)
         const w = world(on)
         w.harness = { models: { sonnet: { [key]: ON[key] } } }
         await start($)
         const diag = (await learn($, '진단')).text ?? ''
-        expect(reads).toEqual(model === 'sonnet' ? [SONNET_ALIAS] : [])
-        expect(versionLine(diag)).toBe(`- 버전: learn-notes 1.7.0 · Claude Code 2.1.296${model === 'sonnet' ? ` · 시험 스위치: ${ON_NAMED[key]}` : ''}`)
-        expect(modelSaid(diag)).toBe(`${model}(이 모델에서 켠 기능 없음)`)
+        expect(reads).toEqual(model === 'sonnet' ? [SONNET_ALIAS] : [HAIKU_ALIAS])
+        expect(versionLine(diag)).toBe(`- 버전: learn-notes 1.7.0 · Claude Code 2.1.296${isSwitched ? ` · 시험 스위치: ${ON_NAMED[key]}` : ''}`)
+        expect(modelSaid(diag)).toBe(`${model}(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)`)
       })
     }
   }
@@ -15774,15 +15784,15 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     ['a __proto__ key in the row', { sonnet: JSON.parse('{"__proto__": {"workedAfterTimes": 2}}') }],
     ['unknown keys and values of the wrong kind', { sonnet: { isWorked: true, workedAfterTimes: -1, rungNewStep: 1.5, rungChangedStep: 'two', isBaseAsked: 'yes', isThinkAsked: 1, isRuleDrill: null } }],
   ] as const) {
-    test(`harness.models as ${what} turns nothing on and reads nothing`, { options: { model: 'sonnet' } }, async ($, on) => {
+    test(`harness.models as ${what} turns nothing more on: the shipped row alone, its alias read, no test switch`, { options: { model: 'sonnet' } }, async ($, on) => {
       const reads = aliasReads(on)
       const w = world(on)
       w.harness = { models }
       await start($)
       const diag = (await learn($, '진단')).text ?? ''
-      expect(reads).toEqual([])
+      expect(reads).toEqual([SONNET_ALIAS])
       expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
-      expect(modelSaid(diag)).toBe('sonnet')
+      expect(modelSaid(diag)).toBe('sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)')
     })
   }
 
@@ -15902,14 +15912,14 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     expect(order).toEqual(['alias', 'model'])
     isSlowRead = false
     expect(versionLine((await learn($, '진단')).text ?? '')).toContain('· 시험 스위치: 풀이 보고 풀기 오답 수 2')
-    // A start with no harness: the shipped route (every switch off), nothing read.
+    // A start with no harness: the shipped route (팀 규칙 표지 넓힘 on, 1.10.0 G6), its alias read, no test switch.
     w.harness = undefined
     order.length = 0
     await start($)
-    expect(order).toEqual([])
+    expect(order).toEqual(['alias'])
     const diag = (await learn($, '진단')).text ?? ''
     expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
-    expect(modelSaid(diag)).toBe('sonnet')
+    expect(modelSaid(diag)).toBe('sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)')
   })
 
   for (const isOnFirst of [true, false]) {
@@ -16266,12 +16276,38 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     expect(usageOf(store)).toMatchObject({ calls: 7, auto: 2 })
   })
 
+  // As shipped (docs/qa/견본.md '모델별 결정'): isRuleWide on and isRuleDrill off in both rows.
   for (const model of ['haiku', 'sonnet'] as const) {
-    test(`as shipped (${model}, no harness): one call however the note reads, its own practice kept as 1.9.0 kept it`, { options: { model } }, async ($, on) => {
+    test(`as shipped (${model}, no harness): one call however the note reads; a practice bringing the rule's name in under a rule line kept marked (no t), one that does not kept as 1.9.0 kept it`, { options: { model } }, async ($, on) => {
       const { calls, note, w } = await wrote($, on, undefined, [PLAIN, REPLY])
       expect(calls.map(call => [call.model, call.system])).toEqual([[model, SYSTEM]])
-      expect(note().text).toBe(PLAIN)
+      expect(note().text).toBe(PLAIN_KEPT)
       expect(w.texts).toEqual([REPLY])
+      let ui = await pane($)
+      expect(await ui.find({ type: 'Button', key: 'note-drill' })).toBeUndefined()
+      await ui.unmount()
+      w.texts = [OWN]
+      await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
+      await finish(w)
+      expect(calls.map(call => call.system)).toEqual([SYSTEM, SYSTEM])
+      expect(note().text).toBe(OWN)
+      ui = await pane($)
+      expect((await ui.find({ type: 'Button', key: 'note-drill' }))?.props).toMatchObject({ hotkey: 't' })
+      await ui.unmount()
+    })
+
+    test(`as shipped (${model}): a harness's flat isRuleWide false is a test switch and keeps the note as 1.9.0 kept it; true, as the row has it, is none`, { options: { model } }, async ($, on) => {
+      const { note, w } = await wrote($, on, { isRuleWide: false }, [PLAIN])
+      expect(note().text).toBe(PLAIN)
+      const versionLine = (diag: string) => diag.split('\n').find(line => line.startsWith('- 버전: '))
+      expect(versionLine((await learn($, '진단')).text ?? '')).toContain('· 시험 스위치: 팀 규칙 표지 넓힘 끔')
+      w.harness = { isRuleWide: true }
+      await start($)
+      w.texts = [PLAIN]
+      await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
+      await finish(w)
+      expect(note().text).toBe(PLAIN_KEPT)
+      expect(versionLine((await learn($, '진단')).text ?? '')).not.toContain('시험 스위치')
     })
   }
 
@@ -16301,8 +16337,18 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     expect(note().text).toBe(PLAIN.replace(`${RULE_LINE}\n`, ''))
   })
 
-  test('per model (G7): haiku\'s row on, the sonnet window makes one call and keeps the note as 1.9.0 did; its t is the concept\'s', { options: { model: 'sonnet' } }, async ($, on) => {
+  test('per model (G7): haiku\'s row on, the sonnet window makes one call and keeps the note as its own row says (isRuleWide on as shipped, isRuleDrill off): marked, no t', { options: { model: 'sonnet' } }, async ($, on) => {
     const { calls, note } = await wrote($, on, { models: { haiku: ON } }, [PLAIN, REPLY])
+    expect(calls.map(call => [call.model, call.system])).toEqual([['sonnet', SYSTEM]])
+    expect(note().text).toBe(PLAIN_KEPT)
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Button', key: 'note-drill' })).toBeUndefined()
+    expect(await ui.find({ type: 'Markdown', text: /직접 해 보기/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('per model (G7): haiku\'s row on, a sonnet window with its row turned back off (models.sonnet) keeps the note as 1.9.0 did; its t is the concept\'s', { options: { model: 'sonnet' } }, async ($, on) => {
+    const { calls, note } = await wrote($, on, { models: { haiku: ON, sonnet: OFF } }, [PLAIN, REPLY])
     expect(calls.map(call => [call.model, call.system])).toEqual([['sonnet', SYSTEM]])
     expect(note().text).toBe(PLAIN)
     const ui = await pane($)
