@@ -7356,6 +7356,198 @@ export const DIAG_FAULTS = 8
 /** Other sessions /learn 진단 names on its 다른 창 line, the newest first. */
 export const DIAG_OTHERS = 3
 
+/**
+ * The model-gated features' switches a load runs with (1.10.0 G7), one value each: a flag is on while true; a step
+ * (a rung of the question ladder, the misses before a worked example) is on while finite, Infinity for off. The
+ * notes.ts functions take each as an argument whose default is its constant (IS_RULE_DRILL …), the off value, so a
+ * call that is not handed one runs as 1.9.0 did.
+ */
+export type Switches = {
+  isRuleDrill: boolean
+  rungNewStep: number
+  rungChangedStep: number
+  workedAfterTimes: number
+  isBaseAsked: boolean
+  isThinkAsked: boolean
+}
+
+/**
+ * Each switch's kind, in the order /learn 진단 names them (1.10.0 G7, D18): a flag (true or false) or a step (a whole
+ * number from 0, Infinity for off). Reading a harness, laying one over the switches, /learn 진단 and the tests go
+ * through this table for the keys, so one more switch is one more row here, in SWITCHES_OFF and in FEATURE_NAMES.
+ */
+export const SWITCH_KINDS: Readonly<Record<keyof Switches, 'flag' | 'step'>> = Object.freeze({
+  isRuleDrill: 'flag',
+  rungNewStep: 'step',
+  rungChangedStep: 'step',
+  workedAfterTimes: 'step',
+  isBaseAsked: 'flag',
+  isThinkAsked: 'flag',
+})
+
+/** The switches' keys, in SWITCH_KINDS' order. */
+export function switchKeys(): (keyof Switches)[] {
+  return Object.keys(SWITCH_KINDS) as (keyof Switches)[]
+}
+
+/**
+ * Every switch off: each its constant, as 1.9.0 shipped them (false · Infinity). The constants stay off in 1.10.0; a
+ * feature turns on only in MODEL_SWITCHES, for the model it was measured with. A model string with no row of its own,
+ * an alias turned to another model, or a level other than beginner runs with these.
+ */
+export const SWITCHES_OFF: Readonly<Switches> = Object.freeze({
+  isRuleDrill: IS_RULE_DRILL,
+  rungNewStep: RUNG_NEW_STEP,
+  rungChangedStep: RUNG_CHANGED_STEP,
+  workedAfterTimes: WORKED_AFTER_TIMES,
+  isBaseAsked: IS_BASE_ASKED,
+  isThinkAsked: IS_THINK_ASKED,
+})
+
+/** The model settings a feature is measured with (plugin.json's `model` options), each a row of MODEL_SWITCHES. */
+export type MeasuredModel = 'haiku' | 'sonnet'
+
+/**
+ * The switches each model setting runs with (1.10.0 G7). A cell is turned on only by its feature's samples run with
+ * that model, in the commit after its decision (docs/qa/견본.md, '1.10.0 모델별 갈래 (G7): 두 모델을 재는 공통 입장'
+ * and the feature's own section); never carried from one model to the other. Both rows all off until then.
+ */
+export const MODEL_SWITCHES: Readonly<Record<MeasuredModel, Readonly<Switches>>> = Object.freeze({
+  haiku: Object.freeze({ ...SWITCHES_OFF }),
+  sonnet: Object.freeze({ ...SWITCHES_OFF }),
+})
+
+/** The explanation level every feature was measured at (D17): any other runs with every switch off. */
+const MEASURED_LEVEL = 'beginner'
+
+/**
+ * The switches the model setting `model` runs with at the explanation level `level` (1.10.0 G7, D17): its row of
+ * `routes` (MODEL_SWITCHES) for exactly `haiku` or `sonnet` at beginner; SWITCHES_OFF for any other string (another
+ * case, a space, a `[1m]` tail, a full id, opus, '') or level. Compared, never looked up: a record indexed by a free
+ * string answers `__proto__` · `constructor` · `toString` with Object.prototype's.
+ */
+export function switchesFor(model: string, level: string, routes: Readonly<Record<MeasuredModel, Readonly<Switches>>> = MODEL_SWITCHES): Readonly<Switches> {
+  if (level !== MEASURED_LEVEL) return SWITCHES_OFF
+  return model === 'haiku' ? routes.haiku : model === 'sonnet' ? routes.sonnet : SWITCHES_OFF
+}
+
+/** True when any switch of `s` is not its off value (SWITCHES_OFF). */
+export function hasOn(s: Readonly<Switches>): boolean {
+  return switchKeys().some(key => s[key] !== SWITCHES_OFF[key])
+}
+
+/** Each feature's name in /learn 진단's settings line (1.10.0 G7, D18). */
+export const FEATURE_NAMES: Readonly<Record<keyof Switches, string>> = Object.freeze({
+  isRuleDrill: '팀 규칙 연습',
+  rungNewStep: '처음 보는 코드',
+  rungChangedStep: '비슷한 코드',
+  workedAfterTimes: '풀이 보고 풀기',
+  isBaseAsked: '바탕 개념',
+  isThinkAsked: '생각해 보기',
+})
+
+/** The names of the features `s` turns on, in SWITCH_KINDS' order, each once. */
+export function routeOn(s: Readonly<Switches>): string[] {
+  const names = switchKeys()
+    .filter(key => s[key] !== SWITCHES_OFF[key])
+    .map(key => FEATURE_NAMES[key])
+  return names.filter((name, i) => names.indexOf(name) === i)
+}
+
+/** Each switch's name in /learn 진단's list of the switches a test's harness turned (switchedNames: 1.9.0's words). */
+export const SWITCH_NAMES: Readonly<Record<keyof Switches, string>> = Object.freeze({
+  isRuleDrill: '팀 규칙 연습',
+  rungNewStep: '처음 보는 코드 단계',
+  rungChangedStep: '비슷한 코드 단계',
+  workedAfterTimes: '풀이 보고 풀기 오답 수',
+  isBaseAsked: '바탕 개념',
+  isThinkAsked: '생각해 보기',
+})
+
+/**
+ * The switches `build` runs the other way from `release`, the ones its route releases with (a test harness's), each
+ * with its state for /learn 진단's `시험 스위치`: a flag 켬 or 끔, a step its number or 끔. A cell the route itself
+ * turns on is no harness's, and not named.
+ */
+export function switchedNames(build: Readonly<Switches>, release: Readonly<Switches>): string[] {
+  return switchKeys()
+    .filter(key => build[key] !== release[key])
+    .map(key => {
+      const value = build[key]
+      return `${SWITCH_NAMES[key]} ${typeof value === 'boolean' ? (value ? '켬' : '끔') : value === Infinity ? '끔' : String(value)}`
+    })
+}
+
+/**
+ * A harness's step (a test's plugin.json): a whole number from 0, or null for off (Infinity); undefined for anything
+ * else, which leaves the switch as it was.
+ */
+export function harnessStepOf(value: unknown): number | undefined {
+  if (value === null) return Infinity
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined
+}
+
+/**
+ * `base` with a test harness's switches laid over it (1.10.0 G7): each key of SWITCH_KINDS `raw` holds as its own
+ * with a value of the key's kind (a flag true or false; a step a whole number from 0, or null for off); the rest as
+ * `base` has them. `raw` not an object (an array, null, a number), an unknown key or a value of the wrong kind
+ * (a negative step, a fraction, a word) changes nothing. Only a test's plugin.json has a harness; a release's has none.
+ */
+export function overlaySwitches(base: Readonly<Switches>, raw: unknown): Switches {
+  const out: Switches = { ...base }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return out
+  const given = raw as Record<string, unknown>
+  const into = out as Record<keyof Switches, boolean | number>
+  for (const key of switchKeys()) {
+    if (!Object.prototype.hasOwnProperty.call(given, key)) continue
+    const value = given[key]
+    if (SWITCH_KINDS[key] === 'flag') {
+      if (typeof value === 'boolean') into[key] = value
+    } else {
+      const step = harnessStepOf(value)
+      if (step !== undefined) into[key] = step
+    }
+  }
+  return out
+}
+
+/**
+ * Whether the model setting's alias points where Claude Code's own does (1.10.0 G7, D24): `kept`; `remapped` when the
+ * environment turns it to another model (ANTHROPIC_DEFAULT_HAIKU_MODEL · ANTHROPIC_DEFAULT_SONNET_MODEL set);
+ * `unreadable` when that could not be read. Read only in a window whose route has a switch on.
+ */
+export type Remap = 'kept' | 'remapped' | 'unreadable'
+
+/**
+ * What /learn 진단's settings line says after the model setting (1.10.0 G7): the features this window's route turns on
+ * (`on`, maybe none), or why every one is off: a model string no row is for (`unmeasured`), a level other than
+ * beginner (`level`), an alias turned to another model (`remapped`) or one that could not be checked (`unreadable`).
+ */
+export type Route = { on: readonly string[] } | 'unmeasured' | 'level' | 'remapped' | 'unreadable'
+
+/**
+ * This window's route for /learn 진단 (1.10.0 G7), from the model setting, the level, the alias's state and the
+ * switches the window releases with (`release`, a harness's aside): none while no row of `routes` turns anything on,
+ * so the line is 1.9.0's to the byte; else, in this order, `unmeasured`, `level`, the alias's state, or the features on.
+ */
+export function routeOf(model: string, level: string, remap: Remap, release: Readonly<Switches>, routes: Readonly<Record<MeasuredModel, Readonly<Switches>>> = MODEL_SWITCHES): Route | undefined {
+  if (!hasOn(routes.haiku) && !hasOn(routes.sonnet)) return undefined
+  if (model !== 'haiku' && model !== 'sonnet') return 'unmeasured'
+  if (level !== MEASURED_LEVEL) return 'level'
+  if (remap !== 'kept') return remap
+  return { on: routeOn(release) }
+}
+
+/** A route as /learn 진단 says it, right after the model setting: '' for none. */
+export function routeText(route: Route | undefined): string {
+  if (route === undefined) return ''
+  if (route === 'unmeasured') return '(잰 적 없는 모델 · 모델별 기능 모두 끔)'
+  if (route === 'level') return '(설명 수준이 beginner가 아님 · 모델별 기능 모두 끔)'
+  if (route === 'remapped') return '(별칭을 다른 모델로 바꿔 둠 · 모델별 기능 모두 끔)'
+  if (route === 'unreadable') return '(별칭을 확인하지 못함 · 모델별 기능 모두 끔)'
+  return route.on.length === 0 ? '(이 모델에서 켠 기능 없음)' : `(이 모델에서 켠 기능: ${route.on.join(' · ')})`
+}
+
 /** What /learn 진단 is made of, every piece gathered with no model call; none of it a path, a request, code or a concept. */
 export type DiagInput = {
   now: number
@@ -7393,6 +7585,8 @@ export type DiagInput = {
     excluded: number
     /** The settings an administrator locked, by field name (autoNote, dailyAutoNotes …). */
     locked: readonly string[]
+    /** This window's route (1.10.0 G7, routeOf): said right after the model; none while no model has a switch on. */
+    route?: Route
   }
   today: { notes: number; calls: number }
   /** The store's size in all and its biggest keys; undefined when it could not be read. */
@@ -7462,7 +7656,7 @@ export function diagText(input: DiagInput): string {
   const folder = s.saveDir === 'default' ? '기본 폴더' : s.saveDir === 'network' ? '네트워크 폴더' : '바꾼 폴더'
   const settings = [
     `자동 노트 ${s.isAutoNote ? '켬' : '끔'}${locked('autoNote')}`,
-    `${s.model}${locked('model')}`,
+    `${s.model}${routeText(s.route)}${locked('model')}`,
     `${s.dailyAutoNotes > 0 ? `하루 한도 ${s.dailyAutoNotes}` : '하루 한도 없음'}${locked('dailyAutoNotes')}`,
     `일지 ${s.isAutoSave ? `켬(${folder}${s.hasFolder === false ? ', 아직 없음' : ''})` : '끔'}${locked('autoSave') || locked('saveDir')}`,
     `패널 자동 열기 ${s.isAutoOpen ? '켬' : '끔'}${locked('autoOpen')}`,

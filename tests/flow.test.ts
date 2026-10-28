@@ -18,6 +18,7 @@ import {
   RUNG_CHANGED_STEP,
   RUNG_NEW_STEP,
   STAMP_KEPT_MS,
+  SWITCH_KINDS,
   WORKED_AFTER_TIMES,
   WRITER_MARK,
   cleanConcepts,
@@ -34,9 +35,12 @@ import {
   stamp,
   stepMarks,
   storedConcepts,
+  switchKeys,
   withKnownMarks,
+  type Switches,
 } from '../hooks/notes'
 import { COEXIST_CASES, COEXIST_MIXED, type CoexistStore } from './fixtures/coexist19'
+import { ROUTE19_CALLS, ROUTE19_DIAG } from './fixtures/route19'
 
 const NOW = Date.UTC(2026, 9, 3, 1)
 const NOTES_DIR = '/home/u/.claude/learning-notes'
@@ -15416,6 +15420,430 @@ describe('1.9.0: the note and quiz calls\' output caps, raised by their sample (
       await learn($, '퀴즈 새로')
       expect(quizItems(store).map(one => one.rung)).toEqual([isOn ? 'new' : 'mine'])
       expect(callsOf(w)).toEqual([{ budget: NOTE, system: SYSTEM }, { budget: isOn ? QUIZ_LONG : QUIZ, system: QUIZ_SYSTEM }])
+    })
+  }
+})
+
+/**
+ * 1.10.0 G7: every kind of model call a window makes, sent by the plugin as it stands, and /learn 진단's text. Run on
+ * fca5988 (1.9.0) by a maintainer's capture outside CI (tests/fixtures/route19.ts), and here with every route off.
+ */
+const ROUTE_DAY = 86_400_000
+const ROUTE_TEAM = ['# 팀', '', '## 규칙', '- API 호출은 `fetch`를 바로 쓰지 말고 `fetcher`를 쓴다', '', '## 용어', '- **캐시 키**: 요청마다 캐시를 나누는 이름입니다', '- **페이지네이션 커서**: 다음 쪽을 가리키는 값입니다', ''].join('\n')
+const ROUTE_HELLO = ['// 인사', 'function greet(name) {', '  return `안녕하세요, ${name}님!`', '}', ''].join('\n')
+const ROUTE_EXAMPLE = 'return `안녕하세요, ${name || "손"}님!`'
+const ROUTE_NOTE = [
+  '### 한 줄 요약',
+  '이름을 받아 인사하는 함수를 만들었습니다',
+  '### 무엇이 바뀌었나',
+  '- 전: 없음',
+  '- 후: 이름을 넣어 인사합니다',
+  '### 왜 이렇게 바꿨을까',
+  '이름마다 인사를 다르게 하려고 만들었습니다.',
+  '### 배울 개념',
+  '- **템플릿 리터럴**: 문자열 안에 값을 넣습니다 — `${name}`',
+  '### 직접 해 보기',
+  '- 할 일: 이름이 비어 있으면 "손님"에게 인사하게 바꿔 보세요',
+  '- 고칠 줄: `` return `안녕하세요, ${name}님!` ``',
+  '- 확인: `greet("")` → "안녕하세요, 손님!"',
+  `- 예시 답: \`\` ${ROUTE_EXAMPLE} \`\``,
+].join('\n')
+const ROUTE_NUDGED = ['판정: 틀림', '피드백: 그 값은 바깥 변수가 아닙니다.', '되묻기: 안쪽 함수가 다시 불릴 때 count는 어디에 남아 있을까요?', '헷갈린 점: 함수가 끝나면 바깥 변수도 사라진다고 봄', '유형: 변수 범위'].join('\n')
+const ROUTE_RIGHT = '판정: 맞음\n피드백: 정확합니다.'
+const routeQ = (n: number) => [`T${n}: 예측`, `Q${n}: 문제 ${n}`, `A${n}: 답 ${n}`].join('\n')
+
+/**
+ * The store the window opens on: 클로저 missed twice running, its base 변수 범위 (a worked example and a base are
+ * asked while those are on), 변수 범위 due, for...of 반복문 at step 4 a month on (code never seen's while it is on).
+ */
+function routeStore(): Map<string, unknown> {
+  const rows: Record<string, { step: number; ago: number; files: string[] }> = {
+    클로저: { step: 1, ago: 3, files: ['counter.js'] },
+    '변수 범위': { step: 2, ago: 5, files: ['counter.js'] },
+    'for...of 반복문': { step: 4, ago: 31, files: ['a.ts'] },
+  }
+  const concepts = Object.fromEntries(
+    Object.entries(rows).map(([name, one]) => [
+      conceptKey(name),
+      { name, count: 2, firstAt: NOW - 60 * ROUTE_DAY, lastAt: NOW - 60 * ROUTE_DAY, blurb: `${name} 설명`, files: one.files, step: one.step, reviewedAt: NOW - one.ago * ROUTE_DAY },
+    ]),
+  )
+  const slips = {
+    [conceptKey('클로저')]: { what: '함수가 끝나면 바깥 변수도 사라진다고 봄', type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * ROUTE_DAY, times: 2, base: conceptKey('변수 범위') },
+  }
+  return new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['slips', slips]])
+}
+
+/** One model call as the plugin asked for it. */
+type RouteCall = { model: string; effort: string | undefined; system: string | undefined; prompt: string; maxTokens: number | undefined; timeoutMs: number | undefined }
+
+/** Each model call's request, in order, caught above the world's answer (any prompt: the world answers model.complete too). Register before `world`. */
+function routeCalls(on: On): RouteCall[] {
+  const calls: RouteCall[] = []
+  on('model.complete', { prompt: /[\s\S]/ }, async (_$, e, next) => {
+    calls.push({ model: e.model, effort: e.effort, system: e.system, prompt: e.prompt, maxTokens: e.maxTokens, timeoutMs: e.timeoutMs })
+    return next(e)
+  })
+  return calls
+}
+
+/**
+ * A window's day with every kind of call: a note with a team file and a practice, r and e under it, the practice
+ * missed and tried again, a question, a review quiz (a try again among its grades), the team's terms, a recap; then
+ * /learn 진단. Its calls and the diagnosis. `setup` (a harness, say) and `env` are the world's before it starts.
+ */
+async function routeDay($: Engine, on: On, setup: (w: World) => void = () => {}, env: Record<string, string> = {}): Promise<{ calls: RouteCall[]; diag: string; w: World }> {
+  const calls = routeCalls(on)
+  const store = routeStore()
+  const w = world(on, 'ok', null, true, store, env)
+  w.files.set('/proj/.claude/learn-notes.md', ROUTE_TEAM)
+  setup(w)
+  await start($)
+  w.answer = ROUTE_NOTE
+  await turn($, () => $.tool.call({ tool: 'Write', tool_use_id: 'h1', file_path: '/proj/src/hello.js', content: ROUTE_HELLO }))
+  await finish(w)
+  const id = (store.get('history') as Record<string, { notes: { id: string }[] }>)['/proj']!.notes.at(-1)!.id
+  const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+  w.answer = '1. `greet("철수")`: "안녕하세요, 철수님!"을 돌려줍니다.'
+  await ui.press({ key: 'trace' })
+  await w.clock.settle()
+  w.answer = '템플릿 리터럴은 글자 사이에 값을 끼워 넣습니다.'
+  await ui.press({ key: 'easier' })
+  await w.clock.settle()
+  await ui.press({ key: 'note-drill' })
+  w.answer = ROUTE_NUDGED
+  await ui.input({ key: `drill-${id}`, text: 'return 1' })
+  await w.clock.settle()
+  w.answer = ROUTE_RIGHT
+  await ui.input({ key: `drill-${id}-again`, text: 'return `안녕하세요, ${name ? name : "손"}님!`' })
+  await w.clock.settle()
+  await ui.unmount()
+  w.answer = '값을 글자 안에 바로 넣을 수 있어서입니다.'
+  await learn($, '질문 왜 템플릿 리터럴을 써요?')
+  w.answer = [routeQ(1), routeQ(2), routeQ(3)].join('\n')
+  await learn($, '퀴즈 새로')
+  w.answer = ROUTE_NUDGED
+  await learn($, '퀴즈 1 전역 변수')
+  w.answer = ROUTE_RIGHT
+  await learn($, '퀴즈 1 안쪽 함수가 count를 기억합니다')
+  await learn($, '퀴즈 2 답 2')
+  w.answer = [routeQ(1), routeQ(2)].join('\n')
+  await learn($, '퀴즈 팀')
+  w.answer = '### 한 일\n인사 함수를 만들었다'
+  await learn($, '정리')
+  const diag = (await learn($, '진단')).text ?? ''
+  return { calls, diag, w }
+}
+
+describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the switches, once at session start', () => {
+  /** A value that turns each switch on, as a measured route may (a step a whole number). */
+  const ON: Readonly<Record<keyof Switches, boolean | number>> = { isRuleDrill: true, rungNewStep: 4, rungChangedStep: 2, workedAfterTimes: 2, isBaseAsked: true, isThinkAsked: true }
+  /** Each switch as /learn 진단's harness list names it on (ON). */
+  const ON_NAMED: Readonly<Record<keyof Switches, string>> = {
+    isRuleDrill: '팀 규칙 연습 켬',
+    rungNewStep: '처음 보는 코드 단계 4',
+    rungChangedStep: '비슷한 코드 단계 2',
+    workedAfterTimes: '풀이 보고 풀기 오답 수 2',
+    isBaseAsked: '바탕 개념 켬',
+    isThinkAsked: '생각해 보기 켬',
+  }
+  /** Every switch off in a harness's flat keys: a flag false, a step null. */
+  const FLAT_OFF = Object.fromEntries(switchKeys().map(key => [key, SWITCH_KINDS[key] === 'flag' ? false : null]))
+  const HAIKU_ALIAS = 'ANTHROPIC_DEFAULT_HAIKU_MODEL'
+  const SONNET_ALIAS = 'ANTHROPIC_DEFAULT_SONNET_MODEL'
+  const SETTINGS_TAIL = ' · 하루 한도 없음 · 일지 켬(기본 폴더) · 패널 자동 열기 켬 · 설명 수준'
+  const settingsLine = (diag: string) => diag.split('\n').find(line => line.startsWith('- 설정: '))
+  /** The settings line's model and what follows it (a route), up to the daily limit. */
+  const modelSaid = (diag: string) => /^- 설정: 자동 노트 켬 · (.*?) · 하루 한도 /.exec(settingsLine(diag) ?? '')?.[1]
+  /** A reply whose question is a worked example (a worked rung's mark kept only when the reply holds one). */
+  const routeWorked = (n: number) =>
+    [`T${n}: 예측`, `Q${n}: 풀이: \`let n = 0; const up = () => ++n; up()\` 뒤 n은 1입니다.`, '이제 풀어 보세요: `let c = 10; const add = () => ++c; add()` 뒤 c는?', `H${n}: 바깥 c`, `A${n}: 11`].join('\n')
+  const versionLine = (diag: string) => diag.split('\n').find(line => line.startsWith('- 버전: '))
+  const itemsOf = (store: Map<string, unknown>) => (store.get('quiz') as { items: Record<string, unknown>[] }).items
+
+  /** Each read of an alias variable, caught above the world's env; `refused` names one whose read is refused. Register before `world`. */
+  function aliasReads(on: On, refused?: string): string[] {
+    const reads: string[] = []
+    on('env.get', { name: /^ANTHROPIC_DEFAULT_/ }, (_$, e, next) => {
+      reads.push(e.name)
+      return e.name === refused ? { deny: 'refused by policy' } : next(e)
+    })
+    return reads
+  }
+
+  // With every switch off a window sends what 1.9.0 sent: the table as shipped has no cell on (when one turns on, its
+  // model's case here goes to the harness-off tests below), any level, either model.
+  for (const level of ['beginner', 'intermediate', 'advanced'] as const) {
+    for (const model of ['haiku', 'sonnet'] as const) {
+      test(`as shipped, ${model} at ${level}: 1.9.0's requests to the byte with the setting as each call's model; /learn 진단 as 1.9.0 said it; no alias read`, { options: { model, level } }, async ($, on) => {
+        const reads = aliasReads(on)
+        const { calls, diag } = await routeDay($, on)
+        expect(calls).toEqual(ROUTE19_CALLS[level].map(call => ({ model, ...call })))
+        const said = ROUTE19_DIAG[`${model}/${level}`]
+        if (said !== undefined) expect(diag).toBe(said)
+        expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · ${model}${SETTINGS_TAIL} ${level}`)
+        expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
+        expect(reads).toEqual([])
+      })
+    }
+  }
+
+  for (const model of ['haiku', 'sonnet'] as const) {
+    test(`${model} with a harness turning every switch off by its flat keys: 1.9.0's requests whatever the table holds`, { options: { model } }, async ($, on) => {
+      const { calls } = await routeDay($, on, w => {
+        w.harness = { ...FLAT_OFF }
+      })
+      expect(calls).toEqual(ROUTE19_CALLS.beginner.map(call => ({ model, ...call })))
+    })
+  }
+
+  test('a route with every switch on (a harness\'s models row) reaches every path the day takes: the note, r, the quiz and its cap, the grades', { options: { model: 'sonnet' } }, async ($, on) => {
+    const reads = aliasReads(on)
+    const { calls, diag } = await routeDay($, on, w => {
+      w.harness = { models: { sonnet: { ...ON } } }
+    })
+    const golden = ROUTE19_CALLS.beginner
+    // The note asks for the team rule's practice, r for 생각해 보기; the quiz asks a base and a worked example (3600).
+    expect(calls[0]!.prompt).not.toBe(golden[0]!.prompt)
+    expect(calls[1]!.prompt).not.toBe(golden[1]!.prompt)
+    expect(calls.filter(call => call.maxTokens === 3600)).toHaveLength(1)
+    expect(calls.every(call => call.model === 'sonnet' && call.effort === 'low')).toBe(true)
+    expect(reads).toEqual([SONNET_ALIAS])
+    // The route's own table turns nothing on: the harness's row is named as a test switch, each one.
+    expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · sonnet(이 모델에서 켠 기능 없음)${SETTINGS_TAIL} beginner`)
+    expect(versionLine(diag)).toBe(`- 버전: learn-notes 1.7.0 · Claude Code 2.1.296 · 시험 스위치: ${switchKeys().map(key => ON_NAMED[key]).join(' · ')}`)
+  })
+
+  test('haiku runs its own row: a harness turning sonnet\'s on leaves haiku 1.9.0\'s, no alias read, /learn 진단 saying none is on here', { options: { model: 'haiku' } }, async ($, on) => {
+    const reads = aliasReads(on)
+    const { calls, diag } = await routeDay($, on, w => {
+      w.harness = { models: { sonnet: { ...ON } } }
+    })
+    expect(calls).toEqual(ROUTE19_CALLS.beginner.map(call => ({ model: 'haiku', ...call })))
+    expect(reads).toEqual([])
+    expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · haiku(이 모델에서 켠 기능 없음)${SETTINGS_TAIL} beginner`)
+    expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
+  })
+
+  for (const level of ['intermediate', 'advanced'] as const) {
+    test(`at ${level} every switch is off for both models, whatever the rows hold: 1.9.0's requests, no alias read, /learn 진단 says why`, { options: { model: 'sonnet', level } }, async ($, on) => {
+      const reads = aliasReads(on)
+      const { calls, diag } = await routeDay($, on, w => {
+        w.harness = { models: { haiku: { ...ON }, sonnet: { ...ON } } }
+      })
+      expect(calls).toEqual(ROUTE19_CALLS[level].map(call => ({ model: 'sonnet', ...call })))
+      expect(reads).toEqual([])
+      expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · sonnet(설명 수준이 beginner가 아님 · 모델별 기능 모두 끔)${SETTINGS_TAIL} ${level}`)
+      expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
+    })
+  }
+
+  test('an alias the environment turns to another model: every switch off, 1.9.0\'s requests; /learn 진단 says so with no value', { options: { model: 'sonnet' } }, async ($, on) => {
+    const reads = aliasReads(on)
+    const { calls, diag } = await routeDay(
+      $,
+      on,
+      w => {
+        w.harness = { models: { sonnet: { ...ON } } }
+      },
+      { [SONNET_ALIAS]: 'pinned-model-x' },
+    )
+    expect(calls).toEqual(ROUTE19_CALLS.beginner.map(call => ({ model: 'sonnet', ...call })))
+    expect(reads).toEqual([SONNET_ALIAS])
+    expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · sonnet(별칭을 다른 모델로 바꿔 둠 · 모델별 기능 모두 끔)${SETTINGS_TAIL} beginner`)
+    expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
+    expect(diag).not.toContain('pinned-model-x')
+  })
+
+  test('an alias whose variable cannot be read: every switch off, 1.9.0\'s requests; /learn 진단 says it could not be checked', { options: { model: 'sonnet' } }, async ($, on) => {
+    const reads = aliasReads(on, SONNET_ALIAS)
+    const { calls, diag } = await routeDay($, on, w => {
+      w.harness = { models: { sonnet: { ...ON } } }
+    })
+    expect(calls).toEqual(ROUTE19_CALLS.beginner.map(call => ({ model: 'sonnet', ...call })))
+    expect(reads).toEqual([SONNET_ALIAS])
+    expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · sonnet(별칭을 확인하지 못함 · 모델별 기능 모두 끔)${SETTINGS_TAIL} beginner`)
+  })
+
+  for (const [what, env] of [
+    ['blank', { [SONNET_ALIAS]: '' }],
+    ['spaces alone', { [SONNET_ALIAS]: '   ' }],
+    ['haiku\'s alone (another alias)', { [HAIKU_ALIAS]: 'pinned-model-x' }],
+  ] as const) {
+    test(`sonnet's alias variable ${what}: the route stands`, { options: { model: 'sonnet' } }, async ($, on) => {
+      const reads = aliasReads(on)
+      const { diag } = await routeDay(
+        $,
+        on,
+        w => {
+          w.harness = { models: { sonnet: { workedAfterTimes: 2 } } }
+        },
+        env,
+      )
+      expect(reads).toEqual([SONNET_ALIAS])
+      expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · sonnet(이 모델에서 켠 기능 없음)${SETTINGS_TAIL} beginner`)
+      expect(versionLine(diag)).toContain('· 시험 스위치: 풀이 보고 풀기 오답 수 2')
+    })
+  }
+
+  for (const [env, isKept] of [
+    [{ [SONNET_ALIAS]: 'pinned-model-x' }, true],
+    [{ [HAIKU_ALIAS]: 'pinned-model-x' }, false],
+  ] as const) {
+    test(`haiku reads its own alias variable alone: ${isKept ? 'sonnet\'s set, the route stands' : 'its own set, every switch off'}`, { options: { model: 'haiku' } }, async ($, on) => {
+      const reads = aliasReads(on)
+      const { diag } = await routeDay(
+        $,
+        on,
+        w => {
+          w.harness = { models: { haiku: { workedAfterTimes: 2 } } }
+        },
+        env,
+      )
+      expect(reads).toEqual([HAIKU_ALIAS])
+      expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · haiku(${isKept ? '이 모델에서 켠 기능 없음' : '별칭을 다른 모델로 바꿔 둠 · 모델별 기능 모두 끔'})${SETTINGS_TAIL} beginner`)
+      expect(versionLine(diag)?.includes('시험 스위치')).toBe(isKept)
+    })
+  }
+
+  // Each switch on its own through a harness's models row: the sonnet window runs it, the haiku window does not (the
+  // table's every key, one more included).
+  for (const key of switchKeys()) {
+    for (const model of ['haiku', 'sonnet'] as const) {
+      test(`models.sonnet turning ${key} on: ${model === 'sonnet' ? 'run by the sonnet window, its alias read' : 'not run by the haiku window, nothing read'}`, { options: { model } }, async ($, on) => {
+        const reads = aliasReads(on)
+        const w = world(on)
+        w.harness = { models: { sonnet: { [key]: ON[key] } } }
+        await start($)
+        const diag = (await learn($, '진단')).text ?? ''
+        expect(reads).toEqual(model === 'sonnet' ? [SONNET_ALIAS] : [])
+        expect(versionLine(diag)).toBe(`- 버전: learn-notes 1.7.0 · Claude Code 2.1.296${model === 'sonnet' ? ` · 시험 스위치: ${ON_NAMED[key]}` : ''}`)
+        expect(modelSaid(diag)).toBe(`${model}(이 모델에서 켠 기능 없음)`)
+      })
+    }
+  }
+
+  for (const [what, models] of [
+    ['an array', [{ workedAfterTimes: 2 }]],
+    ['null', null],
+    ['a number', 2],
+    ['a row under an unknown model', { opus: { workedAfterTimes: 2 } }],
+    ['a row under __proto__', JSON.parse('{"__proto__": {"workedAfterTimes": 2}}')],
+    ['a __proto__ key in the row', { sonnet: JSON.parse('{"__proto__": {"workedAfterTimes": 2}}') }],
+    ['unknown keys and values of the wrong kind', { sonnet: { isWorked: true, workedAfterTimes: -1, rungNewStep: 1.5, rungChangedStep: 'two', isBaseAsked: 'yes', isThinkAsked: 1, isRuleDrill: null } }],
+  ] as const) {
+    test(`harness.models as ${what} turns nothing on and reads nothing`, { options: { model: 'sonnet' } }, async ($, on) => {
+      const reads = aliasReads(on)
+      const w = world(on)
+      w.harness = { models }
+      await start($)
+      const diag = (await learn($, '진단')).text ?? ''
+      expect(reads).toEqual([])
+      expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
+      expect(modelSaid(diag)).toBe('sonnet')
+    })
+  }
+
+  for (const [flat, named] of [
+    [3, '풀이 보고 풀기 오답 수 3'],
+    [null, undefined],
+  ] as const) {
+    test(`a flat key goes over the models row: workedAfterTimes ${flat} over the row's 2`, { options: { model: 'sonnet' } }, async ($, on) => {
+      const w = world(on)
+      w.harness = { models: { sonnet: { workedAfterTimes: 2 } }, workedAfterTimes: flat }
+      await start($)
+      const diag = (await learn($, '진단')).text ?? ''
+      expect(versionLine(diag)).toBe(`- 버전: learn-notes 1.7.0 · Claude Code 2.1.296${named === undefined ? '' : ` · 시험 스위치: ${named}`}`)
+    })
+  }
+
+  for (const model of ['haiku', 'sonnet'] as const) {
+    test(`missed twice running, a worked example in the sonnet window alone (models.sonnet); ${model} ${model === 'sonnet' ? 'asks it' : 'asks again (다시 도전) as 1.9.0'}`, { options: { model } }, async ($, on) => {
+      const store = routeStore()
+      const w = world(on, 'ok', null, true, store)
+      w.harness = { models: { sonnet: { workedAfterTimes: 2 } } }
+      await start($)
+      w.answer = [model === 'sonnet' ? routeWorked(1) : routeQ(1), routeQ(2), routeQ(3)].join('\n')
+      await learn($, '퀴즈 새로')
+      expect(itemsOf(store).map(one => [one.name, one.rung, one.isRetry])[0]).toEqual(model === 'sonnet' ? ['클로저', 'worked', undefined] : ['클로저', undefined, true])
+    })
+  }
+
+  test('decided at session start before any call: a reload takes up a cut note after the alias is read; another start runs the route its harness gives', { options: { model: 'sonnet' } }, async ($, on) => {
+    const order: string[] = []
+    on('env.get', { name: /^ANTHROPIC_DEFAULT_/ }, (_$, e, next) => {
+      order.push('alias')
+      return next(e)
+    })
+    on('model.complete', { prompt: /[\s\S]/ }, (_$, e, next) => {
+      order.push('model')
+      return next(e)
+    })
+    const w = world(on)
+    w.harness = { models: { sonnet: { workedAfterTimes: 2 } } }
+    await start($)
+    expect(order).toEqual(['alias'])
+    w.replies = ['cut']
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    expect(order).toEqual(['alias', 'model'])
+    // The reload: the route decided again (the alias read again) before the note it cut is taken up.
+    order.length = 0
+    await start($)
+    await w.clock.advance(60_000)
+    expect(order).toEqual(['alias', 'model'])
+    expect(versionLine((await learn($, '진단')).text ?? '')).toContain('· 시험 스위치: 풀이 보고 풀기 오답 수 2')
+    // A start with no harness: the shipped route (every switch off), nothing read.
+    w.harness = undefined
+    order.length = 0
+    await start($)
+    expect(order).toEqual([])
+    const diag = (await learn($, '진단')).text ?? ''
+    expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
+    expect(modelSaid(diag)).toBe('sonnet')
+  })
+
+  for (const isOnFirst of [true, false]) {
+    test(`a store another route wrote (${isOnFirst ? 'on, then off' : 'off, then on'}): its quiz kept as written, rung and base and slip; the next quiz by this route`, { options: { model: 'sonnet' } }, async ($, on) => {
+      // One more concept due, so the slip's base (변수 범위) is no pick of its own and goes right before the worked example.
+      const store = routeStore()
+      const concepts = {
+        ...(store.get('concepts') as Record<string, unknown>),
+        [conceptKey('배열')]: { name: '배열', count: 2, firstAt: NOW - 60 * ROUTE_DAY, lastAt: NOW - 60 * ROUTE_DAY, blurb: '배열 설명', files: ['list.js'], step: 1, reviewedAt: NOW - 3 * ROUTE_DAY },
+      }
+      store.set('concepts', concepts)
+      store.set('steps', ownSteps(concepts as never))
+      const w = world(on, 'ok', null, true, store)
+      const onRow = { models: { sonnet: { workedAfterTimes: 2, isBaseAsked: true } } }
+      w.harness = isOnFirst ? onRow : undefined
+      await start($)
+      w.answer = [routeQ(1), isOnFirst ? routeWorked(2) : routeQ(2), routeQ(3)].join('\n')
+      await learn($, '퀴즈 새로')
+      const written = itemsOf(store).map(one => [one.name, one.rung, one.isBase, one.isRetry])
+      expect(written.slice(0, 2)).toEqual(
+        isOnFirst
+          ? [
+              ['변수 범위', undefined, true, undefined],
+              ['클로저', 'worked', undefined, undefined],
+            ]
+          : [
+              ['클로저', undefined, undefined, true],
+              ['for...of 반복문', undefined, undefined, undefined],
+            ],
+      )
+      // The other route's window: the quiz it finds is the one written, its slip's base kept.
+      w.harness = isOnFirst ? undefined : onRow
+      await start($)
+      expect((await learn($, '퀴즈')).text).toContain('1.')
+      expect(itemsOf(store).map(one => [one.name, one.rung, one.isBase, one.isRetry])).toEqual(written)
+      expect((store.get('slips') as Record<string, { base?: string }>)[conceptKey('클로저')]!.base).toBe(conceptKey('변수 범위'))
+      // Its next quiz is its own route's.
+      await w.clock.advance(60_000)
+      w.answer = [routeQ(1), isOnFirst ? routeQ(2) : routeWorked(2), routeQ(3)].join('\n')
+      await learn($, '퀴즈 새로')
+      const next = itemsOf(store).map(one => [one.name, one.rung, one.isBase, one.isRetry])
+      expect(next.some(one => one[1] === 'worked' || one[2] === true)).toBe(!isOnFirst)
+      expect(next.some(one => one[0] === '클로저' && one[3] === true)).toBe(isOnFirst)
     })
   }
 })

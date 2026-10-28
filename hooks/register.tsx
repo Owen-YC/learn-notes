@@ -44,10 +44,7 @@ import {
   isWorkedNext,
   pickForRung,
   rungOf,
-  RUNG_CHANGED_STEP,
   RUNG_LABEL,
-  RUNG_NEW_STEP,
-  WORKED_AFTER_TIMES,
   regrade,
   type Mark,
   type QuizPick,
@@ -248,7 +245,6 @@ import {
   KEYED_LABELS,
   isThinkFollow,
   isThinkQuestion,
-  IS_THINK_ASKED,
   openThink,
   THINK_OPEN_MS,
   THINK_SYSTEM,
@@ -302,8 +298,16 @@ import {
   DRILL_RULE_AFTER,
   DRILL_RULE_BLANK,
   DRILL_UNCHANGED,
-  IS_RULE_DRILL,
-  IS_BASE_ASKED,
+  MODEL_SWITCHES,
+  SWITCHES_OFF,
+  hasOn,
+  overlaySwitches,
+  routeOf,
+  switchesFor,
+  switchedNames,
+  type MeasuredModel,
+  type Remap,
+  type Switches,
   BASE_LABEL,
   BASE_LEAD,
   baseCandidates,
@@ -657,48 +661,58 @@ function enqueue<T>(lane: keyof typeof lanes, work: () => Promise<T>): Promise<T
 /** This build's version, read from its plugin.json at session start (/learn 도움말, /learn 진단); undefined until then, or when unreadable. */
 let myVersion: string | undefined
 /**
- * The model-gated items' switches this load runs with (1.9.0): each its constant in notes.ts, which a release sets
- * by its samples (docs/qa/견본.md) — `isRuleDrill`, IS_RULE_DRILL (F2); the question ladder's steps (F3, F4):
- * `rungNewStep` RUNG_NEW_STEP, `rungChangedStep` RUNG_CHANGED_STEP, `workedAfterTimes` WORKED_AFTER_TIMES, each
- * Infinity for its rung off; `isBaseAsked`, IS_BASE_ASKED (F5); `isThinkAsked`, IS_THINK_ASKED (F6). A test's harness turns one the other way through the
- * plugin.json it serves (its `harness` object, read with the version at session start, readManifest; a step there a
- * whole number, or null for off), so both states are tested whichever one ships. A release's plugin.json has none: only the build's own files
- * can, and /learn 진단 names a switch that runs the other way (switched), so a copy someone turned one in is seen to be.
+ * The model-gated features' switches this load runs with (1.10.0 G7; 1.9.0 had each feature's constant here): the
+ * route of its model setting and level, decided once at session start (chooseSwitches), before anything there calls a
+ * model; until then each off, its constant in notes.ts (SWITCHES_OFF). Every call that hands a feature its switch hands
+ * it this, so one load runs every path with the one route. A test's harness turns one the other way through the
+ * plugin.json it serves (its `harness` object, read with the version at session start, readManifest): `models`, a row
+ * for `haiku` or `sonnet` laid over MODEL_SWITCHES' as a measured route would be, and the 1.9.0 flat keys over all (a
+ * step there a whole number, or null for off). A release's plugin.json has none: only the build's own files can, and
+ * /learn 진단 names a switch that runs the other way from the route (switched), so a copy someone turned one in is seen to be.
  */
-const build = {
-  isRuleDrill: IS_RULE_DRILL,
-  rungNewStep: RUNG_NEW_STEP,
-  rungChangedStep: RUNG_CHANGED_STEP,
-  workedAfterTimes: WORKED_AFTER_TIMES,
-  isBaseAsked: IS_BASE_ASKED,
-  isThinkAsked: IS_THINK_ASKED,
-}
-/** The switches as the build's constants set them, which no harness turns: /learn 진단 names one that differs (switched). */
-const RELEASE: Readonly<typeof build> = { ...build }
-/** Each switch's name in /learn 진단. */
-const SWITCH_NAMES: Record<keyof typeof build, string> = {
-  isRuleDrill: '팀 규칙 연습',
-  rungNewStep: '처음 보는 코드 단계',
-  rungChangedStep: '비슷한 코드 단계',
-  workedAfterTimes: '풀이 보고 풀기 오답 수',
-  isBaseAsked: '바탕 개념',
-  isThinkAsked: '생각해 보기',
-}
-
-/** The switches this load runs the other way from its build's constants (a harness's), with their state, for /learn 진단. */
+const build: Switches = { ...SWITCHES_OFF }
+/** The switches this load's route releases with, which no harness turns (switched): its model's row, or every one off. */
+let release: Readonly<Switches> = SWITCHES_OFF
+/** Whether this load's model alias points where Claude Code's own does (remapState): read only when its route turns one on. */
+let remap: Remap = 'kept'
+/** The table of routes this load runs: MODEL_SWITCHES, or a test harness's `models` rows over it (chooseSwitches). */
+let routes: Readonly<Record<MeasuredModel, Readonly<Switches>>> = MODEL_SWITCHES
+/** The switches this load runs the other way from its route's (a harness's), with their state, for /learn 진단. */
 function switched(): string[] {
-  return (Object.keys(build) as (keyof typeof build)[])
-    .filter(key => build[key] !== RELEASE[key])
-    .map(key => {
-      const value = build[key]
-      return `${SWITCH_NAMES[key]} ${typeof value === 'boolean' ? (value ? '켬' : '끔') : value === Infinity ? '끔' : String(value)}`
-    })
+  return switchedNames(build, release)
 }
 
-/** A ladder step a harness gives (build): a whole number from 0, or null for the rung off; else the build's own. */
-function harnessStep(value: unknown, own: number): number {
-  if (value === null) return Infinity
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : own
+/**
+ * Whether the environment turns the model setting's alias to another model (1.10.0 G7, D24): only the variable of
+ * that alias, read by its name as written (Claude Code reads ANTHROPIC_DEFAULT_HAIKU_MODEL for `haiku` and
+ * ANTHROPIC_DEFAULT_SONNET_MODEL for `sonnet`; checked on a real window, docs/qa/견본.md). A value that is not blank is
+ * `remapped`, a read that throws `unreadable`. The value is looked at for being blank alone: never kept, shown or sent.
+ */
+async function remapState($: EngineInterface, model: MeasuredModel): Promise<Remap> {
+  try {
+    const value = model === 'haiku' ? await $.env.get('ANTHROPIC_DEFAULT_HAIKU_MODEL') : await $.env.get('ANTHROPIC_DEFAULT_SONNET_MODEL')
+    return value !== undefined && value.trim() !== '' ? 'remapped' : 'kept'
+  } catch {
+    return 'unreadable'
+  }
+}
+
+/**
+ * This load's switches (build), the ones its route releases (release) and its alias's state (remap), decided once at
+ * session start, where the harness is read (1.10.0 G7): the route of the model setting and level (switchesFor); a
+ * harness's `models` row over it (a test's alone); the environment read only when that turns a switch on, every one
+ * off when the alias points elsewhere or cannot be checked; the harness's flat keys over all, as in 1.9.0.
+ */
+async function chooseSwitches($: EngineInterface, cfg: Config, harness: Record<string, unknown> | undefined): Promise<void> {
+  const models = harness?.models
+  const row = (model: MeasuredModel) =>
+    isRecord(models) && Object.prototype.hasOwnProperty.call(models, model) ? overlaySwitches(MODEL_SWITCHES[model], models[model]) : MODEL_SWITCHES[model]
+  routes = { haiku: row('haiku'), sonnet: row('sonnet') }
+  const real = switchesFor(cfg.model, cfg.level)
+  const wanted = switchesFor(cfg.model, cfg.level, routes)
+  remap = hasOn(wanted) && (cfg.model === 'haiku' || cfg.model === 'sonnet') ? await remapState($, cfg.model) : 'kept'
+  release = remap === 'kept' ? real : SWITCHES_OFF
+  Object.assign(build, overlaySwitches(remap === 'kept' ? wanted : SWITCHES_OFF, harness))
 }
 
 /** The ladder's steps as this load runs them (build), for rungOf, isWorkedNext and slipNotice. */
@@ -4987,12 +5001,8 @@ export const register: Register = (on, options) => {
     isInteractive = e.isInteractive
     const manifest = await readManifest($)
     myVersion = manifest.version
-    build.isRuleDrill = typeof manifest.harness?.isRuleDrill === 'boolean' ? manifest.harness.isRuleDrill : IS_RULE_DRILL
-    build.rungNewStep = harnessStep(manifest.harness?.rungNewStep, RUNG_NEW_STEP)
-    build.rungChangedStep = harnessStep(manifest.harness?.rungChangedStep, RUNG_CHANGED_STEP)
-    build.workedAfterTimes = harnessStep(manifest.harness?.workedAfterTimes, WORKED_AFTER_TIMES)
-    build.isBaseAsked = typeof manifest.harness?.isBaseAsked === 'boolean' ? manifest.harness.isBaseAsked : IS_BASE_ASKED
-    build.isThinkAsked = typeof manifest.harness?.isThinkAsked === 'boolean' ? manifest.harness.isThinkAsked : IS_THINK_ASKED
+    // The model setting's route (1.10.0 G7), here once: before this session's stamp, resumeNotes or any model call.
+    await chooseSwitches($, cfg, manifest.harness)
     mySessionId = await $.session.id().catch(() => undefined)
     // The guard first, before anything writes the concepts; then this session's stamp for the other windows.
     await enqueue('storing', () => keepSchema($))
@@ -6926,6 +6936,8 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
     raw => cleanOldWrites(raw),
     () => 'unread' as const,
   )
+  // The route (1.10.0 G7), named from what this load releases with, never a harness's switches: none while no model has one on.
+  const route = routeOf(cfg.model, cfg.level, remap, release, routes)
   const text = diagText({
     now,
     ...(version !== undefined ? { version } : {}),
@@ -6949,6 +6961,7 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
       ...(hasFolder !== undefined ? { hasFolder } : {}),
       excluded: cfg.excludePaths.length,
       locked,
+      ...(route !== undefined ? { route } : {}),
     },
     today: { notes: has(activityToday) ? activityToday[day]!.notes : 0, calls: has(usageToday) ? usageToday[day]!.calls : 0 },
     ...(store ? { store } : {}),
