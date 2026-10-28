@@ -51,6 +51,7 @@ import {
 import { COEXIST_CASES, COEXIST_MIXED, type CoexistStore } from './fixtures/coexist19'
 import { ROUTE19_CALLS, ROUTE19_DIAG } from './fixtures/route19'
 import { INPUT_RULE19, OUTPUT_RULE19 } from './fixtures/rule19'
+import { CHANGED_QUIZ_OFF, CHANGED_QUIZ_ON } from './fixtures/changed110'
 
 const NOW = Date.UTC(2026, 9, 3, 1)
 const NOTES_DIR = '/home/u/.claude/learning-notes'
@@ -11468,6 +11469,11 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
   test('a concept at its third step is asked in its code changed: 비슷한 코드 in the pane\'s title and in the conversation', async ($, on) => {
     const name = 'for...of 반복문'
     const store = storeOf([name], 2, 8 * DAY, false)
+    // Two concepts met in no note and not due for weeks fill the quiz to three picks after it: code changed is asked
+    // only in a quiz of three with no team term (1.10.0 G2, D33), the shape its sample measures.
+    const concepts = store.get('concepts') as Record<string, unknown>
+    for (const filler of ['채움 하나', '채움 둘']) concepts[conceptKey(filler)] = { name: filler, count: 1, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${filler} 설명`, files: [], step: 3, reviewedAt: NOW }
+    store.set('steps', ownSteps(concepts as never))
     const w = world(on, 'ok', null, true, store)
     // On as 1.8.0 shipped it, whatever its constant (1.9.0 F4 turned it off by its sample): a harness's step.
     w.harness = { rungChangedStep: 2 }
@@ -11479,11 +11485,13 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     const changed = ['T1: 예측', 'Q1: 아래 코드는 b를 무엇으로 찍을까요?', '```', 'const a = 10', 'const b = a * 2', 'console.log(b)', '```', 'H1: a를 먼저 보세요', 'A1: 20'].join('\n')
     const ui = await quizIn($, w, changed)
     const prompt = w.models.at(-1)!
-    expect(prompt).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (a.ts):\n```\nconst a = 1\nconst b = 2\n```')
-    expect(prompt).toContain('비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 보여 주고 묻는다. 원래 코드의 답으로는 맞힐 수 없게 바꾼다.')
+    expect(prompt).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (a.ts):\n```\nconst a = 1\nconst b = 2\n```\n2. 채움 하나 — 채움 하나 설명\n3. 채움 둘 — 채움 둘 설명\n')
+    // 1.10.0 (G2): its sentence asks a prediction in one block that runs alone, traced on an R line; room for the trace.
+    expect(prompt).toContain('비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 코드 블록 하나로 보여 주고, 그 코드가 찍는 것을 예측으로 묻는다.')
+    expect(prompt).toContain('\nH1: (힌트 한 문장)\nR1: (칸이 "비슷한 코드"인 문제만: 보인 코드를 한 줄씩 따라간 과정)\nA1:')
     expect(prompt).not.toContain('내 코드:')
     expect(prompt).not.toContain("'처음 보는 코드'·'풀이 보고 풀기' 칸은")
-    expect(w.budgets.at(-1)).toBe(3400)
+    expect(w.budgets.at(-1)).toBe(4600)
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 비슷한 코드 · 예측$/ })).toBeDefined()
     expect(quizItems(store)[0]).toMatchObject({ rung: 'changed' })
     expect((await learn($, '퀴즈')).text).toContain('\n1. (비슷한 코드) 아래 코드는 b를 무엇으로 찍을까요?')
@@ -11577,7 +11585,8 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     expect(prompt).not.toContain('학습자가 만든 코드')
     expect(prompt).not.toContain('const b = 2')
     expect(prompt).not.toContain('헷갈린 점을 문제나 힌트에 쓰지 않는다')
-    expect(w.budgets.at(-1)).toBe(3600)
+    // One budget for every quiz that writes code of its own or a trace (1.10.0 G2, D12; 3600 in 1.9.0).
+    expect(w.budgets.at(-1)).toBe(4600)
     expect(listed).toContain('\n1. (풀이 보고 풀기) 풀이: `let n = 0;')
     expect(quizItems(store).map(one => [one.rung, one.isRetry])).toEqual([['worked', undefined], ['worked', undefined]])
     const next = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
@@ -11965,7 +11974,8 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     expect(prompt).toContain('칸: 풀이 보고 풀기')
     // What the quiz is told of the last try is the store's as the quiz was made, as in 1.7 ('a first try left waiting when a new quiz is made').
     expect(prompt).toContain("지난번 문제 '지난 문제의 코드' · 학습자 답 '전역 변수'")
-    expect(w.budgets.at(-1)).toBe(3600)
+    // One budget for every quiz that writes code of its own or a trace (1.10.0 G2, D12; 3600 in 1.9.0).
+    expect(w.budgets.at(-1)).toBe(4600)
     expect(quizItems(store).map(one => [one.rung, one.isRetry])).toEqual([['worked', undefined]])
   })
 
@@ -14053,14 +14063,21 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     (store.get('concepts') as Record<string, { step?: number; reviewedAt?: number; missedAt?: number; knownAt?: number }>)[conceptKey(name)]!
   const quizItems = (store: Map<string, unknown>) => (store.get('quiz') as { items: Record<string, unknown>[] }).items
   const indexOf = (store: Map<string, unknown>, name: string) => quizItems(store).findIndex(one => one.name === name)
-  /** Concepts by name at their steps, each reviewed `ago` before now, their blurbs quoting code, with their step copies. */
+  /**
+   * Two concepts met in no note and not due for weeks (FILLERS), which fill a quiz to three picks after the ones the
+   * test is about: code never seen and code changed are asked only in a quiz of three with no team term (1.10.0 G2,
+   * D33 · ladderMixed), the shape their samples measured; in a smaller one, in the learner's own code.
+   */
+  const FILLERS = ['채움 하나', '채움 둘']
+  /** Concepts by name at their steps, each reviewed `ago` before now, their blurbs quoting code, with their step copies; and FILLERS. */
   const storeOf = (steps: Record<string, number>, ago: number) => {
-    const concepts = Object.fromEntries(
-      Object.entries(steps).map(([name, step]) => [
+    const concepts = Object.fromEntries([
+      ...Object.entries(steps).map(([name, step]) => [
         conceptKey(name),
         { name, count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${name} 설명 — \`for (const n of nums)\``, files: [], step, reviewedAt: NOW - ago },
       ]),
-    )
+      ...FILLERS.map(name => [conceptKey(name), { name, count: 1, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${name} 설명`, files: [], step: 3, reviewedAt: NOW }]),
+    ])
     return new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)]])
   }
   /** A world whose build runs with the ladder's switches `harness` (code never seen at 4 by default), its concepts met in a.ts. */
@@ -14093,14 +14110,15 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(conceptOf(store, NAME).step).toBe(4)
     const ui = await quizIn($, w, fresh(1))
     const prompt = w.models.at(-1)!
-    expect(prompt).toContain(`\n   칸: 처음 보는 코드 (ts로)\n\n개념마다 문제 하나씩`)
+    expect(prompt).toContain(`\n   칸: 처음 보는 코드 (ts로)\n2. 채움 하나 — 채움 하나 설명\n3. 채움 둘 — 채움 둘 설명\n\n개념마다 문제 하나씩`)
     expect(prompt).toContain('처음 보는 코드: 학습자 코드와 다른 상황(다른 이름·값·쓰임)에서')
     expect(prompt).toContain('\nH1: (힌트 한 문장)\nR1: (칸이 "처음 보는 코드"인 문제만: 코드를 한 줄씩 따라간 과정)\nA1:')
     expect(prompt).not.toContain('학습자가 만든 코드')
     expect(prompt).not.toContain('const a = 1')
     expect(prompt).not.toContain('for (const n of nums)')
     expect(prompt).not.toContain('for (const item of items)')
-    expect(w.budgets.at(-1)).toBe(3600)
+    // One budget for every quiz that writes code of its own or a trace (1.10.0 G2, D12; 3600 in 1.9.0).
+    expect(w.budgets.at(-1)).toBe(4600)
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 처음 보는 코드 · 예측$/ })).toBeDefined()
     expect(quizItems(store)[0]).toMatchObject({ rung: 'new', kind: 'predict', hint: '하나씩 더해 보세요', answer: '7' })
     // The trace is dropped: in no window's quiz, the hint and the answer neither.
@@ -14122,8 +14140,10 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     const ui = await quizIn($, w, changed)
     expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (a.ts):')
     expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
-    expect(w.models.at(-1)).not.toContain('R1:')
-    expect(w.budgets.at(-1)).toBe(3400)
+    // Code changed's own R line and room (1.10.0 G2), none of code never seen's.
+    expect(w.models.at(-1)).not.toContain('"처음 보는 코드"인 문제만')
+    expect(w.models.at(-1)).toContain('\nR1: (칸이 "비슷한 코드"인 문제만: 보인 코드를 한 줄씩 따라간 과정)\n')
+    expect(w.budgets.at(-1)).toBe(4600)
     expect(quizItems(store)[0]).toMatchObject({ rung: 'changed' })
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 비슷한 코드 · 예측$/ })).toBeDefined()
     await ui.unmount()
@@ -14154,7 +14174,7 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(prompt.includes('\n   칸: 비슷한 코드\n')).toBe(rungs.includes('changed'))
     expect(prompt.includes('비슷한 코드: 학습자 코드에서')).toBe(rungs.includes('changed'))
     expect(prompt.includes('\n   칸: 내 코드\n')).toBe(rungs.includes('mine'))
-    expect(w.budgets.at(-1)).toBe(RUNG_NEW_STEP <= 4 ? 3600 : 3400)
+    expect(w.budgets.at(-1)).toBe(rungs.some(rung => rung === 'new' || rung === 'changed') ? 4600 : 3400)
     expect(quizItems(store).map(one => one.rung).sort()).toEqual([...rungs].sort())
   })
 
@@ -14380,7 +14400,7 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     await ui.unmount()
   })
 
-  test('(3/5 검토) an edit far down a file that imports a library at its top: the file read for its imports, asked in its code changed; with none, or the file gone, as it reads', async ($, on) => {
+  test('(3/5 검토) an edit far down a file that imports a library at its top: the file read for its imports, asked in its own code (1.10.0 G2: code changed only for code that runs alone); with none, code never seen; the file gone, its own code', async ($, on) => {
     const AXIOS = 'axios 응답'
     const POSTS = '/proj/src/api/posts.js'
     const store = storeOf({ [AXIOS]: 4 }, 31 * DAY)
@@ -14394,11 +14414,12 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     w.answer = fresh(1)
     await learn($, '퀴즈 새로')
     // The lines a question quotes have no import: the file's own top says axios.
-    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (posts.js):')
+    expect(w.models.at(-1)).toContain('\n   칸: 내 코드\n   학습자가 만든 코드 (posts.js):')
     expect(w.models.at(-1)).toContain('axios.get("/api/posts", { params: { page: 1 } })')
     expect(w.models.at(-1)).not.toContain('import axios')
     expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
-    expect(quizItems(store)[0]!.rung).toBe('changed')
+    expect(w.models.at(-1)).not.toContain('비슷한 코드')
+    expect(quizItems(store)[0]!.rung).toBe('mine')
     // The same edit in a file that imports nothing from a package: code never seen.
     w.files.set(POSTS, "import { axios } from './http.js'\n\nexport async function fetchPosts() {}\n")
     await w.clock.advance(60_000)
@@ -14406,16 +14427,16 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     await learn($, '퀴즈 새로')
     expect(w.models.at(-1)).toContain('   칸: 처음 보는 코드 (js로)')
     expect(quizItems(store)[0]!.rung).toBe('new')
-    // The file gone (or kept from Read): its imports unknown, so as it reads, never code never seen.
+    // The file gone (or kept from Read): its imports unknown, so its own code, never code never seen nor changed.
     w.statFails = new Map([[POSTS, 'ENOENT']])
     await w.clock.advance(60_000)
     w.answer = fresh(1)
     await learn($, '퀴즈 새로')
-    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n')
+    expect(w.models.at(-1)).toContain('\n   칸: 내 코드\n')
     expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
   })
 
-  test('(3/5 검토) with code never seen off (a release\'s constant) no file is read for its imports; on, once a quiz', async ($, on) => {
+  test('(3/5 검토) with code never seen and code changed off (the release\'s constants) no file is read for its imports; either on (1.10.0 G2: code changed too), once a quiz', async ($, on) => {
     const AXIOS = 'axios 응답'
     const POSTS = '/proj/src/api/posts.js'
     let reads = 0
@@ -14425,7 +14446,7 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     })
     const store = storeOf({ [AXIOS]: 4 }, 31 * DAY)
     const w = world(on, 'ok', null, true, store)
-    w.harness = { rungNewStep: null, rungChangedStep: 2 }
+    w.harness = { rungNewStep: null, rungChangedStep: null }
     w.files.set(POSTS, 'import axios from "axios"\n')
     await start($)
     w.answer = CONCEPT_NOTE([AXIOS])
@@ -14434,19 +14455,27 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     const before = reads
     w.answer = fresh(1)
     await learn($, '퀴즈 새로')
-    expect(quizItems(store)[0]!.rung).toBe('changed')
+    expect(quizItems(store)[0]!.rung).toBe('mine')
     expect(reads).toBe(before)
-    // On: read once a quiz for its imports.
-    w.harness = { rungNewStep: 4, rungChangedStep: 2 }
+    // Code changed on (1.10.0 G2), code never seen off: read once a quiz for its imports; a library, so its own code.
+    w.harness = { rungNewStep: null, rungChangedStep: 2 }
     await start($)
     await w.clock.advance(60_000)
     w.answer = fresh(1)
     await learn($, '퀴즈 새로')
     expect(reads).toBe(before + 1)
-    expect(quizItems(store)[0]!.rung).toBe('changed')
+    expect(quizItems(store)[0]!.rung).toBe('mine')
+    // Both on: still once a quiz.
+    w.harness = { rungNewStep: 4, rungChangedStep: 2 }
+    await start($)
+    await w.clock.advance(60_000)
+    w.answer = fresh(1)
+    await learn($, '퀴즈 새로')
+    expect(reads).toBe(before + 2)
+    expect(quizItems(store)[0]!.rung).toBe('mine')
   })
 
-  test('(3/5 검토) a note that wrote a React file whole: its import in the code sent, asked in its code changed (or its own), never code never seen', async ($, on) => {
+  test('(3/5 검토) a note that wrote a React file whole: its import in the code sent, asked in its own code, never code never seen nor (1.10.0 G2) code changed', async ($, on) => {
     const HOOK = 'useState 함수형 업데이트'
     const store = storeOf({ [HOOK]: 4 }, 31 * DAY)
     const w = world(on, 'ok', null, true, store)
@@ -14458,9 +14487,10 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     await finish(w)
     w.answer = fresh(1)
     await learn($, '퀴즈 새로')
-    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (Like.js):')
+    expect(w.models.at(-1)).toContain('\n   칸: 내 코드\n   학습자가 만든 코드 (Like.js):')
     expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
-    expect(quizItems(store)[0]!.rung).toBe('changed')
+    expect(w.models.at(-1)).not.toContain('비슷한 코드')
+    expect(quizItems(store)[0]!.rung).toBe('mine')
     // A file the note made whole is not read again: its diff has every line from the top.
     expect(w.files.has('/proj/src/Like.js')).toBe(false)
   })
@@ -14505,7 +14535,7 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(quizItems(store)[0]!.rung).toBe('new')
   })
 
-  test('(교차 검토 2) the file read for its imports as it stands: one past 1,000,000 bytes is not read, its imports unknown, asked in its code changed', async ($, on) => {
+  test('(교차 검토 2) the file read for its imports as it stands: one past 1,000,000 bytes is not read, its imports unknown, asked in its own code (1.10.0 G2; 1.9.0 asked it changed)', async ($, on) => {
     const count = postsReads(on)
     const { w, store } = await postsWorld($, on, w => {
       w.sizes = new Map([[POSTS, 1_000_001]])
@@ -14515,20 +14545,20 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     await learn($, '퀴즈 새로')
     expect(count.reads).toBe(0)
     expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
-    expect(quizItems(store)[0]!.rung).toBe('changed')
+    expect(quizItems(store)[0]!.rung).toBe('mine')
   })
 
-  test('(교차 검토 2) the file read for its imports holds a NUL: not text, its imports unknown, asked in its code changed', async ($, on) => {
+  test('(교차 검토 2) the file read for its imports holds a NUL: not text, its imports unknown, asked in its own code (1.10.0 G2; 1.9.0 asked it changed)', async ($, on) => {
     const { w, store } = await postsWorld($, on, w => {
       w.files.set(POSTS, "import { axios } from './http.js'\u0000\n\nexport async function fetchPosts() {}\n")
     })
     w.answer = fresh(1)
     await learn($, '퀴즈 새로')
     expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
-    expect(quizItems(store)[0]!.rung).toBe('changed')
+    expect(quizItems(store)[0]!.rung).toBe('mine')
   })
 
-  test('(교차 검토 2) the file read for its imports is a link to one the permission rules keep from Read: never read, asked in its code changed', async ($, on) => {
+  test('(교차 검토 2) the file read for its imports is a link to one the permission rules keep from Read: never read, asked in its own code (1.10.0 G2; 1.9.0 asked it changed)', async ($, on) => {
     on('tool.check', { tool: 'Read' }, (_$, e) => ({ decision: String((e.input as { file_path?: string }).file_path).includes('/secret/') ? 'deny' : 'allow' }))
     const count = postsReads(on)
     const { w, store } = await postsWorld($, on, w => {
@@ -14539,7 +14569,7 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     await learn($, '퀴즈 새로')
     expect(count.reads).toBe(0)
     expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
-    expect(quizItems(store)[0]!.rung).toBe('changed')
+    expect(quizItems(store)[0]!.rung).toBe('mine')
   })
 
   test('(교차 검토 2) with code never seen off, a quiz reads no stamps for it: the sessions read as often as before the quiz', async ($, on) => {
@@ -15335,10 +15365,16 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
 describe('1.9.0: the note and quiz calls\' output caps, raised by their sample (docs/qa/견본.md, 출력 상한)', () => {
   const DAY = 86_400_000
   const BUSY: Reply = { status: 529, error: 'overloaded' }
-  /** The budgets the plugin asks for (register.tsx NOTE_TOKENS, QUIZ_TOKENS, QUIZ_LONG_TOKENS), the engine's 2048 for thinking aside. */
+  /**
+   * The budgets the plugin asks for (register.tsx NOTE_TOKENS, QUIZ_TOKENS, QUIZ_TRACE_TOKENS), the engine's 2048 for
+   * thinking aside. 1.10.0 (G2, D12): one budget, 4600, for every quiz with code changed, code never seen or a worked
+   * example in it, where 1.9.0 asked 3600 for the last two; every switch off, every quiz asks 3400 as in 1.9.0.
+   */
   const NOTE = 3500
   const QUIZ = 3400
-  const QUIZ_LONG = 3600
+  const QUIZ_TRACE = 4600
+  /** Two concepts met in no note and not due for weeks: they fill a quiz to the three picks its rungs are asked in (1.10.0 G2, D33). */
+  const FILLERS = { '채움 하나': 3, '채움 둘': 3 }
   const TEAM_PATH = '/proj/.claude/learn-notes.md'
   const TERMS = ['## 용어', '- **캐시 키**: 요청마다 캐시를 나누는 이름입니다', '- **페이지네이션 커서**: 다음 쪽을 가리키는 값입니다', ''].join('\n')
   const RIGHT = '판정: 맞음\n피드백: 정확합니다.'
@@ -15433,7 +15469,7 @@ describe('1.9.0: the note and quiz calls\' output caps, raised by their sample (
     ])
   })
 
-  test('a quiz with a worked example in it (on by a harness) asks for 3600; its grade 480 as before', async ($, on) => {
+  test('a quiz with a worked example in it (on by a harness) asks for 4600; its grade 480 as before', async ($, on) => {
     // A worked example: 클로저 missed twice running where it was asked again.
     const slip = { what: '함수가 끝나면 바깥 변수도 사라진다고 봄', type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * DAY, times: 2 }
     const store = storeOf({ 클로저: 1 }, 3, { [conceptKey('클로저')]: slip })
@@ -15443,7 +15479,7 @@ describe('1.9.0: the note and quiz calls\' output caps, raised by their sample (
     w.answer = worked(1)
     await learn($, '퀴즈 새로')
     expect(quizItems(store).map(one => one.rung)).toEqual(['worked'])
-    expect(callsOf(w)).toEqual([{ budget: QUIZ_LONG, system: QUIZ_SYSTEM }])
+    expect(callsOf(w)).toEqual([{ budget: QUIZ_TRACE, system: QUIZ_SYSTEM }])
     // Its grade: 480 as before.
     w.answer = RIGHT
     await learn($, '퀴즈 1 11')
@@ -15451,8 +15487,11 @@ describe('1.9.0: the note and quiz calls\' output caps, raised by their sample (
   })
 
   for (const isOn of [true, false]) {
-    test(`code never seen ${isOn ? 'on (a harness\'s step 4): 3600' : 'off: the same concept asked in its own code, 3400'}`, async ($, on) => {
+    test(`code never seen ${isOn ? 'on (a harness\'s step 4): 4600' : 'off: the same concept asked in its own code, 3400'}`, async ($, on) => {
       const store = storeOf({ 'for...of 반복문': 4 }, 31)
+      // Filled to three picks, the quiz its rung is asked in (1.10.0 G2, D33); their days set so they are not due.
+      for (const [name, step] of Object.entries(FILLERS)) (store.get('concepts') as Record<string, unknown>)[conceptKey(name)] = { name, count: 1, firstAt: NOW - 30 * DAY, lastAt: NOW - 30 * DAY, blurb: `${name} 설명`, files: [], step, reviewedAt: NOW }
+      store.set('steps', ownSteps(store.get('concepts') as never))
       const w = world(on, 'ok', null, true, store)
       w.harness = { rungNewStep: isOn ? 4 : null, rungChangedStep: null }
       await start($)
@@ -15462,7 +15501,27 @@ describe('1.9.0: the note and quiz calls\' output caps, raised by their sample (
       w.answer = isOn ? fresh(1) : plainQ(1)
       await learn($, '퀴즈 새로')
       expect(quizItems(store).map(one => one.rung)).toEqual([isOn ? 'new' : 'mine'])
-      expect(callsOf(w)).toEqual([{ budget: NOTE, system: SYSTEM }, { budget: isOn ? QUIZ_LONG : QUIZ, system: QUIZ_SYSTEM }])
+      expect(callsOf(w)).toEqual([{ budget: NOTE, system: SYSTEM }, { budget: isOn ? QUIZ_TRACE : QUIZ, system: QUIZ_SYSTEM }])
+    })
+  }
+
+  for (const step of [2, null] as const) {
+    test(`(1.10.0 G2) code changed ${step === 2 ? 'on (a harness\'s step 2): 4600' : 'off (a harness\'s null): the same concept in its own code, 3400'}; a quiz with neither, 3400`, async ($, on) => {
+      const store = storeOf({ 'for...of 반복문': 2, ...FILLERS }, 8)
+      for (const name of Object.keys(FILLERS)) Object.assign((store.get('concepts') as Record<string, Record<string, unknown>>)[conceptKey(name)]!, { reviewedAt: NOW })
+      store.set('steps', ownSteps(store.get('concepts') as never))
+      const w = world(on, 'ok', null, true, store)
+      w.harness = { rungNewStep: null, rungChangedStep: step }
+      await start($)
+      w.answer = CONCEPT_NOTE(['for...of 반복문'])
+      await turn($, () => $.tool.call(EDIT_A))
+      await finish(w)
+      w.answer = ['T1: 예측', 'Q1: 아래 코드의 b는?', '```ts', 'const a = 5', 'const b = a * 2', 'console.log(b)', '```', 'H1: a부터', 'R1: a는 5, b는 10', 'A1: 10'].join('\n')
+      await learn($, '퀴즈 새로')
+      expect(quizItems(store).map(one => one.rung)).toEqual([step === 2 ? 'changed' : 'mine'])
+      expect(callsOf(w)).toEqual([{ budget: NOTE, system: SYSTEM }, { budget: step === 2 ? QUIZ_TRACE : QUIZ, system: QUIZ_SYSTEM }])
+      // The trace is dropped with code changed on; with it off, the R line is the hint's as in 1.9.0.
+      expect(quizItems(store)[0]!.hint).toBe(step === 2 ? 'a부터' : 'a부터\nR1: a는 5, b는 10')
     })
   }
 })
@@ -15651,11 +15710,13 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     })
     const golden = ROUTE19_CALLS.beginner
     // The note's prompt is 1.9.0's whatever the switches (1.10.0 G6), and this one says nothing of a team rule: no
-    // call of its own for it. r asks for 생각해 보기; the quiz asks a base and a worked example (3600).
+    // call of its own for it. r asks for 생각해 보기; the quiz asks a base and a worked example (4600 from 1.10.0 G2,
+    // D12: one budget for every quiz with a trace or code of its own; 3600 in 1.9.0).
     expect(calls[0]).toEqual({ model: 'sonnet', ...golden[0]! })
     expect(calls.some(call => call.system === RULE_DRILL_SYSTEM)).toBe(false)
     expect(calls[1]!.prompt).not.toBe(golden[1]!.prompt)
-    expect(calls.filter(call => call.maxTokens === 3600)).toHaveLength(1)
+    expect(calls.filter(call => call.maxTokens === 4600)).toHaveLength(1)
+    expect(calls.filter(call => call.maxTokens === 3600)).toHaveLength(0)
     expect(calls.every(call => call.model === 'sonnet' && call.effort === 'low')).toBe(true)
     expect(reads).toEqual([SONNET_ALIAS])
     // The route's own table turns 팀 규칙 표지 넓힘 on (1.10.0 G6): the harness's row is named as a test switch where
@@ -16473,4 +16534,204 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     await start($)
     expect(await asked()).toEqual(onAsks)
   })
+})
+
+describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends with it on, and 1.9.0\'s bytes with it off', () => {
+  const DAY = 86_400_000
+  const CART = '/proj/src/cart.js'
+  const EVENS = '/proj/app/evens.py'
+  const CART_BEFORE = 'function total(items) {\n  return items.reduce((sum, item) => sum + item.price, 0)\n}\nconsole.log(total([{ price: 3, qty: 2 }]))\n'
+  const CART_AFTER = 'function total(items) {\n  return items.reduce((sum, item) => sum + item.price * item.qty, 0)\n}\nconsole.log(total([{ price: 3, qty: 2 }]))\n'
+  const EVENS_TEXT = 'nums = [1, 2, 3, 4]\nevens = [n for n in nums if n % 2 == 0]\nprint(evens)\n'
+  const REDUCE = 'reduce'
+  const ARROW = '화살표 함수'
+  const COMP = '리스트 컴프리헨션'
+  const NOTE_CART = [
+    '### 한 줄 요약',
+    '합계에 수량을 곱했습니다',
+    '### 배울 개념',
+    `- **${REDUCE}**: 배열을 값 하나로 모읍니다 — \`items.reduce((sum, item) => sum + item.price * item.qty, 0)\``,
+    `- **${ARROW}**: 짧게 쓰는 함수입니다 — \`(sum, item) => sum + item.price * item.qty\``,
+    '### 직접 확인해 볼 것',
+    '- 실행해 보기',
+  ].join('\n')
+  const NOTE_EVENS = ['### 한 줄 요약', '짝수만 골랐습니다', '### 배울 개념', `- **${COMP}**: 조건에 맞는 것만 모아 새 리스트를 만듭니다 — \`[n for n in nums if n % 2 == 0]\``, '### 직접 확인해 볼 것', '- 실행해 보기'].join('\n')
+  /** A reply whose first question shows code changed, its trace on its R line. */
+  const REPLY = [
+    'T1: 예측',
+    'Q1: 아래 코드는 무엇을 찍을까요?',
+    '```js',
+    'function total(items) {',
+    '  return items.reduce((sum, item) => sum + item.price * item.qty, 10)',
+    '}',
+    'console.log(total([{ price: 3, qty: 2 }]))',
+    '```',
+    'H1: 처음 값을 보세요',
+    'R1: sum은 10에서 시작해 6을 더해 16',
+    'A1: 16',
+  ].join('\n')
+  const CHANGED_TRACE = 'R1: (칸이 "비슷한 코드"인 문제만: 보인 코드를 한 줄씩 따라간 과정)'
+  const NEW_TRACE = 'R1: (칸이 "처음 보는 코드"인 문제만: 코드를 한 줄씩 따라간 과정)'
+  /** The three concepts at their steps (the third by default), a week and a day after their last review, `more` over each. */
+  const storeOf = (steps: Partial<Record<string, number>> = {}, more: Partial<Record<string, Record<string, unknown>>> = {}) => {
+    const concepts = Object.fromEntries(
+      [REDUCE, ARROW, COMP].map(name => [
+        conceptKey(name),
+        { name, count: 1, firstAt: NOW - 60 * DAY, lastAt: NOW - 60 * DAY, blurb: `${name} 설명`, files: [], step: steps[name] ?? 2, reviewedAt: NOW - 8 * DAY, ...(more[name] ?? {}) },
+      ]),
+    )
+    return new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)]])
+  }
+  /**
+   * A world on `store` whose notes met REDUCE and ARROW in an edit to CART and COMP in EVENS written whole, its build run
+   * with `harness` (none: as shipped); `setup` before it starts. Its quiz's model calls, and the reads of CART and
+   * EVENS from the quiz on.
+   */
+  async function quizWorld($: Engine, on: On, harness: Record<string, unknown> | null, store = storeOf(), setup: (w: World) => void = () => {}) {
+    const calls = routeCalls(on)
+    const reads = { cart: 0, evens: 0, isArmed: false }
+    on('fs.read', { path: /\/proj\/(src\/cart\.js|app\/evens\.py)$/ }, (_$, e, next) => {
+      if (reads.isArmed) reads[e.path === CART ? 'cart' : 'evens'] += 1
+      return next(e)
+    })
+    on('tool.call', { tool: 'Edit' }, (_$, e) => ({
+      result: {
+        filePath: e.file_path,
+        oldString: e.old_string,
+        newString: e.new_string,
+        originalFile: CART_BEFORE,
+        structuredPatch: [{ oldStart: 1, oldLines: 3, newStart: 1, newLines: 3, lines: [' function total(items) {', '-  return items.reduce((sum, item) => sum + item.price, 0)', '+  return items.reduce((sum, item) => sum + item.price * item.qty, 0)', ' }'] }],
+        userModified: false,
+        replaceAll: false,
+      },
+    }))
+    const w = world(on, 'ok', null, true, store)
+    if (harness) w.harness = harness
+    w.files.set(CART, CART_AFTER)
+    setup(w)
+    await start($)
+    w.answer = NOTE_CART
+    await turn($, () => $.tool.call({ tool: 'Edit', tool_use_id: 'u1', file_path: CART, old_string: 'item.price, 0', new_string: 'item.price * item.qty, 0' }))
+    await finish(w)
+    w.answer = NOTE_EVENS
+    await turn($, () => $.tool.call({ tool: 'Write', tool_use_id: 'u2', file_path: EVENS, content: EVENS_TEXT }), 't2')
+    await finish(w)
+    w.files.set(EVENS, EVENS_TEXT)
+    reads.isArmed = true
+    const before = calls.length
+    w.answer = REPLY
+    const listed = (await learn($, '퀴즈 새로')).text ?? ''
+    return { w, store, calls: calls.slice(before), reads, listed }
+  }
+  const itemsOf = (store: Map<string, unknown>) => (store.get('quiz') as { items: Record<string, unknown>[] }).items
+
+  test('on (a harness\'s 2): the request pinned, made outside the plugin as the design\'s preview makes it; the trace dropped; the edited file read for its imports, the one written whole not; /learn 진단 names the switch', async ($, on) => {
+    const { w, store, calls, reads, listed } = await quizWorld($, on, { rungChangedStep: 2 })
+    expect(calls).toEqual([CHANGED_QUIZ_ON])
+    expect(CHANGED_QUIZ_ON.maxTokens).toBe(4600)
+    expect(CHANGED_QUIZ_ON.prompt).toContain(`\nH1: (힌트 한 문장)\n${CHANGED_TRACE}\nA1: (답 한두 문장)\n`)
+    expect(CHANGED_QUIZ_ON.prompt.split('   칸: 비슷한 코드\n').length).toBe(4)
+    // Read on this device for its imports, once a concept met in it (two here); a file written whole never (its diff
+    // has every line from the top). Nothing of it is sent: the code sent is the note's.
+    expect(reads).toMatchObject({ cart: 2, evens: 0 })
+    expect(CHANGED_QUIZ_ON.prompt).not.toContain('console.log(total([{ price: 3, qty: 2 }]))')
+    expect(itemsOf(store)[0]).toMatchObject({ name: COMP, rung: 'changed', kind: 'predict', hint: '처음 값을 보세요', answer: '16' })
+    expect(JSON.stringify(store.get('quiz'))).not.toContain('6을 더해')
+    expect(listed).toContain('\n1. (비슷한 코드) 아래 코드는 무엇을 찍을까요?')
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-quiz' })
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 비슷한 코드 · 예측$/ })).toBeDefined()
+    await ui.unmount()
+    const version = ((await learn($, '진단')).text ?? '').split('\n').find(line => line.startsWith('- 버전: '))
+    expect(version).toContain('시험 스위치: 비슷한 코드 단계 2')
+    expect(w.budgets.at(-1)).toBe(4600)
+  })
+
+  for (const harness of [{ rungChangedStep: null }, null]) {
+    test(`off (${harness ? 'a harness\'s null' : 'as shipped, no harness'}): 1.9.0's request to the byte, made outside the plugin by fca5988's own notes.ts; no file read; the R line the hint's as in 1.9.0`, async ($, on) => {
+      const { store, calls, reads } = await quizWorld($, on, harness)
+      expect(calls).toEqual([CHANGED_QUIZ_OFF])
+      expect(CHANGED_QUIZ_OFF.maxTokens).toBe(3400)
+      expect(CHANGED_QUIZ_OFF.prompt).not.toContain('비슷한 코드')
+      expect(CHANGED_QUIZ_OFF.prompt).not.toContain('R1:')
+      expect(reads).toMatchObject({ cart: 0, evens: 0 })
+      expect(itemsOf(store)[0]).toMatchObject({ rung: 'mine', hint: '처음 값을 보세요\nR1: sum은 10에서 시작해 6을 더해 16' })
+    })
+  }
+
+  test('before its step (the second review): each in its own code, no file read, 1.9.0\'s request', async ($, on) => {
+    const { calls, reads } = await quizWorld($, on, { rungChangedStep: 2 }, storeOf({ [REDUCE]: 1, [ARROW]: 1, [COMP]: 1 }))
+    expect(calls).toEqual([CHANGED_QUIZ_OFF])
+    expect(reads).toMatchObject({ cart: 0, evens: 0 })
+  })
+
+  for (const model of ['haiku', 'sonnet'] as const) {
+    test(`(G7) ${model} with only sonnet's row turning it on: ${model === 'haiku' ? '1.9.0\'s request and no file read' : 'the request pinned, sent as sonnet'}`, { options: { model } }, async ($, on) => {
+      const { calls, reads } = await quizWorld($, on, { models: { sonnet: { rungChangedStep: 2 } } })
+      expect(calls).toEqual([{ ...(model === 'haiku' ? CHANGED_QUIZ_OFF : CHANGED_QUIZ_ON), model }])
+      expect(reads.cart).toBe(model === 'haiku' ? 0 : 2)
+    })
+  }
+
+  test('beside code never seen (a harness\'s 4) or a worked example, code changed is asked in its own code: no sentence or R line of its own, the quiz\'s cap the other rung\'s', async ($, on) => {
+    // COMP due at its fifth step: code never seen (EVENS written whole, no import).
+    const fresh = await quizWorld($, on, { rungNewStep: 4, rungChangedStep: 2 }, storeOf({ [COMP]: 4 }, { [COMP]: { reviewedAt: NOW - 31 * DAY } }))
+    const prompt = fresh.calls[0]!.prompt
+    expect(prompt).toContain(`1. ${COMP} — 조건에 맞는 것만 모아 새 리스트를 만듭니다\n   칸: 처음 보는 코드 (py로)\n`)
+    expect(prompt.split('   칸: 내 코드\n').length).toBe(3)
+    expect(prompt).not.toContain('비슷한 코드')
+    expect(prompt).toContain(NEW_TRACE)
+    expect(prompt).not.toContain(CHANGED_TRACE)
+    expect(fresh.calls[0]!.maxTokens).toBe(4600)
+  })
+
+  test('beside a worked example (a harness\'s 2 misses), code changed is asked in its own code too', async ($, on) => {
+    const slip = { what: '조건이 거짓인 것도 남는다고 봄', type: 'boundary', question: '지난 문제', mine: '[1, 2, 3, 4]', at: NOW - 2 * DAY, times: 2 }
+    const store = storeOf()
+    store.set('slips', { [conceptKey(COMP)]: slip })
+    const { calls } = await quizWorld($, on, { workedAfterTimes: 2, rungChangedStep: 2 }, store)
+    const prompt = calls[0]!.prompt
+    expect(prompt).toContain('   칸: 풀이 보고 풀기 (py로)\n')
+    expect(prompt.split('   칸: 내 코드\n').length).toBe(3)
+    expect(prompt).not.toContain('비슷한 코드')
+    expect(prompt).not.toContain('R1:')
+    expect(calls[0]!.maxTokens).toBe(4600)
+  })
+
+  /** The quiz this world sends with code changed on, then (the harness turned off, a minute on) off: each request. */
+  async function onThenOff($: Engine, on: On, store: Map<string, unknown>, setup: (w: World) => void = () => {}) {
+    const { w, calls } = await quizWorld($, on, { rungChangedStep: 2 }, store, setup)
+    w.harness = { rungChangedStep: null }
+    await start($)
+    await w.clock.advance(60_000)
+    const count = w.budgets.length
+    w.answer = REPLY
+    await learn($, '퀴즈 새로')
+    expect(w.budgets.length).toBe(count + 1)
+    return { on: calls[0]!, off: { prompt: w.models.at(-1)!, maxTokens: w.budgets.at(-1)! } }
+  }
+
+  test('(D33) a quiz of three with a team term in it: each concept in its own code, the prompt and cap those of it off to the byte', async ($, on) => {
+    // ARROW not due: the place it leaves goes to the team's term not met yet.
+    const store = storeOf({}, { [ARROW]: { reviewedAt: NOW } })
+    const team = ['## 용어', '- **캐시 키**: 요청마다 캐시를 나누는 이름입니다', ''].join('\n')
+    const both = await onThenOff($, on, store, w => w.files.set('/proj/.claude/learn-notes.md', team))
+    expect(both.on.prompt).toContain('(팀 용어) 캐시 키')
+    expect(both.on.prompt.split(/^\d+\. /m).length - 1).toBe(3)
+    expect(both.on.prompt).not.toContain('비슷한 코드')
+    expect({ prompt: both.on.prompt, maxTokens: both.on.maxTokens }).toEqual(both.off)
+    expect(both.off.maxTokens).toBe(3400)
+  })
+
+  for (const [what, known] of [['two', [ARROW]], ['one', [ARROW, COMP]]] as const) {
+    test(`(D33) a quiz of ${what}: each concept in its own code, the prompt and cap those of it off to the byte`, async ($, on) => {
+      const store = storeOf({}, Object.fromEntries(known.map(name => [name, { knownAt: NOW - DAY }])))
+      store.set('known', Object.fromEntries(known.map(name => [conceptKey(name), NOW - DAY])))
+      const both = await onThenOff($, on, store)
+      expect(both.on.prompt.split(/^\d+\. /m).length - 1).toBe(what === 'two' ? 2 : 1)
+      expect(both.on.prompt).not.toContain('비슷한 코드')
+      expect({ prompt: both.on.prompt, maxTokens: both.on.maxTokens }).toEqual(both.off)
+      expect(both.off.maxTokens).toBe(3400)
+    })
+  }
 })

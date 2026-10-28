@@ -38,16 +38,19 @@ import {
   markWrong,
   marksOf,
   bankQuestion,
+  isChangedAskable,
   isNewAskable,
   isOldGraderOpen,
   isUnrunnableChange,
   isWorkedNext,
+  ladderMixed,
   pickForRung,
   rungOf,
   RUNG_LABEL,
   regrade,
   type Mark,
   type QuizPick,
+  type QuizRung,
   checkPrompt,
   parseCheck,
   isBlankAnswer,
@@ -2517,16 +2520,20 @@ const TIMEOUT_SLACK_MS = 1_000
  */
 const NOTE_TOKENS = 3500
 /**
- * The output budget of a quiz's call (makeQuiz, a team quiz's too) with no worked example and no code never seen in
- * it, the engine's 2048 for thinking on top as for NOTE_TOKENS. 1.8.0's 1400 cut none of a sample's 38 such quizzes;
- * raised by 2000 all the same, as QUIZ_LONG_TOKENS is, for about 1% more output a quiz (docs/qa/견본.md, 출력 상한).
+ * The output budget of a quiz's call (makeQuiz, a team quiz's too) with no worked example, no code never seen and no
+ * code changed in it, the engine's 2048 for thinking on top as for NOTE_TOKENS. 1.8.0's 1400 cut none of a sample's 38
+ * such quizzes; raised by 2000 all the same, as the longer quizzes' was, for about 1% more output a quiz (docs/qa/견본.md,
+ * 출력 상한). Every switch off, every quiz asks for this, as in 1.9.0.
  */
 const QUIZ_TOKENS = 3400
 /**
- * The output budget of a quiz with a worked example or code never seen in it, which writes code of its own: 1.8.0's
- * 1600 cut 2 of a sample's 43 such quizzes (their third question lost), 2000 more none (docs/qa/견본.md, 출력 상한).
+ * The output budget of a quiz with code changed, code never seen or a worked example in it (1.10.0 G2, D12), which
+ * writes a trace (an R line) or code of its own. 1.9.0's 3600 for the last two (1.8.0's 1600 cut 2 of a sample's 43
+ * such quizzes, 2000 more none) was never measured with an R line on code changed; with 1600 a quiz with R lines ran
+ * out of room 4 times in 21 (1.9.0 F3). One budget for all three: they are never in one quiz together (ladderMixed),
+ * and only what is written is spent.
  */
-const QUIZ_LONG_TOKENS = 3600
+const QUIZ_TRACE_TOKENS = 4600
 
 /**
  * One model call for the learner: its text, or why there is none in words they
@@ -2574,7 +2581,8 @@ async function askModel(
  * Each concept with the note it is asked from, while a note still holds it: that note's id, and the learner's
  * code from it. That note is the latest that taught the concept. Its code is screened first (a note kept before
  * 1.6.0 may hold a .env), so a file left out is never quoted. A concept code never seen could ask (from `newStep`,
- * due, isNewAskable) has its change read wider for a library, its file's imports too (isUnrunnableChange, 1.9.0 F3).
+ * due, isNewAskable) or code changed could (from `changedStep`, isChangedAskable, 1.10.0 G2) has its change read wider
+ * for a library, its file's imports too (isUnrunnableChange, 1.9.0 F3); with both rungs off, no file is read.
  */
 async function withCode(
   $: EngineInterface,
@@ -2583,6 +2591,7 @@ async function withCode(
   map: Readonly<Record<string, string>>,
   newStep: number,
   now: number,
+  changedStep: number,
 ): Promise<QuizPick[]> {
   const written = (await allNotes($)).filter(note => note.status === 'ready').sort((a, b) => b.at - a.at)
   const found: QuizPick[] = []
@@ -2599,7 +2608,7 @@ async function withCode(
     for (const change of changes) {
       const text = codeFor(change, one.blurb)
       if (text) {
-        const isAskable = isNewAskable(one, change.file, isDue(one, now), newStep)
+        const isAskable = isNewAskable(one, change.file, isDue(one, now), newStep) || isChangedAskable(one, change.file, changedStep)
         const isLibrary = isAskable && isUnrunnableChange(change, change.kind === 'create' ? undefined : await importsText($, change.path))
         code = { file: baseName(change.file), text, ...(isLibrary ? { isLibrary: true as const } : {}) }
         break
@@ -2728,7 +2737,7 @@ async function makeQuiz(
   const newStep = build.rungNewStep === Infinity ? Infinity : await newStepNow($, now)
   // A review quiz goes over more than one note where it can (three concepts from one note make one lesson
   // again), the slips to ask again and the concepts due before any other, then the team terms not met yet.
-  const found = await withCode($, cfg, chosen, map, newStep, now)
+  const found = await withCode($, cfg, chosen, map, newStep, now, build.rungChangedStep)
   // A concept that came in as a team term: of this repository (any of its terms, in a team quiz) asked as one, by the
   // team's words; of another, its words are the team's all the same.
   const marks = await storedTeamTerms($, map)
@@ -2753,12 +2762,13 @@ async function makeQuiz(
       ? undefined
       : baseFor(index, key => ahead.get(key) ?? openSlip(open, key), spread, asking, map, open, { workedAfter: build.workedAfterTimes, teamMarks: marks })
   const basePick = baseFound
-    ? (marked.find(one => one.key === baseFound.key) ?? (await withCode($, cfg, rankConcepts(index).filter(one => one.key === baseFound.key), map, newStep, now))[0])
+    ? (marked.find(one => one.key === baseFound.key) ?? (await withCode($, cfg, rankConcepts(index).filter(one => one.key === baseFound.key), map, newStep, now, build.rungChangedStep))[0])
     : undefined
   const ordered = baseFound && basePick ? withBase(spread, baseFound, basePick) : spread
   // Each team term asked by the lines its words name (three files read at most), over the learner's code; then its slip.
   // It keeps this repository and the words its grade puts in the concept index: a quiz may be graded in any window.
-  const picks: QuizPick[] = []
+  const laid: QuizPick[] = []
+  const rungs: (QuizRung | undefined)[] = []
   for (const one of ordered) {
     const term = one.team ? termOf.get(one.key) : undefined
     const teamCode = term && file ? await readTermCode($, cfg, file, term) : undefined
@@ -2766,25 +2776,29 @@ async function makeQuiz(
     const slip = openSlip(open, one.key)
     // Which code it is asked in (1.8.0, the question ladder): by its review step, or by a worked example first once
     // its slip, asked again, was missed twice running.
-    const rung = rungOf(
-      one,
-      {
-        ...(one.code ? { code: one.code } : {}),
-        ...(slip ? { slip: ahead.get(one.key) ?? slip } : {}),
-        isAsking: asking.has(one.key),
-        isTeam: one.team === true,
-        isDue: isDue(one, now),
-      },
-      newStep,
-      ladderSteps(),
+    rungs.push(
+      rungOf(
+        one,
+        {
+          ...(one.code ? { code: one.code } : {}),
+          ...(slip ? { slip: ahead.get(one.key) ?? slip } : {}),
+          isAsking: asking.has(one.key),
+          isTeam: one.team === true,
+          isDue: isDue(one, now),
+        },
+        newStep,
+        ladderSteps(),
+      ),
     )
-    picks.push(
-      pickForRung({ ...one, ...(teamCode ? { teamCode } : {}), ...origin, ...(slip ? { slip: { what: slip.what, question: slip.question, mine: slip.mine } } : {}) }, rung),
-    )
+    laid.push({ ...one, ...(teamCode ? { teamCode } : {}), ...origin, ...(slip ? { slip: { what: slip.what, question: slip.question, mine: slip.mine } } : {}) })
   }
-  // A worked example (and code never seen) writes code of its own: room for it, spent only as far as it is used.
-  const isLong = picks.some(one => one.rung === 'worked' || one.rung === 'new')
-  const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: isLong ? QUIZ_LONG_TOKENS : QUIZ_TOKENS })
+  // Each rung only in a shape of quiz its samples measured (1.10.0 G2, ladderMixed), once every pick's is known.
+  const asIs = ladderMixed(rungs, laid)
+  const picks = laid.map((one, i) => pickForRung(one, asIs[i]))
+  // Code changed traces its code, code never seen and a worked example write code of their own: room for it, spent
+  // only as far as it is used.
+  const isLong = picks.some(one => one.rung === 'changed' || one.rung === 'new' || one.rung === 'worked')
+  const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: isLong ? QUIZ_TRACE_TOKENS : QUIZ_TOKENS })
   if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
   const items = parseQuiz(asked.text, picks)
   if (items.length === 0) {

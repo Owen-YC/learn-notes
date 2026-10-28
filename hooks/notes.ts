@@ -5120,14 +5120,16 @@ export const RUNG_LABEL: Readonly<Record<QuizRung, string>> = { worked: '풀이 
  * The review step from which a concept is asked in its code changed (비슷한 코드): the third, a week after the last, as
  * 1.8.0 shipped it (2). Off from 1.9.0: measured again as the plugin calls (effort low, docs/qa/견본.md), it kept the
  * learner's code as it was in too many questions, and once its sentence was mended one answer it wrote was wrong; a
- * concept is asked in its own code until a sample shows it right.
+ * concept is asked in its own code until a sample shows it right. 1.10.0 (G2) asks it anew: a prediction only, its
+ * trace on an R line, in code that runs alone in a language its samples ran (isChangedRunnable), never in a quiz of a
+ * shape its samples did not measure (ladderMixed); still off here, on only in a model's row of MODEL_SWITCHES.
  */
 export const RUNG_CHANGED_STEP = Infinity
 /**
  * The review step from which a concept due is asked in code never seen (처음 보는 코드). Off in 1.8.0: that question's
  * answer is the model's too, and a wrong one would cost a concept weeks of steps; on (4) once a sample shows it right.
  * Off in 1.9.0 too: in its run-checked sample (docs/qa/견본.md) the answers were right once the R line was in, but too
- * many replies ran out of room (maxTokens, 1600 then; register.tsx's QUIZ_LONG_TOKENS since), the last question cut or
+ * many replies ran out of room (maxTokens, 1600 then; register.tsx's QUIZ_TRACE_TOKENS since), the last question cut or
  * none at all, and the grade took an answer with one value of several wrong for 거의 more often than the bar allows.
  */
 export const RUNG_NEW_STEP = Infinity
@@ -5137,7 +5139,7 @@ export const RUNG_NEW_STEP = Infinity
  * docs/qa/견본.md), a worked example of a concept met in code passed, but one of a concept no code met did not, nor
  * once its line was mended (WORKED_PLAIN_ASK): some lost their marks or the example, stated a result the example does
  * not give, or asked for what the example showed, and with the line some replies ran out of room (maxTokens, 1600 then;
- * register.tsx's QUIZ_LONG_TOKENS since). Measured once more with that room (docs/qa/견본.md, '출력 상한을 올린 뒤 다시
+ * register.tsx's QUIZ_TRACE_TOKENS since). Measured once more with that room (docs/qa/견본.md, '출력 상한을 올린 뒤 다시
  * 잼'), the one in code fell short too, counted the way its bar was set: a question whose code named a class it never
  * defined, run as shown, did not print its answer, and A was right on 18 of 20 against 19. A concept missed twice
  * running is asked again as 1.7 did (다시 도전) until a sample shows it right.
@@ -5154,9 +5156,11 @@ const RUNG_NEW_EXTS: readonly string[] = ['js', 'mjs', 'cjs', 'ts', 'py']
 /** What each rung asks of the quiz, said only for the rungs the quiz has, in this order. */
 const RUNG_ASK: readonly [QuizRung, string][] = [
   ['mine', '내 코드: 학습자가 만든 코드를 그대로 보여 주고 묻는다.'],
+  // 1.10.0 (G2): a prediction only, in one block that runs alone, its trace on an R line (CHANGED_TRACE_LINE). 1.9.0's
+  // sentence, which let it be a question to change too, is gone: every miss its sample had was one of those.
   [
     'changed',
-    '비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 보여 주고 묻는다. 원래 코드의 답으로는 맞힐 수 없게 바꾼다. 바꿔 보기로 낼 때도 학습자 코드를 그대로 보이거나 몇 줄만 떼어 보이지 않고, 한 곳을 바꾼 코드에서 묻는다.',
+    '비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 코드 블록 하나로 보여 주고, 그 코드가 찍는 것을 예측으로 묻는다. 다른 문제와 유형이 겹쳐도 이 칸은 예측으로 낸다. 원래 코드의 답으로는 맞힐 수 없게 바꾼다. 그 블록만 따로 돌려도 그대로 실행되게 쓴다: 쓰는 변수·함수·클래스는 모두 블록 안에서 정의하고(학습자 코드에 정의가 보이지 않으면 짧게 새로 쓴다), 찍는 줄이 없으면 결과를 console.log나 print로 찍는 줄을 더한다. 출력은 3줄 이하로 둔다. A 바로 앞에 같은 번호의 R 줄(예: R2:)을 두어 그 코드를 한 줄씩 따라간 과정을 쓰고, A에는 찍히는 글자만 줄마다 그대로 쓴다(설명을 붙이지 않는다). 오류로 멈추는 코드면 A에 그 앞까지 찍힌 글자와 오류 이름(예: TypeError)을 쓴다. 문제(Q)와 힌트(H)에는 출력값이나 따라간 과정을 쓰지 않는다.',
   ],
   [
     'new',
@@ -5183,6 +5187,11 @@ const WORKED_PLAIN_ASK =
  * marker of its own and dropped (parseQuiz), so the answer kept is what the code prints and the hint holds no trace.
  */
 const NEW_TRACE_LINE = 'R1: (칸이 "처음 보는 코드"인 문제만: 코드를 한 줄씩 따라간 과정)'
+/**
+ * The format's line for the trace a question in code changed writes before its answer (1.10.0 G2, R{n}), in a quiz
+ * with no code never seen (ladderMixed keeps the two apart): a marker too, dropped (parseQuiz), never kept.
+ */
+export const CHANGED_TRACE_LINE = 'R1: (칸이 "비슷한 코드"인 문제만: 보인 코드를 한 줄씩 따라간 과정)'
 
 /** Said when a quiz has a rung whose code the quiz writes itself, over QUIZ_SYSTEM's "only in the words and code given". */
 const RUNG_WRITES = "'처음 보는 코드'·'풀이 보고 풀기' 칸은 그 개념을 쓰는 짧은 코드를 새로 쓴다. 그 밖에는 주어진 설명과 코드 안에서만 묻는다."
@@ -5207,8 +5216,10 @@ export function extOf(file: string): string | undefined {
  * (다시 도전, as in 1.7) or a concept with no code (asked why); code never seen from `newStep` on, for a concept due
  * whose code a sample could run and needs nothing but its language (isNewAskable; 1.9.0: none that a library, a
  * framework or a browser runs, its lines by isUnrunnableCode and its change by `isLibrary`, asked as before); its code
- * changed from `changedStep` (RUNG_CHANGED_STEP) on (any language, a concept filling the quiz before it is due too);
- * else its own code.
+ * changed from `changedStep` (RUNG_CHANGED_STEP) on (a concept filling the quiz before it is due too), from 1.10.0 (G2)
+ * only for code that runs as alone (the same `isLibrary` and isUnrunnableCode) in a language its samples ran and whose
+ * run settles one output (isChangedRunnable); else its own code. The quiz then keeps each rung only in a shape its
+ * samples measured (ladderMixed).
  */
 export function rungOf(
   one: LearnConcept,
@@ -5227,7 +5238,7 @@ export function rungOf(
   if (!how.code) return undefined
   const isRunnable = how.code.isLibrary !== true && (how.code.text === undefined || !isUnrunnableCode(how.code.text))
   if (isNewAskable(one, how.code.file, how.isDue, newStep) && isRunnable) return 'new'
-  return stepOf(one) >= changedStep ? 'changed' : 'mine'
+  return stepOf(one) >= changedStep && isRunnable && isChangedRunnable(how.code) ? 'changed' : 'mine'
 }
 
 /**
@@ -5238,6 +5249,45 @@ export function rungOf(
 export function isNewAskable(one: LearnConcept, file: string, isDue: boolean, newStep = RUNG_NEW_STEP): boolean {
   const ext = extOf(file)
   return stepOf(one) >= newStep && isDue && ext !== undefined && RUNG_NEW_EXTS.includes(ext)
+}
+
+/**
+ * Code whose run does not settle one output (1.10.0 G2): the network, chance, the clock, the process, input, files or
+ * the locale, so a question in it changed has no one answer to keep (on the device that measured it and on a learner's
+ * Korean Windows alike).
+ */
+const CHANGED_UNSETTLED: readonly RegExp[] = [
+  /(?<![\w$.])fetch\s*\(/,
+  /\bXMLHttpRequest\b/,
+  /\bMath\.random\s*\(/,
+  /\bDate\.now\s*\(|\bnew\s+Date\s*\(/,
+  /\bprocess\.(?:env|argv|stdin)\b/,
+  /['"\x60]node:/,
+  /(?<![\w$.])(?:input|open)\s*\(/,
+  /(?<![\w$])crypto\.|\bperformance\.now\s*\(|\.toLocale\w*\s*\(|(?<![\w$.])Intl\./,
+]
+/** Python calls whose printed value differs run to run (an address, a salted hash): unsettled in a .py file alone. */
+const CHANGED_UNSETTLED_PY: readonly RegExp[] = [/(?<![\w$.])(?:id|hash)\s*\(/]
+
+/**
+ * Whether a concept's code may be asked changed (1.10.0 G2): in a language its samples ran (RUNG_NEW_EXTS) and with
+ * nothing in its lines that leaves the output unsettled (CHANGED_UNSETTLED). Its library check is rungOf's, as for
+ * code never seen. A narrowing only: widening it takes a new sample (G2's decision rule 6).
+ */
+export function isChangedRunnable(code: { file: string; text?: string }): boolean {
+  const ext = extOf(code.file)
+  const unsettled = ext === 'py' ? [...CHANGED_UNSETTLED, ...CHANGED_UNSETTLED_PY] : CHANGED_UNSETTLED
+  return ext !== undefined && RUNG_NEW_EXTS.includes(ext) && (code.text === undefined || !unsettled.some(pattern => pattern.test(code.text!)))
+}
+
+/**
+ * Whether a concept could be asked in its code changed by its step and language alone (1.10.0 G2): at `changedStep`
+ * or past it, its code in a language its samples ran (RUNG_NEW_EXTS). Only then is its change read wider for a library
+ * (isUnrunnableChange), its file's imports too, as for code never seen (isNewAskable); with the rung off, never.
+ */
+export function isChangedAskable(one: LearnConcept, file: string, changedStep = RUNG_CHANGED_STEP): boolean {
+  const ext = extOf(file)
+  return stepOf(one) >= changedStep && ext !== undefined && RUNG_NEW_EXTS.includes(ext)
 }
 
 /** A module named by its bare name (`'react'`, `"lodash/debounce"`), not by a path (`./`, `../`, `/`) or `node:`. */
@@ -5297,6 +5347,23 @@ export function pickForRung<T extends QuizPick>(pick: T, rung: QuizRung | undefi
   const lang = code ? extOf(code.file) : undefined
   const blurb = rung === 'new' ? unquoted(pick.blurb) : pick.blurb
   return { ...rest, blurb, rung, ...(lang !== undefined ? { lang } : {}) } as T
+}
+
+/**
+ * A quiz's rungs as they are asked (1.10.0 G2, D13 · D33), in the quiz's order, each pick's code as it is: a rung only
+ * in the shape of quiz its samples measured, else as the rung off asks it. Code changed and code never seen are each
+ * measured in a quiz of three with no team term and nothing else of the quiz's own making: in a quiz with fewer than
+ * three picks, or with a team term (`team`, `isTeamMarked`) among them, both are asked in the learner's own code
+ * (mine); code changed beside code never seen or a worked example is asked in its own code too.
+ */
+export function ladderMixed(rungs: readonly (QuizRung | undefined)[], picks: readonly Pick<QuizPick, 'team' | 'isTeamMarked'>[]): (QuizRung | undefined)[] {
+  const isMeasured = rungs.length >= 3 && !picks.some(one => one.team === true || one.isTeamMarked === true)
+  const isApart = rungs.some(rung => rung === 'new' || rung === 'worked')
+  return rungs.map(rung => {
+    if (rung === 'new') return isMeasured ? rung : 'mine'
+    if (rung === 'changed') return isMeasured && !isApart ? rung : 'mine'
+    return rung
+  })
 }
 
 /** Words with the code they quote in backticks taken out, and a dash or colon left hanging after them. */
@@ -5550,14 +5617,15 @@ function isShownAsItWas(code: { file: string; text: string }, question: string):
 
 /**
  * The rung a question keeps, read against what the model wrote: a worked example with no example shown (no 풀이:)
- * keeps none, nor code meant changed that is shown as it was (isShownAsItWas), nor code never seen with no code shown;
- * any other keeps its pick's.
+ * keeps none, nor code meant changed that is shown as it was (isShownAsItWas) or not shown at all (1.10.0 G2: a why
+ * with no code is no 비슷한 코드), nor code never seen with no code shown; any other keeps its pick's.
  */
 function keptRung(pick: Pick<QuizPick, 'rung' | 'code'>, question: string): QuizRung | undefined {
   if (pick.rung === 'worked') return WORKED_SHOWN.test(question) ? 'worked' : undefined
   // Code never seen (1.9.0 F3) is the rung of a question that shows code, of whatever kind, so a miss steps it back
   // one only (markFor); one asked with none (a concept the model found a library needed) is a why as in 1.7.
   if (pick.rung === 'new') return shownCode(question).some(piece => piece.text.trim() !== '') ? 'new' : undefined
+  if (pick.rung === 'changed' && !shownCode(question).some(piece => piece.text.trim() !== '')) return undefined
   if (pick.rung === 'changed' && pick.code && isShownAsItWas(pick.code, question)) return undefined
   return pick.rung
 }
@@ -5710,7 +5778,8 @@ export const QUIZ_SYSTEM = [
  * says it under its head (`칸: 비슷한 코드`), and the quiz is told what each of its rungs asks (RUNG_ASK); one asked by
  * a worked example has its slip shown in the example, so the sentence that keeps a slip unsaid leaves it out; one of a
  * concept no code met is told more of how (WORKED_PLAIN_ASK, 1.9.0 교차 검토 2), one in code as 1.8.0 told it. A quiz
- * with code never seen (1.9.0 F3) is shown an R line in its format, the trace its answer is written after.
+ * with code never seen (1.9.0 F3), or else with code changed (1.10.0 G2, CHANGED_TRACE_LINE), is shown an R line in
+ * its format, the trace its answer is written after.
  */
 export function quizPrompt(
   picks: readonly (LearnConcept & Pick<QuizPick, 'code' | 'slip' | 'team' | 'teamCode' | 'isTeamMarked' | 'rung' | 'lang'>)[],
@@ -5756,7 +5825,7 @@ export function quizPrompt(
     'T1: (예측 · 왜 · 바꿔 보기 중 하나)',
     'Q1: (문제 한두 문장)',
     'H1: (힌트 한 문장)',
-    ...(rungs.has('new') ? [NEW_TRACE_LINE] : []),
+    ...(rungs.has('new') ? [NEW_TRACE_LINE] : rungs.has('changed') ? [CHANGED_TRACE_LINE] : []),
     'A1: (답 한두 문장)',
     'T2: …',
     'Q2: …',
@@ -6661,8 +6730,9 @@ export function listItem(n: number, text: string): string {
  * next marker; a hint or a kind may be missing.
  */
 export function parseQuiz(text: string, picks: readonly QuizPick[]): LearnQuizItem[] {
-  // A question in code never seen (1.9.0 F3) traces its code on an R line before its answer: a marker too, then dropped.
-  const markers = picks.some(one => one.rung === 'new') ? 'QHATR' : 'QHAT'
+  // A question in code never seen (1.9.0 F3) or code changed (1.10.0 G2) traces its code on an R line before its
+  // answer: a marker too, then dropped.
+  const markers = picks.some(one => one.rung === 'new' || one.rung === 'changed') ? 'QHATR' : 'QHAT'
   const aware = quizItems(quizParts(text, true, markers), picks)
   // A fence the model left open would hide every marker after it: then read it as if there were no code.
   const items = aware.length >= picks.length ? aware : [aware, quizItems(quizParts(text, false, markers), picks)].reduce((a, b) => (b.length > a.length ? b : a))

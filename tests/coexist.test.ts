@@ -11,6 +11,9 @@ import {
   indexPrint,
   isMarkedIndex,
   knownMarks,
+  markFor,
+  markPartial,
+  markWrong,
   markedConcepts,
   recallSteps,
   stepMarks,
@@ -18,6 +21,8 @@ import {
   withKnownMarks,
 } from '../hooks/notes'
 import { COEXIST_CASES, COEXIST_MIXED, COEXIST_NOW, type CoexistStore } from './fixtures/coexist19'
+import { QUIZ_OUTPUT_18 } from './fixtures/quiz18'
+import { QUIZ_OUTPUT_110_ON } from './fixtures/quiz19'
 
 const NOW = COEXIST_NOW
 const DAY = 86_400_000
@@ -191,5 +196,36 @@ describe('1.9.0: the stores the four old builds left over one 1.9.0 wrote, by th
       expect(hasMark(rewrites[v]!.concepts)).toBe(false)
       expect(json(read19(rewrites[v]!, aliases))).toEqual(rereads18[v])
     }
+  })
+})
+
+describe('1.10.0 (G2): a question in code changed asked with it on is the record 1.8.0 wrote for one, graded as 1.8.0 graded it', () => {
+  test('every quiz of quiz18.ts that keeps code changed on (a harness\'s 2): each such question the same record, field for field, as 1.8.0 (3690021) read back from the same reply', () => {
+    const keys = Object.keys(QUIZ_OUTPUT_110_ON)
+    expect(keys.length).toBeGreaterThan(0)
+    let changed = 0
+    for (const key of keys) {
+      const was = QUIZ_OUTPUT_18[key.split(' ')[0]!]!
+      QUIZ_OUTPUT_110_ON[key]!.items.forEach((item, i) => {
+        if (item.rung !== 'changed') return
+        changed += 1
+        // The fields every window from 1.7.0 reads (key, name, question, hint, answer, kind, noteId) and 1.8.0's rung.
+        expect([key, item]).toEqual([key, was.items[i]])
+        expect(Object.keys(item).every(field => ['key', 'name', 'question', 'hint', 'answer', 'kind', 'noteId', 'rung'].includes(field))).toBe(true)
+      })
+    }
+    expect(changed).toBeGreaterThan(0)
+  })
+
+  test('its grade marks the concept as a 1.8.0 question in code changed: wrong to the first step, 거의 one back, right as any', () => {
+    const index = { [conceptKey('map')]: concept('map', { step: 3, reviewedAt: NOW - 8 * DAY }) }
+    const after = (mark: ReturnType<typeof markFor>) => mark(index, [conceptKey('map')], NOW)[conceptKey('map')]!
+    expect(markFor('wrong', undefined, false, 'changed')).toBe(markWrong)
+    expect(markFor('wrong', 'partial', false, 'changed')).toBe(markPartial)
+    expect(after(markFor('wrong', undefined, false, 'changed'))).toEqual(after(markFor('wrong', undefined, false, undefined)))
+    expect(after(markFor('wrong', 'partial', false, 'changed'))).toEqual(after(markFor('wrong', 'partial', false, undefined)))
+    expect(after(markFor('wrong', undefined, false, 'changed')).step).toBe(0)
+    expect(after(markFor('wrong', 'partial', false, 'changed')).step).toBe(2)
+    expect(after(markFor('right', 'right', false, 'changed'))).toEqual(after(markFor('right', 'right', false, undefined)))
   })
 })
