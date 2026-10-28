@@ -33,6 +33,7 @@ import {
   parseTeamFile,
   ruleDrillPrompt,
   ruleNamesOf,
+  screenNote,
   journalPath,
   knownMarks,
   markedConcepts,
@@ -16139,7 +16140,7 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM])
     expect(calls[0]!.prompt).not.toContain('(팀 규칙)')
     expect(calls[0]!.maxTokens).toBe(3500)
-    expect(calls[1]).toEqual({ model: 'haiku', effort: 'low', system: RULE_DRILL_SYSTEM, prompt: ruleDrillPrompt(note(), TEAM.rules, SAID), maxTokens: RULE_DRILL_TOKENS, timeoutMs: 90_000 })
+    expect(calls[1]).toEqual({ model: 'haiku', effort: 'low', system: RULE_DRILL_SYSTEM, prompt: ruleDrillPrompt(screenNote(note()), TEAM.rules, SAID), maxTokens: RULE_DRILL_TOKENS, timeoutMs: 90_000 })
     // The code the note's own call was sent, the team's rules and the note's line.
     expect(calls[1]!.prompt).toContain(`+  ${LINE}\n`)
     expect(calls[1]!.prompt).toContain(`\n## 노트가 짚은 줄\n${RULE_LINE}\n`)
@@ -16276,6 +16277,64 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     expect(usageOf(store)).toMatchObject({ calls: 7, auto: 2 })
   })
 
+  test('on: a file the team file leaves out after the note was written (## 빼기) reaches neither call when w writes it again: the rule practice\'s prompt is the screened note\'s, the file named, its code never sent (2/7 검토)', async ($, on) => {
+    const PRICING = { tool: 'Write', tool_use_id: 'k1', file_path: '/proj/src/pricing.js', content: 'export const MARGIN = 0.4231 // INTERNALONLY\n' } as const
+    const calls = routeCalls(on)
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    w.files.set('/proj/.claude/learn-notes.md', TEAM_MD)
+    w.harness = ON
+    await start($)
+    w.texts = [OWN, REPLY]
+    await turn($, async () => {
+      await $.tool.call(WRITE_USER)
+      await $.tool.call(PRICING)
+    })
+    await finish(w)
+    // Not left out yet: both calls carry it, as 1.9.0's note call did.
+    expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM])
+    expect(calls[0]!.prompt).toContain('INTERNALONLY')
+    expect(calls[1]!.prompt).toContain('INTERNALONLY')
+    w.files.set('/proj/.claude/learn-notes.md', `${TEAM_MD}\n## 빼기\n- src/pricing.js\n`)
+    const ui = await pane($)
+    w.texts = [OWN, REPLY]
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    await ui.unmount()
+    expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM, SYSTEM, RULE_DRILL_SYSTEM])
+    const note = notesIn(store).at(-1)!
+    expect(note).toMatchObject({ status: 'ready', text: RULE_TEXT })
+    // The note as stored still holds the file's code: only screening keeps it out of what is sent.
+    expect(JSON.stringify(note.changes)).toContain('INTERNALONLY')
+    for (const call of calls.slice(2)) expect(call.prompt).not.toContain('INTERNALONLY')
+    expect(calls[3]!.prompt).toContain('pricing.js — 설정으로 빼서 내용을 싣지 않음')
+    expect(calls[3]!.prompt).toBe(ruleDrillPrompt(screenNote(note, ['src/pricing.js']), TEAM.rules, SAID))
+  })
+
+  test('on, in a -p run, the rule practice\'s call cut short: no later load of this process takes the note up, so it is saved at once with its own practice, journaled; the next session calls nothing more (2/7 검토)', async ($, on) => {
+    const calls = routeCalls(on)
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    w.files.set('/proj/.claude/learn-notes.md', TEAM_MD)
+    w.harness = ON
+    await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
+    w.texts = [OWN, REPLY]
+    w.replies = ['ok', 'cut']
+    await turn($, () => $.tool.call(WRITE_USER))
+    await finish(w)
+    expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM])
+    expect(notesIn(store).at(-1)).toMatchObject({ status: 'ready', text: OWN })
+    expect(w.journal()).toHaveLength(1)
+    expect(w.journal()[0]!.text).toContain(`- 할 일: ${CONCEPT_TASK}`)
+    // The next session, at a terminal: the note is written, nothing to take up.
+    await start($)
+    await w.clock.advance(60_000)
+    await w.clock.settle()
+    expect(calls).toHaveLength(2)
+    expect(notesIn(store).at(-1)).toMatchObject({ status: 'ready', text: OWN })
+    expect(w.journal()).toHaveLength(1)
+  })
+
   // As shipped (docs/qa/견본.md '모델별 결정'): isRuleWide on and isRuleDrill off in both rows.
   for (const model of ['haiku', 'sonnet'] as const) {
     test(`as shipped (${model}, no harness): one call however the note reads; a practice bringing the rule's name in under a rule line kept marked (no t), one that does not kept as 1.9.0 kept it`, { options: { model } }, async ($, on) => {
@@ -16283,6 +16342,9 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
       expect(calls.map(call => [call.model, call.system])).toEqual([[model, SYSTEM]])
       expect(note().text).toBe(PLAIN_KEPT)
       expect(w.texts).toEqual([REPLY])
+      // The journal keeps the note's own line; the bold one is a practice's record, never made with no practice (2/7 검토).
+      expect(w.journal().at(-1)!.text).toContain(`- 할 일 (팀 규칙): ${PLAIN_TASK}`)
+      expect(w.journal().at(-1)!.text).not.toContain('**할 일 (팀 규칙)**')
       let ui = await pane($)
       expect(await ui.find({ type: 'Button', key: 'note-drill' })).toBeUndefined()
       await ui.unmount()
@@ -16327,6 +16389,7 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     expect(w.models.at(-1)).not.toContain('직접 해 보기')
     expect(w.models.at(-1)).not.toContain(PLAIN_TASK)
     expect(w.journal().find(one => one.text.includes(PLAIN_TASK))!.text).toContain(`- 할 일 (팀 규칙): ${PLAIN_TASK}`)
+    expect(w.journal().map(one => one.text).join('\n')).not.toContain('**할 일 (팀 규칙)**')
     // A 팀 규칙: line that says something marks it too; none over it, never.
     w.texts = [PLAIN.replace(RULE_LINE, '팀 규칙: 서버 요청은 apiRequest로 합니다'), PLAIN.replace(`${RULE_LINE}\n`, '')]
     await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')

@@ -905,6 +905,9 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note kept as 1.9.0 kept it, a wide
       ['pprint("hi")', 'print', false],
       ['print_all("hi")', 'print', false],
       ['os.environ["X"]', 'os.environ', true],
+      // After a $ (Nuxt's $fetch, a $config) the name is part of a longer one (2/7 검토).
+      ['const r = await $fetch(u)', 'fetch', false],
+      ['const u = $config.API_URL', 'config', false],
     ]
     for (const [code, name, isHeld] of cases) expect([code, name, holdsName(code, name)]).toEqual([code, name, isHeld])
   })
@@ -932,13 +935,23 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note kept as 1.9.0 kept it, a wide
       expect(ruleLabelled(plain.replace(RULE_LINE, said), NAMES)).toBe(kept.replace(RULE_LINE, said))
       expect(ruleLabelled(plain.replace(RULE_LINE, said))).toBe(plain.replace(RULE_LINE, said))
     }
-    // A 팀 규칙: line that says nothing, no line at all, or one after the practice's heading: as it was.
-    for (const said of ['팀 규칙: 없음', '팀 규칙:', '**팀 규칙:** 없음', '이름을 보이려고 만들었습니다.']) {
+    // A 팀 규칙: line that says nothing, no line at all, a line with no colon after 팀 규칙 (words about the rule, not
+    // the 1.6.0 line), or one after the practice's heading: as it was.
+    for (const said of ['팀 규칙: 없음', '팀 규칙:', '**팀 규칙:** 없음', '이름을 보이려고 만들었습니다.', '팀 규칙에 맞게 서버 요청을 바꿨습니다.', '- 팀 규칙대로 apiRequest를 씁니다']) {
       const untouched = plain.replace(RULE_LINE, said)
       expect(ruleLabelled(untouched, NAMES)).toBe(untouched)
     }
     const late = [...HEAD.filter(line => line !== RULE_LINE), ...PLAIN, RULE_LINE].join('\n')
     expect(ruleLabelled(late, NAMES)).toBe(late)
+    // A 팀 규칙: line that says something, after the practice's heading only (in its section, or under a heading after it).
+    const lateTeam = [...HEAD.filter(line => line !== RULE_LINE), ...PLAIN, '팀 규칙: 서버 요청은 apiRequest로 합니다'].join('\n')
+    expect(ruleLabelled(lateTeam, NAMES)).toBe(lateTeam)
+    const afterHeading = [...HEAD.filter(line => line !== RULE_LINE), ...PLAIN, '', '### 참고', '팀 규칙: 서버 요청은 apiRequest로 합니다'].join('\n')
+    expect(ruleLabelled(afterHeading, NAMES)).toBe(afterHeading)
+    // An example bringing in a name with a $ before it ($fetch) brings no rule name in: fetch is not whole there.
+    const dollar = [...HEAD, '### 직접 해 보기', '- 할 일: 서버 요청을 다른 함수로 바꿔 보세요', '- 고칠 줄: `const res = await axios.get(u)`', '- 확인: `loadUser(1)` → 같은 사용자 정보가 나옵니다', '- 예시 답: `const res = await $fetch(u)`'].join('\n')
+    expect(ruleLabelled(dollar, NAMES)).toBe(dollar)
+    expect(ruleLabelled(dollar.replace('$fetch(u)', 'fetch(u)'), NAMES)).not.toBe(dollar.replace('$fetch(u)', 'fetch(u)'))
     // Its line holds the name already: none brought in. A name inside a longer one is none.
     const held = plain.replace(`\`\` ${LINE} \`\``, `\`\` ${EXAMPLE.replace(')', ', 1)')} \`\``)
     expect(ruleLabelled(held, NAMES)).toBe(held)
