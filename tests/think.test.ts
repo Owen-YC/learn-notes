@@ -274,7 +274,7 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
 
     const think = openThink(NOTE.asks, 2)!
     // 1.8.0's rule (THINK_RULE): the words read as an answer or a question, as IS_THINK_ASKED off sends them (1.9.0 F6).
-    const prompt = askPrompt(NOTE, '0이요', 'beginner', undefined, think, undefined, false)
+    const prompt = askPrompt(NOTE, '0이요', 'beginner', undefined, think, false)
     const section = [
       "## 바로 앞 '예시로 따라가기'의 답과, 그 끝에 학습자에게 던진 생각해 보기",
       TRACE,
@@ -290,7 +290,7 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
     // The rest as 1.7.0 has it.
     expect(prompt.slice(prompt.indexOf('## 그 노트의 요청'))).toBe(PLAIN_170.slice(PLAIN_170.indexOf('## 그 노트의 요청')))
     // The walk-through alone under the note: no questions before.
-    const alone = askPrompt({ ...NOTE, asks: [NOTE.asks[1]!] }, '0이요', 'beginner', TEAM, think, undefined, false)
+    const alone = askPrompt({ ...NOTE, asks: [NOTE.asks[1]!] }, '0이요', 'beginner', TEAM, think, false)
     expect(alone).toContain(section)
     expect(alone).not.toContain('## 앞서 이 노트에 대해')
     expect(alone.indexOf(section)).toBeLessThan(alone.indexOf('## 이 저장소의 팀 규칙과 용어'))
@@ -367,12 +367,12 @@ describe('1.9.0: 생각해 보기 back on behind IS_THINK_ASKED: a guess checked
     expect(EASIER_QUESTION).toBe(EASIER_170)
     // No 생각해 보기 open: 1.7.0's to the byte, in either state.
     for (const isOn of [true, false]) {
-      expect(askPrompt(NOTE, '0이요', 'beginner', undefined, undefined, undefined, isOn)).toBe(PLAIN_170)
-      expect(askPrompt(NOTE, '0이요', 'intermediate', TEAM, undefined, undefined, isOn)).toBe(TEAM_170)
+      expect(askPrompt(NOTE, '0이요', 'beginner', undefined, undefined, isOn)).toBe(PLAIN_170)
+      expect(askPrompt(NOTE, '0이요', 'intermediate', TEAM, undefined, isOn)).toBe(TEAM_170)
     }
     const think = openThink(NOTE.asks, 2)!
-    const on = askPrompt(NOTE, '2000 나오나요?', 'beginner', TEAM, think, undefined, true)
-    const off = askPrompt(NOTE, '2000 나오나요?', 'beginner', TEAM, think, undefined, false)
+    const on = askPrompt(NOTE, '2000 나오나요?', 'beginner', TEAM, think, true)
+    const off = askPrompt(NOTE, '2000 나오나요?', 'beginner', TEAM, think, false)
     expect(on).toContain(`생각해 보기: ${QUESTION}\n${QUESTION_RULE}\n\n`)
     expect(on).toContain('학습자는 이 코드를 실행하지 않았다.')
     expect(on).not.toContain(RULE_18)

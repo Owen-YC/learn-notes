@@ -1524,27 +1524,15 @@ const DRILL_ASK = [
 ]
 
 /**
- * Whether a note may make its practice one of a team rule (1.9.0 F2): in a repository whose team file has rules, the
- * line its "왜 이렇게 바꿨을까" says may differ from one (`팀 규칙과 다를 수 있음: …`) changed as the rule says, its task
- * marked on its label (`- 할 일 (팀 규칙):`, which no window before 1.9.0 reads as a task: none of them grades it).
- * Graded apart from the concepts (no step, no slip; the day's count only). On only once samples N1 and N2 passed
- * (docs/qa/견본.md): in 1.9.0 N2 passed and N1 did not, before and after its one fix, so it ships off. Off, the
- * note's prompt is 1.8.0's to the byte, and a practice the model marked by itself is none.
+ * Whether a note whose "왜 이렇게 바꿨을까" says the change may differ from a team rule (`팀 규칙과 다를 수 있음: …`), in
+ * a repository whose team file has rules, has its practice made that rule's by a call of its own (1.10.0 G6:
+ * RULE_DRILL_SYSTEM, ruleDrillPrompt, withRuleDrill), its task marked on its label (`- 할 일 (팀 규칙):`, which no
+ * window before 1.9.0 reads as a task: none of them grades it). Graded apart from the concepts (no step, no slip; the
+ * day's count only). The note's own prompt is 1.9.0's off one whatever this is (1.9.0 F2 asked it of the note itself,
+ * and its samples N1 did not pass): off, no such call is made, and a practice the model marked by itself is none.
+ * Off here as in 1.9.0; a model's row of MODEL_SWITCHES turns it on once its samples passed (docs/qa/견본.md).
  */
 export const IS_RULE_DRILL = false
-
-/**
- * What a note is asked for on top of DRILL_ASK while IS_RULE_DRILL is on and the team file has rules: the practice of
- * the rule its "다를 수 있음" line named, on one line of the changed code, in place of the first concept's; only its
- * task line changes, marked on its label. Led by the line N1's first samples called for (docs/qa/견본.md): a note
- * that said the change only touches a rule (`팀 규칙: …`) marked its practice all the same, which then had none.
- */
-const DRILL_RULE_ASK = [
-  '("팀 규칙과 다를 수 있음:" 줄을 쓴 노트에서만 아래를 따른다)',
-  '(위에 "팀 규칙과 다를 수 있음:" 줄을 썼고 바뀐 뒤 코드의 한 줄만 고쳐 그 규칙을 지킬 수 있으면, 배울 개념 대신 그 규칙으로 연습을 낸다. 할 일 줄만 아래 줄로 바꾼다)',
-  '- 할 일 (팀 규칙): 그 규칙대로 고치는 일 한 문장',
-  '(그 줄을 쓰지 않았으면 "(팀 규칙)"을 쓰지 않는다)',
-]
 
 /**
  * The one user message the model reads for a note. `known`: the concepts
@@ -1552,15 +1540,14 @@ const DRILL_RULE_ASK = [
  * knows kept out of what the note teaches and the ones practiced in quizzes
  * named in a line. `team`: the repository's team file, its rules and terms put
  * before the concepts already learned, so a concept the team has a term for is
- * named as the team names it. `isRuleDrill` (1.9.0 F2, IS_RULE_DRILL): with rules
- * in the team file, a practice may be one of a team rule (DRILL_RULE_ASK).
+ * named as the team names it. The same whatever a feature's switch (1.10.0 G6: a
+ * team rule's practice is asked by a call of its own, ruleDrillPrompt).
  */
 export function notePrompt(
   note: Pick<LearnNote, 'prompt' | 'answer' | 'changes' | 'moreFiles' | 'withheld'>,
   level: Level,
   known: readonly string[] | KnownNames = [],
   team?: TeamFile,
-  isRuleDrill = IS_RULE_DRILL,
 ): string {
   const hasRules = (team?.rules.length ?? 0) > 0
   const names: KnownNames = 'rest' in known ? known : { known: [], practiced: [], rest: [...known] }
@@ -1609,7 +1596,50 @@ export function notePrompt(
     '(1~3개. "- **개념 이름**: 설명 — 그 개념이 쓰인 코드 한 줄을 백틱으로 인용". 개념 이름은 짧은 용어만 쓰고 쉬운 말 풀이는 이름 뒤 설명에 쓴다. 줄 번호는 쓰지 마라)',
     '### 직접 해 보기',
     ...DRILL_ASK,
-    ...(hasRules && isRuleDrill ? DRILL_RULE_ASK : []),
+  ].join('\n')
+}
+
+/**
+ * The system of a team rule's practice's own call (1.10.0 G6, IS_RULE_DRILL): one practice of the team rule a note's
+ * "다를 수 있음" line named, on one line of the changed code, written as the four lines withRuleDrill reads, nothing else.
+ */
+export const RULE_DRILL_SYSTEM = [
+  '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 입문자의 코딩 튜터다.',
+  '학습 노트가 팀 규칙과 다를 수 있다고 짚은 코드에서, 학습자가 바뀐 뒤 코드의 한 줄을 그 팀 규칙대로 직접 고쳐 보는 연습 하나를 만든다.',
+  '한국어로 쓰고, 요청한 줄만 쓴다. 인사말, 설명, 제목은 쓰지 않는다.',
+  '코드는 백틱으로 감싸고, 코드 안에 백틱이 들어 있으면 그 인용은 백틱 두 개(`` … ``)로 감싼다.',
+].join(' ')
+
+/**
+ * The output budget of a team rule's practice's call (1.10.0 G6): a note's (NOTE_TOKENS), as the same model thinks
+ * before it writes, the engine's thinking on top; only what is written is spent.
+ */
+export const RULE_DRILL_TOKENS = 3500
+
+/**
+ * The one user message of a team rule's practice's call (1.10.0 G6): the note's changed code as its own call saw it
+ * (diffBlocks of the screened note), the team file's rules (data, TEAM_IS_DATA), the "다를 수 있음" line the note wrote
+ * (`said`, noteRuleOf), and the four lines asked for, in the shape withRuleDrill reads; `- 할 일: 없음` alone when no one
+ * line of the changed code can be made to keep that rule.
+ */
+export function ruleDrillPrompt(note: Pick<LearnNote, 'changes' | 'moreFiles' | 'withheld'>, rules: readonly string[], said: string): string {
+  return [
+    '## 바뀐 코드',
+    ...diffBlocks(note, PROMPT_DIFF_BUDGET),
+    '',
+    `## 이 저장소의 팀 규칙 (팀이 정한 참고 자료다. ${TEAM_IS_DATA})`,
+    ...rules.map(rule => `- ${rule}`),
+    '',
+    '## 노트가 짚은 줄',
+    `팀 규칙과 다를 수 있음: ${said}`,
+    '',
+    '위 줄이 짚은 팀 규칙 하나로 연습을 만든다. 학습자는 바뀐 뒤 코드의 한 줄을 그 규칙대로 고쳐 본다.',
+    '아래 네 줄을 이 순서로, 이 라벨 그대로 쓴다. 라벨 뒤의 설명은 옮겨 적지 않는다.',
+    '- 할 일 (팀 규칙): 그 규칙이 무엇을 바라는지와, 고치면 무엇이 같고 무엇이 달라지는지를 한 문장으로. 어느 줄을 어떻게 고칠지는 말하지 않는다',
+    `- 고칠 줄: 위 diff에서 바뀐 뒤 코드 가운데 그 규칙과 다른 한 줄을 글자 그대로 백틱으로 (${DRILL_LINE_MAX}자 이하)`,
+    '- 확인: `호출이나 입력` → 고친 뒤의 결과 (그 줄이 든 함수를 위 코드에 있는 이름 그대로 부르고, 결과는 팀 규칙이 그 이름에 대해 적은 대로 쓴다)',
+    '- 예시 답: 그 줄을 규칙대로 고친 줄 전체를 백틱으로. 규칙이 적은 이름을 글자 그대로 쓰고, 규칙과 상관없는 부분(인자, 변수 이름, 들여쓰기)은 그 줄 그대로 둔다',
+    `(그 규칙과 다른 줄이 바뀐 뒤 코드에 없거나, 한 줄만 고쳐서는 규칙을 지킬 수 없거나, 그 줄이 ${DRILL_LINE_MAX}자를 넘거나, 그 줄이 규칙이 쓰라는 모듈을 만드는 코드이거나, 테스트·빌드 스크립트처럼 앱 코드가 아니면 "- 할 일: 없음" 한 줄만 쓴다)`,
   ].join('\n')
 }
 
@@ -1765,8 +1795,10 @@ export const ASKS_KEPT = 3
  * openThink: 1.8.0) has that walk-through in full and its question right after
  * it, the field's words read as an answer to check or a question to answer;
  * the walk-through is then left out of the questions before. Without `think`
- * the prompt is 1.7.0's, to the byte. `isRuleDrill`: as hideDrillAnswer reads
- * a team-rule practice (1.9.0 F2). `isThinkAsked` (IS_THINK_ASKED, 1.9.0 F6):
+ * the prompt is 1.7.0's, to the byte. A team rule's practice is left out as
+ * hideDrillAnswer leaves it while IS_RULE_DRILL is off, whatever the model's
+ * switch (1.10.0 G6, D31): a question goes as 1.9.0 sent it, its practice of a
+ * concept with no line or example. `isThinkAsked` (IS_THINK_ASKED, 1.9.0 F6):
  * the words are a question (isThinkQuestion; a guess goes to thinkCheckPrompt
  * instead), read by THINK_QUESTION_RULE; else 1.8.0's THINK_RULE, to the byte.
  */
@@ -1776,7 +1808,6 @@ export function askPrompt(
   level: Level,
   team?: TeamFile,
   think?: { question: string; trace: string },
-  isRuleDrill = IS_RULE_DRILL,
   isThinkAsked = IS_THINK_ASKED,
 ): string {
   const recent = (note.asks ?? []).slice(-2)
@@ -1797,7 +1828,7 @@ export function askPrompt(
     '',
     '## 학습 노트',
     // Its practice's line and example answer left out (1.7.0): e's plainer words would show them under the note.
-    note.status === 'ready' ? cut(hideDrillAnswer(note.text, undefined, { isRuleDrill }), 4000) : '(노트가 아직 없다. 코드 전후만 보고 답한다)',
+    note.status === 'ready' ? cut(hideDrillAnswer(note.text, undefined, { isRuleDrill: false }), 4000) : '(노트가 아직 없다. 코드 전후만 보고 답한다)',
     '',
     '## 바뀐 코드',
     ...diffBlocks(note, PROMPT_DIFF_BUDGET),
@@ -2153,8 +2184,12 @@ function taskLineOf(line: string): { words: string; isMarked: boolean } | undefi
  * section then keeps one: the later headings go and their lines come up under the first, the team rule's first, so
  * every window, each reading the first section alone, finds the rule's task, line and example first and hides every
  * line and example there. The rest of the note is as it was, byte for byte; run twice, it is the same.
+ * `ruleNames` (1.10.0 G6, the names the team file's rules write as code, ruleNamesOf, while the model's isRuleWide is
+ * on): a section is a team rule's too when the note touched a rule (a "다를 수 있음" line ruleOf reads, or a `팀 규칙:`
+ * line that says something) and its example brings one of them in that its line to change does not hold (addsRuleName),
+ * as a team rule's fix does; none given (the default), 1.9.0's to the byte.
  */
-export function ruleLabelled(text: string): string {
+export function ruleLabelled(text: string, ruleNames: readonly string[] = []): string {
   const lines = text.split('\n')
   type Task = { at: number; end: number; words: string; isMarked: boolean }
   type Section = { start: number; end: number; tasks: Task[] }
@@ -2174,9 +2209,13 @@ export function ruleLabelled(text: string): string {
   const first = sections[0]
   if (first === undefined) return text
   const hasRule = ruleOf(lines, first.start) !== undefined
+  // A note that touched a team rule in either of 1.6.0's shapes (1.10.0 G6): a "다를 수 있음" line or a `팀 규칙:` one.
+  const isTouched = ruleNames.length > 0 && (hasRule || teamRuleSaid(lines, first.start))
   // A label alone: its words are on the next line that is not blank.
   const wordsOf = (task: Task) => (task.words !== '' ? task.words : (lines.slice(task.at + 1, task.end).find(one => one.trim() !== '') ?? ''))
-  const isRuleSection = (section: Section) => section.tasks.some(task => task.isMarked || (hasRule && /팀\s*규칙/.test(wordsOf(task))))
+  const isRuleSection = (section: Section) =>
+    section.tasks.some(task => task.isMarked || (hasRule && /팀\s*규칙/.test(wordsOf(task)))) ||
+    (isTouched && addsRuleName(lines.slice(section.start + 1, section.end), ruleNames))
   if (!sections.some(isRuleSection)) return text
   const out = [...lines]
   for (const task of sections.flatMap(section => section.tasks)) out[task.at] = task.words === '' ? RULE_TASK_HEAD : `${RULE_TASK_HEAD} ${task.words}`
@@ -2194,6 +2233,154 @@ export function ruleLabelled(text: string): string {
   const isIn = (i: number) => sections.some(section => i >= section.start && i < section.end)
   const rest = out.slice(first.end).filter((_, k) => !isIn(first.end + k))
   return [...out.slice(0, first.start + 1), ...merged, ...(rest.length > 0 ? ['', ...rest] : [])].join('\n')
+}
+
+/** A line saying the change touches a team rule (1.6.0's other shape, `팀 규칙: …`), bold, bulleted or quoted too. */
+const TEAM_RULE_SAID = /^[^\p{L}\p{N}]*팀\s*규칙\s*(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*)$/u
+
+/** Whether a note's lines before `end` hold a `팀 규칙:` line (TEAM_RULE_SAID) that says something, not "없음". */
+function teamRuleSaid(lines: readonly string[], end: number): boolean {
+  return lines.slice(0, end).some(line => {
+    const m = TEAM_RULE_SAID.exec(line.trim())
+    const said = m ? m[1]!.replace(/\*\*\s*$/, '').trim() : ''
+    return said !== '' && !NONE_SAID.test(said)
+  })
+}
+
+/** A name a team rule writes as code (`apiRequest`, `log.info`, `config.API_URL`): a word, or words joined by dots. */
+const RULE_NAME = /^[\p{L}_$][\p{L}\p{N}_$]*(?:\.[\p{L}_$][\p{L}\p{N}_$]*)*$/u
+/** Names ruleNamesOf keeps at most. */
+const RULE_NAMES_MAX = 40
+
+/**
+ * The names a team file's rules write as code (1.10.0 G6): each backticked span that is a name (RULE_NAME), in the
+ * rules' order, each once, RULE_NAMES_MAX at most; a date (`2026-10-22`) or a call (`fetch(url)`) is none.
+ */
+export function ruleNamesOf(rules: readonly string[]): string[] {
+  const names: string[] = []
+  for (const rule of rules) {
+    for (const m of rule.matchAll(/`([^`]+)`/g)) {
+      const name = m[1]!.trim()
+      if (names.length < RULE_NAMES_MAX && RULE_NAME.test(name) && !names.includes(name)) names.push(name)
+    }
+  }
+  return names
+}
+
+/**
+ * Whether `code` holds `name` whole (1.10.0 G6): with no letter, digit, `_`, `$` or `.` right before it and no letter,
+ * digit, `_` or `$` right after it, so `fetch` is not in `fetcher(` and `log.info` not in `console.log`.
+ */
+export function holdsName(code: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(?<![\\p{L}\\p{N}_$.])${escaped}(?![\\p{L}\\p{N}_$])`, 'u').test(code)
+}
+
+/**
+ * Whether a practice section's example answer holds a name of `ruleNames` that its line to change does not (1.10.0
+ * G6): the practice brings a rule's name in (`fetch(url)` → `apiRequest(url)`), as a team rule's fix does.
+ */
+function addsRuleName(section: readonly string[], ruleNames: readonly string[]): boolean {
+  const { parts } = drillParts(section)
+  const line = quotedCode(parts.get('고칠줄') ?? '')
+  const example = quotedCode(parts.get('예시답') ?? '')
+  if (line === undefined || example === undefined) return false
+  return ruleNames.some(name => holdsName(example, name) && !holdsName(line, name))
+}
+
+/**
+ * A note's reply as the store, the journal and every window keep it (1.10.0 G6): cut to 9000 characters, a concept's
+ * bold closed (closeConceptBold), its team rule's practice in the kept shape (ruleLabelled, with `ruleNames` while the
+ * model's isRuleWide is on, else none: 1.9.0's text to the byte). What writeNote stores and what the samples read.
+ */
+export function keptNoteText(reply: string, ruleNames: readonly string[] = []): string {
+  return ruleLabelled(closeConceptBold(cut(reply, 9000)), ruleNames)
+}
+
+/**
+ * What a note's "다를 수 있음" line says of a team rule (ruleOf), read before its practice's heading, or in the whole
+ * note when it has none (1.10.0 G6): a note with one is the one a team rule's practice may be asked for.
+ */
+export function noteRuleOf(text: string): string | undefined {
+  const lines = text.split('\n')
+  return ruleOf(lines, drillSpan(lines)?.start ?? lines.length)
+}
+
+/** A test's path (1.10.0 G6), split at `/` or `\`: a tests or spec folder, a `.test.` or `.spec.` file, a Python test. */
+const TEST_PATH = /(?:^|[\\/])(?:__tests__|tests?|spec)[\\/]|\.(?:test|spec)\.[^\\/]+$|(?:^|[\\/])test_[^\\/]*\.py$|_test\.py$/i
+
+/**
+ * Whether a team rule's practice may not be on `file` (1.10.0 G6): a test, or the module a rule asks for itself, its
+ * name's stem the first part of a rule's name (`apiRequest.ts` for `apiRequest`, `log.py` for `log.info`), the path
+ * split at `/` or `\` alike.
+ */
+function isRuleModuleFile(file: string, ruleNames: readonly string[]): boolean {
+  if (TEST_PATH.test(file)) return true
+  const stem = (file.split(/[\\/]/).pop() ?? '').replace(/\.[^.]+$/, '').toLowerCase()
+  return ruleNames.some(name => name.split('.')[0]!.toLowerCase() === stem)
+}
+
+/** Characters a note's text keeps at most (keptNoteText's cut): a team rule's practice put in never makes it longer. */
+const NOTE_TEXT_MAX = 9000
+
+/**
+ * A note's text with its practice made a team rule's (1.10.0 G6), from the reply of that practice's own call
+ * (ruleDrillPrompt): its task (in any shape, taskLineOf), line to change, check and example as one practice section
+ * (`### 직접 해 보기`, its task in the kept shape, RULE_TASK_HEAD), in place of every practice section the note has, or
+ * after the note when it has none. Undefined, the note keeping its own section, when the reply has no task, says
+ * there is none, or has no check; when drillOf reads no team rule's practice of the note in it (a line the changed
+ * code does not hold, past DRILL_LINE_MAX, a secret masked in it, an example that is the line); when its file is a
+ * test or a rule's own module (isRuleModuleFile); when its example brings in none of the names the rules
+ * (`ruleNames`) and the note's rule line write as code that its line does not hold (none to check when neither writes
+ * one); or when the text would pass NOTE_TEXT_MAX.
+ */
+export function withRuleDrill(
+  text: string,
+  reply: string,
+  changes: readonly Pick<LearnChange, 'file' | 'path' | 'diff'>[],
+  ruleNames: readonly string[],
+): string | undefined {
+  const got = new Map<string, string>()
+  for (const line of clean(reply).split('\n')) {
+    const task = taskLineOf(line)
+    if (task) {
+      if (!got.has('할일')) got.set('할일', task.words)
+      continue
+    }
+    const m = DRILL_LABEL.exec(line)
+    if (!m) continue
+    const label = m[1]!.replace(/\s+/g, '')
+    if (!got.has(label)) got.set(label, labelValue(m))
+  }
+  const task = (got.get('할일') ?? '').trim()
+  const check = (got.get('확인') ?? '').trim()
+  if (task === '' || NONE_SAID.test(task) || check === '' || !got.has('고칠줄') || !got.has('예시답')) return undefined
+  const section = ['### 직접 해 보기', `${RULE_TASK_HEAD} ${task}`, `- 고칠 줄: ${got.get('고칠줄')}`, `- 확인: ${check}`, `- 예시 답: ${got.get('예시답')}`]
+  const lines = text.split('\n')
+  // Each practice section: from its heading to the next heading (ruleLabelled's).
+  const spans: { start: number; end: number }[] = []
+  for (let start = 0; start < lines.length; start += 1) {
+    if (!DRILL_HEADING.test(lines[start]!.trim())) continue
+    let end = start + 1
+    while (end < lines.length && !ANY_HEADING.test(lines[end]!.trim()) && !DRILL_HEADING.test(lines[end]!.trim())) end += 1
+    spans.push({ start, end })
+    start = end - 1
+  }
+  const first = spans[0]
+  let made: string
+  if (first === undefined) made = `${text.replace(/\s+$/, '')}\n\n${section.join('\n')}`
+  else {
+    const isIn = (i: number) => spans.some(span => i >= span.start && i < span.end)
+    const rest = lines.slice(first.start).filter((_, k) => !isIn(first.start + k))
+    made = [...lines.slice(0, first.start), ...section, ...(rest.length > 0 ? ['', ...rest] : [])].join('\n')
+  }
+  if (made.length > NOTE_TEXT_MAX) return undefined
+  const drill = drillOf(made, changes, true)
+  if (drill?.rule === undefined || isRuleModuleFile(drill.file, ruleNames)) return undefined
+  // An example that brings in no name the rules or the note's rule line write as code fixes no rule (1.9.0 N1 (b)).
+  const named = [...new Set([...ruleNames, ...ruleNamesOf([drill.rule])])]
+  if (named.length > 0 && !named.some(name => holdsName(drill.example, name) && !holdsName(drill.line, name))) return undefined
+  return made
 }
 
 /**
@@ -7364,6 +7551,11 @@ export const DIAG_OTHERS = 3
  */
 export type Switches = {
   isRuleDrill: boolean
+  /**
+   * Whether a note's practice that brings a team rule's name in under a note that touched a rule is kept as that
+   * rule's (1.10.0 G6, ruleLabelled's `ruleNames`): no constant of its own, off (false) as 1.9.0 kept notes.
+   */
+  isRuleWide: boolean
   rungNewStep: number
   rungChangedStep: number
   workedAfterTimes: number
@@ -7378,6 +7570,7 @@ export type Switches = {
  */
 export const SWITCH_KINDS: Readonly<Record<keyof Switches, 'flag' | 'step'>> = Object.freeze({
   isRuleDrill: 'flag',
+  isRuleWide: 'flag',
   rungNewStep: 'step',
   rungChangedStep: 'step',
   workedAfterTimes: 'step',
@@ -7391,12 +7584,14 @@ export function switchKeys(): (keyof Switches)[] {
 }
 
 /**
- * Every switch off: each its constant, as 1.9.0 shipped them (false · Infinity). The constants stay off in 1.10.0; a
- * feature turns on only in MODEL_SWITCHES, for the model it was measured with. A model string with no row of its own,
- * an alias turned to another model, or a level other than beginner runs with these.
+ * Every switch off: each its constant, as 1.9.0 shipped them (false · Infinity), and isRuleWide false (1.10.0 G6: no
+ * constant, 1.9.0's ruleLabelled). The constants stay off in 1.10.0; a feature turns on only in MODEL_SWITCHES, for the
+ * model it was measured with. A model string with no row of its own, an alias turned to another model, or a level
+ * other than beginner runs with these.
  */
 export const SWITCHES_OFF: Readonly<Switches> = Object.freeze({
   isRuleDrill: IS_RULE_DRILL,
+  isRuleWide: false,
   rungNewStep: RUNG_NEW_STEP,
   rungChangedStep: RUNG_CHANGED_STEP,
   workedAfterTimes: WORKED_AFTER_TIMES,
@@ -7411,6 +7606,7 @@ export type MeasuredModel = 'haiku' | 'sonnet'
  * The switches each model setting runs with (1.10.0 G7). A cell is turned on only by its feature's samples run with
  * that model, in the commit after its decision (docs/qa/견본.md, '1.10.0 모델별 갈래 (G7): 두 모델을 재는 공통 입장'
  * and the feature's own section); never carried from one model to the other. Both rows all off until then.
+ * A row with isRuleDrill on has isRuleWide on too (1.10.0 G6: a team rule's practice was measured on notes kept so).
  */
 export const MODEL_SWITCHES: Readonly<Record<MeasuredModel, Readonly<Switches>>> = Object.freeze({
   haiku: Object.freeze({ ...SWITCHES_OFF }),
@@ -7439,6 +7635,7 @@ export function hasOn(s: Readonly<Switches>): boolean {
 /** Each feature's name in /learn 진단's settings line (1.10.0 G7, D18). */
 export const FEATURE_NAMES: Readonly<Record<keyof Switches, string>> = Object.freeze({
   isRuleDrill: '팀 규칙 연습',
+  isRuleWide: '팀 규칙 표지 넓힘',
   rungNewStep: '처음 보는 코드',
   rungChangedStep: '비슷한 코드',
   workedAfterTimes: '풀이 보고 풀기',
@@ -7457,6 +7654,7 @@ export function routeOn(s: Readonly<Switches>): string[] {
 /** Each switch's name in /learn 진단's list of the switches a test's harness turned (switchedNames: 1.9.0's words). */
 export const SWITCH_NAMES: Readonly<Record<keyof Switches, string>> = Object.freeze({
   isRuleDrill: '팀 규칙 연습',
+  isRuleWide: '팀 규칙 표지 넓힘',
   rungNewStep: '처음 보는 코드 단계',
   rungChangedStep: '비슷한 코드 단계',
   workedAfterTimes: '풀이 보고 풀기 오답 수',

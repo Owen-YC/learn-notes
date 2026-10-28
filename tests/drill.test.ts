@@ -2,12 +2,15 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { LearnChange, LearnNote } from '../types'
 import {
+  CHECK_SYSTEM,
   DRILL_LINE_MAX,
   DRILL_MAX_BYTES,
   DRILL_RULE_AFTER,
   DRILL_RULE_BLANK,
   HISTORY_TEXT_BUDGET,
   IS_RULE_DRILL,
+  RULE_DRILL_SYSTEM,
+  RULE_DRILL_TOKENS,
   addActivity,
   askPrompt,
   checkPrompt,
@@ -20,25 +23,35 @@ import {
   drillTryHead,
   drillVerdictText,
   fitDrill,
+  fixEscapedTicks,
   forHistory,
   hideDrillAnswer,
+  holdsName,
   inlineCode,
   isDrillOver,
   isKoreanTyped,
   jsonBytes,
+  keptNoteText,
   normalizeCode,
   notePrompt,
+  noteRuleOf,
   parseCheck,
   parseTeamFile,
   quizPrompt,
   quotesAlike,
+  ruleDrillPrompt,
   ruleLabelled,
+  ruleNamesOf,
   sameCode,
   sameLine,
+  screenNote,
   shareText,
   todayReview,
+  withRuleDrill,
 } from '../hooks/notes'
 import { INPUT_18, OUTPUT_18 } from './fixtures/prompts18'
+import { INPUT_RULE19, OUTPUT_RULE19 } from './fixtures/rule19'
+import { RULE_DRILL_IN, RULE_DRILL_PROMPT_110, RULE_DRILL_SYSTEM_110 } from './fixtures/ruledrill110'
 
 const AT = Date.UTC(2026, 9, 3, 1)
 const KEY = 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAA'
@@ -520,18 +533,16 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     '(그 줄을 쓰지 않았으면 "(팀 규칙)"을 쓰지 않는다)',
   ].join('\n')
 
-  test('notePrompt: with the team\'s rules and the switch on, three lines last, right after "할 일: 없음"; off, with terms alone or no team file, 1.8.0\'s to the byte', () => {
-    const on = notePrompt(NOTE_IN, 'beginner', INPUT_18.known, TEAM, true)
-    expect(on.endsWith(`"- 할 일: 없음" 한 줄만 쓴다)\n${RULE_ASK}`)).toBe(true)
-    expect(on.slice(0, -(RULE_ASK.length + 1))).toBe(OUTPUT_18.noteRules)
-    expect(notePrompt(NOTE_IN, 'beginner', INPUT_18.known, TEAM, false)).toBe(OUTPUT_18.noteRules)
-    // A team file with terms alone asks for nothing new, the switch on or off; nor does none.
+  test('notePrompt: with rules, terms alone or no team file, 1.8.0\'s to the byte; no switch asks it for a rule practice (1.10.0 G6: DRILL_RULE_ASK left the code)', () => {
+    expect(notePrompt(NOTE_IN, 'beginner', INPUT_18.known, TEAM)).toBe(OUTPUT_18.noteRules)
+    expect(notePrompt(NOTE_IN, 'beginner', INPUT_18.known, parseTeamFile(INPUT_18.teamTerms))).toBe(OUTPUT_18.noteTerms)
+    expect(notePrompt(NOTE_IN, 'beginner', INPUT_18.known, undefined)).toBe(OUTPUT_18.noteNone)
+    // 1.9.0's fifth argument (isRuleDrill) is gone: one given still changes nothing.
+    const withSwitch = notePrompt as (...args: unknown[]) => string
     for (const isOn of [true, false]) {
-      expect(notePrompt(NOTE_IN, 'beginner', INPUT_18.known, parseTeamFile(INPUT_18.teamTerms), isOn)).toBe(OUTPUT_18.noteTerms)
-      expect(notePrompt(NOTE_IN, 'beginner', INPUT_18.known, undefined, isOn)).toBe(OUTPUT_18.noteNone)
+      expect(withSwitch(NOTE_IN, 'beginner', INPUT_18.known, TEAM, isOn)).toBe(OUTPUT_18.noteRules)
+      expect(withSwitch(NOTE_IN, 'beginner', INPUT_18.known, TEAM, isOn)).not.toContain(RULE_ASK)
     }
-    // The build's own switch decides the default: the prompt with rules asks for it exactly when it is on.
-    expect(notePrompt(NOTE_IN, 'beginner', INPUT_18.known, TEAM).includes(RULE_ASK)).toBe(IS_RULE_DRILL)
   })
 
   test('ruleLabelled: every shape a model writes the mark in becomes the one kept; a bold label alone too, its words left on the next line', () => {
@@ -605,7 +616,7 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
       [...head, '**할 일 (팀 규칙)**:', RULE_TASK, ...rest].join('\n'),
       [...head, '- 할 일: 팀 규칙대로 API 호출을 fetcher로 바꿔 보세요', ...rest].join('\n'),
     ]
-    for (const text of written.map(ruleLabelled)) {
+    for (const text of written.map(one => ruleLabelled(one))) {
       const lines = text.split('\n')
       const at = old.span(lines)!
       const labels = old.labels(lines.slice(at.start + 1, at.end))
@@ -752,13 +763,12 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     const ready = { ...NOTE_IN, status: 'ready' as const, text: RULE_NOTE, at: AT, root: '/proj' }
     expect(shareText(ready, [], true)).toContain(`- 할 일 (팀 규칙): ${RULE_TASK}`)
     expect(shareText(ready, [], false)).not.toContain('직접 해 보기')
-    expect(askPrompt(ready, '더 쉽게', 'beginner', TEAM, undefined, false)).not.toContain('직접 해 보기')
-    expect(askPrompt(ready, '더 쉽게', 'beginner', TEAM, undefined, true)).toContain(`- 할 일 (팀 규칙): ${RULE_TASK}`)
+    // A question never carries it (1.10.0 G6, D31): its prompt is the one 1.9.0 sent with the switch off.
+    expect(askPrompt(ready, '더 쉽게', 'beginner', TEAM)).not.toContain('직접 해 보기')
+    expect(askPrompt(ready, '더 쉽게', 'beginner', TEAM)).not.toContain(RULE_TASK)
     const ready18 = { ...NOTE_IN, status: 'ready' as const, text: INPUT_18.text, at: Date.UTC(2026, 9, 3, 1), root: '/proj' }
-    for (const isOn of [true, false]) {
-      expect(shareText(ready18, ['async/await'], isOn)).toBe(OUTPUT_18.share)
-      expect(askPrompt(ready18, '더 쉽게', 'beginner', TEAM, undefined, isOn)).toBe(OUTPUT_18.ask)
-    }
+    expect(askPrompt(ready18, '더 쉽게', 'beginner', TEAM)).toBe(OUTPUT_18.ask)
+    for (const isOn of [true, false]) expect(shareText(ready18, ['async/await'], isOn)).toBe(OUTPUT_18.share)
   })
 
   test('checkPrompt with a rule: the rule the note named after the example, RULE_CHECK in the kind\'s place, 규칙: before 판정, no slip asked; with none, 1.8.0\'s to the byte', () => {
@@ -822,5 +832,291 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     const state = { mine: 'const res = await fetcher(`/u/${id}`)', verdict: 'right' as const, feedback: '', at: AT }
     expect(drillSection({ at: AT, prompt: '사용자 정보' }, { task: RULE_TASK, rule: RULE_SAID }, state, AT)).toContain(`**할 일 (팀 규칙)**: ${RULE_TASK}\n\n**내 줄**: `)
     expect(drillSection({ at: AT, prompt: '사용자 정보' }, { task: RULE_TASK }, state, AT)).toContain(`**할 일**: ${RULE_TASK}\n\n**내 줄**: `)
+  })
+})
+
+describe('1.10.0: 팀 규칙 연습 (G6): the note kept as 1.9.0 kept it, a wider label, and a team rule\'s practice by a call of its own', () => {
+  const I = INPUT_RULE19
+  const O = OUTPUT_RULE19
+  const TEAM = parseTeamFile(I.teamMd)
+  const NAMES = ruleNamesOf(TEAM.rules)
+  const SAID = O.drill.rule!
+  const USER = I.note.changes
+  const RULE_LINE = `팀 규칙과 다를 수 있음: ${SAID}`
+  /** The note up to its practice (summary, change, why with the rule line, concepts), and its rule practice. */
+  const HEAD = I.note.text.slice(0, I.note.text.indexOf('\n### 직접 해 보기')).split('\n')
+  const RULE_SECTION = I.note.text.split('\n').slice(HEAD.length)
+  /** The four lines the rule practice's call writes: its task, line, check and example. */
+  const RULE_LINES = RULE_SECTION.slice(1)
+  const REPLY = RULE_LINES.join('\n')
+  const TASK = RULE_LINES[0]!.slice('- 할 일 (팀 규칙): '.length)
+  const LINE = 'const res = await fetch(`/users/${id}`)'
+  const EXAMPLE = 'const res = await apiRequest(`/users/${id}`)'
+  /** The practice the note's own call writes (its concept's), and the note with it. */
+  const CONCEPT = ['### 직접 해 보기', '- 할 일: 응답을 기다리지 않고 Promise 그대로 돌려주게 바꿔 보세요', '- 고칠 줄: `return res.json()`', '- 확인: `loadUser(1)` → Promise가 나옵니다', '- 예시 답: `return res`']
+  const OWN = [...HEAD, ...CONCEPT].join('\n')
+  /** A practice of the note's own that brings the rule's name in, its task unmarked (what W2 marks). */
+  const PLAIN_TASK = '서버 요청을 인증이 붙는 함수로 바꿔 보세요'
+  const PLAIN = ['### 직접 해 보기', `- 할 일: ${PLAIN_TASK}`, ...RULE_LINES.slice(1)]
+  const PLAIN_KEPT = ['### 직접 해 보기', `- 할 일 (팀 규칙): ${PLAIN_TASK}`, ...RULE_LINES.slice(1)]
+  const changeWith = (diff: string, file = 'src/user.js'): LearnChange => ({ ...USER[0]!, file, path: `/proj/${file}`, diff })
+
+  test('the fixtures read as the design has them: a rule practice under the note\'s rule line, its line and example in the code', () => {
+    expect(HEAD.at(-3)).toBe(RULE_LINE)
+    expect(RULE_SECTION[0]).toBe('### 직접 해 보기')
+    expect(RULE_LINES).toHaveLength(4)
+    expect(O.drill).toMatchObject({ task: TASK, line: LINE, example: EXAMPLE, file: 'src/user.js', rule: SAID })
+    expect(RULE_DRILL_TOKENS).toBe(3500)
+  })
+
+  test('ruleNamesOf: the names the rules write in backticks, in order, each once, 40 at most; a date, a call, words with a space are none', () => {
+    expect(NAMES).toEqual(['fetch', 'requests', 'apiRequest', 'api_request', 'console.log', 'print', 'log.info', 'toDateText', 'to_date_text', 'process.env', 'os.environ', 'config', 'config.API_URL'])
+    expect(ruleNamesOf(['`fetch(url)` 대신 `apiRequest(url)`을 쓴다', '`2026-10-22` 꼴로 `toDateText`를 쓴다', '`apiRequest` 다시', '` spaced ` · `a b` · `$http.get` · `_x` · `9lives` · `a..b` · `.x`'])).toEqual([
+      'toDateText',
+      'apiRequest',
+      'spaced',
+      '$http.get',
+      '_x',
+    ])
+    const many = Array.from({ length: 50 }, (_, i) => `\`name${i}\``)
+    expect(ruleNamesOf([many.slice(0, 25).join(' '), many.slice(25).join(' ')])).toEqual(Array.from({ length: 40 }, (_, i) => `name${i}`))
+    expect(ruleNamesOf([])).toEqual([])
+    expect(ruleNamesOf(['서버 요청은 정해진 함수로 한다'])).toEqual([])
+  })
+
+  test('holdsName: a name whole, never inside a longer one or after a dot; a dotted name whole', () => {
+    const cases: [string, string, boolean][] = [
+      ['const res = await fetch(url)', 'fetch', true],
+      ['const res = await fetcher(url)', 'fetch', false],
+      ['window.fetch(url)', 'fetch', false],
+      ['refetch(url)', 'fetch', false],
+      ['console.log(x)', 'log.info', false],
+      ['console.log(x)', 'log', false],
+      ['log.info(x)', 'log.info', true],
+      ['mylog.info(x)', 'log.info', false],
+      ['log.infos(x)', 'log.info', false],
+      ['const u = config.API_URL', 'config.API_URL', true],
+      ['const u = config.API_URL_2', 'config.API_URL', false],
+      ['const u = config.API_URL', 'config', true],
+      ['const u = myconfig.API_URL', 'config', false],
+      ['$http.get(u)', '$http.get', true],
+      ['a$http.get(u)', '$http.get', false],
+      ['print("hi")', 'print', true],
+      ['pprint("hi")', 'print', false],
+      ['print_all("hi")', 'print', false],
+      ['os.environ["X"]', 'os.environ', true],
+    ]
+    for (const [code, name, isHeld] of cases) expect([code, name, holdsName(code, name)]).toEqual([code, name, isHeld])
+  })
+
+  test('keptNoteText(reply, []) is 1.9.0\'s kept text to the byte (cut 9000 → closeConceptBold → ruleLabelled): recorded replies of each shape, a bold left open, one past 9000 (tests/fixtures/rule19.ts)', () => {
+    expect(I.reply).toHaveLength(O.kept.length)
+    for (const [i, reply] of I.reply.entries()) {
+      expect(keptNoteText(fixEscapedTicks(reply), [])).toBe(O.kept[i]!)
+      expect(keptNoteText(fixEscapedTicks(reply))).toBe(O.kept[i]!)
+    }
+    expect(O.kept.at(-1)).toHaveLength(9000)
+    // No rule touched, or no rule name brought in: the names change nothing.
+    expect(keptNoteText(OWN, NAMES)).toBe(OWN)
+    expect(keptNoteText(I.note.text, NAMES)).toBe(I.note.text)
+  })
+
+  test('ruleLabelled with the rule names (isRuleWide, W2): under a "다를 수 있음" line or a 팀 규칙: line that says something, a practice whose example brings a rule\'s name in is kept as the rule\'s; none given, 1.9.0\'s', () => {
+    const plain = [...HEAD, ...PLAIN].join('\n')
+    const kept = [...HEAD, ...PLAIN_KEPT].join('\n')
+    expect(ruleLabelled(plain, NAMES)).toBe(kept)
+    expect(ruleLabelled(plain)).toBe(plain)
+    expect(ruleLabelled(plain, [])).toBe(plain)
+    // A 팀 규칙: line that says something, bold, bulleted or quoted.
+    for (const said of ['팀 규칙: 서버 요청은 apiRequest로 합니다', '**팀 규칙:** 서버 요청은 apiRequest로 합니다', '- 팀 규칙: 서버 요청은 apiRequest로 합니다', '> 팀 규칙： 서버 요청은 apiRequest로 합니다']) {
+      expect(ruleLabelled(plain.replace(RULE_LINE, said), NAMES)).toBe(kept.replace(RULE_LINE, said))
+      expect(ruleLabelled(plain.replace(RULE_LINE, said))).toBe(plain.replace(RULE_LINE, said))
+    }
+    // A 팀 규칙: line that says nothing, no line at all, or one after the practice's heading: as it was.
+    for (const said of ['팀 규칙: 없음', '팀 규칙:', '**팀 규칙:** 없음', '이름을 보이려고 만들었습니다.']) {
+      const untouched = plain.replace(RULE_LINE, said)
+      expect(ruleLabelled(untouched, NAMES)).toBe(untouched)
+    }
+    const late = [...HEAD.filter(line => line !== RULE_LINE), ...PLAIN, RULE_LINE].join('\n')
+    expect(ruleLabelled(late, NAMES)).toBe(late)
+    // Its line holds the name already: none brought in. A name inside a longer one is none.
+    const held = plain.replace(`\`\` ${LINE} \`\``, `\`\` ${EXAMPLE.replace(')', ', 1)')} \`\``)
+    expect(ruleLabelled(held, NAMES)).toBe(held)
+    expect(ruleLabelled(plain, ['fetc', 'apiRequ', 'Request'])).toBe(plain)
+    // Two sections, the rule name brought in by the second: kept as one, the rule's first (1.9.0's merge).
+    const two = [...HEAD, ...CONCEPT, '', ...PLAIN].join('\n')
+    expect(ruleLabelled(two, NAMES)).toBe([...HEAD, ...PLAIN_KEPT, '', '- 할 일 (팀 규칙): 응답을 기다리지 않고 Promise 그대로 돌려주게 바꿔 보세요', ...CONCEPT.slice(2)].join('\n'))
+  })
+
+  test('ruleLabelled: a 팀 규칙: line and a task naming the team that brings no rule name in is left (no W1); a task in the team\'s words that changes a format is left (G19); twice is once, every shape', () => {
+    const teamSaid = [...HEAD.map(line => (line === RULE_LINE ? '팀 규칙: 서버 요청은 apiRequest로 합니다' : line)), '### 직접 해 보기', '- 할 일: 팀 규칙처럼 응답을 기다리지 않게 바꿔 보세요', ...CONCEPT.slice(2)].join('\n')
+    expect(ruleLabelled(teamSaid, NAMES)).toBe(teamSaid)
+    const g19 = [
+      '### 한 줄 요약',
+      '날짜를 글자로 보이는 함수를 만들었습니다',
+      '### 왜 이렇게 바꿨을까',
+      '팀 규칙과 다를 수 있음: 날짜는 `toDateText`로 보이라는 규칙과 달리 직접 만듭니다',
+      '### 배울 개념',
+      '- **strftime**: 날짜를 꼴에 맞춰 글자로 바꿉니다 — `return d.strftime("%Y-%m-%d")`',
+      '### 직접 해 보기',
+      '- 할 일: 팀이 정한 방식처럼 월과 일 사이를 / 로 바꿔 보세요',
+      '- 고칠 줄: `return d.strftime("%Y-%m-%d")`',
+      '- 확인: `day_text(d)` → "2026/10/22"',
+      '- 예시 답: `return d.strftime("%Y/%m/%d")`',
+    ].join('\n')
+    expect(ruleLabelled(g19, NAMES)).toBe(g19)
+    const shapes = [OWN, I.note.text, [...HEAD, ...PLAIN].join('\n'), [...HEAD, ...CONCEPT, '', ...PLAIN].join('\n'), teamSaid, g19, ...O.kept]
+    for (const text of shapes) {
+      const once = ruleLabelled(text, NAMES)
+      expect(ruleLabelled(once, NAMES)).toBe(once)
+      expect(ruleLabelled(once)).toBe(once)
+    }
+  })
+
+  test('noteRuleOf reads the "다를 수 있음" line before the practice\'s heading, or in a note with none anywhere; "없음", none, or 팀 규칙: alone is undefined', () => {
+    expect(noteRuleOf(OWN)).toBe(SAID)
+    expect(noteRuleOf(HEAD.join('\n'))).toBe(SAID)
+    expect(noteRuleOf(OWN.replace(RULE_LINE, `**팀 규칙과 다를 수 있음:** ${SAID}`))).toBe(SAID)
+    expect(noteRuleOf(OWN.replace(`${RULE_LINE}\n`, ''))).toBeUndefined()
+    expect(noteRuleOf(OWN.replace(SAID, '없음'))).toBeUndefined()
+    expect(noteRuleOf(OWN.replace('팀 규칙과 다를 수 있음:', '팀 규칙:'))).toBeUndefined()
+    expect(noteRuleOf([...HEAD.filter(line => line !== RULE_LINE), ...CONCEPT, RULE_LINE].join('\n'))).toBeUndefined()
+  })
+
+  test('ruleDrillPrompt and RULE_DRILL_SYSTEM: one note\'s bytes as the design writes them (tests/fixtures/ruledrill110.ts); the screened note\'s code alone, a file left out named, never shown', () => {
+    expect(RULE_DRILL_SYSTEM).toBe(RULE_DRILL_SYSTEM_110)
+    const team = parseTeamFile(RULE_DRILL_IN.teamMd)
+    const shown = screenNote({ ...RULE_DRILL_IN.note, withheld: [] })
+    expect(shown.withheld).toEqual([{ file: '.env', why: 'secret' }])
+    const prompt = ruleDrillPrompt(shown, team.rules, RULE_DRILL_IN.said)
+    expect(prompt).toBe(RULE_DRILL_PROMPT_110)
+    expect(prompt).not.toContain('tok-1234567890abcdef')
+    expect(prompt).not.toContain('API_TOKEN')
+    // The team's terms are not the rules': none of them in it.
+    expect(ruleDrillPrompt(shown, parseTeamFile(`${RULE_DRILL_IN.teamMd}\n## 용어\n- **세션 토큰**: 로그인한 사용자를 알아보는 값입니다\n`).rules, RULE_DRILL_IN.said)).toBe(RULE_DRILL_PROMPT_110)
+  })
+
+  test('withRuleDrill takes the four lines in any shape a model writes them, as one practice section in place of every one the note has, or after a note with none', () => {
+    expect(withRuleDrill(OWN, REPLY, USER, NAMES)).toBe(I.note.text)
+    const shapes = [
+      REPLY,
+      RULE_LINES.map(line => line.replace(/^- ([^:]+):/, '- **$1**:')).join('\n'),
+      RULE_LINES.map(line => line.replace(/^- ([^:]+): /, '**$1:** ')).join('\n'),
+      [`- 할 일: (팀 규칙) ${TASK}`, ...RULE_LINES.slice(1)].join('\n'),
+      [`- **할 일**: [팀 규칙] ${TASK}`, ...RULE_LINES.slice(1)].join('\n'),
+      ['연습입니다.', '', ...RULE_LINES, '', '끝입니다.'].join('\n'),
+      RULE_LINES.join('\r\n'),
+      // A second task line or label after the first: the first of each.
+      [...RULE_LINES, '- 할 일 (팀 규칙): 다른 일', '- 고칠 줄: `return res.json()`'].join('\n'),
+    ]
+    for (const reply of shapes) expect(withRuleDrill(OWN, reply, USER, NAMES)).toBe(I.note.text)
+    // A plain task line is kept in the marked shape.
+    expect(withRuleDrill(OWN, [`- 할 일: ${TASK}`, ...RULE_LINES.slice(1)].join('\n'), USER, NAMES)).toBe(I.note.text)
+    // Single backticks for the line and the example: kept as written.
+    const single = [RULE_LINES[0]!, '- 고칠 줄: `const res = await fetch(url)`', RULE_LINES[2]!, '- 예시 답: `const res = await apiRequest(url)`'].join('\n')
+    const urlDiff = USER[0]!.diff.replace('fetch(`/users/${id}`)', 'fetch(url)')
+    expect(withRuleDrill(OWN, single, [changeWith(urlDiff)], NAMES)).toBe([...HEAD, '### 직접 해 보기', ...single.split('\n')].join('\n'))
+    // Two sections, one between them under another heading, a bold heading: one section, the rest after it.
+    const two = [...HEAD, ...CONCEPT, '', ...CONCEPT].join('\n')
+    expect(withRuleDrill(two, REPLY, USER, NAMES)).toBe(I.note.text)
+    const between = [...HEAD, ...CONCEPT, '### 참고', '- 응답은 한 번만 읽습니다', '', '**직접 해 보기**', ...CONCEPT.slice(1)].join('\n')
+    expect(withRuleDrill(between, REPLY, USER, NAMES)).toBe(`${I.note.text}\n\n### 참고\n- 응답은 한 번만 읽습니다\n`)
+    // No section: after the note, a blank line between.
+    expect(withRuleDrill(`${HEAD.join('\n')}\n\n`, REPLY, USER, NAMES)).toBe([...HEAD, '', ...RULE_SECTION].join('\n'))
+    // Its result is drillOf's rule practice, the windows' reading as 1.9.0 read its own.
+    expect(drillOf(withRuleDrill(OWN, REPLY, USER, NAMES)!, USER, true)).toEqual(O.drill)
+  })
+
+  test('withRuleDrill takes none (the note keeps its own section): no task or none, no check, a line not in the code or past 40, the line as its example, a test or a rule\'s own module (a \\ path too), no rule name brought in, past 9000', () => {
+    const none = (reply: string, text = OWN, changes: LearnChange[] = USER, names: readonly string[] = NAMES) => expect(withRuleDrill(text, reply, changes, names)).toBeUndefined()
+    none('')
+    none('- 할 일: 없음')
+    none('- 할 일 (팀 규칙): 없음')
+    none(RULE_LINES.slice(1).join('\n'))
+    none([RULE_LINES[0]!, RULE_LINES[1]!, RULE_LINES[3]!].join('\n'))
+    none(REPLY.replace(RULE_LINES[2]!, '- 확인:'))
+    none([RULE_LINES[0]!, RULE_LINES[2]!, RULE_LINES[3]!].join('\n'))
+    none([RULE_LINES[0]!, RULE_LINES[1]!, RULE_LINES[2]!].join('\n'))
+    // A line the changed code does not hold; one past DRILL_LINE_MAX (in the code); the example the line itself.
+    none(REPLY.replace('/users/', '/people/'))
+    const long = 'const res = await fetch(`/users/${id}?with=all&full=1`)'
+    expect([...long].length).toBeGreaterThan(DRILL_LINE_MAX)
+    none(REPLY.replace(LINE, long).replace(EXAMPLE, long.replace('fetch', 'apiRequest')), OWN, [changeWith(USER[0]!.diff.replace(LINE, long))])
+    none(REPLY.replace(EXAMPLE, LINE))
+    // No "다를 수 있음" line over it in the note: no rule practice.
+    none(REPLY, OWN.replace(`${RULE_LINE}\n`, ''))
+    // A test, the rule's own module (its stem the rule name's first part), a path written with \ too.
+    for (const file of ['tests/user.js', 'src/__tests__/user.js', 'src/user.test.js', 'src/user.spec.ts', 'spec/user.js', 'app/test_user.py', 'app/user_test.py', 'src/api/apiRequest.js', 'src/api/ApiRequest.ts', 'app/log.py', 'src/config.js', 'src\\api\\apiRequest.ts', 'C:\\proj\\tests\\user.js', 'src\\__tests__\\user.js', 'app\\log.py']) {
+      none(REPLY, OWN, [changeWith(USER[0]!.diff, file)])
+    }
+    // Paths that only look alike are taken.
+    for (const file of ['src/latest/user.js', 'src/contest.js', 'src/apiRequestView.js', 'src/logs/user.js', 'src\\user.js']) {
+      expect(withRuleDrill(OWN, REPLY, [changeWith(USER[0]!.diff, file)], NAMES)).toBeDefined()
+    }
+    // An example that brings in no name the rules or the note's line write as code; the line holding it already.
+    none(REPLY.replace(EXAMPLE, 'const res = await request(`/users/${id}`)'))
+    none(REPLY.replace(EXAMPLE, 'const res = await fetch(`/users/${id}`, {})'))
+    // The names the note's rule line writes count too, with no rule names given.
+    none(REPLY.replace(EXAMPLE, 'const res = await request(`/users/${id}`)'), OWN, USER, [])
+    expect(withRuleDrill(OWN, REPLY, USER, [])).toBe(I.note.text)
+    // No name anywhere (no backticks in the rules or the line): only the name check rests.
+    const bare = OWN.replace(SAID, '서버 요청은 정해진 함수로 하라는 규칙과 다릅니다')
+    const anyName = REPLY.replace(EXAMPLE, 'const res = await request(`/users/${id}`)')
+    expect(withRuleDrill(bare, anyName, USER, [])).toBeDefined()
+    none(anyName.replace(LINE, LINE.replace('users', 'people')), bare, USER, [])
+    none(anyName.replace('const res = await request(`/users/${id}`)', LINE), bare, USER, [])
+    none(anyName, bare, [changeWith(USER[0]!.diff, 'tests/user.js')], [])
+    // Past 9000 characters made, the note's own text kept; at 9000, taken.
+    const made = (pad: number) => [...HEAD.slice(0, 2), 'x'.repeat(pad), ...HEAD.slice(2), ...CONCEPT].join('\n')
+    const base = withRuleDrill(made(0), REPLY, USER, NAMES)!.length
+    expect(withRuleDrill(made(9000 - base), REPLY, USER, NAMES)).toHaveLength(9000)
+    none(REPLY, made(9001 - base))
+  })
+
+  test('windows before 1.9.0 (1.7.0 · 1.7.1 · 1.8.0) read a section withRuleDrill made or W2 marked as no task, their line and example hidden; with the switch off it is no practice anywhere but the journal', () => {
+    const texts = [withRuleDrill(OWN, REPLY, USER, NAMES)!, withRuleDrill([...HEAD, ...CONCEPT, '', ...CONCEPT].join('\n'), REPLY, USER, NAMES)!, ruleLabelled([...HEAD, ...PLAIN].join('\n'), NAMES), ruleLabelled([...HEAD, ...CONCEPT, '', ...PLAIN].join('\n'), NAMES)]
+    for (const text of texts) {
+      const lines = text.split('\n')
+      const at = old.span(lines)!
+      const labels = old.labels(lines.slice(at.start + 1, at.end))
+      expect(labels).not.toContain('할일')
+      expect(labels).toEqual(expect.arrayContaining(['고칠줄', '확인', '예시답']))
+      expect(lines.slice(at.start + 1, at.end).some(line => line.startsWith('- 할 일 (팀 규칙):'))).toBe(true)
+      const hidden = old.hide(text)
+      expect(hidden).not.toContain('apiRequest(`/users')
+      expect(hidden).not.toContain('고칠 줄')
+      expect(hidden).not.toContain('예시 답')
+      // 1.9.0 and 1.10.0 with the switch off: no practice; the pane, the copy and a question leave it out.
+      expect(drillOf(text, USER, false)).toBeUndefined()
+      expect(hideDrillAnswer(text, 'user.js', { isRuleDrill: false })).toBe(HEAD.join('\n'))
+      // On: the rule's practice, the pane showing its task and check alone.
+      expect(drillOf(text, USER, true)?.rule).toBe(SAID)
+      expect(hideDrillAnswer(text, 'user.js', { isRuleDrill: true })).not.toContain('apiRequest(`/users')
+    }
+  })
+
+  test('the grade of a rule practice is 1.9.0\'s to the byte (tests/fixtures/rule19.ts): drillOf and drillQuestion, checkPrompt with the rule (first, after "모르겠어요", the try again), CHECK_SYSTEM, parseCheck with the rule', () => {
+    expect(drillOf(I.note.text, USER, true)).toEqual(O.drill)
+    expect(drillQuestion(O.drill)).toBe(I.item.question)
+    expect(CHECK_SYSTEM).toBe(O.checkSystem)
+    const rule = { rule: O.drill.rule! }
+    expect(checkPrompt(I.item, I.mine, 'beginner', undefined, undefined, rule)).toBe(O.grades.first)
+    expect(checkPrompt(I.item, I.mine, 'beginner', I.blank, undefined, rule)).toBe(O.grades.blank)
+    expect(checkPrompt(I.item, I.mine, 'beginner', I.tried, undefined, rule)).toBe(O.grades.tried)
+    expect(I.replies.map(reply => parseCheck(reply, { rule: true }) ?? null)).toEqual(O.parsed)
+  })
+
+  test('a question\'s prompt leaves the rule practice out whatever the switch (D31): askPrompt is 1.9.0\'s with it off, to the byte, with a walk-through open or not (tests/fixtures/rule19.ts)', () => {
+    expect(askPrompt(I.note, '왜 apiRequest를 써요?', 'beginner', TEAM)).toBe(O.asks.plain)
+    expect(askPrompt(I.note, '2번 사용자요', 'beginner', TEAM, I.think)).toBe(O.asks.think)
+    expect(askPrompt(I.note, '이 노트를 더 쉬운 말로 다시 설명해 주세요.', 'intermediate', TEAM)).toBe(O.asks.easier)
+    for (const asked of Object.values(O.asks)) {
+      expect(asked).not.toContain('직접 해 보기')
+      expect(asked).not.toContain(TASK)
+    }
+    // The copy for a mentor reads it as the window's switch says (shareText's isRuleDrill), the pane too.
+    const ready = { ...I.note, at: AT, root: '/proj' }
+    expect(shareText(ready, [], true)).toContain(`- 할 일 (팀 규칙): ${TASK}`)
+    expect(shareText(ready, [], false)).not.toContain('직접 해 보기')
   })
 })

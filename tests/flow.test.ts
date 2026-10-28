@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import type { LearnNote } from '../types'
 
 import {
   BASE_LEAD,
@@ -12,6 +13,8 @@ import {
   CHECK_SYSTEM,
   QUIZ_SYSTEM,
   RECAP_SYSTEM,
+  RULE_DRILL_SYSTEM,
+  RULE_DRILL_TOKENS,
   SYSTEM,
   THINK_SYSTEM,
   WORKED_BASE_NEXT,
@@ -26,6 +29,9 @@ import {
   cleanMarkedConcepts,
   conceptKey,
   indexPrint,
+  parseTeamFile,
+  ruleDrillPrompt,
+  ruleNamesOf,
   journalPath,
   knownMarks,
   markedConcepts,
@@ -42,6 +48,7 @@ import {
 } from '../hooks/notes'
 import { COEXIST_CASES, COEXIST_MIXED, type CoexistStore } from './fixtures/coexist19'
 import { ROUTE19_CALLS, ROUTE19_DIAG } from './fixtures/route19'
+import { INPUT_RULE19, OUTPUT_RULE19 } from './fixtures/rule19'
 
 const NOW = Date.UTC(2026, 9, 3, 1)
 const NOTES_DIR = '/home/u/.claude/learning-notes'
@@ -90,6 +97,11 @@ type World = {
   model: Model
   /** The next calls' answers, the first taken by each call while any is left (before `model`). */
   replies: Reply[]
+  /**
+   * The next answered calls' texts, the first taken by each call answered while any is left (before `answer`): a
+   * note's and then its team rule's practice's own call (1.10.0 G6), each its reply.
+   */
+  texts: string[]
   /** The account's rate-limit windows as `$.session.usage()` gives them (empty: an API key's session). */
   limits: { kind: string; percentUsed: number }[]
   writes: { path: string; text: string }[]
@@ -191,6 +203,7 @@ function world(
   const w: World = {
     model,
     replies: [],
+    texts: [],
     limits: [],
     writes: [],
     logs: [],
@@ -361,7 +374,7 @@ function world(
     w.budgets.push(e.maxTokens)
     w.systems.push(e.system)
     const queued = w.replies.shift()
-    if (queued === 'ok') return { value: { isAnswered: true as const, text: w.answer, usage: w.usage } }
+    if (queued === 'ok') return { value: { isAnswered: true as const, text: w.texts.shift() ?? w.answer, usage: w.usage } }
     if (queued === 'timeout') await w.clock.sleep(e.timeoutMs ?? 0)
     if (queued === 'timeout' || queued === 'cut') return { value: { isAnswered: false as const, reason: 'aborted' as const, usage: ZERO_USAGE } }
     if (queued !== undefined) return { value: { isAnswered: false as const, reason: 'api-error' as const, status: queued.status, error: queued.error as 'unknown', usage: ZERO_USAGE } }
@@ -369,7 +382,7 @@ function world(
     if (w.model === 'hold') await held
     return w.model === 'error'
       ? { value: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: w.usage } }
-      : { value: { isAnswered: true, text: w.answer, usage: w.usage } }
+      : { value: { isAnswered: true, text: w.texts.shift() ?? w.answer, usage: w.usage } }
   })
   on('tool.call', { tool: 'Edit' }, (_$, e) => {
     if (e.file_path.endsWith('broken.ts')) return { isError: true, result: 'boom', text: 'boom' }
@@ -13676,6 +13689,13 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     `- 예시 답: \`\` ${EXAMPLE} \`\``,
   ].join('\n')
   const RULE_ASK = '- 할 일 (팀 규칙): 그 규칙대로 고치는 일 한 문장'
+  /** What the team rule's practice's own call answers (1.10.0 G6): the four lines, RULE_NOTE's practice. */
+  const RULE_REPLY = [`- 할 일 (팀 규칙): ${TASK}`, `- 고칠 줄: \`\` ${LINE} \`\``, '- 확인: `getUser(1)` → 같은 사용자 정보가 나옵니다', `- 예시 답: \`\` ${EXAMPLE} \`\``].join('\n')
+  /** RULE_NOTE as the note's own call writes it (1.10.0 G6: its prompt 1.9.0's off one): a practice of its concept. */
+  const OWN_NOTE = RULE_NOTE.replace(
+    RULE_REPLY,
+    ['- 할 일: 응답을 기다리지 않고 Promise 그대로 돌려주게 바꿔 보세요', '- 고칠 줄: `return res.json()`', '- 확인: `getUser(1)` → Promise가 나옵니다', '- 예시 답: `return res`'].join('\n'),
+  )
   const RULE_CHECK = '팀 규칙 연습이다. 판정보다 먼저 고친 줄이 위 팀 규칙을 지키는지 본다.'
   const SHOWN = /### 직접 해 보기 · api\.js\n- 할 일 \(팀 규칙\): API 호출을 팀 규칙대로 fetcher로 바꿔 보세요\n- 확인: `getUser\(1\)` → 같은 사용자 정보가 나옵니다/
   type Kept = { id: string; text: string; drill?: Record<string, unknown> }
@@ -13684,16 +13704,19 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
 
   /**
    * A world whose build runs with the switch `isOn` (the harness in the plugin.json it serves, read at session start),
-   * a team file with rules, and the note `text` written for a new api.js; its id.
+   * a team file with rules, and the note `text` written for a new api.js; its id. On, a note with a rule line has its
+   * team rule's practice asked by a call of its own (1.10.0 G6), answered `drill` (RULE_REPLY: RULE_NOTE's practice).
    */
-  async function written($: Engine, on: On, isOn: boolean, store = new Map<string, unknown>(), text = RULE_NOTE, isPlaced = true) {
+  async function written($: Engine, on: On, isOn: boolean, store = new Map<string, unknown>(), text = OWN_NOTE, isPlaced = true, drill = RULE_REPLY) {
     const w = world(on, 'ok', null, isPlaced, store)
     w.harness = { isRuleDrill: isOn }
     w.files.set('/proj/.claude/learn-notes.md', TEAM_FILE)
     await start($)
     w.answer = text
+    w.texts = [text, drill]
     await turn($, () => $.tool.call(WRITE_API))
     await finish(w)
+    w.texts = []
     return { w, id: noteOf(store).id }
   }
 
@@ -13704,9 +13727,15 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
   }
 
   for (const isOn of [true, false]) {
-    test(`the note's prompt asks for a rule practice exactly while the build's switch is on (${isOn ? 'on' : 'off'})`, async ($, on) => {
-      const { w } = await written($, on, isOn)
-      expect(w.models[0]!.includes(RULE_ASK)).toBe(isOn)
+    test(`the note's prompt is 1.9.0's off one either way; a rule practice is a call of its own exactly while the build's switch is on (${isOn ? 'on' : 'off'}, 1.10.0 G6)`, async ($, on) => {
+      expect(OWN_NOTE).not.toBe(RULE_NOTE)
+      const store = new Map<string, unknown>()
+      const { w } = await written($, on, isOn, store)
+      expect(w.models[0]).not.toContain(RULE_ASK)
+      expect(w.models[0]).not.toContain('(팀 규칙)')
+      expect(w.systems).toEqual(isOn ? [SYSTEM, RULE_DRILL_SYSTEM] : [SYSTEM])
+      expect(w.budgets).toEqual(isOn ? [3500, RULE_DRILL_TOKENS] : [3500])
+      expect(noteOf(store).text).toBe(isOn ? RULE_NOTE : OWN_NOTE)
     })
   }
 
@@ -13716,7 +13745,8 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     await start($)
     await turn($, () => $.tool.call(WRITE_API))
     await finish(w)
-    expect(w.models.at(-1)!.includes(RULE_ASK)).toBe(IS_RULE_DRILL)
+    expect(w.models.at(-1)!.includes(RULE_ASK)).toBe(false)
+    expect(w.systems.includes(RULE_DRILL_SYSTEM)).toBe(IS_RULE_DRILL)
     w.harness = { isRuleDrill: true }
     w.files.set('/proj/.claude/learn-notes.md', '## 용어\n- **주문서**: 결제 직전에 굳힌 장바구니\n')
     await start($)
@@ -13724,17 +13754,19 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     await finish(w)
     expect(w.models.at(-1)).not.toContain('(팀 규칙)')
     expect(w.models.at(-1)).toContain('주문서')
+    // No rules: no rule practice's call though the note says the change may differ from one.
+    expect(w.systems.at(-1)).toBe(SYSTEM)
   })
 
   test('on: the task and check show under a heading naming the file, never the line or the example; t opens the line in a field with no call', async ($, on) => {
     const store = new Map<string, unknown>()
     const { w, ui, id } = await practiced($, on, store)
-    expect(w.models).toHaveLength(1)
+    expect(w.models).toHaveLength(2)
     expect(await ui.find({ type: 'Markdown', text: SHOWN })).toBeDefined()
     expect(await ui.find({ type: 'Markdown', text: /고칠 줄|예시 답|await fetcher\(/ })).toBeUndefined()
     expect((await ui.find({ type: 'Button', key: 'note-drill' }))?.props).toMatchObject({ hotkey: 't', label: '직접 해 보기' })
     await ui.press({ key: 'note-drill' })
-    expect(w.models).toHaveLength(1)
+    expect(w.models).toHaveLength(2)
     expect(await ui.find({ type: 'Text', text: '✎ 연습입니다 · 파일은 바뀌지 않습니다' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'Enter: 확인 · 코드는 영문 상태에서 · Tab: 버튼으로 (1~4 보기)' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '3  export async function getUser(id) {' })).toBeDefined()
@@ -13773,7 +13805,7 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     await ui.press({ key: 'note-drill' })
     await ui.input({ key: `drill-${id}`, text: 'const res = await fetcher(`/u/${id}`);' })
     await w.clock.settle()
-    expect(w.models).toHaveLength(1)
+    expect(w.models).toHaveLength(2)
     expect((await ui.find({ type: 'Text', text: '✓ 해냈습니다' }))?.props.color).toBe('green')
     expect(JSON.stringify(concept(store))).toBe(before)
     expect(concept(store).reviewedAt).toBeUndefined()
@@ -13801,8 +13833,8 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     w.answer = '규칙: 안 지킴\n판정: 맞음\n피드백: 결과는 같지만 fetch를 바로 부릅니다.'
     await ui.input({ key: `drill-${id}`, text: 'const res = await fetch(`/u/${id}`, {})' })
     await w.clock.settle()
-    expect(w.models).toHaveLength(2)
-    const asked = w.models[1]!
+    expect(w.models).toHaveLength(3)
+    const asked = w.models[2]!
     expect(asked).toContain('## 개념\n팀 규칙\n## 문제\n할 일: API 호출을 팀 규칙대로 fetcher로 바꿔 보세요\n')
     expect(asked).toContain(`## 모범 답\n${EXAMPLE}\n## 노트가 짚은 팀 규칙 (노트가 팀 규칙 파일을 보고 쓴 줄이다.`)
     expect(asked).toContain(`\n${RULE_SAID}\n`)
@@ -13835,9 +13867,9 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     w.answer = '규칙: 안 지킴\n판정: 틀림\n피드백: 그대로 fetch입니다.'
     await ui.input({ key: `drill-${id}-again`, text: 'const res = await self.fetch(`/u/${id}`)' })
     await w.clock.settle()
-    expect(w.models).toHaveLength(3)
-    expect(w.models[2]).toContain('마지막 시도다. 되묻기는 쓰지 않는다.')
-    expect(w.models[2]).toContain('## 개념\n팀 규칙\n')
+    expect(w.models).toHaveLength(4)
+    expect(w.models[3]).toContain('마지막 시도다. 되묻기는 쓰지 않는다.')
+    expect(w.models[3]).toContain('## 개념\n팀 규칙\n')
     expect(await ui.find({ type: 'Text', text: '✗ 틀림' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: DRILL_RULE_AFTER })).toBeDefined()
     expect(JSON.stringify(concept(store))).toBe(before)
@@ -13852,11 +13884,11 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     const before = JSON.stringify(concept(store))
     await ui.press({ key: 'note-drill' })
     await ui.input({ key: `drill-${id}`, text: '모르겠어요' })
-    expect(w.models).toHaveLength(1)
+    expect(w.models).toHaveLength(2)
     expect(await ui.find({ type: 'Text', text: '힌트를 보고 한 번 더 고쳐 보세요' })).toBeDefined()
     expect(await ui.find({ type: 'Markdown', text: `**힌트:** ${RULE_LINE} · 이 줄에서 바꿀 곳 한 군데를 찾아보세요` })).toBeDefined()
     await ui.input({ key: `drill-${id}-again`, text: '몰라요' })
-    expect(w.models).toHaveLength(1)
+    expect(w.models).toHaveLength(2)
     expect(await ui.find({ type: 'Text', text: '✗ 틀림' })).toBeDefined()
     expect(await ui.find({ type: 'Markdown', text: 'a로 예시 답을 읽어 보세요.' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: DRILL_RULE_AFTER })).toBeDefined()
@@ -13881,7 +13913,7 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     await phone.press({ key: 'note-drill-answer' })
     expect(await phone.find({ type: 'Markdown', text: `**예시 답:** \`\` ${EXAMPLE} \`\`` })).toBeDefined()
     expect(await phone.find({ type: 'Text', text: DRILL_RULE_AFTER })).toBeDefined()
-    expect(w.models).toHaveLength(1)
+    expect(w.models).toHaveLength(2)
     expect(store.get('activity')).toEqual({ '2026-10-03': { notes: 1, right: 0, wrong: 0 } })
     expect(JSON.stringify(concept(store))).toBe(before)
     expect(noteOf(store).drill).toMatchObject({ isAnswerSeen: true })
@@ -13910,7 +13942,9 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
   test('a mark in another shape is kept in the one shape, in the store and the journal; a mark with no rule line over it has no practice anywhere but the journal', async ($, on) => {
     const store = new Map<string, unknown>()
     const loose = RULE_NOTE.replace(`- 할 일 (팀 규칙): ${TASK}`, `- 할 일: (팀 규칙) ${TASK}`)
-    const { w } = await written($, on, true, store, loose, false)
+    // On, its own call's reply says there is none (1.10.0 G6): the note keeps its own practice, the mark kept so.
+    const { w } = await written($, on, true, store, loose, false, '- 할 일: 없음')
+    expect(w.systems).toEqual([SYSTEM, RULE_DRILL_SYSTEM])
     expect(noteOf(store).text).toBe(RULE_NOTE)
     expect(w.journal().at(-1)!.text).toContain(`- 할 일 (팀 규칙): ${TASK}\n`)
     expect(w.journal().at(-1)!.text).not.toContain('(팀 규칙) API')
@@ -13936,19 +13970,21 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
   test('on: a practice of a concept under a rule line is 1.8.0\'s: over, its concept marked and no line under it for a team rule', async ($, on) => {
     const store = new Map<string, unknown>()
     const plain = RULE_NOTE.replace(`- 할 일 (팀 규칙): ${TASK}`, '- 할 일: API 호출을 fetcher로 바꿔 보세요')
-    const { w, id } = await written($, on, true, store, plain)
+    // The rule practice's own call answers none, and isRuleWide is off (1.10.0 G6): the note's own practice stays its concept's.
+    const { w, id } = await written($, on, true, store, plain, true, '- 할 일: 없음')
+    expect(noteOf(store).text).toBe(plain)
     const ui = await pane($)
     await ui.press({ key: 'note-drill' })
     await ui.input({ key: `drill-${id}`, text: EXAMPLE })
     await w.clock.settle()
-    expect(w.models).toHaveLength(1)
+    expect(w.models).toHaveLength(2)
     expect(await ui.find({ type: 'Text', text: '✓ 해냈습니다' })).toBeDefined()
     expect(concept(store).reviewedAt).toBeGreaterThanOrEqual(NOW)
     expect(await ui.find({ type: 'Text', text: DRILL_RULE_AFTER })).toBeUndefined()
     await ui.unmount()
   })
 
-  test('on: c, /learn 공유 and e carry the rule practice as the pane shows it, its task and check, never its line or example', async ($, on) => {
+  test('on: c and /learn 공유 carry the rule practice as the pane shows it, its task and check, never its line or example; e\'s question leaves it out (1.10.0 G6, D31)', async ($, on) => {
     const { w, ui } = await practiced($, on)
     await ui.press({ key: 'share' })
     await w.clock.settle()
@@ -13957,8 +13993,10 @@ describe('1.9.0: 팀 규칙을 내 코드로 바꿔 보기, a team-rule practice
     w.answer = '쉬운 말로 다시 쓴 답'
     await ui.press({ key: 'easier' })
     await w.clock.settle()
-    expect(w.models).toHaveLength(2)
-    expect(w.models.at(-1)).toContain(`- 할 일 (팀 규칙): ${TASK}`)
+    expect(w.models).toHaveLength(3)
+    expect(w.models.at(-1)).not.toContain('직접 해 보기')
+    expect(w.models.at(-1)).not.toContain(TASK)
+    expect(w.models.at(-1)).toContain(RULE_LINE)
     expect(w.models.at(-1)).not.toContain('await fetcher(')
     await ui.unmount()
     await learn($, '공유')
@@ -15538,10 +15576,11 @@ async function routeDay($: Engine, on: On, setup: (w: World) => void = () => {},
 
 describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the switches, once at session start', () => {
   /** A value that turns each switch on, as a measured route may (a step a whole number). */
-  const ON: Readonly<Record<keyof Switches, boolean | number>> = { isRuleDrill: true, rungNewStep: 4, rungChangedStep: 2, workedAfterTimes: 2, isBaseAsked: true, isThinkAsked: true }
+  const ON: Readonly<Record<keyof Switches, boolean | number>> = { isRuleDrill: true, isRuleWide: true, rungNewStep: 4, rungChangedStep: 2, workedAfterTimes: 2, isBaseAsked: true, isThinkAsked: true }
   /** Each switch as /learn 진단's harness list names it on (ON). */
   const ON_NAMED: Readonly<Record<keyof Switches, string>> = {
     isRuleDrill: '팀 규칙 연습 켬',
+    isRuleWide: '팀 규칙 표지 넓힘 켬',
     rungNewStep: '처음 보는 코드 단계 4',
     rungChangedStep: '비슷한 코드 단계 2',
     workedAfterTimes: '풀이 보고 풀기 오답 수 2',
@@ -15604,8 +15643,10 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
       w.harness = { models: { sonnet: { ...ON } } }
     })
     const golden = ROUTE19_CALLS.beginner
-    // The note asks for the team rule's practice, r for 생각해 보기; the quiz asks a base and a worked example (3600).
-    expect(calls[0]!.prompt).not.toBe(golden[0]!.prompt)
+    // The note's prompt is 1.9.0's whatever the switches (1.10.0 G6), and this one says nothing of a team rule: no
+    // call of its own for it. r asks for 생각해 보기; the quiz asks a base and a worked example (3600).
+    expect(calls[0]).toEqual({ model: 'sonnet', ...golden[0]! })
+    expect(calls.some(call => call.system === RULE_DRILL_SYSTEM)).toBe(false)
     expect(calls[1]!.prompt).not.toBe(golden[1]!.prompt)
     expect(calls.filter(call => call.maxTokens === 3600)).toHaveLength(1)
     expect(calls.every(call => call.model === 'sonnet' && call.effort === 'low')).toBe(true)
@@ -15987,9 +16028,12 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         await turn($, () => $.tool.call(EDIT_A))
         await finish(w)
         w.answer = ROUTE_RULE_NOTE
+        const before = w.models.length
         await turn($, () => $.tool.call({ tool: 'Write', tool_use_id: 'a1', file_path: '/proj/src/api.js', content: ROUTE_API }), 't2')
         await finish(w)
-        expect(w.models.at(-1)!.includes(ROUTE_RULE_ASK)).toBe(isOnFirst)
+        // The note's prompt asks for no rule practice either way (1.10.0 G6); on, the rule's practice is a call of its own.
+        expect(w.models[before]).not.toContain(ROUTE_RULE_ASK)
+        expect(w.systems.slice(before)).toEqual(isOnFirst ? [SYSTEM, RULE_DRILL_SYSTEM] : [SYSTEM])
         const practiced = notesOf(store).at(-1)!
         expect(practiced.text).toBe(ROUTE_RULE_NOTE)
         expect(await drillShown()).toBe(isOnFirst)
@@ -16017,7 +16061,8 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         w.answer = CONCEPT_NOTE(['배열'])
         await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't3')
         await finish(w)
-        expect(w.models.at(-1)!.includes(ROUTE_RULE_ASK)).toBe(!isOnFirst)
+        expect(w.models.at(-1)).not.toContain(ROUTE_RULE_ASK)
+        expect(w.systems.at(-1)).toBe(SYSTEM)
         expect(notesOf(store).find(one => one.id === practiced.id)?.text).toBe(ROUTE_RULE_NOTE)
         // Its next quiz is its own route's.
         await w.clock.advance(60_000)
@@ -16028,4 +16073,295 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
       })
     }
   }
+})
+
+describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team rule\'s practice by a call of its own, a wider label, both per model', () => {
+  const TEAM_MD = INPUT_RULE19.teamMd
+  const TEAM = parseTeamFile(TEAM_MD)
+  const NAMES = ruleNamesOf(TEAM.rules)
+  const SAID = OUTPUT_RULE19.drill.rule!
+  const RULE_LINE = `팀 규칙과 다를 수 있음: ${SAID}`
+  const RULE_TEXT = INPUT_RULE19.note.text
+  /** The note up to its practice, and its rule practice: the four lines the rule practice's call writes. */
+  const HEAD = RULE_TEXT.slice(0, RULE_TEXT.indexOf('\n### 직접 해 보기')).split('\n')
+  const RULE_LINES = RULE_TEXT.split('\n').slice(HEAD.length + 1)
+  const REPLY = RULE_LINES.join('\n')
+  const TASK = RULE_LINES[0]!.slice('- 할 일 (팀 규칙): '.length)
+  const LINE = 'const res = await fetch(`/users/${id}`)'
+  const EXAMPLE = 'const res = await apiRequest(`/users/${id}`)'
+  /** The note as its own call writes it: a practice of its concept. */
+  const CONCEPT_TASK = '응답을 기다리지 않고 Promise 그대로 돌려주게 바꿔 보세요'
+  const OWN = [...HEAD, '### 직접 해 보기', `- 할 일: ${CONCEPT_TASK}`, '- 고칠 줄: `return res.json()`', '- 확인: `loadUser(1)` → Promise가 나옵니다', '- 예시 답: `return res`'].join('\n')
+  /** Its own practice bringing the rule's name in, unmarked (what isRuleWide marks), and as marked. */
+  const PLAIN_TASK = '서버 요청을 인증이 붙는 함수로 바꿔 보세요'
+  const PLAIN = [...HEAD, '### 직접 해 보기', `- 할 일: ${PLAIN_TASK}`, ...RULE_LINES.slice(1)].join('\n')
+  const PLAIN_KEPT = [...HEAD, '### 직접 해 보기', `- 할 일 (팀 규칙): ${PLAIN_TASK}`, ...RULE_LINES.slice(1)].join('\n')
+  const USER_JS = ["import { apiRequest } from './api/apiRequest.js'", '', 'export async function loadUser(id) {', `  ${LINE}`, '  return res.json()', '}', ''].join('\n')
+  const WRITE_USER = { tool: 'Write', tool_use_id: 'w1', file_path: '/proj/src/user.js', content: USER_JS } as const
+  const ON = { isRuleDrill: true, isRuleWide: true }
+  const OFF = { isRuleDrill: false, isRuleWide: false }
+  const BUSY: Reply = { status: 529, error: 'overloaded' }
+  const notesIn = (store: Map<string, unknown>) => (store.get('history') as Record<string, { notes: LearnNote[] }>)['/proj']!.notes
+  const usageOf = (store: Map<string, unknown>) => Object.values(store.get('usage') as Record<string, { calls: number; auto: number }>)[0]
+  const escape = (text: string) => new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const SHOWN = escape(`### 직접 해 보기 · user.js\n${RULE_LINES[0]}\n${RULE_LINES[2]}`)
+
+  /**
+   * A world with the team file of the rules, its harness `harness`, a turn's end writing the note for a new user.js:
+   * the answered calls' texts `texts`, the calls' replies `replies` first. Its calls, store, and the note as stored.
+   */
+  async function wrote($: Engine, on: On, harness: Record<string, unknown> | undefined, texts: string[], replies: Reply[] = []) {
+    const calls = routeCalls(on)
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    w.files.set('/proj/.claude/learn-notes.md', TEAM_MD)
+    w.harness = harness
+    await start($)
+    w.texts = [...texts]
+    w.replies = [...replies]
+    await turn($, () => $.tool.call(WRITE_USER))
+    await finish(w)
+    return { w, calls, store, note: () => notesIn(store).at(-1)! }
+  }
+
+  test('on: a note with a "다를 수 있음" line in a repository with rules has a second call, the rule practice\'s own (system, prompt, cap, time limit, effort, the setting\'s model); its four lines are the practice; the pane shows its task and check; the journal keeps it', async ($, on) => {
+    const { w, calls, note } = await wrote($, on, ON, [OWN, REPLY])
+    expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM])
+    expect(calls[0]!.prompt).not.toContain('(팀 규칙)')
+    expect(calls[0]!.maxTokens).toBe(3500)
+    expect(calls[1]).toEqual({ model: 'haiku', effort: 'low', system: RULE_DRILL_SYSTEM, prompt: ruleDrillPrompt(note(), TEAM.rules, SAID), maxTokens: RULE_DRILL_TOKENS, timeoutMs: 90_000 })
+    // The code the note's own call was sent, the team's rules and the note's line.
+    expect(calls[1]!.prompt).toContain(`+  ${LINE}\n`)
+    expect(calls[1]!.prompt).toContain(`\n## 노트가 짚은 줄\n${RULE_LINE}\n`)
+    expect(calls[1]!.prompt).not.toContain('세션 토큰')
+    expect(note()).toMatchObject({ status: 'ready', text: RULE_TEXT })
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Markdown', text: SHOWN })).toBeDefined()
+    expect(await ui.find({ type: 'Markdown', text: /고칠 줄|예시 답|apiRequest\(`/ })).toBeUndefined()
+    expect((await ui.find({ type: 'Button', key: 'note-drill' }))?.props).toMatchObject({ hotkey: 't', label: '직접 해 보기' })
+    await ui.press({ key: 'note-drill' })
+    expect((await ui.find({ type: 'Input', key: `drill-${note().id}` }))?.props).toMatchObject({ value: LINE })
+    await ui.input({ key: `drill-${note().id}`, text: '모르겠어요' })
+    expect(await ui.find({ type: 'Markdown', text: `**힌트:** ${RULE_LINE} · 이 줄에서 바꿀 곳 한 군데를 찾아보세요` })).toBeDefined()
+    await ui.unmount()
+    expect(w.models).toHaveLength(2)
+    const journal = w.journal().at(-1)!.text
+    expect(journal).toContain(`- 할 일 (팀 규칙): ${TASK}`)
+    expect(journal).toContain(`- 예시 답: \`\` ${EXAMPLE} \`\``)
+  })
+
+  test('on, a note a turn\'s end wrote by itself: the usage record counts two calls and one automatic note; with dailyAutoNotes 2, two such notes go before the limit', { options: { dailyAutoNotes: 2 } }, async ($, on) => {
+    const { w, store } = await wrote($, on, ON, [OWN, REPLY])
+    expect(usageOf(store)).toMatchObject({ calls: 2, auto: 1 })
+    w.texts = [OWN, REPLY]
+    await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
+    await finish(w)
+    expect(usageOf(store)).toMatchObject({ calls: 4, auto: 2 })
+    expect(notesIn(store).map(one => [one.status, one.text])).toEqual([['ready', RULE_TEXT], ['ready', RULE_TEXT]])
+    expect(w.toasts.filter(text => text.includes('한도'))).toEqual([])
+    await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w3' }), 't3')
+    await finish(w)
+    expect(w.models).toHaveLength(4)
+    expect(w.toasts.filter(text => text.includes('한도'))).toEqual(['학습 노트: 오늘 자동 노트 한도(2개)에 닿았습니다 · 패널에서 w를 누르면 씁니다'])
+  })
+
+  for (const [label, text] of [
+    ['no "다를 수 있음" line', OWN.replace(`${RULE_LINE}\n`, '')],
+    ['a 팀 규칙: line alone', OWN.replace(RULE_LINE, '팀 규칙: 서버 요청은 apiRequest로 합니다')],
+    ['a "다를 수 있음" line that says none', OWN.replace(SAID, '없음')],
+  ] as const) {
+    test(`on: a note with ${label} has one call, its text the off build's to the byte for the same reply`, async ($, on) => {
+      const { w, calls, store } = await wrote($, on, ON, [text])
+      expect(calls.map(call => call.system)).toEqual([SYSTEM])
+      w.harness = OFF
+      await start($)
+      w.texts = [text]
+      await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
+      await finish(w)
+      expect(calls.map(call => call.system)).toEqual([SYSTEM, SYSTEM])
+      expect(notesIn(store).map(one => one.text)).toEqual([text, text])
+    })
+  }
+
+  test('on, a team file with terms alone or none: one call, a "다를 수 있음" line or not', async ($, on) => {
+    const calls = routeCalls(on)
+    const store = new Map<string, unknown>()
+    const w = world(on, 'ok', null, true, store)
+    w.harness = ON
+    w.files.set('/proj/.claude/learn-notes.md', '## 용어\n- **세션 토큰**: 로그인한 사용자를 알아보는 값입니다\n')
+    await start($)
+    w.texts = [OWN]
+    await turn($, () => $.tool.call(WRITE_USER))
+    await finish(w)
+    w.files.delete('/proj/.claude/learn-notes.md')
+    await start($)
+    w.texts = [OWN]
+    await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
+    await finish(w)
+    expect(calls.map(call => call.system)).toEqual([SYSTEM, SYSTEM])
+    expect(notesIn(store).map(one => one.text)).toEqual([OWN, OWN])
+  })
+
+  const FAILS: [string, string[], Reply[], number][] = [
+    ['a server error', [OWN], ['ok', { status: 500, error: 'api_error' }], 0],
+    ['its own time limit', [OWN], ['ok', 'timeout'], 90_000],
+    ['an empty reply', [OWN, ''], [], 0],
+    ['"할 일: 없음"', [OWN, '- 할 일: 없음'], [], 0],
+    ['a reply withRuleDrill does not take (the example the line itself)', [OWN, REPLY.replace(EXAMPLE, LINE)], [], 0],
+    ['a reply with no check', [OWN, RULE_LINES.filter(line => !line.startsWith('- 확인')).join('\n')], [], 0],
+  ]
+  for (const [label, texts, replies, wait] of FAILS) {
+    test(`on, the rule practice's call failing (${label}): the note is ready with its own practice, the text the off build keeps`, async ($, on) => {
+      const { w, calls, note } = await wrote($, on, ON, texts, replies)
+      if (wait > 0) {
+        await w.clock.advance(wait)
+        await w.clock.settle()
+      }
+      expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM])
+      expect(note()).toMatchObject({ status: 'ready', text: OWN })
+      expect(w.journal().at(-1)!.text).toContain(`- 할 일: ${CONCEPT_TASK}`)
+      const ui = await pane($)
+      expect((await ui.find({ type: 'Button', key: 'note-drill' }))?.props).toMatchObject({ hotkey: 't' })
+      expect(await ui.find({ type: 'Markdown', text: escape(`- 할 일: ${CONCEPT_TASK}`) })).toBeDefined()
+      await ui.unmount()
+      // A failed call is a fault of the note's area, though the note was written.
+      if (replies.length > 0) expect((await learn($, '진단')).text).toContain('노트 쓰기 · ')
+    })
+  }
+
+  test('on, the rule practice\'s call cut short (a reload): the note stays being written, nothing journaled; the next load takes it up through both calls', async ($, on) => {
+    const { w, calls, note } = await wrote($, on, ON, [OWN, OWN, REPLY], ['ok', 'cut'])
+    await w.clock.advance(60_000)
+    expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM])
+    expect(note().status).toBe('writing')
+    expect(w.journal()).toHaveLength(0)
+    await start($)
+    await w.clock.advance(5)
+    await w.clock.settle()
+    expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM, SYSTEM, RULE_DRILL_SYSTEM])
+    expect(note()).toMatchObject({ status: 'ready', text: RULE_TEXT })
+    expect(w.journal()).toHaveLength(1)
+  })
+
+  test('on: w writing the note again, and a turn\'s end note\'s one try again after a busy server, go through both calls', async ($, on) => {
+    const { w, calls, store, note } = await wrote($, on, ON, [OWN, REPLY])
+    const ui = await pane($)
+    w.texts = [OWN, REPLY.replace(TASK, `${TASK}.`)]
+    await ui.press({ key: 'write' })
+    await w.clock.settle()
+    await ui.unmount()
+    expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM, SYSTEM, RULE_DRILL_SYSTEM])
+    expect(note().text).toBe(RULE_TEXT.replace(TASK, `${TASK}.`))
+    expect(usageOf(store)).toMatchObject({ calls: 4, auto: 1 })
+    // A busy server on a turn's end: the try again half a minute on, then its rule practice.
+    w.texts = [OWN, REPLY]
+    w.replies = [BUSY, 'ok', 'ok']
+    await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
+    await finish(w)
+    expect(calls.map(call => call.system)).toHaveLength(5)
+    await w.clock.advance(35_000)
+    await w.clock.settle()
+    expect(calls.map(call => call.system).slice(4)).toEqual([SYSTEM, SYSTEM, RULE_DRILL_SYSTEM])
+    expect(note()).toMatchObject({ status: 'ready', text: RULE_TEXT })
+    expect(usageOf(store)).toMatchObject({ calls: 7, auto: 2 })
+  })
+
+  for (const model of ['haiku', 'sonnet'] as const) {
+    test(`as shipped (${model}, no harness): one call however the note reads, its own practice kept as 1.9.0 kept it`, { options: { model } }, async ($, on) => {
+      const { calls, note, w } = await wrote($, on, undefined, [PLAIN, REPLY])
+      expect(calls.map(call => [call.model, call.system])).toEqual([[model, SYSTEM]])
+      expect(note().text).toBe(PLAIN)
+      expect(w.texts).toEqual([REPLY])
+    })
+  }
+
+  test('isRuleWide on alone: a practice bringing the rule\'s name in under a rule line is kept marked: no t, left out of the pane, a question and the copy; the journal keeps it', async ($, on) => {
+    const { w, calls, note } = await wrote($, on, { isRuleWide: true }, [PLAIN])
+    expect(calls.map(call => call.system)).toEqual([SYSTEM])
+    expect(note().text).toBe(PLAIN_KEPT)
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Button', key: 'note-drill' })).toBeUndefined()
+    expect(await ui.find({ type: 'Markdown', text: /직접 해 보기/ })).toBeUndefined()
+    await ui.press({ key: 'share' })
+    expect(w.copied.at(-1)).not.toContain('직접 해 보기')
+    w.answer = '쉬운 말로 다시 쓴 답'
+    await ui.press({ key: 'easier' })
+    await w.clock.settle()
+    await ui.unmount()
+    expect(w.models.at(-1)).not.toContain('직접 해 보기')
+    expect(w.models.at(-1)).not.toContain(PLAIN_TASK)
+    expect(w.journal().find(one => one.text.includes(PLAIN_TASK))!.text).toContain(`- 할 일 (팀 규칙): ${PLAIN_TASK}`)
+    // A 팀 규칙: line that says something marks it too; none over it, never.
+    w.texts = [PLAIN.replace(RULE_LINE, '팀 규칙: 서버 요청은 apiRequest로 합니다'), PLAIN.replace(`${RULE_LINE}\n`, '')]
+    await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
+    await finish(w)
+    expect(note().text).toBe(PLAIN_KEPT.replace(RULE_LINE, '팀 규칙: 서버 요청은 apiRequest로 합니다'))
+    await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w3' }), 't3')
+    await finish(w)
+    expect(note().text).toBe(PLAIN.replace(`${RULE_LINE}\n`, ''))
+  })
+
+  test('per model (G7): haiku\'s row on, the sonnet window makes one call and keeps the note as 1.9.0 did; its t is the concept\'s', { options: { model: 'sonnet' } }, async ($, on) => {
+    const { calls, note } = await wrote($, on, { models: { haiku: ON } }, [PLAIN, REPLY])
+    expect(calls.map(call => [call.model, call.system])).toEqual([['sonnet', SYSTEM]])
+    expect(note().text).toBe(PLAIN)
+    const ui = await pane($)
+    expect((await ui.find({ type: 'Button', key: 'note-drill' }))?.props).toMatchObject({ hotkey: 't' })
+    expect(await ui.find({ type: 'Markdown', text: escape(`- 할 일: ${PLAIN_TASK}`) })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('per model (G7): haiku\'s row on, the haiku window marks and asks; read where haiku\'s row is off (another model\'s window), no practice', { options: { model: 'haiku' } }, async ($, on) => {
+    const { w, calls, note } = await wrote($, on, { models: { haiku: ON } }, [PLAIN, '- 할 일: 없음'])
+    expect(calls.map(call => [call.model, call.system])).toEqual([['haiku', SYSTEM], ['haiku', RULE_DRILL_SYSTEM]])
+    expect(note().text).toBe(PLAIN_KEPT)
+    let ui = await pane($)
+    expect((await ui.find({ type: 'Button', key: 'note-drill' }))?.props).toMatchObject({ hotkey: 't' })
+    expect(await ui.find({ type: 'Markdown', text: escape(`- 할 일 (팀 규칙): ${PLAIN_TASK}`) })).toBeDefined()
+    await ui.unmount()
+    w.harness = { models: { sonnet: ON } }
+    await start($)
+    ui = await pane($)
+    expect(await ui.find({ type: 'Button', key: 'note-drill' })).toBeUndefined()
+    expect(await ui.find({ type: 'Markdown', text: /직접 해 보기/ })).toBeUndefined()
+    await ui.unmount()
+    expect(note().text).toBe(PLAIN_KEPT)
+  })
+
+  test('a question, r and e under a note with the rule practice send what the switch off sends (D31), the practice left out: the same bytes on and off', async ($, on) => {
+    const { w, calls, note } = await wrote($, on, ON, [OWN, REPLY])
+    expect(note().text).toBe(RULE_TEXT)
+    /** r, a question after it and e under the newest note: their calls. */
+    const asked = async () => {
+      const from = calls.length
+      const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+      w.answer = '1. `loadUser(1)`: 1번 사용자 정보를 가져옵니다.\n\n**생각해 보기:** `loadUser(2)`를 부르면 무엇이 나올까요?'
+      await ui.press({ key: 'trace' })
+      await w.clock.settle()
+      w.answer = '2번 사용자 정보가 나옵니다.'
+      const key = String((await ui.find({ type: 'Input' }))!.props.key)
+      await ui.input({ key, text: '2번 사용자요' })
+      await w.clock.settle()
+      w.answer = '쉬운 말로 다시 쓴 답'
+      await ui.press({ key: 'easier' })
+      await w.clock.settle()
+      await ui.unmount()
+      return calls.slice(from)
+    }
+    const onAsks = await asked()
+    expect(onAsks.map(call => call.system)).toEqual([ASK_SYSTEM, ASK_SYSTEM, ASK_SYSTEM])
+    for (const call of onAsks) {
+      expect(call.prompt).not.toContain('직접 해 보기')
+      expect(call.prompt).not.toContain(TASK)
+      expect(call.prompt).toContain(RULE_LINE)
+    }
+    // The same note again (nothing asked under it yet), asked where the switch is off.
+    w.texts = [OWN, REPLY]
+    await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
+    await finish(w)
+    expect(note().text).toBe(RULE_TEXT)
+    w.harness = OFF
+    await start($)
+    expect(await asked()).toEqual(onAsks)
+  })
 })

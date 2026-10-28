@@ -28,10 +28,11 @@ import {
 } from '../hooks/notes'
 
 /** A value that turns each switch on, as a measured route may. */
-const ON: Readonly<Switches> = { isRuleDrill: true, rungNewStep: 4, rungChangedStep: 2, workedAfterTimes: 2, isBaseAsked: true, isThinkAsked: true }
+const ON: Readonly<Switches> = { isRuleDrill: true, isRuleWide: true, rungNewStep: 4, rungChangedStep: 2, workedAfterTimes: 2, isBaseAsked: true, isThinkAsked: true }
 /** The on values each feature's design may ship for a model (D1, the designs' decision rules). */
 const ON_VALUES: Readonly<Record<keyof Switches, readonly (boolean | number)[]>> = {
   isRuleDrill: [true],
+  isRuleWide: [true],
   rungNewStep: [4],
   rungChangedStep: [2],
   workedAfterTimes: [2],
@@ -43,8 +44,8 @@ const ON_VALUES: Readonly<Record<keyof Switches, readonly (boolean | number)[]>>
  * docs/qa/견본.md ('모델별 결정') turns that model's cell on, in the commit after it, this table with it.
  */
 const SHIPPED: Readonly<Record<MeasuredModel, Switches>> = {
-  haiku: { isRuleDrill: false, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false },
-  sonnet: { isRuleDrill: false, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false },
+  haiku: { isRuleDrill: false, isRuleWide: false, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false },
+  sonnet: { isRuleDrill: false, isRuleWide: false, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false },
 }
 /** Two tables a route may run, one model's row unlike the other's. */
 const SPLIT: Readonly<Record<MeasuredModel, Readonly<Switches>>> = {
@@ -71,7 +72,7 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
   })
 
   test('SWITCHES_OFF is 1.9.0\'s constants, every one off and frozen; the constants stay off', () => {
-    expect(SWITCHES_OFF).toEqual({ isRuleDrill: false, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false })
+    expect(SWITCHES_OFF).toEqual({ isRuleDrill: false, isRuleWide: false, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false })
     expect([IS_RULE_DRILL, RUNG_NEW_STEP, RUNG_CHANGED_STEP, WORKED_AFTER_TIMES, IS_BASE_ASKED, IS_THINK_ASKED]).toEqual([false, Infinity, Infinity, Infinity, false, false])
     expect(Object.isFrozen(SWITCHES_OFF)).toBe(true)
     expect(Object.isFrozen(MODEL_SWITCHES)).toBe(true)
@@ -92,7 +93,7 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
 
   test('SWITCH_KINDS, SWITCHES_OFF, FEATURE_NAMES, SWITCH_NAMES and each row hold the same keys; each off value of its kind', () => {
     const keys = switchKeys()
-    expect(keys).toEqual(['isRuleDrill', 'rungNewStep', 'rungChangedStep', 'workedAfterTimes', 'isBaseAsked', 'isThinkAsked'])
+    expect(keys).toEqual(['isRuleDrill', 'isRuleWide', 'rungNewStep', 'rungChangedStep', 'workedAfterTimes', 'isBaseAsked', 'isThinkAsked'])
     for (const table of [SWITCHES_OFF, FEATURE_NAMES, SWITCH_NAMES, MODEL_SWITCHES.haiku, MODEL_SWITCHES.sonnet, ON, ON_VALUES]) expect(Object.keys(table)).toEqual(keys)
     for (const key of keys) {
       if (SWITCH_KINDS[key] === 'flag') expect(SWITCHES_OFF[key]).toBe(false)
@@ -108,6 +109,16 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
     }
   })
 
+  test('a row with the team rule\'s practice on has its wider labelling on too (1.10.0 G6, D18): the shipped table and the one it must ship', () => {
+    for (const table of [MODEL_SWITCHES, SHIPPED]) {
+      for (const model of ['haiku', 'sonnet'] as const) if (table[model].isRuleDrill) expect(table[model].isRuleWide).toBe(true)
+    }
+    // isRuleWide is the second key, right after isRuleDrill, named as the design names it.
+    expect(switchKeys().indexOf('isRuleWide')).toBe(switchKeys().indexOf('isRuleDrill') + 1)
+    expect(SWITCH_KINDS.isRuleWide).toBe('flag')
+    expect([FEATURE_NAMES.isRuleWide, SWITCH_NAMES.isRuleWide]).toEqual(['팀 규칙 표지 넓힘', '팀 규칙 표지 넓힘'])
+  })
+
   test('hasOn and routeOn read every key of the table: each switch on alone is named, in the table\'s order, once', () => {
     expect(hasOn(SWITCHES_OFF)).toBe(false)
     expect(routeOn(SWITCHES_OFF)).toEqual([])
@@ -116,7 +127,7 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
       expect(hasOn(one)).toBe(true)
       expect(routeOn(one)).toEqual([FEATURE_NAMES[key]])
     }
-    expect(routeOn(ON)).toEqual(['팀 규칙 연습', '처음 보는 코드', '비슷한 코드', '풀이 보고 풀기', '바탕 개념', '생각해 보기'])
+    expect(routeOn(ON)).toEqual(['팀 규칙 연습', '팀 규칙 표지 넓힘', '처음 보는 코드', '비슷한 코드', '풀이 보고 풀기', '바탕 개념', '생각해 보기'])
     // A step on at 0 is on; a flag's off value is false alone.
     expect(hasOn({ ...SWITCHES_OFF, rungChangedStep: 0 })).toBe(true)
   })
@@ -147,8 +158,8 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
     expect(switchedNames(SPLIT.sonnet, SPLIT.sonnet)).toEqual([])
     // A harness turning one of them off and another on.
     expect(switchedNames({ ...SPLIT.sonnet, workedAfterTimes: Infinity, rungChangedStep: 2 }, SPLIT.sonnet)).toEqual(['비슷한 코드 단계 2', '풀이 보고 풀기 오답 수 끔'])
-    expect(switchedNames(ON, SWITCHES_OFF)).toEqual(['팀 규칙 연습 켬', '처음 보는 코드 단계 4', '비슷한 코드 단계 2', '풀이 보고 풀기 오답 수 2', '바탕 개념 켬', '생각해 보기 켬'])
-    expect(switchedNames(SWITCHES_OFF, ON)).toEqual(['팀 규칙 연습 끔', '처음 보는 코드 단계 끔', '비슷한 코드 단계 끔', '풀이 보고 풀기 오답 수 끔', '바탕 개념 끔', '생각해 보기 끔'])
+    expect(switchedNames(ON, SWITCHES_OFF)).toEqual(['팀 규칙 연습 켬', '팀 규칙 표지 넓힘 켬', '처음 보는 코드 단계 4', '비슷한 코드 단계 2', '풀이 보고 풀기 오답 수 2', '바탕 개념 켬', '생각해 보기 켬'])
+    expect(switchedNames(SWITCHES_OFF, ON)).toEqual(['팀 규칙 연습 끔', '팀 규칙 표지 넓힘 끔', '처음 보는 코드 단계 끔', '비슷한 코드 단계 끔', '풀이 보고 풀기 오답 수 끔', '바탕 개념 끔', '생각해 보기 끔'])
   })
 
   test('routeOf: none while no row turns anything on, whatever the model, level or alias; else unmeasured, level, the alias, then the features on', () => {

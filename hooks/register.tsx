@@ -144,7 +144,6 @@ import {
   withKnownMarks,
   conceptKey,
   conceptsMarkdown,
-  closeConceptBold,
   conceptsOf,
   redactText,
   screenNote,
@@ -329,8 +328,14 @@ import {
   inlineCode,
   isDrillOver,
   isKoreanTyped,
-  ruleLabelled,
+  keptNoteText,
+  noteRuleOf,
+  ruleDrillPrompt,
+  ruleNamesOf,
+  RULE_DRILL_SYSTEM,
+  RULE_DRILL_TOKENS,
   sameLine,
+  withRuleDrill,
 } from './notes'
 
 const PANE = 'learn-notes'
@@ -3384,7 +3389,7 @@ async function askNote(
     'ask',
     isCheck
       ? { system: THINK_SYSTEM, prompt: thinkCheckPrompt(shown, think, masked, level), maxTokens: THINK_CHECK_TOKENS }
-      : { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules, think, build.isRuleDrill, build.isThinkAsked), maxTokens: 900 },
+      : { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules, think, build.isThinkAsked), maxTokens: 900 },
   )
   if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
   // A check's reply not in its format is shown as it came.
@@ -3919,7 +3924,7 @@ async function writeNote(
       {
         system: SYSTEM,
         // A note kept before 1.6.0, written again, was never screened.
-        prompt: notePrompt(await screened($, cfg, note), cfg.level, knownNames(await read($, concepts)), rules, build.isRuleDrill),
+        prompt: notePrompt(await screened($, cfg, note), cfg.level, knownNames(await read($, concepts)), rules),
         maxTokens: NOTE_TOKENS,
       },
       isRetry ? 'retry' : isAuto ? 'auto' : 'manual',
@@ -3955,12 +3960,32 @@ async function writeNote(
         return
       }
     }
-    // A team-rule practice's task kept in its one shape (1.9.0 F2, ruleLabelled): no window before 1.9.0 reads it as a
+    // A team-rule practice's task kept in its one shape (1.9.0 F2, keptNoteText): no window before 1.9.0 reads it as a
     // task, so none grades a rule's line as its concept's. The store, the journal and every window read that shape.
+    // While this model's isRuleWide is on (1.10.0 G6), a practice that brings a rule's name in is kept so too.
+    const ruleNames = rules ? ruleNamesOf(rules.rules) : []
+    let text = 'error' in asked ? '' : keptNoteText(asked.text, build.isRuleWide ? ruleNames : [])
+    // While this model's isRuleDrill is on (1.10.0 G6), a note that says the change may differ from a team rule has
+    // that rule's practice made by a call of its own, in place of its own; one that fails or that withRuleDrill does
+    // not take leaves the note its own, as with the switch off. Never `auto`: the note alone counts toward the day's
+    // limit. Cut short as the note's call may be (a reload, not its time limit), the note stays being written: the
+    // next load takes it up from its note's call.
+    const said = 'error' in asked || !build.isRuleDrill || rules === undefined || rules.rules.length === 0 ? undefined : noteRuleOf(text)
+    if (said !== undefined && rules !== undefined) {
+      const drilled = await askModel(
+        $,
+        cfg,
+        'note',
+        { system: RULE_DRILL_SYSTEM, prompt: ruleDrillPrompt(await screened($, cfg, note), rules.rules, said), maxTokens: RULE_DRILL_TOKENS },
+        'manual',
+      )
+      if ('error' in drilled && drilled.fail?.reason === 'aborted' && drilled.fail.isTimeout !== true && isInteractive) return
+      if (!('error' in drilled)) text = withRuleDrill(text, drilled.text, note.changes, ruleNames) ?? text
+    }
     const patch: Partial<LearnNote> =
       'error' in asked
         ? { status: 'failed', text: asked.fail ? noteFailText(asked.fail, cfg.model) : `${asked.error} · w로 다시 쓰기`, retry: undefined, previous: undefined }
-        : { status: 'ready', text: ruleLabelled(closeConceptBold(cut(asked.text, 9000))), retry: undefined, drill: undefined, previous: undefined }
+        : { status: 'ready', text, retry: undefined, drill: undefined, previous: undefined }
     // A note cleared from the pane meanwhile, or left behind by a /cd, is still saved and stored from this copy.
     let done = (await setNote($, id, patch)) ?? { ...note, ...patch }
     // Written again, its practice is a new one: what was typed for the old one goes.
