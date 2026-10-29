@@ -47,6 +47,7 @@ import {
   switchesFor,
   workedAfterFor,
   workedBranch,
+  isWorkedQuizzable,
   workedNextText,
   type QuizPick,
 } from '../hooks/notes'
@@ -691,6 +692,13 @@ const WRITES_18 = "'처음 보는 코드'·'풀이 보고 풀기' 칸은 그 개
 const COMBOS_110: readonly (readonly [number, number])[] = [[2, 2], [2, Infinity], [Infinity, 2], [Infinity, Infinity]]
 const tag110 = (n: number) => (n === Infinity ? 'off' : String(n))
 
+/**
+ * The worked110.ts key whose quiz a case makes since G1's 4/7 review, one worked example a quiz (ladderMixed): `both 2 2`
+ * (one met in code, one met in no code, both at their branches' counts; the design's preview asked both) is `both 2 off`,
+ * the second asked again as with its branch off; every other key is its own (no other case holds two).
+ */
+const asOneWorked = (key: string) => (key === 'both 2 2' ? 'both 2 off' : key)
+
 /** A quiz of worked110.ts as makeQuiz builds it with the branches' counts: each pick's rung (rungOf), the quiz's shape (ladderMixed), each pick for its rung. */
 function workedQuiz(one: (typeof WORKED_CASES_110)[number], workedAfter: number, workedPlainAfter: number): QuizPick[] {
   const bases = one.picks.map(p => {
@@ -732,7 +740,7 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
     for (const one of WORKED_CASES_110) {
       for (const [workedAfter, workedPlainAfter] of COMBOS_110) {
         const key = `${one.id} ${tag110(workedAfter)} ${tag110(workedPlainAfter)}`
-        const want = WORKED_OUTPUT_110[key]!
+        const want = WORKED_OUTPUT_110[asOneWorked(key)]!
         const picks = workedQuiz(one, workedAfter, workedPlainAfter)
         expect([key, picks.map(p => p.rung ?? null)]).toEqual([key, want.rungs])
         expect(quizPrompt(picks, 'beginner')).toBe(want.prompt)
@@ -756,8 +764,14 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
     const plain = at('plain-2 off 2')
     expect(plain).toContain(`\n${WORKED_18}\n${TURN_110}\n${PLAIN_110}\n${WRITES_18}\n`)
     expect(plain).not.toContain(CODE_110)
+    // A quiz of both branches' worked examples (the design's preview): CODE then PLAIN, each once. makeQuiz sends none
+    // since its 4/7 review (one worked example a quiz, ladderMixed): that quiz asks the first, in code, and not PLAIN.
     const both = at('both 2 2')
     expect(both).toContain(`\n${WORKED_18}\n${TURN_110}\n${CODE_110}\n${PLAIN_110}\n${WRITES_18}\n`)
+    const sent = quizPrompt(workedQuiz(WORKED_CASES_110.find(one => one.id === 'both')!, 2, 2), 'beginner')
+    expect(sent).toContain(`\n${WORKED_18}\n${TURN_110}\n${CODE_110}\n${WRITES_18}\n`)
+    expect(sent).not.toContain(PLAIN_110)
+    expect(sent.split('칸: 풀이 보고 풀기').length - 1).toBe(1)
     for (const prompt of [code, plain, both]) {
       for (const line of [TURN_110, PLAN_110]) expect(prompt.split(line).length).toBe(2)
       expect(prompt).toContain(`\nT1: (예측 · 왜 · 바꿔 보기 중 하나)\n${PLAN_110}\nQ1: (문제 한두 문장)\nH1: (힌트 한 문장)\nA1: (답 한두 문장)\nT2: …\nQ2: …\n`)
@@ -808,28 +822,33 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
     expect(parseQuiz('T1: 예측\nQ1: 문제\nH1: 실마리\nP1: 3 → 5\nA1: 답', plain)[0]!.hint).toBe('실마리\nP1: 3 → 5')
   })
 
-  test('workedBranch: \'code\' for code that runs alone in js, mjs, cjs, ts or py holding a line its words quote; \'plain\' for no code; none for any other', () => {
-    expect(workedBranch(undefined, QUOTED)).toBe('plain')
-    expect(workedBranch(undefined, '')).toBe('plain')
-    for (const file of ['a.js', 'a.mjs', 'a.cjs', 'src/a.ts', 'A.JS']) expect([file, workedBranch({ file, text: JS.text }, QUOTED)]).toEqual([file, 'code'])
-    expect(workedBranch({ file: 'app/e.py', text: 'nums = [1, 2]\nprint([n for n in nums if n % 2 == 0])' }, '모읍니다 — `[n for n in nums if n % 2 == 0]`')).toBe('code')
+  test('workedBranch: \'code\' for code that runs alone in js, mjs, cjs, ts or py holding a line its words quote; \'plain\' for no code of a concept seen in no file; none for any other', () => {
+    expect(workedBranch(undefined, QUOTED, [])).toBe('plain')
+    expect(workedBranch(undefined, '', [])).toBe('plain')
+    // 4/7 review: no code found for a concept seen in a file (its note gone, its file left out since, a change that only
+    // took lines away) is none, not 'plain': met in code, asked again as with its note.
+    for (const files of [['src/a.ts'], ['notes.txt'], ['.gitignore', 'src/a.js']]) expect([files, workedBranch(undefined, QUOTED, files)]).toEqual([files, undefined])
+    // Code found, its files say nothing more.
+    expect(workedBranch(JS, QUOTED, ['src/cart.js'])).toBe('code')
+    for (const file of ['a.js', 'a.mjs', 'a.cjs', 'src/a.ts', 'A.JS']) expect([file, workedBranch({ file, text: JS.text }, QUOTED, [])]).toEqual([file, 'code'])
+    expect(workedBranch({ file: 'app/e.py', text: 'nums = [1, 2]\nprint([n for n in nums if n % 2 == 0])' }, '모읍니다 — `[n for n in nums if n % 2 == 0]`', [])).toBe('code')
     // Spaces aside, a quote of 4 characters or more on a line; a line of 8 or more inside a longer quote.
-    expect(workedBranch({ file: 'a.js', text: 'total+=n' }, QUOTED)).toBe('code')
-    expect(workedBranch({ file: 'a.js', text: 'for (const n of [1, 2]) total += n' }, '설명 — `for (const n of [1, 2]) total += n; console.log(total)`')).toBe('code')
-    expect(workedBranch({ file: 'a.js', text: 'const s = `${name}님`' }, '값을 넣습니다 — `${name}`')).toBe('code')
+    expect(workedBranch({ file: 'a.js', text: 'total+=n' }, QUOTED, [])).toBe('code')
+    expect(workedBranch({ file: 'a.js', text: 'for (const n of [1, 2]) total += n' }, '설명 — `for (const n of [1, 2]) total += n; console.log(total)`', [])).toBe('code')
+    expect(workedBranch({ file: 'a.js', text: 'const s = `${name}님`' }, '값을 넣습니다 — `${name}`', [])).toBe('code')
     // A line under 8 characters inside a longer quote is none (codeFor's match).
-    expect(workedBranch({ file: 'a.js', text: 'total\nlet x = 1' }, '설명 — `console.log(total)`')).toBeUndefined()
-    expect(workedBranch({ file: 'a.js', text: 'total\nconsole.log(total)' }, '설명 — `console.log(total)`')).toBe('code')
+    expect(workedBranch({ file: 'a.js', text: 'total\nlet x = 1' }, '설명 — `console.log(total)`', [])).toBeUndefined()
+    expect(workedBranch({ file: 'a.js', text: 'total\nconsole.log(total)' }, '설명 — `console.log(total)`', [])).toBe('code')
     // No line holds the quote (a tool's concept given a change's top lines), no quote, quotes under 4 characters, no lines.
-    expect(workedBranch({ file: 'src/cart.js', text: 'const total = items.reduce((s, x) => s + x.price, 0)' }, '작업 중인 변경을 잠시 치워 둡니다 — `git stash`')).toBeUndefined()
-    expect(workedBranch({ file: 'a.js', text: JS.text }, '합계 설명')).toBeUndefined()
-    expect(workedBranch({ file: 'a.js', text: 'let a = 1\nlet b = 2' }, '짧은 것 — `a` · `ab` · `abc`')).toBeUndefined()
-    expect(workedBranch({ file: 'a.js' }, QUOTED)).toBeUndefined()
+    expect(workedBranch({ file: 'src/cart.js', text: 'const total = items.reduce((s, x) => s + x.price, 0)' }, '작업 중인 변경을 잠시 치워 둡니다 — `git stash`', [])).toBeUndefined()
+    expect(workedBranch({ file: 'a.js', text: JS.text }, '합계 설명', [])).toBeUndefined()
+    expect(workedBranch({ file: 'a.js', text: 'let a = 1\nlet b = 2' }, '짧은 것 — `a` · `ab` · `abc`', [])).toBeUndefined()
+    expect(workedBranch({ file: 'a.js' }, QUOTED, [])).toBeUndefined()
     // Not a language its samples ran, or no extension.
-    for (const file of ['App.jsx', 'App.tsx', 'a.css', 'index.html', 'run.sh', 'Makefile', 'main.go']) expect([file, workedBranch({ file, text: JS.text }, QUOTED)]).toEqual([file, undefined])
+    for (const file of ['App.jsx', 'App.tsx', 'a.css', 'index.html', 'run.sh', 'Makefile', 'main.go']) expect([file, workedBranch({ file, text: JS.text }, QUOTED, [])]).toEqual([file, undefined])
     // A library's, a framework's or a browser's code (isUnrunnableCode), the quote on another of its lines.
     for (const line of ["import _ from 'lodash'", 'const [n, setN] = useState(0)', 'return <Button onClick={go} />', "app.get('/', (req, res) => res.send('ok'))", "document.querySelector('#a')"]) {
-      expect([line, workedBranch({ file: 'a.js', text: `${line}\n${JS.text}` }, QUOTED)]).toEqual([line, undefined])
+      expect([line, workedBranch({ file: 'a.js', text: `${line}\n${JS.text}` }, QUOTED, [])]).toEqual([line, undefined])
     }
     // isQuoted is codeFor's own match.
     expect(isQuoted(JS.text, QUOTED)).toBe(true)
@@ -837,20 +856,22 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
   })
 
   test('each branch its own count: rungOf and workedAfterFor, both on, the code branch alone, the plain alone, both off, by the misses running, a try again set right, a team term, and the level (by route)', () => {
-    const kinds = {
-      code: { code: JS, blurb: QUOTED },
-      plain: { code: undefined, blurb: QUOTED },
-      out: { code: { file: 'App.jsx', text: JS.text }, blurb: QUOTED },
-      unquoted: { code: JS, blurb: '합계 설명 — `git stash`' },
+    const kinds: Record<string, { code: { file: string; text: string } | undefined; blurb: string; files: string[] }> = {
+      code: { code: JS, blurb: QUOTED, files: ['src/cart.js'] },
+      plain: { code: undefined, blurb: QUOTED, files: [] },
+      out: { code: { file: 'App.jsx', text: JS.text }, blurb: QUOTED, files: [] },
+      unquoted: { code: JS, blurb: '합계 설명 — `git stash`', files: [] },
+      // 4/7 review: seen in a file, its code found no more (its note gone): neither branch.
+      gone: { code: undefined, blurb: QUOTED, files: ['src/cart.js'] },
     }
     for (const [workedAfter, workedPlainAfter] of COMBOS_110) {
-      for (const [kind, { code, blurb }] of Object.entries(kinds)) {
+      for (const [kind, { code, blurb, files }] of Object.entries(kinds)) {
         const after = kind === 'code' ? workedAfter : kind === 'plain' ? workedPlainAfter : Infinity
-        expect([kind, workedAfterFor(code, blurb, { workedAfter, workedPlainAfter })]).toEqual([kind, after])
+        expect([kind, workedAfterFor(code, blurb, files, { workedAfter, workedPlainAfter })]).toEqual([kind, after])
         for (const times of [1, 2, 3]) {
           for (const isRight of [false, true]) {
             for (const isTeam of [false, true]) {
-              const rung = rungOf({ ...at(2), blurb }, { ...plain, ...(code ? { code } : {}), slip: { times, ...(isRight ? { isRight: true as const } : {}) }, isAsking: true, isTeam }, Infinity, { changedStep: Infinity, workedAfter, workedPlainAfter })
+              const rung = rungOf({ ...at(2), blurb, files }, { ...plain, ...(code ? { code } : {}), slip: { times, ...(isRight ? { isRight: true as const } : {}) }, isAsking: true, isTeam }, Infinity, { changedStep: Infinity, workedAfter, workedPlainAfter })
               const want = !isTeam && !isRight && times >= after ? 'worked' : undefined
               expect([kind, workedAfter, workedPlainAfter, times, isRight, isTeam, rung]).toEqual([kind, workedAfter, workedPlainAfter, times, isRight, isTeam, want])
             }
@@ -859,8 +880,8 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
       }
     }
     // The defaults are the constants (off): no worked example.
-    expect(workedAfterFor(JS, QUOTED)).toBe(Infinity)
-    expect(workedAfterFor(undefined, QUOTED)).toBe(Infinity)
+    expect(workedAfterFor(JS, QUOTED, [])).toBe(Infinity)
+    expect(workedAfterFor(undefined, QUOTED, [])).toBe(Infinity)
     expect(rungOf({ ...at(2), blurb: QUOTED }, { ...plain, code: JS, slip: { times: 5 }, isAsking: true })).toBeUndefined()
     // The level, through the route (D17): beginner alone; any other, both off.
     const routes = { haiku: { ...SWITCHES_OFF, workedAfterTimes: 2, workedPlainAfterTimes: 2 }, sonnet: { ...SWITCHES_OFF, workedAfterTimes: 2, workedPlainAfterTimes: 2 } }
@@ -875,26 +896,28 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
   })
 
   test('the line under a grade, /learn 진단\'s base count and baseFor go by the same count as rungOf, on the same code and words', () => {
-    const later = { code: JS, blurb: QUOTED }
-    const kinds: Record<string, { code?: { file: string; text: string }; blurb: string }> = {
-      code: { code: JS, blurb: QUOTED },
-      plain: { blurb: QUOTED },
-      out: { code: { file: 'App.tsx', text: JS.text }, blurb: QUOTED },
+    const later = { code: JS, blurb: QUOTED, files: ['src/cart.js'] }
+    const kinds: Record<string, { code?: { file: string; text: string }; blurb: string; files: string[] }> = {
+      code: { code: JS, blurb: QUOTED, files: ['src/cart.js'] },
+      plain: { blurb: QUOTED, files: [] },
+      out: { code: { file: 'App.tsx', text: JS.text }, blurb: QUOTED, files: ['App.tsx'] },
       // Its words changed so no line of its code holds their quote any more.
-      reworded: { code: JS, blurb: '합계 설명 — `git stash`' },
+      reworded: { code: JS, blurb: '합계 설명 — `git stash`', files: ['src/cart.js'] },
       // Met in code by a later note: its code found then.
       later,
+      // 4/7 review: met in code, its note gone since (its code found no more): neither branch's.
+      gone: { blurb: QUOTED, files: ['src/cart.js'] },
     }
     const index: Record<string, LearnConcept> = { 'c:합계': { ...at(1), name: '합계', blurb: QUOTED, firstAt: 10 }, 'c:바탕': { ...at(3), name: '바탕', blurb: '바탕 설명', firstAt: 1, reviewedAt: NOW - 30 * DAY } }
     const fillers = [pick('채움 하나'), pick('채움 둘')]
     for (const [workedAfter, workedPlainAfter] of COMBOS_110) {
       const steps = { workedAfter, workedPlainAfter }
-      for (const [kind, { code, blurb }] of Object.entries(kinds)) {
+      for (const [kind, { code, blurb, files }] of Object.entries(kinds)) {
         for (const times of [1, 2, 3]) {
           for (const isRight of [false, true]) {
             const record: LearnSlip = { ...SLIP, at: NOW, times, base: 'c:바탕', ...(isRight ? { isRight: true as const } : {}) }
-            const rung = rungOf({ ...at(1), blurb }, { ...plain, ...(code ? { code } : {}), slip: record, isAsking: true }, Infinity, { changedStep: Infinity, ...steps })
-            const after = workedAfterFor(code, blurb, steps)
+            const rung = rungOf({ ...at(1), blurb, files }, { ...plain, ...(code ? { code } : {}), slip: record, isAsking: true }, Infinity, { changedStep: Infinity, ...steps })
+            const after = workedAfterFor(code, blurb, files, steps)
             const item = { result: 'wrong' as const, gradedAt: NOW, mine: SLIP.mine, slip: SLIP.what, slipType: 'state' as const }
             const id = [kind, workedAfter, workedPlainAfter, times, isRight]
             const isWorked = rung === 'worked'
@@ -902,8 +925,8 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
             expect([...id, slipNotice(item, record, false, after)?.text.endsWith(WORKED_NEXT)]).toEqual([...id, isWorked])
             expect([...id, workedNextText(record, false, after)]).toEqual([...id, WORKED_NEXT])
             // A base before the worked example at the count itself, as baseFor asks one; counted so by /learn 진단.
-            const x = pick('합계', { blurb, ...(code ? { code } : {}), slip: SLIP })
-            const found = baseFor({ ...index, 'c:합계': { ...index['c:합계']!, blurb } }, () => ({ ...record, at: NOW - DAY }), [x, ...fillers], new Set(['c:합계']), {}, {}, steps)
+            const x = pick('합계', { blurb, files, ...(code ? { code } : {}), slip: SLIP })
+            const found = baseFor({ ...index, 'c:합계': { ...index['c:합계']!, blurb, files } }, () => ({ ...record, at: NOW - DAY }), [x, ...fillers], new Set(['c:합계']), {}, {}, steps)
             expect([...id, found !== undefined]).toEqual([...id, isWorked && times === after])
             expect([...id, slipCounts({ 'c:합계': record }, Infinity, () => after).based]).toEqual([...id, found !== undefined ? 1 : 0])
           }
@@ -912,11 +935,18 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
     }
   })
 
-  test('ladderMixed\'s worked rules (D13 · D33): beside a worked example, code changed and never seen in the learner\'s own code; a worked example with a team term in the quiz, or alone but for a base, asked again', () => {
+  test('ladderMixed\'s worked rules (D13 · D33): beside a worked example, code changed and never seen in the learner\'s own code; a worked example with a team term in the quiz, or alone but for a base, asked again; one a quiz, the first', () => {
     const none = [{}, {}, {}]
     expect(ladderMixed(['worked', 'new', 'mine'], none)).toEqual(['worked', 'mine', 'mine'])
     expect(ladderMixed(['new', 'changed', 'worked'], none)).toEqual(['mine', 'mine', 'worked'])
-    expect(ladderMixed(['worked', 'worked', 'changed'], none)).toEqual(['worked', 'worked', 'mine'])
+    // 4/7 review: one worked example a quiz (no sample held two, nor one of each branch): the first, the rest asked again.
+    expect(ladderMixed(['worked', 'worked', 'changed'], none)).toEqual(['worked', undefined, 'mine'])
+    expect(ladderMixed(['mine', 'worked', 'worked'], none)).toEqual(['mine', 'worked', undefined])
+    expect(ladderMixed(['worked', 'worked', 'worked'], none)).toEqual(['worked', undefined, undefined])
+    expect(ladderMixed(['worked', 'worked'], [{}, {}])).toEqual(['worked', undefined])
+    expect(ladderMixed(['mine', 'worked', 'worked'], [{ isBase: true }, {}, {}])).toEqual(['mine', 'worked', undefined])
+    // None kept for its quiz's shape (a team term): none at all, the first not kept for the next.
+    expect(ladderMixed(['worked', 'worked', 'mine'], [{}, {}, { isTeamMarked: true }])).toEqual([undefined, undefined, 'mine'])
     // D33 (1): a team term of this repository or of another anywhere in the quiz.
     for (const team of [{ team: true as const }, { isTeamMarked: true as const }]) {
       expect(ladderMixed(['worked', 'mine', undefined], [{}, {}, team])).toEqual([undefined, 'mine', undefined])
@@ -929,6 +959,23 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
     expect(ladderMixed(['worked', 'mine'], [{}, {}])).toEqual(['worked', 'mine'])
     // A worked example asked again for its quiz's shape leaves code never seen beside it as with it off, in a quiz of three.
     expect(ladderMixed(['worked', 'new', 'mine'], [{}, {}, { isTeamMarked: true }])).toEqual([undefined, 'mine', 'mine'])
+  })
+
+  test('isWorkedQuizzable (4/7 검토): a concept no team term of any repository, with another concept a quiz could ask beside it (not known, no team term); the line under a grade promises by it', () => {
+    const one = (name: string, more: Partial<LearnConcept> = {}): LearnConcept => ({ ...at(1), name, ...more })
+    const index = { 'c:합계': one('합계'), 'c:map': one('map') }
+    expect(isWorkedQuizzable(index, 'c:합계', {})).toBe(true)
+    // Itself a team term of this repository or another (D33 (1): its every quiz holds one).
+    expect(isWorkedQuizzable(index, 'c:합계', { 'c:합계': ['abc123def456'] })).toBe(false)
+    // No other concept, the other known, or a team term (D33 (3), (1)).
+    expect(isWorkedQuizzable({ 'c:합계': one('합계') }, 'c:합계', {})).toBe(false)
+    expect(isWorkedQuizzable({ ...index, 'c:map': one('map', { knownAt: NOW }) }, 'c:합계', {})).toBe(false)
+    expect(isWorkedQuizzable(index, 'c:합계', { 'c:map': ['abc123def456'] })).toBe(false)
+    // One of several is enough; the concept itself not in the index is the caller's (afterNow: Infinity).
+    expect(isWorkedQuizzable({ ...index, 'c:셋': one('셋') }, 'c:합계', { 'c:map': ['abc123def456'] })).toBe(true)
+    // What a quiz of each makes (ladderMixed): with the mark, or alone, no worked example kept.
+    expect(ladderMixed(['worked', 'mine'], [{ isTeamMarked: true }, {}])).toEqual([undefined, 'mine'])
+    expect(ladderMixed(['worked'], [{}])).toEqual([undefined])
   })
 
   test('codeFor gives 1.9.0\'s lines (codefor19.ts, its quote match now isQuoted\'s), for every change and words there', () => {

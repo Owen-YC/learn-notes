@@ -44,6 +44,7 @@ import {
   isOldGraderOpen,
   isUnrunnableChange,
   isWorkedNext,
+  isWorkedQuizzable,
   basedKeys,
   workedAfterFor,
   ladderMixed,
@@ -2630,40 +2631,43 @@ async function withCode(
 }
 
 /**
- * The code the next quiz would ask a concept in and its words, found as makeQuiz finds them for rungOf (withCode, the
- * concept under the key it counts under now): what a worked example's branch rests on (1.10.0 G1, workedAfterFor), for
- * what a grade's line promises (isWorkedNext) and what /learn 진단 counts (slipCounts). No file is read: code never
- * seen and code changed are not asked here, and the branch looks at no library read from a file (workedBranch). None
- * for a concept the index does not hold, which no quiz asks.
+ * The misses running after which the next quiz would ask a concept by a worked example (1.10.0 G1), the concept under
+ * the key it counts under now: workedAfterFor on the code makeQuiz finds for it (withCode), its words and its files,
+ * for what a grade's line promises (isWorkedNext) and what /learn 진단 counts (slipCounts). Infinity for one no quiz
+ * asks so: one the index does not hold, and (its 4/7 review) one no quiz of a shape its samples measured could ask by
+ * a worked example (isWorkedQuizzable: a team term of any repository, or with no concept beside it but known ones and
+ * team terms), which ladderMixed asks again. No file is read: code never seen and code changed are not asked here, and
+ * the branch looks at no library read from a file (workedBranch).
  */
-async function codeNow($: EngineInterface, cfg: Config, key: string): Promise<{ code: QuizPick['code']; blurb: string } | undefined> {
+async function afterNow($: EngineInterface, cfg: Config, key: string): Promise<number> {
   const map = await read($, aliases)
   const at = resolveKey(map, key)
-  const one = rankConcepts(await read($, concepts)).find(other => other.key === at)
-  if (!one) return undefined
+  const index = await read($, concepts)
+  const one = rankConcepts(index).find(other => other.key === at)
+  if (!one || !isWorkedQuizzable(index, at, await storedTeamTerms($, map))) return Infinity
   const [found] = await withCode($, cfg, [one], map, Infinity, await $.clock.now(), Infinity)
-  return { code: found?.code, blurb: one.blurb }
+  return workedAfterFor(found?.code, one.blurb, one.files, ladderSteps())
 }
 
-/** The code and words each grade's concept had when its line was first drawn (gradeAfter), by its key and its grade's time. */
-const gradeCodes = new Map<string, { code: QuizPick['code']; blurb: string } | null>()
+/** The count each grade's concept had when its line was first drawn (gradeAfter, afterNow), by its key and its grade's time. */
+const gradeCodes = new Map<string, number>()
 
 /**
- * The misses running after which a graded question's concept is asked by a worked example next (1.10.0 G1,
- * workedAfterFor on codeNow's code and words), for its line under the grade (slipNotice, isWorkedNext, workedNextText):
- * looked for only where its slip (`record`) has reached the lower of the branches' counts (isWorkedNext), and once a
- * grade in each window, the pane drawing that line again and again. Infinity elsewhere, with every branch off (no
- * store read at all), or when the concept or the notes cannot be read: then no worked example is promised.
+ * The misses running after which a graded question's concept is asked by a worked example next (1.10.0 G1, afterNow),
+ * for its line under the grade (slipNotice, isWorkedNext, workedNextText): looked for only where its slip (`record`)
+ * has reached the lower of the branches' counts (isWorkedNext), and once a grade in each window, the pane drawing that
+ * line again and again. Infinity elsewhere, with every branch off (no store read at all), or when the concept or the
+ * notes cannot be read: then no worked example is promised.
  */
 async function gradeAfter($: EngineInterface, cfg: Config, item: LearnQuizItem, record: LearnSlip | undefined): Promise<number> {
   if (!isWorkedNext(record, item, Math.min(build.workedAfterTimes, build.workedPlainAfterTimes))) return Infinity
   const at = `${item.key}\u0000${item.gradedAt}`
-  let found = gradeCodes.get(at)
-  if (found === undefined) {
-    found = (await codeNow($, cfg, item.key).catch(() => undefined)) ?? null
-    gradeCodes.set(at, found)
+  let after = gradeCodes.get(at)
+  if (after === undefined) {
+    after = await afterNow($, cfg, item.key).catch(() => Infinity)
+    gradeCodes.set(at, after)
   }
-  return found === null ? Infinity : workedAfterFor(found.code, found.blurb, ladderSteps())
+  return after
 }
 
 /** Bytes past which the file a concept's code came from is not read for its imports (1.9.0 F3): taken to need a library. */
@@ -5192,7 +5196,8 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     const seen = { list: recentSubmits, lastRequest: lastRequestText }
     // A file's read permission is asked again this turn: the rules may have changed since the last. So is a grade's
-    // code and words (gradeAfter, 1.10.0 G1): the notes, the files left out and the concept's words may have too.
+    // count (gradeAfter, afterNow, 1.10.0 G1): the notes, the files left out, the concept's words, the index and the
+    // team terms may have too.
     readDenied.clear()
     gradeCodes.clear()
     await followRoot($)
@@ -5681,7 +5686,8 @@ export const register: Register = (on, options) => {
     const quizStart = quizStartText(teamSlots(unmet.length, filled), Object.values(index).filter(one => !isKnown(one)).length)
     const isAdded = (item: LearnQuizItem) => isTeamAdded(item, index, map)
     // Each question missed: its concept's count as the next quiz will go by it (1.10.0 G1, gradeAfter), so its line
-    // promises a worked example only where its branch asks one. Looked for only where the slip would make one, once a grade.
+    // promises a worked example only where its branch asks one and a quiz its samples measured can (afterNow). Looked
+    // for only where the slip would make one, once a grade.
     const nextAfters = await Promise.all((current?.items ?? []).map(item => (item.result === 'wrong' ? gradeAfter($, cfg, item, slipOf(item.key)) : Infinity)))
     const afterOf = (i: number) => nextAfters[i] ?? Infinity
 
@@ -7027,11 +7033,10 @@ async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Pr
     async raw => {
       const clean = cleanSlips(raw, map, now)
       // Each slip with a base at a count a branch that is on asks after (1.10.0 G1): its concept's count as the next
-      // quiz finds its code and words (codeNow). None looked for while every branch is off.
+      // quiz finds its code, words and files (afterNow). None looked for while every branch is off.
       const afters = new Map<string, number>()
       for (const key of basedKeys(clean, [build.workedAfterTimes, build.workedPlainAfterTimes].filter(Number.isFinite))) {
-        const found = await codeNow($, cfg, key).catch(() => undefined)
-        afters.set(key, found === undefined ? Infinity : workedAfterFor(found.code, found.blurb, ladderSteps()))
+        afters.set(key, await afterNow($, cfg, key).catch(() => Infinity))
       }
       return slipCounts(clean, build.workedAfterTimes, key => afters.get(key) ?? Infinity)
     },

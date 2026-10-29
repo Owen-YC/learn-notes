@@ -5248,7 +5248,7 @@ export function extOf(file: string): string | undefined {
  * Which code a picked concept is asked in, the first that fits: none for a team term of this repository (asked by the
  * team's words and lines, as in 1.7); a worked example once its open slip, asked again, was missed as many times
  * running as its branch's switch says (workedAfterFor, 1.10.0 G1: `workedAfter` for a concept met in code that runs
- * alone and holds its quote, `workedPlainAfter` for one met in none, never for any other) and not set right on the try
+ * alone and holds its quote, `workedPlainAfter` for one met in no file, never for any other) and not set right on the try
  * again (`isRight`); none for any other open slip
  * (다시 도전, as in 1.7) or a concept with no code (asked why); code never seen from `newStep` on, for a concept due
  * whose code a sample could run and needs nothing but its language (isNewAskable; 1.9.0: none that a library, a
@@ -5272,7 +5272,7 @@ export function rungOf(
 ): QuizRung | undefined {
   if (how.isTeam) return undefined
   if (how.slip) {
-    const after = workedAfterFor(how.code, one.blurb, { workedAfter, workedPlainAfter })
+    const after = workedAfterFor(how.code, one.blurb, one.files, { workedAfter, workedPlainAfter })
     return how.isAsking && how.slip.times >= after && how.slip.isRight !== true ? 'worked' : undefined
   }
   if (!how.code) return undefined
@@ -5283,16 +5283,19 @@ export function rungOf(
 
 /**
  * The branch a worked example of a concept is measured in (1.10.0 G1), by `code`, the code the next quiz finds for it
- * (withCode: the latest note that taught it, screened, codeFor's lines), and `blurb`, its words: 'plain' with no code;
+ * (withCode: the latest note that taught it, screened, codeFor's lines), `blurb`, its words, and `files`, the files it
+ * was seen in: 'plain' with no code for a concept seen in no file (met in no code: no note's change ever taught it);
  * 'code' for lines that hold the quote its words make (isQuoted, codeFor's own match) in a language its samples ran
  * (RUNG_NEW_EXTS) and need no library, framework or browser (isUnrunnableCode); undefined for any other (no lines,
  * a quote in none of them: the top lines of a note's first change, given a tool's concept codeFor found no line for;
  * jsx · tsx · css · html · sh or no extension; a library's, a framework's or a browser's code), asked again as 1.7
- * did. `isLibrary` is not looked at: the grade's line finds the code without reading a file (register.tsx codeNow),
- * and must say what the quiz will do.
+ * did. Its 4/7 review: a concept seen in a file whose code is found no more (its note gone past HISTORY_PER_PROJECT,
+ * its file left out since, a change that only took lines away) is none either, not 'plain': met in code, it was never
+ * of the plain branch's samples, and with its note it is asked again all the same. `isLibrary` is not looked at: the
+ * grade's line finds the code without reading a file (register.tsx afterNow), and must say what the quiz will do.
  */
-export function workedBranch(code: { file: string; text?: string } | undefined, blurb: string): 'code' | 'plain' | undefined {
-  if (code === undefined) return 'plain'
+export function workedBranch(code: { file: string; text?: string } | undefined, blurb: string, files: readonly string[]): 'code' | 'plain' | undefined {
+  if (code === undefined) return files.length === 0 ? 'plain' : undefined
   const ext = extOf(code.file)
   if (code.text === undefined || ext === undefined || !RUNG_NEW_EXTS.includes(ext)) return undefined
   return isQuoted(code.text, blurb) && !isUnrunnableCode(code.text) ? 'code' : undefined
@@ -5301,15 +5304,16 @@ export function workedBranch(code: { file: string; text?: string } | undefined, 
 /**
  * The misses running after which a concept is asked by a worked example (1.10.0 G1): its branch's switch
  * (workedBranch), `workedAfter` for 'code', `workedPlainAfter` for 'plain', Infinity for neither. rungOf, the grade's
- * line (isWorkedNext, slipNotice, workedNextText), /learn 진단 (slipCounts) and baseFor each go by it on the same code
- * and words, so the quiz, the line under a grade and the counts say one thing.
+ * line (isWorkedNext, slipNotice, workedNextText), /learn 진단 (slipCounts) and baseFor each go by it on the same code,
+ * words and files, so the quiz, the line under a grade and the counts say one thing.
  */
 export function workedAfterFor(
   code: { file: string; text?: string } | undefined,
   blurb: string,
+  files: readonly string[],
   { workedAfter = WORKED_AFTER_TIMES, workedPlainAfter = WORKED_PLAIN_AFTER_TIMES }: Partial<Pick<LadderSteps, 'workedAfter' | 'workedPlainAfter'>> = {},
 ): number {
-  const branch = workedBranch(code, blurb)
+  const branch = workedBranch(code, blurb, files)
   return branch === 'code' ? workedAfter : branch === 'plain' ? workedPlainAfter : Infinity
 }
 
@@ -5478,9 +5482,10 @@ export function pickForRung<T extends QuizPick>(pick: T, rung: QuizRung | undefi
  * measured in a quiz of three with no team term and nothing else of the quiz's own making: in a quiz with fewer than
  * three picks, or with a team term (`team`, `isTeamMarked`) among them, both are asked in the learner's own code
  * (mine); code changed beside code never seen or a worked example is asked in its own code too. A worked example
- * (1.10.0 G1, D13 · D33) is measured in a quiz of two or three with no team term and no code changed or never seen:
- * in a quiz with a team term, or with one pick alone but for a base concept (`isBase`), it is asked again as with it
- * off (다시 도전, no rung); beside it, code changed and code never seen are asked in the learner's own code.
+ * (1.10.0 G1, D13 · D33) is measured one to a quiz of two or three with no team term and no code changed or never
+ * seen: in a quiz with a team term, or with one pick alone but for a base concept (`isBase`), it is asked again as
+ * with it off (다시 도전, no rung), and past the first in a quiz too (its 4/7 review: no sample held two, nor one of
+ * each branch); beside it, code changed and code never seen are asked in the learner's own code.
  */
 export function ladderMixed(
   rungs: readonly (QuizRung | undefined)[],
@@ -5489,8 +5494,9 @@ export function ladderMixed(
   const isTeamIn = picks.some(one => one.team === true || one.isTeamMarked === true)
   const isMeasured = rungs.length >= 3 && !isTeamIn
   const isWorkedMeasured = !isTeamIn && picks.filter(one => one.isBase !== true).length >= 2
-  const kept = rungs.map(rung => (rung === 'worked' && !isWorkedMeasured ? undefined : rung))
-  const hasWorked = kept.includes('worked')
+  const first = isWorkedMeasured ? rungs.indexOf('worked') : -1
+  const kept = rungs.map((rung, i) => (rung === 'worked' && i !== first ? undefined : rung))
+  const hasWorked = first !== -1
   const isApart = hasWorked || kept.includes('new')
   return kept.map(rung => {
     if (rung === 'new') return isMeasured && !hasWorked ? rung : 'mine'
@@ -6606,8 +6612,9 @@ export function noteSlipName(
  * name says, a right answer after being asked back included, and not the worked examples the next quiz will show,
  * which rungOf picks by more than the slip); and open with a base concept a quiz would ask before its worked example
  * (1.9.0 F5, `based`: 바탕 개념; missed `workedAfter` times running, not set right on its try again, as baseFor asks).
- * `afterOf` gives each slip's key its own count (1.10.0 G1: workedAfterFor on the code and words the next quiz finds for
- * that key, register.tsx), `workedAfter` for every key when not given.
+ * `afterOf` gives each slip's key its own count (1.10.0 G1: workedAfterFor on the code, words and files the next quiz
+ * finds for that key, Infinity where isWorkedQuizzable does not hold, register.tsx afterNow), `workedAfter` for every
+ * key when not given.
  */
 export type SlipCounts = { all: number; open: number; mended: number; other: number; blank: number; againOpen: number; based: number }
 
@@ -6690,7 +6697,8 @@ export function workedNextText(record: Pick<LearnSlip, 'base' | 'times'> | undef
  * slipsToAsk: a grade that kept no miss, as wrong once the answer is seen, leaves it gone over), missed
  * `workedAfter` (WORKED_AFTER_TIMES) times running, not set right on a try again, and the question no team term's
  * (asked by the team's words, as in 1.7). 1.10.0 (G1): `workedAfter` is its concept's own (workedAfterFor on the code
- * and words the next quiz finds for it, register.tsx gradeCode), Infinity where none is found, as rungOf picks.
+ * and words the next quiz finds for it, register.tsx afterNow), Infinity where none is found or no quiz of a shape its
+ * samples measured could ask it one (isWorkedQuizzable), as rungOf and ladderMixed pick.
  */
 export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuizItem, 'team' | 'gradedAt'>, workedAfter = WORKED_AFTER_TIMES): boolean {
   return (
@@ -6704,6 +6712,20 @@ export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuiz
 }
 
 /**
+ * Whether a quiz could ask the concept under `key` by a worked example in a shape its samples measured (1.10.0 G1, its
+ * 4/7 review; ladderMixed, D33), whatever else the quiz holds: not a team term of any repository (`teamMarks`), whose
+ * every quiz holds a team term, itself (D33 (1)); and with another concept in `index` a quiz could ask beside it, not
+ * known and no team term of any repository (else its quiz is of it alone, D33 (3), or beside team terms, D33 (1)).
+ * The line under a grade and /learn 진단 promise and count a worked example only where this holds (register.tsx
+ * afterNow): never one no quiz will keep. One the next quiz leaves out for its other picks (a team term not met
+ * yet, another worked example first) is still promised, and asked by a later quiz, as its plan accepts.
+ */
+export function isWorkedQuizzable(index: Readonly<Record<string, LearnConcept>>, key: string, teamMarks: Readonly<Record<string, readonly string[]>>): boolean {
+  if (isTeamTerm(teamMarks, key)) return false
+  return Object.entries(index).some(([other, one]) => other !== key && !isKnown(one) && !isTeamTerm(teamMarks, other))
+}
+
+/**
  * The line a graded question shows under its feedback about its concept's slip (`record`, as the store has it now):
  * the slip this grade kept and that the next quiz asks it again, an answer with nothing in it (by what it was: none
  * recalled, or a real one too short to read a slip from), a slip mended right after a question asked back, a question
@@ -6712,7 +6734,8 @@ export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuiz
  * A worked example missed (1.8.0) is a question asked again missed again; a miss that makes the next review quiz show
  * a worked example (isWorkedNext) says so in place of the next quiz's other code (the callers add it to `again`), its
  * base first when the slip has one (workedNextText, 1.9.0 F5). `workedAfter` is the concept's own (1.10.0 G1,
- * workedAfterFor), so a concept the next quiz asks again is promised no worked example.
+ * workedAfterFor, Infinity where isWorkedQuizzable does not hold), so a concept the next quiz asks again is promised no
+ * worked example.
  */
 export function slipNotice(
   item: Pick<LearnQuizItem, 'result' | 'gradedAt' | 'isRetry' | 'mine' | 'slip' | 'slipType' | 'firstTry' | 'rung' | 'team'>,
@@ -6808,7 +6831,7 @@ export type BaseFound = { key: string; before: string; slot: number }
  * The base concept a review quiz asks right before a worked example (1.9.0 F5), if any. The worked example (X) is the
  * first of `picks` asked again (`asking`), no team term of this repository, whose slip (`slipOf`, as it will stand once
  * the quiz this one replaces is settled) is open, missed its branch's count of times running (1.10.0 G1, workedAfterFor
- * on the pick's code and words: `workedAfter` met in code, `workedPlainAfter` met in none) and not set right on a try
+ * on the pick's code, words and files: `workedAfter` met in code, `workedPlainAfter` met in none) and not set right on a try
  * again, with a base: what rungOf makes a worked example. Its base, followed through merges, is asked
  * when the index holds it, not known, not X, in no place of the quiz, gone over by no quiz since that slip was kept, with
  * no slip of its own open in the store (`open`: asked again as its own, soon), and no team term of any repository
@@ -6834,7 +6857,7 @@ export function baseFor(
     return (
       slip !== undefined &&
       slip.fixedAt === undefined &&
-      slip.times === workedAfterFor(one.code, one.blurb, { workedAfter, workedPlainAfter }) &&
+      slip.times === workedAfterFor(one.code, one.blurb, one.files, { workedAfter, workedPlainAfter }) &&
       slip.isRight !== true &&
       slip.base !== undefined
     )

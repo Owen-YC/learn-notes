@@ -366,7 +366,7 @@ describe('1.9.0: where a quiz asks the base concept (F5, baseFor · withBase · 
     // Code with no quote of its words, in jsx, or a library's: neither branch, no worked example and no base.
     for (const code of [{ file: 'src/a.js', text: 'console.log(1)' }, { file: 'src/A.jsx', text: quoted.text }, { file: 'src/a.js', text: `import _ from 'lodash'\n${quoted.text}` }]) {
       expect(find([{ ...inCode, code }, D, F])).toBeUndefined()
-      expect(workedAfterFor(code, inCode.blurb, BOTH)).toBe(Infinity)
+      expect(workedAfterFor(code, inCode.blurb, [], BOTH)).toBe(Infinity)
     }
     // The default counts are the constants' (off).
     expect(baseFor(index, () => slip(), [X, D, F], new Set([k('클로저')]), {}, {})).toBeUndefined()
