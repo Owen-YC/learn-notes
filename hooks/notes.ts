@@ -5081,9 +5081,11 @@ export function gatherPath(raw: string, home: string | undefined, root: string):
 export type QuizPick = RankedConcept & {
   /**
    * The learner's code the concept is asked about; `isLibrary` (1.9.0 F3) when the change it came from needs a library,
-   * a framework or a browser, read wider than these lines (isUnrunnableChange): set only where code never seen could ask it.
+   * a framework or a browser, read wider than these lines (isUnrunnableChange): set only where code never seen or code
+   * changed could ask it; `isImporting` (1.10.0 G2) when that change or its file brings code in by any line
+   * (isImportingChange): set only where code changed could. Neither is kept or sent.
    */
-  code?: { file: string; text: string; isLibrary?: true }
+  code?: { file: string; text: string; isLibrary?: true; isImporting?: true }
   noteId?: string
   slip?: Pick<LearnSlip, 'what' | 'question' | 'mine'>
   team?: true
@@ -5217,14 +5219,14 @@ export function extOf(file: string): string | undefined {
  * whose code a sample could run and needs nothing but its language (isNewAskable; 1.9.0: none that a library, a
  * framework or a browser runs, its lines by isUnrunnableCode and its change by `isLibrary`, asked as before); its code
  * changed from `changedStep` (RUNG_CHANGED_STEP) on (a concept filling the quiz before it is due too), from 1.10.0 (G2)
- * only for code that runs as alone (the same `isLibrary` and isUnrunnableCode) in a language its samples ran and whose
- * run settles one output (isChangedRunnable); else its own code. The quiz then keeps each rung only in a shape its
- * samples measured (ladderMixed).
+ * only for code that runs as alone (the same `isLibrary` and isUnrunnableCode) in a language its samples ran, with no
+ * line bringing code in and whose run settles one output (isChangedRunnable); else its own code. The quiz then keeps
+ * each rung only in a shape its samples measured (ladderMixed).
  */
 export function rungOf(
   one: LearnConcept,
   how: {
-    code?: { file: string; text?: string; isLibrary?: boolean }
+    code?: { file: string; text?: string; isLibrary?: boolean; isImporting?: boolean }
     slip?: Pick<LearnSlip, 'times' | 'isRight'>
     isAsking: boolean
     isTeam: boolean
@@ -5254,30 +5256,61 @@ export function isNewAskable(one: LearnConcept, file: string, isDue: boolean, ne
 /**
  * Code whose run does not settle one output (1.10.0 G2): the network, chance, the clock, the process, input, files or
  * the locale, so a question in it changed has no one answer to keep (on the device that measured it and on a learner's
- * Korean Windows alike).
+ * Korean Windows alike). Its 3/7 review narrowed it to its samples' (which used none of the process, the clock or the
+ * locale): any `process.`, the clock read by `Date()` or `new Date` with no parentheses, `navigator.` and `localeCompare(`.
  */
 const CHANGED_UNSETTLED: readonly RegExp[] = [
   /(?<![\w$.])fetch\s*\(/,
   /\bXMLHttpRequest\b/,
   /\bMath\.random\s*\(/,
-  /\bDate\.now\s*\(|\bnew\s+Date\s*\(/,
-  /\bprocess\.(?:env|argv|stdin)\b/,
+  /\bDate\.now\s*\(|\bnew\s+Date\b|(?<![\w$.])Date\s*\(/,
+  /\bprocess\.\w/,
   /['"\x60]node:/,
   /(?<![\w$.])(?:input|open)\s*\(/,
-  /(?<![\w$])crypto\.|\bperformance\.now\s*\(|\.toLocale\w*\s*\(|(?<![\w$.])Intl\./,
+  /(?<![\w$])crypto\.|\bperformance\.now\s*\(|\.toLocale\w*\s*\(|\.localeCompare\s*\(|(?<![\w$.])(?:Intl|navigator)\./,
 ]
 /** Python calls whose printed value differs run to run (an address, a salted hash): unsettled in a .py file alone. */
 const CHANGED_UNSETTLED_PY: readonly RegExp[] = [/(?<![\w$.])(?:id|hash)\s*\(/]
 
 /**
- * Whether a concept's code may be asked changed (1.10.0 G2): in a language its samples ran (RUNG_NEW_EXTS) and with
- * nothing in its lines that leaves the output unsettled (CHANGED_UNSETTLED). Its library check is rungOf's, as for
- * code never seen. A narrowing only: widening it takes a new sample (G2's decision rule 6).
+ * Whether a concept's code may be asked changed (1.10.0 G2): in a language its samples ran (RUNG_NEW_EXTS), with no
+ * line bringing code in, in its lines (CHANGED_IMPORTS) or in its change and file (`isImporting`, isImportingChange),
+ * as its samples had none, and nothing in its lines that leaves the output unsettled (CHANGED_UNSETTLED). Its library
+ * check is rungOf's, as for code never seen. A narrowing only: widening it takes a new sample (G2's decision rule 6).
  */
-export function isChangedRunnable(code: { file: string; text?: string }): boolean {
+export function isChangedRunnable(code: { file: string; text?: string; isImporting?: boolean }): boolean {
   const ext = extOf(code.file)
   const unsettled = ext === 'py' ? [...CHANGED_UNSETTLED, ...CHANGED_UNSETTLED_PY] : CHANGED_UNSETTLED
-  return ext !== undefined && RUNG_NEW_EXTS.includes(ext) && (code.text === undefined || !unsettled.some(pattern => pattern.test(code.text!)))
+  return (
+    ext !== undefined &&
+    RUNG_NEW_EXTS.includes(ext) &&
+    code.isImporting !== true &&
+    (code.text === undefined || ![...CHANGED_IMPORTS, ...unsettled].some(pattern => pattern.test(code.text!)))
+  )
+}
+
+/**
+ * A line that brings code in from elsewhere (1.10.0 G2, its 3/7 review): a Python `import` or `from … import` line of
+ * any module, its package's own (`from .models import`) and one with a comment after it too; a JavaScript or
+ * TypeScript `import` or `export … from` line, `import(` or `require(`, of a path too. Wider than LIBRARY_IMPORTS, which
+ * picks a library for code never seen and is as it was: code changed is asked only in code like its samples', none of
+ * which had such a line.
+ */
+const CHANGED_IMPORTS: readonly RegExp[] = [
+  /^[ \t]*import\b/m,
+  /^[ \t]*from[ \t]+[\w.]+[ \t]+import\b/m,
+  /^[ \t]*export\b[^\n]*\bfrom[ \t]*['"\x60]/m,
+  /(?<![\w$.])(?:import|require)\s*\(/,
+]
+
+/**
+ * True when the change a concept's code came from brings code in by any line (CHANGED_IMPORTS, 1.10.0 G2): every
+ * hunk's lines after the change, and for a file it did not make whole, the file as it stands now (`file`, read on this
+ * device as isUnrunnableChange reads it: nothing of it is shown or sent). Code changed is asked in none of it.
+ */
+export function isImportingChange(change: Pick<LearnChange, 'diff'>, file: string | undefined): boolean {
+  const after = parseDiff(change.diff).map(h => beforeAfter(h).after)
+  return [...after, file ?? ''].some(text => CHANGED_IMPORTS.some(pattern => pattern.test(text)))
 }
 
 /**

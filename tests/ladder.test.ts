@@ -18,6 +18,7 @@ import {
   extOf,
   isChangedAskable,
   isChangedRunnable,
+  isImportingChange,
   isNewAskable,
   isOldGraderOpen,
   isUnrunnableChange,
@@ -790,7 +791,7 @@ describe('1.10.0 (G2): 비슷한 코드 on (a harness\'s 2): a prediction in one
   })
 
   test('its scope: code that runs alone in js, mjs, cjs, ts or py whose run settles one output, from its step; any other, its own code', () => {
-    const rung = (file: string, text: string, step = 2, more: { isLibrary?: boolean } = {}) => rungOf(at(step), { ...plain, code: { file, text, ...more } }, Infinity, ON2)
+    const rung = (file: string, text: string, step = 2, more: { isLibrary?: boolean; isImporting?: boolean } = {}) => rungOf(at(step), { ...plain, code: { file, text, ...more } }, Infinity, ON2)
     const plainCode = 'let a = 1\nconsole.log(a + 1)'
     for (const file of ['a.js', 'a.mjs', 'a.cjs', 'src/a.ts', 'A.JS']) expect([file, rung(file, plainCode)]).toEqual([file, 'changed'])
     expect(rung('app/a.py', 'a = 1\nprint(a + 1)')).toBe('changed')
@@ -820,16 +821,46 @@ describe('1.10.0 (G2): 비슷한 코드 on (a harness\'s 2): a prediction in one
       ['a.js', "document.querySelector('#a')"],
       ['a.py', 'print(id(x))'],
       ['a.py', 'print(hash("a"))'],
+      // 3/7 검토: the input, the process, the clock and the locale its samples had none of, in forms the design's list missed.
+      ['a.js', "process.stdin.on('data', chunk => console.log(chunk))"],
+      ['a.js', 'for await (const line of process.stdin) console.log(line)'],
+      ['a.js', 'console.log(process.cwd())'],
+      ['a.js', 'console.log(Date())'],
+      ['a.js', 'const d = new Date\nconsole.log(d.getFullYear())'],
+      ['a.js', 'console.log(navigator.language)'],
+      ['a.js', 'names.sort((a, b) => a.localeCompare(b))'],
+      // 3/7 검토: any line bringing code in, as its samples had none: a path's, its package's own, one with a comment after it.
+      ['a.js', "import { sum } from './math'"],
+      ['a.js', "const { sum } = require('./math')"],
+      ['a.js', "export { sum } from './math'"],
+      ['a.js', "const math = await import('./math.js')"],
+      ['a.ts', "import type { Item } from './types'\nconst n: Item = 1"],
+      ['a.py', 'from .models import User\nprint(User.count())'],
+      ['a.py', 'from . import util\nprint(util.twice(3))'],
+      ['a.py', "import random  # don't seed it\nprint(random.randint(1, 6))"],
+      ['a.py', "from datetime import date  # 'today'"],
     ]
     for (const [file, text] of unsettled) expect([text, rung(file, text)]).toEqual([text, 'mine'])
     // A change read as needing a library (withCode's isLibrary): its own code.
     expect(rung('a.js', plainCode, 2, { isLibrary: true })).toBe('mine')
     // hash( only in Python (a salted hash): a function of the learner's in JavaScript is code like any other.
     expect(rung('a.js', 'const h = hash(pw)\nconsole.log(h)')).toBe('changed')
-    for (const text of ['const total = items.reduce((a, b) => a + b, 0)', 'const { id } = user', 'const fetched = 1', 'el.open = true', "import { sum } from './math'"]) {
+    for (const text of [
+      'const total = items.reduce((a, b) => a + b, 0)',
+      'const { id } = user',
+      'const fetched = 1',
+      'el.open = true',
+      'const imported = [1]\nconsole.log(imported.length)',
+      'const processed = [1]\nconsole.log(processed.length)',
+      'const days = updateDate(1)',
+      "const s = 'import this'\nconsole.log(s)",
+    ]) {
       expect([text, rung('a.js', text)]).toEqual([text, 'changed'])
     }
     expect(rung('a.py', 'valid = is_valid(x)\nprint(valid)')).toBe('changed')
+    expect(rung('a.py', 'from_date = 1\nprint(from_date)')).toBe('changed')
+    // A change or file read as bringing code in (withCode's isImporting, isImportingChange): its own code.
+    expect(rung('a.js', plainCode, 2, { isImporting: true })).toBe('mine')
     // Before its step: its own code; with it off: its own code at every step.
     expect(rung('a.js', plainCode, 1)).toBe('mine')
     expect(rungOf(at(5), { ...plain, code: { file: 'a.js', text: plainCode } }, Infinity, { changedStep: Infinity })).toBe('mine')
@@ -841,6 +872,31 @@ describe('1.10.0 (G2): 비슷한 코드 on (a harness\'s 2): a prediction in one
     expect(isChangedRunnable({ file: 'a.tsx' })).toBe(false)
     expect(isChangedRunnable({ file: 'a.py', text: 'print(hash(1))' })).toBe(false)
     expect(isChangedRunnable({ file: 'a.js', text: 'print(hash(1))' })).toBe(true)
+    expect(isChangedRunnable({ file: 'a.js', text: plainCode, isImporting: true })).toBe(false)
+  })
+
+  test('isImportingChange (3/7 검토): a change, or its file as it stands, with any line bringing code in; the plain code of its samples, none', () => {
+    const edit = (lines: string[]) => ({ diff: `@@ -1,${lines.length} +1,${lines.length} @@\n${lines.map(line => ` ${line}`).join('\n')}`, kind: 'update' as const })
+    const create = (lines: string[]) => ({ diff: `@@ -0,0 +1,${lines.length} @@\n${lines.map(line => `+${line}`).join('\n')}`, kind: 'create' as const })
+    const quoted = ['users = User.all()', 'print(len([u for u in users if u.active]))']
+    const pad = Array.from({ length: 12 }, (_, i) => `# line ${i + 1}`)
+    // The file read on this device (isUnrunnableChange's reading): an import far above the lines quoted.
+    for (const top of ['from .models import User', 'from . import util', "import random  # don't seed it", "from datetime import date  # 'today'", 'import math']) {
+      expect([top, isImportingChange(edit(quoted), [top, ...pad, ...quoted].join('\n'))]).toEqual([top, true])
+    }
+    for (const top of ["import { sum } from './math'", "const { sum } = require('./math')", "export * from './math'", "  import('./math.js').then(m => m.sum)"]) {
+      expect([top, isImportingChange(edit(['console.log(sum([1, 2]))']), [top, ...pad.map(line => line.replace('#', '//')), 'console.log(sum([1, 2]))'].join('\n'))]).toEqual([top, true])
+    }
+    // A file written whole: its change holds every line, the import too, however far above.
+    expect(isImportingChange(create(['import random', ...pad, ...quoted]), undefined)).toBe(true)
+    // Plain code, in its change and its file, or a file not read (isUnrunnableChange takes that to need a library).
+    expect(isImportingChange(edit(quoted), ['def active():', ...quoted].join('\n'))).toBe(false)
+    expect(isImportingChange(edit(['const imported = 1', 'console.log(imported)']), 'const imported = 1\nconsole.log(imported)')).toBe(false)
+    expect(isImportingChange(create(['from_date = 1', 'print(from_date)']), undefined)).toBe(false)
+    expect(isImportingChange(edit(quoted), undefined)).toBe(false)
+    // isUnrunnableChange, which picks the library for code never seen too, is as it was: a path's import is no library.
+    expect(isUnrunnableChange(edit(['console.log(sum([1, 2]))']), "import { sum } from './math'\nconsole.log(sum([1, 2]))")).toBe(false)
+    expect(isUnrunnableChange(edit(quoted), ['from .models import User', ...quoted].join('\n'))).toBe(false)
   })
 
   test('isChangedAskable, which reads a change wider: from its step, in a language its samples ran, due or not; never with it off', () => {

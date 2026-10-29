@@ -39,6 +39,7 @@ import {
   marksOf,
   bankQuestion,
   isChangedAskable,
+  isImportingChange,
   isNewAskable,
   isOldGraderOpen,
   isUnrunnableChange,
@@ -2582,7 +2583,8 @@ async function askModel(
  * code from it. That note is the latest that taught the concept. Its code is screened first (a note kept before
  * 1.6.0 may hold a .env), so a file left out is never quoted. A concept code never seen could ask (from `newStep`,
  * due, isNewAskable) or code changed could (from `changedStep`, isChangedAskable, 1.10.0 G2) has its change read wider
- * for a library, its file's imports too (isUnrunnableChange, 1.9.0 F3); with both rungs off, no file is read.
+ * for a library, its file's imports too (isUnrunnableChange, 1.9.0 F3); one code changed could, for any line bringing
+ * code in too (isImportingChange, its 3/7 review). With both rungs off, no file is read.
  */
 async function withCode(
   $: EngineInterface,
@@ -2608,9 +2610,12 @@ async function withCode(
     for (const change of changes) {
       const text = codeFor(change, one.blurb)
       if (text) {
-        const isAskable = isNewAskable(one, change.file, isDue(one, now), newStep) || isChangedAskable(one, change.file, changedStep)
-        const isLibrary = isAskable && isUnrunnableChange(change, change.kind === 'create' ? undefined : await importsText($, change.path))
-        code = { file: baseName(change.file), text, ...(isLibrary ? { isLibrary: true as const } : {}) }
+        const isChanged = isChangedAskable(one, change.file, changedStep)
+        const isAskable = isNewAskable(one, change.file, isDue(one, now), newStep) || isChanged
+        const file = isAskable && change.kind !== 'create' ? await importsText($, change.path) : undefined
+        const isLibrary = isAskable && isUnrunnableChange(change, file)
+        const isImporting = isChanged && isImportingChange(change, file)
+        code = { file: baseName(change.file), text, ...(isLibrary ? { isLibrary: true as const } : {}), ...(isImporting ? { isImporting: true as const } : {}) }
         break
       }
     }

@@ -14573,7 +14573,9 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
   })
 
   test('(교차 검토 2) with code never seen off, a quiz reads no stamps for it: the sessions read as often as before the quiz', async ($, on) => {
-    const { w, store } = await postsWorld($, on, () => {}, { rungNewStep: null, rungChangedStep: 2 })
+    // The file with no line bringing code in (1.10.0 G2's 3/7 review: one importing a path is asked in its own code), so
+    // the rung on is code changed.
+    const { w, store } = await postsWorld($, on, w => w.files.set(POSTS, 'export async function fetchPosts() {}\n'), { rungNewStep: null, rungChangedStep: 2 })
     const before = w.gets.filter(key => key === 'sessions').length
     w.answer = fresh(1)
     await learn($, '퀴즈 새로')
@@ -16696,6 +16698,55 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
     expect(prompt).not.toContain('비슷한 코드')
     expect(prompt).not.toContain('R1:')
     expect(calls[0]!.maxTokens).toBe(4600)
+  })
+
+  /** CART with a line bringing code in (`top`) far above the lines a note quotes: in no snippet, in the file alone. */
+  const cartUnder = (top: string) => `${top}\n${Array.from({ length: 12 }, (_, i) => `// line ${i + 1}`).join('\n')}\n${CART_AFTER}`
+
+  test('(3/7 검토) an edit to a file that imports by a path far above the lines quoted: each concept met in it in its own code, the file read; the one written whole with none, code changed', async ($, on) => {
+    const { calls, reads } = await quizWorld($, on, { rungChangedStep: 2 }, storeOf(), w => w.files.set(CART, cartUnder("import { sum } from './math'")))
+    const prompt = calls[0]!.prompt
+    expect(prompt.split(/^\d+\. /m).length - 1).toBe(3)
+    expect(prompt.split('   칸: 내 코드\n   학습자가 만든 코드 (cart.js)').length - 1).toBe(2)
+    expect(prompt).toContain('   칸: 비슷한 코드\n   학습자가 만든 코드 (evens.py)')
+    expect(prompt).not.toContain("from './math'")
+    expect(reads).toMatchObject({ cart: 2, evens: 0 })
+    expect(calls[0]!.maxTokens).toBe(4600)
+  })
+
+  test('(3/7 검토) a concept filling the quiz at its step, not due, met in an edit to a file that imports a library: read for it all the same, asked in its own code', async ($, on) => {
+    // REDUCE gone over a day ago (not due at its third step): it fills the quiz's third place.
+    const store = storeOf({}, { [REDUCE]: { reviewedAt: NOW - DAY } })
+    const { calls, reads } = await quizWorld($, on, { rungChangedStep: 2 }, store, w => w.files.set(CART, cartUnder("import { sum } from 'lodash'")))
+    const prompt = calls[0]!.prompt
+    expect(prompt.split(/^\d+\. /m).length - 1).toBe(3)
+    expect(prompt).toContain(`${REDUCE} — `)
+    expect([reads.cart, prompt.includes('   칸: 비슷한 코드\n   학습자가 만든 코드 (cart.js)')]).toEqual([2, false])
+    expect(prompt).toContain('   칸: 비슷한 코드\n   학습자가 만든 코드 (evens.py)')
+  })
+
+  test('(3/7 검토) a base concept found past the concepts the quiz looks through (1.9.0 F5): its file read for its imports as any pick\'s, asked in its own code right before the worked example', async ($, on) => {
+    // 클로저 missed twice running, its base REDUCE (met in CART, which imports a library) gone over three days ago, so
+    // not due; five concepts due before it fill the six the quiz looks through. ARROW at its second step, so read for
+    // nothing: CART is read for the base alone.
+    const X = '클로저'
+    const store = storeOf({ [ARROW]: 1 }, { [REDUCE]: { reviewedAt: NOW - 3 * DAY } })
+    const concepts = store.get('concepts') as Record<string, unknown>
+    for (const [i, name] of [X, '문자열', '조건문', '반복문', '객체', '함수'].entries()) {
+      concepts[conceptKey(name)] = { name, count: 1, firstAt: NOW - (40 + i) * DAY, lastAt: NOW - (40 + i) * DAY, blurb: `${name} 설명`, files: [], step: i === 0 ? 1 : 2, reviewedAt: NOW - (i === 0 ? 3 : 8) * DAY }
+    }
+    store.set('steps', ownSteps(concepts as never))
+    store.set('slips', { [conceptKey(X)]: { what: '함수가 끝나면 바깥 변수도 사라진다고 봄', type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * DAY, times: 2, base: conceptKey(REDUCE) } })
+    const { calls, reads } = await quizWorld($, on, { isBaseAsked: true, workedAfterTimes: 2, rungChangedStep: 2 }, store, w => w.files.set(CART, cartUnder("import { sum } from 'lodash'")))
+    const prompt = calls[0]!.prompt
+    const place = (name: string) => prompt.search(new RegExp(`^\\d+\\. ${name} — `, 'm'))
+    const base = place(REDUCE)
+    expect(base).toBeGreaterThan(-1)
+    expect(prompt.slice(base).split(/\n\d+\. /)[0]).toContain('   칸: 내 코드\n   학습자가 만든 코드 (cart.js)')
+    expect(place(X)).toBeGreaterThan(base)
+    expect(prompt).toContain('   칸: 풀이 보고 풀기')
+    expect(prompt).not.toContain('비슷한 코드')
+    expect(reads).toMatchObject({ cart: 1, evens: 0 })
   })
 
   /** The quiz this world sends with code changed on, then (the harness turned off, a minute on) off: each request. */
