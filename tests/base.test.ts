@@ -554,6 +554,30 @@ describe('1.10.0: 바탕 개념 (G4): each concept listed marked first, a base k
     expect(audit(undefined)).toEqual({})
   })
 
+  test('baseAuditOf (5/7 검토): a name that starts with a number (2차원 배열 · 3항 연산자) read by its name, never as that number; a number only where it stands alone (then a space, 번, a bracket, a stop, a colon, a mark, a dash, 은 · 는 · 이 · 가, or nothing)', () => {
+    const led = [
+      { key: 'c:2d', name: '2차원 배열' },
+      { key: 'c:loop', name: '반복문' },
+      { key: 'c:scope', name: '변수 범위' },
+    ]
+    expect(audit('2차원 배열 틀림, 반복문 바름, 변수 범위 없음', led)).toEqual({ 'c:2d': 'wrong', 'c:loop': 'right', 'c:scope': 'none' })
+    expect(audit('반복문 바름, 2차원 배열 없음, 변수 범위 틀림', led)).toEqual({ 'c:loop': 'right', 'c:2d': 'none', 'c:scope': 'wrong' })
+    expect(audit('(2차원 배열) 틀림 · **2차원배열**: 바름', led)).toEqual({ 'c:2d': 'wrong' })
+    expect(audit('3항 연산자 바름', [...led, { key: 'c:if3', name: '3항 연산자' }])).toEqual({ 'c:if3': 'right' })
+    // A name not listed that starts with a number is no number's mark either.
+    expect(audit('3항 연산자 바름, 10진수 틀림', led)).toEqual({})
+    // Numbers as before, with a mark, a dash, a particle or nothing right after them too.
+    expect(audit('1 틀림, 2: 바름, 3번 없음', led)).toEqual({ 'c:2d': 'wrong', 'c:loop': 'right', 'c:scope': 'none' })
+    expect(audit('1틀림, 2바름, 3-', led)).toEqual({ 'c:2d': 'wrong', 'c:loop': 'right', 'c:scope': 'none' })
+    expect(audit('1은 틀림, 2는 바름, 3이 없음', led)).toEqual({ 'c:2d': 'wrong', 'c:loop': 'right', 'c:scope': 'none' })
+    expect(audit('2 틀림 (2차원 배열과 헷갈림)', led)).toEqual({ 'c:loop': 'wrong' })
+    // auditedBase on it: the base its own mark says 틀림 kept (by number or by name), none for the one it says 바름.
+    const marks = '바탕 점검: 2차원 배열 틀림, 반복문 바름, 변수 범위 없음'
+    expect(auditedBase(parseCheck(reply(marks, '바탕: 1'), { base: true })!, led)).toBe('c:2d')
+    expect(auditedBase(parseCheck(reply(marks, '바탕: 2차원 배열'), { base: true })!, led)).toBe('c:2d')
+    expect(auditedBase(parseCheck(reply(marks, '바탕: 2'), { base: true })!, led)).toBeUndefined()
+  })
+
   test('auditedBase: the base its 바탕 line names, only where its own mark says 틀림; none for 바름 · 없음, no audit, one that does not read, another\'s 틀림, 바탕 0 or 바탕 근거 없음', () => {
     const read = (marks: string, said = '바탕: 3', why?: string) => auditedBase(parseCheck(reply(marks, said, why), { base: true })!, listed)
     expect(read('바탕 점검: 1 없음, 2 바름, 3 틀림')).toBe('c:c')

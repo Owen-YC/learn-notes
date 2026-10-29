@@ -15151,8 +15151,11 @@ describe('1.9.0: 바탕 개념, a base concept asked right before the worked exa
     concepts[conceptKey('fetcher')] = { name: 'fetcher', count: 2, firstAt: NOW - 20 * DAY, lastAt: NOW - 20 * DAY, blurb: '우리 팀의 API 호출 함수입니다', files: ['counter.js'], step: 0, reviewedAt: NOW - 3 * DAY }
     store.set('teamTerms', { [conceptKey('fetcher')]: [rootTag('/proj')] })
     store.set('slips', { ...slipsOf(store), [conceptKey('fetcher')]: { what: 'fetcher가 오류를 삼킨다고 봄', type: 'scope', question: '지난 문제', mine: '삼켜요', at: NOW - 2 * DAY, times: 1 } })
+    // Met in code by a note, with the code branch on (1.10.0 G4 asks bases only there, 5/7 검토): only its being a team
+    // term keeps the list off (the question's own team, and the store's mark aftersNow reads).
+    metInCode(store, 'fetcher')
     const w = world(on, 'ok', null, true, store)
-    w.harness = { isBaseAsked: true }
+    w.harness = { workedAfterTimes: 2, isBaseAsked: true }
     w.files.set('/proj/.claude/learn-notes.md', '# 팀\n\n## 용어\n- **fetcher**: 우리 팀의 API 호출 함수입니다\n')
     await start($)
     w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
@@ -17775,5 +17778,71 @@ describe('1.10.0: 바탕 개념 (G4) behind its switch: each concept marked firs
       [F, undefined],
     ])
     expect(both.off.prompt).toContain('   칸: 풀이 보고 풀기 (js로)')
+  })
+
+  /**
+   * `grade` (a grade of X: its request) in a world on `store` started with `harness` (and `team` as this repository's
+   * team file), then again on the store as it was before, with bases off and the rest as it was: each grade's request,
+   * the slip it left and the question as kept.
+   */
+  async function gradedThenOff(
+    $: Engine,
+    on: On,
+    store: Map<string, unknown>,
+    harness: Record<string, unknown>,
+    grade: (w: World) => Promise<{ said?: string; prompt: string; budget: number }>,
+    team?: string,
+  ) {
+    const was = JSON.stringify([...store])
+    const w = world(on, 'ok', null, true, store)
+    if (team !== undefined) w.files.set('/proj/.claude/learn-notes.md', team)
+    const kept = async () => ({ ...(await grade(w)), slip: slipsOf(store)[conceptKey(X)], item: quizItems(store)[0] })
+    w.harness = harness
+    await start($)
+    const first = await kept()
+    store.clear()
+    for (const [key, value] of JSON.parse(was) as [string, unknown][]) store.set(key, value)
+    w.harness = { ...harness, isBaseAsked: false }
+    await start($)
+    return { on: first, off: await kept() }
+  }
+
+  test('(5/7 검토) a concept this repository\'s team file names as a term, met in code, no team mark for it in the store, asked again in /learn 퀴즈 팀 (team: true): no list, 480, its request and reading those of bases off to the byte; no base kept', async ($, on) => {
+    const team = `# 팀\n\n## 용어\n- **${X}**: 우리 팀이 세는 함수에 쓰는 말\n`
+    const both = await gradedThenOff(
+      $,
+      on,
+      storeOf(),
+      ON,
+      async w => {
+        w.answer = plainQ(1)
+        await learn($, '퀴즈 팀')
+        expect(quizItems(w.store)[0]).toMatchObject({ name: X, team: true, isRetry: true })
+        // No team mark for it in the store: its code branch's count is found (aftersNow), so only the question's own team
+        // keeps the list off.
+        expect(w.store.get('teamTerms') ?? {}).toEqual({})
+        w.answer = graded()
+        await learn($, '퀴즈 1 전역에 남아요')
+        return { prompt: w.models.at(-1)!, budget: w.budgets.at(-1)! }
+      },
+      team,
+    )
+    asOff(both.on)
+    expect(both.on).toEqual(both.off)
+    expect(both.on.slip).toMatchObject({ times: 2 })
+    expect(both.on.slip).not.toHaveProperty('base')
+  })
+
+  test('(5/7 검토) no concept learned before it to list (met before every other), every other condition holding: no list, 480, its request and reading (바탕 lines in the reply too) those of bases off to the byte; no base kept', async ($, on) => {
+    const store = storeOf()
+    ;(store.get('concepts') as Record<string, { firstAt: number }>)[conceptKey(X)]!.firstAt = NOW - 100 * DAY
+    const both = await gradedThenOff($, on, store, ON, w => gradeX($, w))
+    asOff(both.on)
+    expect(both.on).toEqual(both.off)
+    // Read as 1.8.0 reads a reply it asked no base of: the 바탕 lines are the question's slip's words, no base, no mark kept.
+    expect(both.on.item?.slip).toContain(MARKS)
+    expect(both.on.slip).not.toHaveProperty('base')
+    expect(both.on.item).not.toHaveProperty('slipBase')
+    expect(both.on.said).toContain(`\n같은 곳을 또 헷갈렸습니다 · ${WORKED_NEXT}`)
   })
 })

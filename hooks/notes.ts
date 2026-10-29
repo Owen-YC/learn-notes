@@ -6887,8 +6887,10 @@ function auditMark(text: string): 'right' | 'wrong' | 'none' | undefined {
 /**
  * A grade's 바탕 점검 line read (1.10.0 G4): each listed concept's mark, by its number (1 the first; in brackets, with
  * 번, or a colon after it) or by its name (the longest of `candidates`' names the part holds, spaces and case aside; two
- * as long, none), one part per comma, semicolon, line, ' / ' or ' · '. The first mark after it counts (`3 틀림 (바르게
- * 말한 곳 없음)` is 틀림). A part that names no listed concept or says no mark, and a concept already read, are left out.
+ * as long, none), one part per comma, semicolon, line, ' / ' or ' · '. A number is one only where it stands alone (a
+ * space, 번, a bracket, a stop, a colon, a dash, a mark, 은 · 는 · 이 · 가 or nothing after it): `2차원 배열 틀림` is the
+ * mark of the concept named so, never of the second (5/7 검토). The first mark after it counts (`3 틀림 (바르게 말한 곳
+ * 없음)` is 틀림). A part that names no listed concept or says no mark, and a concept already read, are left out.
  */
 export function baseAuditOf(raw: string | undefined, candidates: readonly BaseCandidate[]): Map<string, 'right' | 'wrong' | 'none'> {
   const found = new Map<string, 'right' | 'wrong' | 'none'>()
@@ -6896,7 +6898,7 @@ export function baseAuditOf(raw: string | undefined, candidates: readonly BaseCa
   for (const part of raw.split(/[,，;；\n]|\s[/·]\s/)) {
     const bare = part.trim().replace(/^[-*•]\s*/, '')
     if (bare === '') continue
-    const numbered = /^[(（[]?\s*(\d+)\s*(?:번)?\s*[)）\].:：]?/.exec(bare)
+    const numbered = /^[(（[]?\s*(\d+)(?=\s|번|[)）\].:：\-–—]|[은는이가](?:\s|$)|틀|바르|바름|맞|없|잘못|해당|$)\s*(?:번)?\s*[)）\].:：]?/.exec(bare)
     let key: string | undefined
     let rest = bare
     if (numbered) {
