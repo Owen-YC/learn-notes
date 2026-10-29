@@ -17867,9 +17867,9 @@ describe('1.10.0: 처음 보는 코드 (G3) behind its switch: its prediction gr
   const itemsOf = (store: Map<string, unknown>) => (store.get('quiz') as { items: Record<string, unknown>[] }).items
   /**
    * NAME at its fifth step a month on, OTHER at its second; a quiz another window made (or this one, before): NAME's
-   * question in code never seen as a prediction (CHECK_ITEM_110), OTHER's in its own code.
+   * question in code never seen as a prediction (CHECK_ITEM_110; or of `kind`, none for null), OTHER's in its own code.
    */
-  const storeOf = () => {
+  const storeOf = (kind: 'predict' | 'why' | 'modify' | null = 'predict') => {
     const concepts = {
       [conceptKey(NAME)]: { name: NAME, count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${NAME} 설명`, files: ['a.ts'], step: 4, reviewedAt: NOW - 31 * DAY },
       [conceptKey(OTHER)]: { name: OTHER, count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${OTHER} 설명`, files: ['b.js'], step: 1, reviewedAt: NOW - 3 * DAY },
@@ -17878,16 +17878,16 @@ describe('1.10.0: 처음 보는 코드 (G3) behind its switch: its prediction gr
       at: NOW - 60_000,
       isRevealed: false,
       items: [
-        { key: conceptKey(NAME), name: NAME, question: CHECK_ITEM_110.question, answer: CHECK_ITEM_110.answer, hint: HINT, kind: 'predict', rung: 'new' },
+        { key: conceptKey(NAME), name: NAME, question: CHECK_ITEM_110.question, answer: CHECK_ITEM_110.answer, hint: HINT, ...(kind ? { kind } : {}), rung: 'new' },
         { key: conceptKey(OTHER), name: OTHER, question: OTHER_Q, answer: '2', hint: '중괄호 안을 보세요', kind: 'predict', rung: 'mine' },
       ],
     }
     return new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['quiz', quiz]])
   }
-  /** A window on storeOf() whose build runs with `harness` (none: as shipped), its model calls caught. */
-  async function opened($: Engine, on: On, harness: Record<string, unknown> | null) {
+  /** A window on storeOf(kind) whose build runs with `harness` (none: as shipped), its model calls caught. */
+  async function opened($: Engine, on: On, harness: Record<string, unknown> | null, kind: 'predict' | 'why' | 'modify' | null = 'predict') {
     const calls = routeCalls(on)
-    const store = storeOf()
+    const store = storeOf(kind)
     const w = world(on, 'ok', null, true, store)
     if (harness) w.harness = harness
     await start($)
@@ -17968,6 +17968,43 @@ describe('1.10.0: 처음 보는 코드 (G3) behind its switch: its prediction gr
       expect(itemsOf(store)[0]).toMatchObject({ result: 'wrong', verdict: 'partial', rung: 'new' })
       expect(conceptOf(store, NAME).step).toBe(3)
       expect(conceptOf(store, NAME).missedAt).toBeUndefined()
+    })
+  }
+
+  test('(6/7 검토) its first try graded 거의 by a window with it off (haiku as shipped), its try again in one with it on (a harness\'s 4): the measured try again\'s request to the byte, its first try said 틀림 and 거의 said once; 거의 again read 틀림: one step back', async ($, on) => {
+    const { w, store, calls } = await opened($, on, null)
+    w.answer = ['판정: 거의', `피드백: ${WRONG_FIRST.feedback}`, `되묻기: ${WRONG_FIRST.nudge}`].join('\n')
+    expect((await learn($, `퀴즈 1 ${MINE}`)).text).toContain('1번 △ 아직입니다 · 방향은 맞습니다 · ')
+    expect(calls.at(-1)!.prompt).toBe(CHECK_19['predict · none · none · beginner'])
+    expect(itemsOf(store)[0]!.firstTry).toMatchObject({ mine: MINE, verdict: 'partial', feedback: WRONG_FIRST.feedback, nudge: WRONG_FIRST.nudge })
+    // The same store in a window whose code never seen is on (another model's, or after /config): the try again.
+    w.harness = { rungNewStep: 4 }
+    await start($)
+    w.answer = '대조: 1줄 같음, 2줄 다름\n판정: 거의\n피드백: 둘째 줄이 아직 다릅니다.'
+    await learn($, `퀴즈 1 ${MINE}`)
+    expect(calls.at(-1)).toEqual({ model: 'haiku', effort: 'low', system: CHECK_SYSTEM, prompt: NEW_EXACT_110['wrong · beginner'], maxTokens: 480, timeoutMs: 60_000 })
+    expect(calls.at(-1)!.prompt.match(/거의/g)).toHaveLength(1)
+    expect(itemsOf(store)[0]).toMatchObject({ result: 'wrong', verdict: 'wrong', rung: 'new' })
+    expect(JSON.stringify(store.get('quiz'))).not.toContain('2줄 다름')
+    expect(conceptOf(store, NAME).step).toBe(3)
+    expect(conceptOf(store, NAME).missedAt).toBeUndefined()
+  })
+
+  // Only a prediction is graded line by line (isExactGrade): one in code never seen asked otherwise, in a window with it on, as 1.9.0.
+  for (const kind of ['why', 'modify', null] as const) {
+    test(`(6/7 검토) on (a harness's 4), a stored question in code never seen asked ${kind ?? 'with no kind'}: graded and read as 1.9.0 (fca5988) to the byte; 거의 kept as 거의, its head △; a 대조: line the feedback's`, async ($, on) => {
+      const { w, store, calls } = await opened($, on, { rungNewStep: 4 }, kind)
+      w.answer = ['판정: 거의', `피드백: ${WRONG_FIRST.feedback}`, '대조: 1줄 같음, 2줄 다름', `되묻기: ${WRONG_FIRST.nudge}`].join('\n')
+      expect((await learn($, `퀴즈 1 ${MINE}`)).text).toContain('1번 △ 아직입니다 · 방향은 맞습니다 · ')
+      expect(calls.at(-1)).toEqual({ model: 'haiku', effort: 'low', system: CHECK_SYSTEM, prompt: CHECK_19[`${kind ?? 'none'} · none · none · beginner`], maxTokens: 480, timeoutMs: 60_000 })
+      expect(itemsOf(store)[0]!.firstTry).toMatchObject({ mine: MINE, verdict: 'partial', feedback: `${WRONG_FIRST.feedback}\n대조: 1줄 같음, 2줄 다름`, nudge: WRONG_FIRST.nudge })
+      // Its try again: 1.9.0's, the first try 거의; 거의 again kept as 거의 (both tries short of right), one step back.
+      w.answer = '판정: 거의\n피드백: 둘째 줄이 아직 다릅니다.'
+      await learn($, `퀴즈 1 ${MINE}`)
+      expect(calls.at(-1)!.prompt).toBe(checkPrompt(itemsOf(store)[0] as never, MINE, 'beginner', { mine: MINE, verdict: 'partial', feedback: `${WRONG_FIRST.feedback}\n대조: 1줄 같음, 2줄 다름`, nudge: WRONG_FIRST.nudge }))
+      expect(calls.at(-1)!.prompt).toContain('\n첫 판정: 거의\n')
+      expect(itemsOf(store)[0]).toMatchObject({ result: 'wrong', verdict: 'partial', rung: 'new' })
+      expect(conceptOf(store, NAME).step).toBe(3)
     })
   }
 

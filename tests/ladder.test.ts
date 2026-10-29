@@ -1409,6 +1409,24 @@ describe('1.10.0 (G3): 처음 보는 코드 graded line by line (right or wrong)
     expect(hinted.endsWith(`\n${COMPARE}\n판정: (맞음 · 틀림 중 하나)\n피드백: (한두 문장)\n헷갈린 점: (틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)\n유형: (틀림일 때만 위 갈래 중 하나)`)).toBe(true)
   })
 
+  test('(6/7 검토) with `exact`, a try again whose first try a window with it off graded 거의 (D28): that first try said 틀림, as an exact grade reads 거의; the measured try again\'s bytes at every level, 거의 said once. Without it, 1.9.0\'s 첫 판정: 거의', () => {
+    // The first try of the measured try again (NEW_EXACT_110 `wrong`), but graded 거의: as a window with it off keeps it.
+    const partial = { ...CHECK_FIRSTS_110.wrong!, verdict: 'partial' as const }
+    for (const level of ['beginner', 'intermediate', 'advanced'] as const) {
+      expect(checkPrompt(NEW, CHECK_MINE_110, level, partial, undefined, { exact: true })).toBe(NEW_EXACT_110[`wrong · ${level}`]!)
+    }
+    for (const past of Object.values(CHECK_PASTS_110)) {
+      const again = checkPrompt(NEW, CHECK_MINE_110, 'beginner', CHECK_FIRSTS_110.partial, past, { exact: true })
+      expect(again).toContain('\n첫 판정: 틀림\n')
+      expect(again).not.toContain('첫 판정: 거의')
+      expect(again.match(/거의/g)).toHaveLength(1)
+    }
+    // A window with it off (no `exact`), or a question it does not take: the first try's 거의 said as 1.9.0 says it.
+    expect(checkPrompt(NEW, CHECK_MINE_110, 'beginner', CHECK_FIRSTS_110.partial, undefined)).toBe(CHECK_19['predict · partial · none · beginner']!)
+    expect(CHECK_19['predict · partial · none · beginner']).toContain('\n첫 판정: 거의\n')
+    expect(checkPrompt(itemOf('why', 'new'), CHECK_MINE_110, 'beginner', CHECK_FIRSTS_110.partial, undefined, { exact: true })).toBe(CHECK_19['why · partial · none · beginner']!)
+  })
+
   test('isExactGrade takes a prediction in code never seen alone; a team-rule practice is graded as 1.9.0 whatever its item says', () => {
     expect(isExactGrade({ rung: 'new', kind: 'predict' })).toBe(true)
     for (const kind of ['why', 'modify', undefined] as const) expect(isExactGrade({ rung: 'new', ...(kind ? { kind } : {}) })).toBe(false)

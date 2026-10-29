@@ -3195,7 +3195,8 @@ async function gradeTyped(
   const bases = isBaseAsked ? baseCandidates(await read($, concepts), resolveKey(map, item.key), await storedTeamTerms($, map)) : []
   // A question in code never seen asked as a prediction is graded line by line, right or wrong only (1.10.0 G3,
   // NEW_CHECK), by a window whose code never seen is on alone (this model's at level beginner, the route; D28): any other
-  // window (another model's, a model or level no sample measured) grades it as 1.9.0 did, 거의 kept as 거의.
+  // window (another model's, a model or level no sample measured) grades it as 1.9.0 did, 거의 kept as 거의. A try again
+  // here of a first try such a window graded 거의 is graded line by line, that first try said 틀림 (checkPrompt).
   const isExact = build.rungNewStep !== Infinity && isExactGrade(item)
   const prompt = checkPrompt(item, mine, cfg.level, first, past ? { what: past.what, mine: past.mine } : undefined, {
     ...(bases.length > 0 ? { bases: bases.map(one => one.name) } : {}),

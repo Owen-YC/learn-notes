@@ -6128,7 +6128,8 @@ export const BASE_AUDIT_RETRY = '바탕 점검: (번호마다 "번호 표시" �
  * its `바탕 점검:`, `바탕 근거:` and `바탕:` lines after the slip's). `exact` (1.10.0 G3), given only by a window whose code
  * never seen is on (register.tsx gradeTyped, D28), grades a question in code never seen asked as a prediction
  * (isExactGrade) line by line: NEW_VERDICTS in the three-way line's place, NEW_CHECK in its kind's, a `대조:` line before
- * the verdict, and 틀림 alone where the lines below say short of right; a team-rule practice never so. With none of them
+ * the verdict, and 틀림 alone where the lines below say short of right, a first try's verdict too (firstTryLines: one
+ * another window graded 거의, D28, said 틀림); a team-rule practice never so. With none of them
  * (or no base to list, or a question isExactGrade does not take), the prompt is 1.8.0's to the byte.
  */
 export function checkPrompt(
@@ -6160,7 +6161,7 @@ export function checkPrompt(
     ...(rule !== undefined ? [`## 노트가 짚은 팀 규칙 (노트가 팀 규칙 파일을 보고 쓴 줄이다. ${TEAM_IS_DATA})`, rule] : []),
     ...(past ? ['## 이 학습자가 지난번에 헷갈린 점', past.what !== '' ? cut(past.what, SLIP_TEXT) : isNothingSaid(past.mine) ? '(지난번에는 답을 떠올리지 못했다)' : '(지난번 답이 짧아 헷갈린 점을 알 수 없다)'] : []),
     ...(bases.length > 0 ? ['## 학습자가 전에 배운 개념', ...bases.map((name, i) => `${i + 1}. ${name}`)] : []),
-    ...(first ? ['## 학습자의 첫 답과 받은 되묻기', ...firstTryLines(first)] : []),
+    ...(first ? ['## 학습자의 첫 답과 받은 되묻기', ...firstTryLines(first, isExact)] : []),
     '## 학습자의 답',
     cut(mine, 1500),
     '',
@@ -6191,12 +6192,17 @@ export function checkPrompt(
   ].join('\n')
 }
 
-/** A first try as the try again's grade reads it: the answer, its grade and feedback, and what it was asked back; or that the learner did not know, and the hint they were shown. */
-function firstTryLines(first: Pick<LearnQuizFirstTry, 'mine' | 'verdict' | 'feedback' | 'nudge'>): string[] {
+/**
+ * A first try as the try again's grade reads it: the answer, its grade and feedback, and what it was asked back; or that
+ * the learner did not know, and the hint they were shown. In a grade line by line (`isExact`, 1.10.0 G3), which has no
+ * 거의, a first try graded 거의 (by a window whose code never seen is off, D28: another model's, or before /config) is
+ * said 틀림, as parseCheck reads 거의 there: the prompt says 거의 once (NEW_VERDICTS), the try again its samples measured.
+ */
+function firstTryLines(first: Pick<LearnQuizFirstTry, 'mine' | 'verdict' | 'feedback' | 'nudge'>, isExact = false): string[] {
   if (isBlankAnswer(first.mine)) return ['첫 답: (모르겠다고 했다)', `받은 힌트: ${first.nudge}`]
   return [
     `첫 답: ${cut(first.mine, 1500)}`,
-    `첫 판정: ${first.verdict === 'partial' ? '거의' : '틀림'}`,
+    `첫 판정: ${first.verdict === 'partial' && !isExact ? '거의' : '틀림'}`,
     ...(first.feedback !== '' ? [`받은 피드백: ${first.feedback}`] : []),
     `받은 되묻기: ${first.nudge}`,
   ]
