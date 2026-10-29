@@ -12,6 +12,7 @@ import {
   SWITCH_NAMES,
   SWITCHES_OFF,
   WORKED_AFTER_TIMES,
+  WORKED_PLAIN_AFTER_TIMES,
   diagText,
   harnessStepOf,
   hasOn,
@@ -28,7 +29,7 @@ import {
 } from '../hooks/notes'
 
 /** A value that turns each switch on, as a measured route may. */
-const ON: Readonly<Switches> = { isRuleDrill: true, isRuleWide: true, rungNewStep: 4, rungChangedStep: 2, workedAfterTimes: 2, isBaseAsked: true, isThinkAsked: true }
+const ON: Readonly<Switches> = { isRuleDrill: true, isRuleWide: true, rungNewStep: 4, rungChangedStep: 2, workedAfterTimes: 2, workedPlainAfterTimes: 2, isBaseAsked: true, isThinkAsked: true }
 /** The on values each feature's design may ship for a model (D1, the designs' decision rules). */
 const ON_VALUES: Readonly<Record<keyof Switches, readonly (boolean | number)[]>> = {
   isRuleDrill: [true],
@@ -36,6 +37,7 @@ const ON_VALUES: Readonly<Record<keyof Switches, readonly (boolean | number)[]>>
   rungNewStep: [4],
   rungChangedStep: [2],
   workedAfterTimes: [2],
+  workedPlainAfterTimes: [2],
   isBaseAsked: [true],
   isThinkAsked: [true],
 }
@@ -44,8 +46,8 @@ const ON_VALUES: Readonly<Record<keyof Switches, readonly (boolean | number)[]>>
  * docs/qa/견본.md ('모델별 결정') turns that model's cell on, in the commit after it, this table with it.
  */
 const SHIPPED: Readonly<Record<MeasuredModel, Switches>> = {
-  haiku: { isRuleDrill: false, isRuleWide: true, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false },
-  sonnet: { isRuleDrill: false, isRuleWide: true, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false },
+  haiku: { isRuleDrill: false, isRuleWide: true, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, workedPlainAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false },
+  sonnet: { isRuleDrill: false, isRuleWide: true, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, workedPlainAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false },
 }
 /** Two tables a route may run, one model's row unlike the other's. */
 const SPLIT: Readonly<Record<MeasuredModel, Readonly<Switches>>> = {
@@ -72,8 +74,8 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
   })
 
   test('SWITCHES_OFF is 1.9.0\'s constants, every one off and frozen; the constants stay off', () => {
-    expect(SWITCHES_OFF).toEqual({ isRuleDrill: false, isRuleWide: false, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false })
-    expect([IS_RULE_DRILL, RUNG_NEW_STEP, RUNG_CHANGED_STEP, WORKED_AFTER_TIMES, IS_BASE_ASKED, IS_THINK_ASKED]).toEqual([false, Infinity, Infinity, Infinity, false, false])
+    expect(SWITCHES_OFF).toEqual({ isRuleDrill: false, isRuleWide: false, rungNewStep: Infinity, rungChangedStep: Infinity, workedAfterTimes: Infinity, workedPlainAfterTimes: Infinity, isBaseAsked: false, isThinkAsked: false })
+    expect([IS_RULE_DRILL, RUNG_NEW_STEP, RUNG_CHANGED_STEP, WORKED_AFTER_TIMES, WORKED_PLAIN_AFTER_TIMES, IS_BASE_ASKED, IS_THINK_ASKED]).toEqual([false, Infinity, Infinity, Infinity, Infinity, false, false])
     expect(Object.isFrozen(SWITCHES_OFF)).toBe(true)
     expect(Object.isFrozen(MODEL_SWITCHES)).toBe(true)
     expect(Object.isFrozen(MODEL_SWITCHES.haiku)).toBe(true)
@@ -93,7 +95,7 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
 
   test('SWITCH_KINDS, SWITCHES_OFF, FEATURE_NAMES, SWITCH_NAMES and each row hold the same keys; each off value of its kind', () => {
     const keys = switchKeys()
-    expect(keys).toEqual(['isRuleDrill', 'isRuleWide', 'rungNewStep', 'rungChangedStep', 'workedAfterTimes', 'isBaseAsked', 'isThinkAsked'])
+    expect(keys).toEqual(['isRuleDrill', 'isRuleWide', 'rungNewStep', 'rungChangedStep', 'workedAfterTimes', 'workedPlainAfterTimes', 'isBaseAsked', 'isThinkAsked'])
     for (const table of [SWITCHES_OFF, FEATURE_NAMES, SWITCH_NAMES, MODEL_SWITCHES.haiku, MODEL_SWITCHES.sonnet, ON, ON_VALUES]) expect(Object.keys(table)).toEqual(keys)
     for (const key of keys) {
       if (SWITCH_KINDS[key] === 'flag') expect(SWITCHES_OFF[key]).toBe(false)
@@ -119,6 +121,25 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
     expect([FEATURE_NAMES.isRuleWide, SWITCH_NAMES.isRuleWide]).toEqual(['팀 규칙 표지 넓힘', '팀 규칙 표지 넓힘'])
   })
 
+  test('a worked example\'s two branches are two switches (1.10.0 G1, D18): workedPlainAfterTimes a step right after workedAfterTimes, each named for its branch, both off in every shipped row', () => {
+    expect(switchKeys().indexOf('workedPlainAfterTimes')).toBe(switchKeys().indexOf('workedAfterTimes') + 1)
+    expect([SWITCH_KINDS.workedAfterTimes, SWITCH_KINDS.workedPlainAfterTimes]).toEqual(['step', 'step'])
+    expect([FEATURE_NAMES.workedAfterTimes, FEATURE_NAMES.workedPlainAfterTimes]).toEqual(['풀이 보고 풀기(코드)', '풀이 보고 풀기(코드 없는 개념)'])
+    expect([SWITCH_NAMES.workedAfterTimes, SWITCH_NAMES.workedPlainAfterTimes]).toEqual(['풀이 보고 풀기 오답 수 (코드 개념)', '풀이 보고 풀기 오답 수 (코드 없는 개념)'])
+    expect([WORKED_AFTER_TIMES, WORKED_PLAIN_AFTER_TIMES, SWITCHES_OFF.workedPlainAfterTimes]).toEqual([Infinity, Infinity, Infinity])
+    for (const model of ['haiku', 'sonnet'] as const) expect([MODEL_SWITCHES[model].workedAfterTimes, MODEL_SWITCHES[model].workedPlainAfterTimes]).toEqual([Infinity, Infinity])
+    // Each branch on alone is its own feature; a harness's flat key turns one, never the other.
+    expect(routeOn({ ...SWITCHES_OFF, workedPlainAfterTimes: 2 })).toEqual(['풀이 보고 풀기(코드 없는 개념)'])
+    expect(overlaySwitches(SWITCHES_OFF, { workedAfterTimes: 2 })).toEqual({ ...SWITCHES_OFF, workedAfterTimes: 2 })
+    expect(overlaySwitches(SWITCHES_OFF, { workedPlainAfterTimes: 2 })).toEqual({ ...SWITCHES_OFF, workedPlainAfterTimes: 2 })
+    expect(switchedNames({ ...SWITCHES_OFF, workedAfterTimes: 2, workedPlainAfterTimes: 3 }, SWITCHES_OFF)).toEqual(['풀이 보고 풀기 오답 수 (코드 개념) 2', '풀이 보고 풀기 오답 수 (코드 없는 개념) 3'])
+    // Any other model string or level: both off.
+    for (const [model, level] of [['Haiku', 'beginner'], [' sonnet', 'beginner'], ['opus', 'beginner'], ['', 'beginner'], ['__proto__', 'beginner'], ['haiku', 'intermediate'], ['sonnet', 'advanced']]) {
+      const s = switchesFor(model!, level!, { haiku: ON, sonnet: ON })
+      expect([s.workedAfterTimes, s.workedPlainAfterTimes]).toEqual([Infinity, Infinity])
+    }
+  })
+
   test('hasOn and routeOn read every key of the table: each switch on alone is named, in the table\'s order, once', () => {
     expect(hasOn(SWITCHES_OFF)).toBe(false)
     expect(routeOn(SWITCHES_OFF)).toEqual([])
@@ -127,7 +148,7 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
       expect(hasOn(one)).toBe(true)
       expect(routeOn(one)).toEqual([FEATURE_NAMES[key]])
     }
-    expect(routeOn(ON)).toEqual(['팀 규칙 연습', '팀 규칙 표지 넓힘', '처음 보는 코드', '비슷한 코드', '풀이 보고 풀기', '바탕 개념', '생각해 보기'])
+    expect(routeOn(ON)).toEqual(['팀 규칙 연습', '팀 규칙 표지 넓힘', '처음 보는 코드', '비슷한 코드', '풀이 보고 풀기(코드)', '풀이 보고 풀기(코드 없는 개념)', '바탕 개념', '생각해 보기'])
     // A step on at 0 is on; a flag's off value is false alone.
     expect(hasOn({ ...SWITCHES_OFF, rungChangedStep: 0 })).toBe(true)
   })
@@ -157,9 +178,9 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
     // A route that turns two on, run as it is: nothing named.
     expect(switchedNames(SPLIT.sonnet, SPLIT.sonnet)).toEqual([])
     // A harness turning one of them off and another on.
-    expect(switchedNames({ ...SPLIT.sonnet, workedAfterTimes: Infinity, rungChangedStep: 2 }, SPLIT.sonnet)).toEqual(['비슷한 코드 단계 2', '풀이 보고 풀기 오답 수 끔'])
-    expect(switchedNames(ON, SWITCHES_OFF)).toEqual(['팀 규칙 연습 켬', '팀 규칙 표지 넓힘 켬', '처음 보는 코드 단계 4', '비슷한 코드 단계 2', '풀이 보고 풀기 오답 수 2', '바탕 개념 켬', '생각해 보기 켬'])
-    expect(switchedNames(SWITCHES_OFF, ON)).toEqual(['팀 규칙 연습 끔', '팀 규칙 표지 넓힘 끔', '처음 보는 코드 단계 끔', '비슷한 코드 단계 끔', '풀이 보고 풀기 오답 수 끔', '바탕 개념 끔', '생각해 보기 끔'])
+    expect(switchedNames({ ...SPLIT.sonnet, workedAfterTimes: Infinity, rungChangedStep: 2 }, SPLIT.sonnet)).toEqual(['비슷한 코드 단계 2', '풀이 보고 풀기 오답 수 (코드 개념) 끔'])
+    expect(switchedNames(ON, SWITCHES_OFF)).toEqual(['팀 규칙 연습 켬', '팀 규칙 표지 넓힘 켬', '처음 보는 코드 단계 4', '비슷한 코드 단계 2', '풀이 보고 풀기 오답 수 (코드 개념) 2', '풀이 보고 풀기 오답 수 (코드 없는 개념) 2', '바탕 개념 켬', '생각해 보기 켬'])
+    expect(switchedNames(SWITCHES_OFF, ON)).toEqual(['팀 규칙 연습 끔', '팀 규칙 표지 넓힘 끔', '처음 보는 코드 단계 끔', '비슷한 코드 단계 끔', '풀이 보고 풀기 오답 수 (코드 개념) 끔', '풀이 보고 풀기 오답 수 (코드 없는 개념) 끔', '바탕 개념 끔', '생각해 보기 끔'])
   })
 
   test('routeOf: none while no row turns anything on, whatever the model, level or alias; else unmeasured, level, the alias, then the features on', () => {
@@ -173,7 +194,7 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
     expect(routeOf('haiku', 'beginner', 'kept', MODEL_SWITCHES.haiku)).toEqual({ on: ['팀 규칙 표지 넓힘'] })
     expect(routeOf('sonnet', 'beginner', 'kept', MODEL_SWITCHES.sonnet)).toEqual({ on: ['팀 규칙 표지 넓힘'] })
     expect(routeOf('haiku', 'intermediate', 'kept', SWITCHES_OFF)).toBe('level')
-    expect(routeOf('sonnet', 'beginner', 'kept', SPLIT.sonnet, SPLIT)).toEqual({ on: ['풀이 보고 풀기', '바탕 개념'] })
+    expect(routeOf('sonnet', 'beginner', 'kept', SPLIT.sonnet, SPLIT)).toEqual({ on: ['풀이 보고 풀기(코드)', '바탕 개념'] })
     expect(routeOf('haiku', 'beginner', 'kept', SPLIT.haiku, SPLIT)).toEqual({ on: ['생각해 보기'] })
     // One row on is enough to name every window's route, the other model's none.
     const one = { haiku: SWITCHES_OFF, sonnet: SPLIT.sonnet }

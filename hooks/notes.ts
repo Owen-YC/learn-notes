@@ -5111,7 +5111,7 @@ export const KIND_LABEL: Readonly<Record<QuizKind, string>> = { predict: '예측
  * Which code a quiz question asks in (1.8.0, the question ladder), set by the concept's review step and never chosen
  * by the learner: its own code as the note met it, that code with one value, condition or order changed so the answer
  * remembered no longer fits (off from 1.9.0), code never seen (off in 1.8.0 and 1.9.0), or a worked example first once
- * it was missed twice running (off from 1.9.0, 교차 검토 2).
+ * it was missed twice running (off from 1.9.0, 교차 검토 2; 1.10.0 G1 asks it anew by branch, workedBranch).
  */
 export type QuizRung = NonNullable<LearnQuizItem['rung']>
 
@@ -5144,14 +5144,26 @@ export const RUNG_NEW_STEP = Infinity
  * register.tsx's QUIZ_TRACE_TOKENS since). Measured once more with that room (docs/qa/견본.md, '출력 상한을 올린 뒤 다시
  * 잼'), the one in code fell short too, counted the way its bar was set: a question whose code named a class it never
  * defined, run as shown, did not print its answer, and A was right on 18 of 20 against 19. A concept missed twice
- * running is asked again as 1.7 did (다시 도전) until a sample shows it right.
+ * running is asked again as 1.7 did (다시 도전) until a sample shows it right. 1.10.0 (G1) asks it anew, in two
+ * branches each with its own switch (workedBranch, workedAfterFor): this one for a concept met in code that runs alone
+ * in a language its samples ran and holds the line its words quote ('code'), WORKED_PLAIN_AFTER_TIMES for one met in no
+ * code ('plain'); the quiz is told to ask for a result the example does not give (WORKED_TURN_ASK, its plan on a P
+ * line dropped by parseQuiz) and, by branch, to write code that runs as shown (WORKED_CODE_ASK) or steps the tool's
+ * defaults give (WORKED_PLAIN_ASK). Still off here, on only in a model's row of MODEL_SWITCHES.
  */
 export const WORKED_AFTER_TIMES = Infinity
 /**
- * The ladder's switches a load runs with (1.9.0): each its constant above, which a release sets by its samples
- * (docs/qa/견본.md); a test harness may run a load with others (register.tsx `build`).
+ * Misses running after which the next review quiz shows a worked example first for a concept met in no code (1.10.0
+ * G1, workedBranch 'plain'), as WORKED_AFTER_TIMES is for one met in code: measured on its own samples and prompt, so
+ * on or off apart from it. Off here (Infinity); on only in a model's row of MODEL_SWITCHES.
  */
-export type LadderSteps = { changedStep: number; workedAfter: number }
+export const WORKED_PLAIN_AFTER_TIMES = Infinity
+/**
+ * The ladder's switches a load runs with (1.9.0): each its constant above, which a release sets by its samples
+ * (docs/qa/견본.md); a test harness may run a load with others (register.tsx `build`). `workedAfter` is for a concept
+ * met in code, `workedPlainAfter` for one met in none (1.10.0 G1, workedAfterFor).
+ */
+export type LadderSteps = { changedStep: number; workedAfter: number; workedPlainAfter: number }
 /** The languages a question in code never seen may be written in: the ones its samples could run. */
 const RUNG_NEW_EXTS: readonly string[] = ['js', 'mjs', 'cjs', 'ts', 'py']
 
@@ -5175,14 +5187,35 @@ const RUNG_ASK: readonly [QuizRung, string][] = [
 ]
 
 /**
- * Said after the worked example's line (RUNG_ASK) when the quiz has one of a concept no code met, its rung with no
- * language (교차 검토 2). Measured at effort low like the plugin (docs/qa/견본.md), such examples now and then lost their
- * marks or the example itself, showed another concept's code, stated a result the example's own lines or the tool's
- * defaults do not give, or asked for the very line or count the example showed. A worked example in code keeps
- * 1.8.0's words alone: its sample passed as they were.
+ * Said after RUNG_ASK's lines, before RUNG_WRITES, in a quiz with a worked example of either branch (1.10.0 G1): ask
+ * for a result the principle gives on new values, never a pick of two, the example's own result or one the question
+ * states, and plan it on a P line first (WORKED_PLAN_LINE), the example's result → this answer. Of the misses its last
+ * sample had (1.9.0 마무리), 10 of 14 asked again for the example's result; 1.8.0's "같지 않게" did not stop them.
  */
-const WORKED_PLAIN_ASK =
-  '칸 뒤에 언어가 없는 풀이 보고 풀기(코드 없이 만난 개념)도 문제를 "풀이:"로 시작하고 "이제 풀어 보세요:" 뒤에 묻는다. 풀이와 문제 모두 그 개념이 쓰이는 명령·주소·설정·상황으로 쓰고, 다른 개념의 예로 바꾸지 않는다. 풀이의 결과는 예의 모든 줄을 차례로 따라가, 그 도구의 기본 설정에서 실제로 나오는 것만 쓴다. 문제의 답은 풀이 결과의 어느 줄이나 개수와도 같지 않게 한다.'
+export const WORKED_TURN_ASK =
+  '풀이 보고 풀기의 문제는 원리를 새 값에 적용해야 나오는 값·출력·개수·목록이나 바꾼 코드를 묻는다. 둘 중 하나를 고르는 문제(예·아니요, 참·거짓, 오류·통과, 된다·안 된다, 바로·나중, 바뀜·그대로)와 풀이와 같은 결과(같은 값·같은 출력·같은 오류)가 답인 문제, 답이 문제 글에 이미 적힌 문제는 내지 않는다. 그 문제의 Q 줄 바로 앞에 P 줄을 두어 풀이의 결과와 이 문제의 답을 "→"로 이어 한 줄로 먼저 적고, 둘이 같으면 문제를 바꾼다. P 줄은 학습자에게 보이지 않는다.'
+
+/**
+ * Said after WORKED_TURN_ASK when the quiz has a worked example with a language (`칸: 풀이 보고 풀기 (js로)`, the
+ * branch 'code', 1.10.0 G1): its example and its question each runs as shown, every name it uses defined in its own
+ * block, no line asked by its number (a flash card shows the question alone, bankQuestion).
+ */
+export const WORKED_CODE_ASK =
+  '칸 뒤에 언어가 붙은 풀이 보고 풀기는 풀이의 코드와 문제의 코드를 저마다 따로, 보인 그대로 돌려도 적은 결과가 나오게 쓴다. 코드가 쓰는 클래스(부모 클래스까지)·함수·변수·타입은 모두 그 코드 블록 안에서 정의하고, 학습자 코드나 지난번 문제, 풀이에만 있는 이름을 쓰지 않는다. 정의를 넣느라 풀이의 예가 4줄을 넘어도 된다. 몇 번째 줄인지는 묻지도 답하지도 않고, 줄을 가리킬 때는 그 줄의 코드를 백틱으로 옮겨 쓴다.'
+
+/**
+ * Said after WORKED_TURN_ASK (and WORKED_CODE_ASK) when the quiz has a worked example of a concept no code met, its
+ * rung with no language (the branch 'plain'): 1.9.0's line of the name (교차 검토 2, never sent) in the words 1.10.0
+ * (G1) measures, which say the steps the result rests on and the lines a shell prints of itself.
+ */
+export const WORKED_PLAIN_ASK =
+  '칸 뒤에 언어가 없는 풀이 보고 풀기(코드 없이 만난 개념)도 문제를 "풀이:"로 시작하고 "이제 풀어 보세요:" 뒤에 묻는다. 풀이와 문제 모두 그 개념이 쓰이는 명령·주소·설정·상황으로 쓰고, 다른 개념의 예로 바꾸지 않는다. 결과는 빈 폴더에서 보인 명령을 차례로 그대로 쳤을 때 그 도구의 기본 설정에서 실제로 나오는 것만 쓴다. 그 전에 있어야 하는 파일·폴더·저장소·커밋·원격·설정은 명령으로 보이거나 글로 밝힌다. 화면의 줄이나 개수를 물을 때는 무엇을 세는지 밝히고, 셸이 스스로 찍는 줄(작업 번호, 확인 물음)도 빼지 않는다.'
+
+/**
+ * The format's plan line (1.10.0 G1, P{n}), between `T1:` and `Q1:` in a quiz with a worked example: read as a marker
+ * of its own and dropped (parseQuiz) wherever it stands, so the learner never sees it and the store never keeps it.
+ */
+export const WORKED_PLAN_LINE = 'P1: (칸이 "풀이 보고 풀기"인 문제만: 풀이의 결과 → 이 문제의 답)'
 
 /**
  * The format's line for the trace a question in code never seen writes before its answer (1.9.0 F3, R{n}): read as a
@@ -5213,8 +5246,10 @@ export function extOf(file: string): string | undefined {
 
 /**
  * Which code a picked concept is asked in, the first that fits: none for a team term of this repository (asked by the
- * team's words and lines, as in 1.7); a worked example once its open slip, asked again, was missed `workedAfter`
- * (WORKED_AFTER_TIMES) times running and not set right on the try again (`isRight`); none for any other open slip
+ * team's words and lines, as in 1.7); a worked example once its open slip, asked again, was missed as many times
+ * running as its branch's switch says (workedAfterFor, 1.10.0 G1: `workedAfter` for a concept met in code that runs
+ * alone and holds its quote, `workedPlainAfter` for one met in none, never for any other) and not set right on the try
+ * again (`isRight`); none for any other open slip
  * (다시 도전, as in 1.7) or a concept with no code (asked why); code never seen from `newStep` on, for a concept due
  * whose code a sample could run and needs nothing but its language (isNewAskable; 1.9.0: none that a library, a
  * framework or a browser runs, its lines by isUnrunnableCode and its change by `isLibrary`, asked as before); its code
@@ -5233,14 +5268,69 @@ export function rungOf(
     isDue: boolean
   },
   newStep = RUNG_NEW_STEP,
-  { changedStep = RUNG_CHANGED_STEP, workedAfter = WORKED_AFTER_TIMES }: Partial<LadderSteps> = {},
+  { changedStep = RUNG_CHANGED_STEP, workedAfter = WORKED_AFTER_TIMES, workedPlainAfter = WORKED_PLAIN_AFTER_TIMES }: Partial<LadderSteps> = {},
 ): QuizRung | undefined {
   if (how.isTeam) return undefined
-  if (how.slip) return how.isAsking && how.slip.times >= workedAfter && how.slip.isRight !== true ? 'worked' : undefined
+  if (how.slip) {
+    const after = workedAfterFor(how.code, one.blurb, { workedAfter, workedPlainAfter })
+    return how.isAsking && how.slip.times >= after && how.slip.isRight !== true ? 'worked' : undefined
+  }
   if (!how.code) return undefined
   const isRunnable = how.code.isLibrary !== true && (how.code.text === undefined || !isUnrunnableCode(how.code.text))
   if (isNewAskable(one, how.code.file, how.isDue, newStep) && isRunnable) return 'new'
   return stepOf(one) >= changedStep && isRunnable && isChangedRunnable(how.code) ? 'changed' : 'mine'
+}
+
+/**
+ * The branch a worked example of a concept is measured in (1.10.0 G1), by `code`, the code the next quiz finds for it
+ * (withCode: the latest note that taught it, screened, codeFor's lines), and `blurb`, its words: 'plain' with no code;
+ * 'code' for lines that hold the quote its words make (isQuoted, codeFor's own match) in a language its samples ran
+ * (RUNG_NEW_EXTS) and need no library, framework or browser (isUnrunnableCode); undefined for any other (no lines,
+ * a quote in none of them: the top lines of a note's first change, given a tool's concept codeFor found no line for;
+ * jsx · tsx · css · html · sh or no extension; a library's, a framework's or a browser's code), asked again as 1.7
+ * did. `isLibrary` is not looked at: the grade's line finds the code without reading a file (register.tsx codeNow),
+ * and must say what the quiz will do.
+ */
+export function workedBranch(code: { file: string; text?: string } | undefined, blurb: string): 'code' | 'plain' | undefined {
+  if (code === undefined) return 'plain'
+  const ext = extOf(code.file)
+  if (code.text === undefined || ext === undefined || !RUNG_NEW_EXTS.includes(ext)) return undefined
+  return isQuoted(code.text, blurb) && !isUnrunnableCode(code.text) ? 'code' : undefined
+}
+
+/**
+ * The misses running after which a concept is asked by a worked example (1.10.0 G1): its branch's switch
+ * (workedBranch), `workedAfter` for 'code', `workedPlainAfter` for 'plain', Infinity for neither. rungOf, the grade's
+ * line (isWorkedNext, slipNotice, workedNextText), /learn 진단 (slipCounts) and baseFor each go by it on the same code
+ * and words, so the quiz, the line under a grade and the counts say one thing.
+ */
+export function workedAfterFor(
+  code: { file: string; text?: string } | undefined,
+  blurb: string,
+  { workedAfter = WORKED_AFTER_TIMES, workedPlainAfter = WORKED_PLAIN_AFTER_TIMES }: Partial<Pick<LadderSteps, 'workedAfter' | 'workedPlainAfter'>> = {},
+): number {
+  const branch = workedBranch(code, blurb)
+  return branch === 'code' ? workedAfter : branch === 'plain' ? workedPlainAfter : Infinity
+}
+
+/**
+ * The spans a concept's words quote (backticks, double backticks for one holding a backtick), spaces squashed, of
+ * 4 characters or more: what codeFor looks for in a change and isQuoted in lines kept.
+ */
+function quotesOf(blurb: string): string[] {
+  return [...blurb.matchAll(/``(.+?)``|`([^`]+)`/g)].map(m => squash(m[1] ?? m[2]!)).filter(q => q.length >= 4)
+}
+
+/** True when a line of code holds one of `quotes` (quotesOf), or is one's part of 8 characters or more, spaces aside. */
+function isQuotedLine(line: string, quotes: readonly string[]): boolean {
+  const flat = squash(line)
+  return flat.length > 0 && quotes.some(q => flat.includes(q) || (flat.length >= 8 && q.includes(flat)))
+}
+
+/** True when a line of `text` holds a quote of `blurb` as codeFor matches it (1.10.0 G1, workedBranch). */
+export function isQuoted(text: string, blurb: string): boolean {
+  const quotes = quotesOf(blurb)
+  return text.split('\n').some(line => isQuotedLine(line, quotes))
 }
 
 /**
@@ -5387,13 +5477,23 @@ export function pickForRung<T extends QuizPick>(pick: T, rung: QuizRung | undefi
  * in the shape of quiz its samples measured, else as the rung off asks it. Code changed and code never seen are each
  * measured in a quiz of three with no team term and nothing else of the quiz's own making: in a quiz with fewer than
  * three picks, or with a team term (`team`, `isTeamMarked`) among them, both are asked in the learner's own code
- * (mine); code changed beside code never seen or a worked example is asked in its own code too.
+ * (mine); code changed beside code never seen or a worked example is asked in its own code too. A worked example
+ * (1.10.0 G1, D13 · D33) is measured in a quiz of two or three with no team term and no code changed or never seen:
+ * in a quiz with a team term, or with one pick alone but for a base concept (`isBase`), it is asked again as with it
+ * off (다시 도전, no rung); beside it, code changed and code never seen are asked in the learner's own code.
  */
-export function ladderMixed(rungs: readonly (QuizRung | undefined)[], picks: readonly Pick<QuizPick, 'team' | 'isTeamMarked'>[]): (QuizRung | undefined)[] {
-  const isMeasured = rungs.length >= 3 && !picks.some(one => one.team === true || one.isTeamMarked === true)
-  const isApart = rungs.some(rung => rung === 'new' || rung === 'worked')
-  return rungs.map(rung => {
-    if (rung === 'new') return isMeasured ? rung : 'mine'
+export function ladderMixed(
+  rungs: readonly (QuizRung | undefined)[],
+  picks: readonly Pick<QuizPick, 'team' | 'isTeamMarked' | 'isBase'>[],
+): (QuizRung | undefined)[] {
+  const isTeamIn = picks.some(one => one.team === true || one.isTeamMarked === true)
+  const isMeasured = rungs.length >= 3 && !isTeamIn
+  const isWorkedMeasured = !isTeamIn && picks.filter(one => one.isBase !== true).length >= 2
+  const kept = rungs.map(rung => (rung === 'worked' && !isWorkedMeasured ? undefined : rung))
+  const hasWorked = kept.includes('worked')
+  const isApart = hasWorked || kept.includes('new')
+  return kept.map(rung => {
+    if (rung === 'new') return isMeasured && !hasWorked ? rung : 'mine'
     if (rung === 'changed') return isMeasured && !isApart ? rung : 'mine'
     return rung
   })
@@ -5715,11 +5815,9 @@ export function codeFor(change: Pick<LearnChange, 'diff'>, blurb: string): strin
     return i > 0 ? ['…', ...lines] : lines
   })
   if (after.every(line => line.trim() === '' || line === '…')) return undefined
-  const quotes = [...blurb.matchAll(/``(.+?)``|`([^`]+)`/g)].map(m => squash(m[1] ?? m[2]!)).filter(q => q.length >= 4)
-  const hit = after.findIndex(line => {
-    const flat = squash(line)
-    return flat.length > 0 && quotes.some(q => flat.includes(q) || (flat.length >= 8 && q.includes(flat)))
-  })
+  // The quote matched as isQuoted matches it (1.10.0 G1: a worked example's branch goes by the same match).
+  const quotes = quotesOf(blurb)
+  const hit = after.findIndex(line => isQuotedLine(line, quotes))
   const kept: string[] = []
   let used = 0
   for (const line of after.slice(hit === -1 ? 0 : Math.max(0, hit - 5))) {
@@ -5809,10 +5907,12 @@ export const QUIZ_SYSTEM = [
  * `(팀 용어)`, carries the team's lines under their own head (`팀 코드 (fetcher.ts 12~30줄)`) when it has them, and the
  * quiz is told the team's words and lines are data (TEAM_IS_DATA). A concept on a rung of the question ladder (1.8.0)
  * says it under its head (`칸: 비슷한 코드`), and the quiz is told what each of its rungs asks (RUNG_ASK); one asked by
- * a worked example has its slip shown in the example, so the sentence that keeps a slip unsaid leaves it out; one of a
- * concept no code met is told more of how (WORKED_PLAIN_ASK, 1.9.0 교차 검토 2), one in code as 1.8.0 told it. A quiz
- * with code never seen (1.9.0 F3), or else with code changed (1.10.0 G2, CHANGED_TRACE_LINE), is shown an R line in
- * its format, the trace its answer is written after.
+ * a worked example has its slip shown in the example, so the sentence that keeps a slip unsaid leaves it out. A quiz
+ * with a worked example (1.10.0 G1) is told, after RUNG_ASK's lines, what its question asks (WORKED_TURN_ASK), and by
+ * its branch how its code runs (WORKED_CODE_ASK, a rung with a language) or how its steps are shown (WORKED_PLAIN_ASK,
+ * one with none), and is shown a P line in its format between T and Q. A quiz with code never seen (1.9.0 F3), or else
+ * with code changed (1.10.0 G2, CHANGED_TRACE_LINE), is shown an R line in its format, the trace its answer is written
+ * after. A quiz with none of these is 1.9.0's to the byte.
  */
 export function quizPrompt(
   picks: readonly (LearnConcept & Pick<QuizPick, 'code' | 'slip' | 'team' | 'teamCode' | 'isTeamMarked' | 'rung' | 'lang'>)[],
@@ -5842,6 +5942,8 @@ export function quizPrompt(
     '',
     `개념마다 문제 하나씩, 위 순서대로 ${picks.length}개를 낸다. 문제에 개념 이름을 그대로 쓰지 말고, 코드나 상황을 보여 주고 묻는다.`,
     ...RUNG_ASK.filter(([rung]) => rungs.has(rung)).map(([, ask]) => ask),
+    ...(hasWorked ? [WORKED_TURN_ASK] : []),
+    ...(picks.some(one => one.rung === 'worked' && one.lang !== undefined) ? [WORKED_CODE_ASK] : []),
     ...(picks.some(one => one.rung === 'worked' && one.lang === undefined) ? [WORKED_PLAIN_ASK] : []),
     ...(hasWorked || rungs.has('new') ? [RUNG_WRITES] : []),
     ...(hasSlip
@@ -5856,6 +5958,7 @@ export function quizPrompt(
     '힌트는 막힌 학습자가 답을 떠올리게 돕는 실마리 한 문장이다. 답이나 개념 이름을 그대로 말하지 않는다.',
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
     'T1: (예측 · 왜 · 바꿔 보기 중 하나)',
+    ...(hasWorked ? [WORKED_PLAN_LINE] : []),
     'Q1: (문제 한두 문장)',
     'H1: (힌트 한 문장)',
     ...(rungs.has('new') ? [NEW_TRACE_LINE] : rungs.has('changed') ? [CHANGED_TRACE_LINE] : []),
@@ -6503,10 +6606,16 @@ export function noteSlipName(
  * name says, a right answer after being asked back included, and not the worked examples the next quiz will show,
  * which rungOf picks by more than the slip); and open with a base concept a quiz would ask before its worked example
  * (1.9.0 F5, `based`: 바탕 개념; missed `workedAfter` times running, not set right on its try again, as baseFor asks).
+ * `afterOf` gives each slip's key its own count (1.10.0 G1: workedAfterFor on the code and words the next quiz finds for
+ * that key, register.tsx), `workedAfter` for every key when not given.
  */
 export type SlipCounts = { all: number; open: number; mended: number; other: number; blank: number; againOpen: number; based: number }
 
-export function slipCounts(slips: Readonly<Record<string, LearnSlip>>, workedAfter = WORKED_AFTER_TIMES): SlipCounts {
+export function slipCounts(
+  slips: Readonly<Record<string, LearnSlip>>,
+  workedAfter = WORKED_AFTER_TIMES,
+  afterOf: (key: string) => number = () => workedAfter,
+): SlipCounts {
   const list = Object.values(slips)
   const open = list.filter(one => one.fixedAt === undefined)
   return {
@@ -6516,8 +6625,24 @@ export function slipCounts(slips: Readonly<Record<string, LearnSlip>>, workedAft
     other: list.filter(one => one.type === 'other').length,
     blank: list.filter(one => one.type === 'blank').length,
     againOpen: open.filter(one => one.times >= 2).length,
-    based: open.filter(one => one.base !== undefined && one.times === workedAfter && one.isRight !== true).length,
+    based: Object.entries(slips).filter(([key, one]) => isBased(one) && one.times === afterOf(key)).length,
   }
+}
+
+/** A slip baseFor could ask a base before (1.9.0 F5): open, with a base, not set right on a try again. */
+function isBased(one: LearnSlip): boolean {
+  return one.fixedAt === undefined && one.base !== undefined && one.isRight !== true
+}
+
+/**
+ * The keys of the slips slipCounts could count as `based` (1.10.0 G1): with a base, missed as many times as one of
+ * `afters` says (the branches' switches that are on). So /learn 진단 looks for the code of these alone, and of none
+ * while every branch is off.
+ */
+export function basedKeys(slips: Readonly<Record<string, LearnSlip>>, afters: readonly number[]): string[] {
+  return Object.entries(slips)
+    .filter(([, one]) => isBased(one) && afters.includes(one.times))
+    .map(([key]) => key)
 }
 
 /** What a graded question's line under its feedback says of its concept's slip (slipNotice): the kind, and its words. */
@@ -6551,8 +6676,9 @@ export const WORKED_BASE_NEXT = '다음 복습 퀴즈는 바탕 개념과 풀이
 /**
  * What a miss that makes the next review quiz a worked example (isWorkedNext) says of it: WORKED_BASE_NEXT once its slip
  * (`record`, as the store has it after the grade) has a base, bases are asked (1.9.0 F5) and it was missed `workedAfter`
- * (WORKED_AFTER_TIMES) times running, just where baseFor asks a base before the worked example (a third miss running,
- * after one set right on its try again, is asked with none: once for a slip); else WORKED_NEXT.
+ * (WORKED_AFTER_TIMES; 1.10.0 G1: its concept's own, workedAfterFor) times running, just where baseFor asks a base
+ * before the worked example (a third miss running, after one set right on its try again, is asked with none: once for
+ * a slip); else WORKED_NEXT.
  */
 export function workedNextText(record: Pick<LearnSlip, 'base' | 'times'> | undefined, isBaseAsked = IS_BASE_ASKED, workedAfter = WORKED_AFTER_TIMES): string {
   return isBaseAsked && record?.base !== undefined && record.times === workedAfter ? WORKED_BASE_NEXT : WORKED_NEXT
@@ -6563,7 +6689,8 @@ export function workedNextText(record: Pick<LearnSlip, 'base' | 'times'> | undef
  * (`record`, as the store has it after the grade) open, kept by this very grade (so the next quiz asks it again,
  * slipsToAsk: a grade that kept no miss, as wrong once the answer is seen, leaves it gone over), missed
  * `workedAfter` (WORKED_AFTER_TIMES) times running, not set right on a try again, and the question no team term's
- * (asked by the team's words, as in 1.7).
+ * (asked by the team's words, as in 1.7). 1.10.0 (G1): `workedAfter` is its concept's own (workedAfterFor on the code
+ * and words the next quiz finds for it, register.tsx gradeCode), Infinity where none is found, as rungOf picks.
  */
 export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuizItem, 'team' | 'gradedAt'>, workedAfter = WORKED_AFTER_TIMES): boolean {
   return (
@@ -6584,7 +6711,8 @@ export function isWorkedNext(record: LearnSlip | undefined, item: Pick<LearnQuiz
  * asked back, `isHelped` false). Nothing when the grade kept none (the schema guard on, a store that refused it).
  * A worked example missed (1.8.0) is a question asked again missed again; a miss that makes the next review quiz show
  * a worked example (isWorkedNext) says so in place of the next quiz's other code (the callers add it to `again`), its
- * base first when the slip has one (workedNextText, 1.9.0 F5).
+ * base first when the slip has one (workedNextText, 1.9.0 F5). `workedAfter` is the concept's own (1.10.0 G1,
+ * workedAfterFor), so a concept the next quiz asks again is promised no worked example.
  */
 export function slipNotice(
   item: Pick<LearnQuizItem, 'result' | 'gradedAt' | 'isRetry' | 'mine' | 'slip' | 'slipType' | 'firstTry' | 'rung' | 'team'>,
@@ -6679,8 +6807,9 @@ export type BaseFound = { key: string; before: string; slot: number }
 /**
  * The base concept a review quiz asks right before a worked example (1.9.0 F5), if any. The worked example (X) is the
  * first of `picks` asked again (`asking`), no team term of this repository, whose slip (`slipOf`, as it will stand once
- * the quiz this one replaces is settled) is open, missed `workedAfter` (WORKED_AFTER_TIMES) times running and not set
- * right on a try again, with a base: what rungOf makes a worked example. Its base, followed through merges, is asked
+ * the quiz this one replaces is settled) is open, missed its branch's count of times running (1.10.0 G1, workedAfterFor
+ * on the pick's code and words: `workedAfter` met in code, `workedPlainAfter` met in none) and not set right on a try
+ * again, with a base: what rungOf makes a worked example. Its base, followed through merges, is asked
  * when the index holds it, not known, not X, in no place of the quiz, gone over by no quiz since that slip was kept, with
  * no slip of its own open in the store (`open`: asked again as its own, soon), and no team term of any repository
  * (`teamMarks`). It takes the last place that is no slip asked again, not X and no concept answered wrong (a filler,
@@ -6694,11 +6823,21 @@ export function baseFor(
   asking: ReadonlySet<string>,
   map: Readonly<Record<string, string>>,
   open: Readonly<Record<string, LearnSlip>>,
-  { workedAfter = WORKED_AFTER_TIMES, teamMarks = {} }: { workedAfter?: number; teamMarks?: Readonly<Record<string, readonly string[]>> } = {},
+  {
+    workedAfter = WORKED_AFTER_TIMES,
+    workedPlainAfter = WORKED_PLAIN_AFTER_TIMES,
+    teamMarks = {},
+  }: { workedAfter?: number; workedPlainAfter?: number; teamMarks?: Readonly<Record<string, readonly string[]>> } = {},
 ): BaseFound | undefined {
   const isWorked = (one: QuizPick) => {
     const slip = asking.has(one.key) && one.team !== true ? slipOf(one.key) : undefined
-    return slip !== undefined && slip.fixedAt === undefined && slip.times === workedAfter && slip.isRight !== true && slip.base !== undefined
+    return (
+      slip !== undefined &&
+      slip.fixedAt === undefined &&
+      slip.times === workedAfterFor(one.code, one.blurb, { workedAfter, workedPlainAfter }) &&
+      slip.isRight !== true &&
+      slip.base !== undefined
+    )
   }
   const x = picks.find(isWorked)
   const slip = x ? slipOf(x.key) : undefined
@@ -6764,8 +6903,8 @@ export function listItem(n: number, text: string): string {
  */
 export function parseQuiz(text: string, picks: readonly QuizPick[]): LearnQuizItem[] {
   // A question in code never seen (1.9.0 F3) or code changed (1.10.0 G2) traces its code on an R line before its
-  // answer: a marker too, then dropped.
-  const markers = picks.some(one => one.rung === 'new' || one.rung === 'changed') ? 'QHATR' : 'QHAT'
+  // answer, and a worked example (1.10.0 G1) plans its answer on a P line: each a marker too, then dropped.
+  const markers = `QHAT${picks.some(one => one.rung === 'new' || one.rung === 'changed') ? 'R' : ''}${picks.some(one => one.rung === 'worked') ? 'P' : ''}`
   const aware = quizItems(quizParts(text, true, markers), picks)
   // A fence the model left open would hide every marker after it: then read it as if there were no code.
   const items = aware.length >= picks.length ? aware : [aware, quizItems(quizParts(text, false, markers), picks)].reduce((a, b) => (b.length > a.length ? b : a))
@@ -7661,7 +7800,10 @@ export type Switches = {
   isRuleWide: boolean
   rungNewStep: number
   rungChangedStep: number
+  /** Misses running before a worked example of a concept met in code (WORKED_AFTER_TIMES, 1.10.0 G1's branch 'code'). */
   workedAfterTimes: number
+  /** The same for a concept met in no code (WORKED_PLAIN_AFTER_TIMES, 1.10.0 G1's branch 'plain'). */
+  workedPlainAfterTimes: number
   isBaseAsked: boolean
   isThinkAsked: boolean
 }
@@ -7677,6 +7819,7 @@ export const SWITCH_KINDS: Readonly<Record<keyof Switches, 'flag' | 'step'>> = O
   rungNewStep: 'step',
   rungChangedStep: 'step',
   workedAfterTimes: 'step',
+  workedPlainAfterTimes: 'step',
   isBaseAsked: 'flag',
   isThinkAsked: 'flag',
 })
@@ -7698,6 +7841,7 @@ export const SWITCHES_OFF: Readonly<Switches> = Object.freeze({
   rungNewStep: RUNG_NEW_STEP,
   rungChangedStep: RUNG_CHANGED_STEP,
   workedAfterTimes: WORKED_AFTER_TIMES,
+  workedPlainAfterTimes: WORKED_PLAIN_AFTER_TIMES,
   isBaseAsked: IS_BASE_ASKED,
   isThinkAsked: IS_THINK_ASKED,
 })
@@ -7742,7 +7886,8 @@ export const FEATURE_NAMES: Readonly<Record<keyof Switches, string>> = Object.fr
   isRuleWide: '팀 규칙 표지 넓힘',
   rungNewStep: '처음 보는 코드',
   rungChangedStep: '비슷한 코드',
-  workedAfterTimes: '풀이 보고 풀기',
+  workedAfterTimes: '풀이 보고 풀기(코드)',
+  workedPlainAfterTimes: '풀이 보고 풀기(코드 없는 개념)',
   isBaseAsked: '바탕 개념',
   isThinkAsked: '생각해 보기',
 })
@@ -7761,7 +7906,8 @@ export const SWITCH_NAMES: Readonly<Record<keyof Switches, string>> = Object.fre
   isRuleWide: '팀 규칙 표지 넓힘',
   rungNewStep: '처음 보는 코드 단계',
   rungChangedStep: '비슷한 코드 단계',
-  workedAfterTimes: '풀이 보고 풀기 오답 수',
+  workedAfterTimes: '풀이 보고 풀기 오답 수 (코드 개념)',
+  workedPlainAfterTimes: '풀이 보고 풀기 오답 수 (코드 없는 개념)',
   isBaseAsked: '바탕 개념',
   isThinkAsked: '생각해 보기',
 })

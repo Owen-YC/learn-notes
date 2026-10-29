@@ -12,6 +12,7 @@ import {
   isMarkedIndex,
   knownMarks,
   markFor,
+  markHelped,
   markPartial,
   markWrong,
   markedConcepts,
@@ -23,6 +24,7 @@ import {
 import { COEXIST_CASES, COEXIST_MIXED, COEXIST_NOW, type CoexistStore } from './fixtures/coexist19'
 import { QUIZ_OUTPUT_18 } from './fixtures/quiz18'
 import { QUIZ_OUTPUT_110_ON } from './fixtures/quiz19'
+import { WORKED_OUTPUT_110 } from './fixtures/worked110'
 
 const NOW = COEXIST_NOW
 const DAY = 86_400_000
@@ -227,5 +229,32 @@ describe('1.10.0 (G2): a question in code changed asked with it on is the record
     expect(after(markFor('wrong', undefined, false, 'changed')).step).toBe(0)
     expect(after(markFor('wrong', 'partial', false, 'changed')).step).toBe(2)
     expect(after(markFor('right', 'right', false, 'changed'))).toEqual(after(markFor('right', 'right', false, undefined)))
+  })
+})
+
+describe('1.10.0 (G1): a worked example asked with a branch on is the record 1.8.0 wrote for one, its P line nowhere, graded as 1.8.0 graded it', () => {
+  test('every worked example of worked110.ts: the same record, field for field, as 1.8.0 (3690021) read back from the same reply with its P lines taken out', () => {
+    let worked = 0
+    for (const [key, out] of Object.entries(WORKED_OUTPUT_110)) {
+      out.items.forEach((item, i) => {
+        if (item.rung !== 'worked') return
+        worked += 1
+        expect([key, item]).toEqual([key, out.items18[i]])
+        // The fields every window from 1.7.0 reads and 1.8.0's rung: no field of its own, no P line's words kept.
+        expect(Object.keys(item).every(field => ['key', 'name', 'question', 'hint', 'answer', 'kind', 'noteId', 'isRetry', 'rung'].includes(field))).toBe(true)
+        expect(JSON.stringify(item)).not.toMatch(/P\d:|→/)
+      })
+    }
+    expect(worked).toBe(22)
+  })
+
+  test('its grade marks the concept as a 1.8.0 worked example: wrong to the first step, right after the example as right with help (its step kept)', () => {
+    const index = { [conceptKey('합계')]: concept('합계', { step: 3, reviewedAt: NOW - 8 * DAY }) }
+    const after = (mark: ReturnType<typeof markFor>) => mark(index, [conceptKey('합계')], NOW)[conceptKey('합계')]!
+    // The example is help (register.tsx isHelpedGrade, 1.8.0): the grade hands markFor isHelped for a worked example.
+    expect(markFor('wrong', undefined, false, 'worked')).toBe(markWrong)
+    expect(markFor('right', 'right', true, 'worked')).toBe(markHelped)
+    expect(after(markFor('wrong', undefined, false, 'worked')).step).toBe(0)
+    expect(after(markFor('right', 'right', true, 'worked'))).toMatchObject({ step: 3, reviewedAt: NOW })
   })
 })

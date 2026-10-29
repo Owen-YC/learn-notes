@@ -26,6 +26,7 @@ import {
   slipNotice,
   slipRecordOf,
   withBase,
+  workedAfterFor,
   workedNextText,
   type QuizPick,
 } from '../hooks/notes'
@@ -291,9 +292,11 @@ describe('1.9.0: where a quiz asks the base concept (F5, baseFor · withBase · 
   const pick = (name: string, more: Partial<QuizPick> = {}): QuizPick => ({ ...index[k(name)]!, key: k(name), ...more })
   const slip = (more: Partial<LearnSlip> = {}): LearnSlip => ({ what: 'i가 하나라고 봄', type: 'scope', question: 'Q', mine: '3 3 3', at: NOW - 2 * DAY, times: 2, base: k('변수 범위'), ...more })
   const slips = (x: LearnSlip, more: Record<string, LearnSlip> = {}) => ({ [k('클로저')]: x, ...more })
+  /** Worked examples after two misses running in both branches (1.10.0 G1), as 1.8.0 shipped them for every concept. */
+  const BOTH = { workedAfter: 2, workedPlainAfter: 2 }
   const find = (picks: QuizPick[], x: LearnSlip = slip(), more: Record<string, LearnSlip> = {}, asking = [k('클로저')], how: Parameters<typeof baseFor>[6] = {}) => {
     const open = slips(x, more)
-    return baseFor(index, key => open[key], picks, new Set(asking), {}, open, { workedAfter: 2, ...how })
+    return baseFor(index, key => open[key], picks, new Set(asking), {}, open, { ...BOTH, ...how })
   }
   const X = pick('클로저', { slip: { what: 'i가 하나라고 봄', question: 'Q', mine: '3 3 3' } })
   const D = pick('비동기')
@@ -317,7 +320,7 @@ describe('1.9.0: where a quiz asks the base concept (F5, baseFor · withBase · 
     expect(withBase([X, D], added, B).map(one => one.name)).toEqual(['변수 범위', '클로저', '비동기'])
     // A base merged into another is asked as the concept it counts under now.
     const open = slips(slip({ base: 'c:scope' }))
-    expect(baseFor(index, key => open[key], [X, D, F], new Set([k('클로저')]), { 'c:scope': k('변수 범위') }, open, { workedAfter: 2 })?.key).toBe(k('변수 범위'))
+    expect(baseFor(index, key => open[key], [X, D, F], new Set([k('클로저')]), { 'c:scope': k('변수 범위') }, open, BOTH)?.key).toBe(k('변수 범위'))
   })
 
   test('no base: no place but slips asked again and a concept answered wrong, or a base known, gone, in the quiz, gone over, open, or a team term', () => {
@@ -346,7 +349,27 @@ describe('1.9.0: where a quiz asks the base concept (F5, baseFor · withBase · 
     expect(find([X, D, F], slip(), {}, [])).toBeUndefined()
     expect(find([{ ...X, team: true }, D, F])).toBeUndefined()
     // 풀이 보고 풀기 off (F4's Infinity): no worked example, no base.
-    expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: Infinity })).toBeUndefined()
+    expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: Infinity, workedPlainAfter: Infinity })).toBeUndefined()
+  })
+
+  test('1.10.0 (G1): X a worked example by its branch\'s count alone (workedAfterFor on its pick\'s code and words), as rungOf asks one', () => {
+    const quoted = { file: 'src/a.js', text: 'let total = 0\nfor (const n of [1, 2]) total += n' }
+    const inCode = pick('클로저', { blurb: '클로저 설명 — `total += n`', code: quoted, slip: { what: 'i가 하나라고 봄', question: 'Q', mine: '3 3 3' } })
+    // X met in no code: the plain branch's count, the code branch's none.
+    expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: 2, workedPlainAfter: Infinity })).toBeUndefined()
+    expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: Infinity, workedPlainAfter: 2 })?.key).toBe(k('변수 범위'))
+    // X met in js code that holds its quote: the code branch's count, the plain branch's none.
+    expect(find([inCode, D, F], slip(), {}, [k('클로저')], { workedAfter: 2, workedPlainAfter: Infinity })?.key).toBe(k('변수 범위'))
+    expect(find([inCode, D, F], slip(), {}, [k('클로저')], { workedAfter: Infinity, workedPlainAfter: 2 })).toBeUndefined()
+    // Three misses running with the code branch at 3: the base then.
+    expect(find([inCode, D, F], slip({ times: 3 }), {}, [k('클로저')], { workedAfter: 3, workedPlainAfter: 2 })?.key).toBe(k('변수 범위'))
+    // Code with no quote of its words, in jsx, or a library's: neither branch, no worked example and no base.
+    for (const code of [{ file: 'src/a.js', text: 'console.log(1)' }, { file: 'src/A.jsx', text: quoted.text }, { file: 'src/a.js', text: `import _ from 'lodash'\n${quoted.text}` }]) {
+      expect(find([{ ...inCode, code }, D, F])).toBeUndefined()
+      expect(workedAfterFor(code, inCode.blurb, BOTH)).toBe(Infinity)
+    }
+    // The default counts are the constants' (off).
+    expect(baseFor(index, () => slip(), [X, D, F], new Set([k('클로저')]), {}, {})).toBeUndefined()
   })
 
   test('the line under a miss promises the base just where baseFor asks one: missed workedAfter times running, not set right (4/5 검토)', () => {
