@@ -2,6 +2,7 @@ import type { LearnConcept, LearnQuizItem, LearnSlip } from '../types'
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
+  BASE_AUDIT_RETRY,
   BASE_CANDIDATES,
   BASE_LABEL,
   BASE_LEAD,
@@ -10,12 +11,17 @@ import {
   WORKED_AFTER_TIMES,
   WORKED_BASE_NEXT,
   WORKED_NEXT,
+  auditedBase,
+  baseAfterFor,
+  baseAuditOf,
   baseCandidates,
   baseFor,
   baseOf,
   checkPrompt,
+  isBaseKept,
   isBaseKey,
   isWorkedNext,
+  ladderMixed,
   nextSlip,
   parseCheck,
   parseQuiz,
@@ -46,6 +52,15 @@ const concept = (name: string, daysAgo: number, more: Partial<LearnConcept> = {}
   ...more,
 })
 const k = (name: string) => `c:${name.toLowerCase().replace(/[\s()（）"'`.…\-–—_·]+/g, '')}`
+
+/** 1.10.0 G4's sentence and format lines as its design wrote them (plan110 G4 how 1 · 2), to the byte. */
+const G4_CHECK =
+  '바탕 점검 · 바탕 근거 · 바탕은 판정이 거의나 틀림일 때만 쓴다. 바탕 점검에는 위 목록의 번호마다 틀림 · 바름 · 없음 중 하나를 쓴다. 틀림은 이번 답의 잘못된 생각을, 이번 문제의 개념은 쓰지 않고 그 개념만 쓰는 짧은 코드에 옮겨도 틀린 답이 나올 때다. 헷갈림이 이번 문제의 개념이 하는 일에 대한 것이면, 목록의 개념 이름이나 유형의 갈래와 닮았어도 틀림이 아니다. 틀림이 아니고 답이 그 개념을 바르게 말하거나 바르게 썼으면 바름, 답에 그 개념이 드러나지 않으면 없음이다. 바탕에는 점검에서 틀림인 번호 하나를 쓰고, 바탕 근거에는 그 개념만 쓰는 짧은 코드 하나와 답의 생각대로면 나올 결과 → 실제 결과를 쓴다. 틀림인 번호가 없으면 바탕 근거는 없음, 바탕은 0이라고 쓴다.'
+const G4_FORMAT = [
+  '바탕 점검: (위 번호마다 번호 다음에 틀림·바름·없음 중 하나를 써서 쉼표로 잇는다)',
+  '바탕 근거: (점검에서 틀림인 개념만 쓰는 짧은 코드 하나와, 답의 생각대로면 나올 결과 → 실제 결과. 없으면 없음)',
+  '바탕: (점검에서 틀림인 번호 하나, 없으면 0)',
+]
 
 /** What 1.8.0 (3690021) kept of a slip it read back, word for word: no base (a 1.8 window writes the slips back so). */
 function slipRecordOf18(raw: unknown): LearnSlip | undefined {
@@ -126,14 +141,13 @@ describe('1.9.0: a base concept picked when a question asked again is graded (F5
     expect(baseCandidates(many, k('클로저'))).toHaveLength(BASE_CANDIDATES)
   })
 
-  test('checkPrompt: the bases numbered after the slip open, the sentence after the kind\'s, the 바탕 근거 and 바탕 lines between the slip\'s and the kind\'s', () => {
+  test('checkPrompt: the bases numbered after the slip open, the sentence after the kind\'s, the 바탕 점검, 바탕 근거 and 바탕 lines between the slip\'s and the kind\'s (1.10.0 G4\'s, in the place of F5\'s never sent)', () => {
     const i = INPUT_18
     const bases = ['변수 범위', '화살표 함수']
     const prompt = checkPrompt(i.item, i.mine, 'beginner', undefined, i.past, { bases })
     const block = '## 학습자가 전에 배운 개념\n1. 변수 범위\n2. 화살표 함수\n'
-    const sentence =
-      '바탕은 판정이 거의나 틀림일 때만 쓴다. 이번 답의 헷갈림이 위 목록에 있는 개념 하나를 잘못 알아서 생겼다는 근거가 답에 있으면, 바탕 근거에 답의 그 말을 짧게 쓰고 바탕에 그 개념의 번호 하나를 쓴다. 근거가 없거나 이 개념 안에서 생긴 헷갈림이면 바탕 근거는 없음, 바탕은 0이라고 쓴다.\n'
-    const line = '바탕 근거: (답의 어느 말이 위 개념을 잘못 안 것인지 짧게, 없으면 없음)\n바탕: (위 번호 하나, 없으면 0)\n'
+    const sentence = `${G4_CHECK}\n`
+    const line = `${G4_FORMAT.join('\n')}\n`
     expect(prompt).toContain(`## 이 학습자가 지난번에 헷갈린 점\n${i.past.what}\n${block}## 학습자의 답\n`)
     expect(prompt).toContain(`기타 중 하나를 그대로 쓴다.\n${sentence}정확히 아래 형식만 쓴다.`)
     expect(prompt).toContain(`헷갈린 점: (거의·틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)\n${line}유형: (거의·틀림일 때만 위 갈래 중 하나)`)
@@ -294,11 +308,17 @@ describe('1.9.0: where a quiz asks the base concept (F5, baseFor · withBase · 
   const slips = (x: LearnSlip, more: Record<string, LearnSlip> = {}) => ({ [k('클로저')]: x, ...more })
   /** Worked examples after two misses running in both branches (1.10.0 G1), as 1.8.0 shipped them for every concept. */
   const BOTH = { workedAfter: 2, workedPlainAfter: 2 }
+  /** The code branch's count (1.10.0 G4: a base is asked before a worked example of it alone). */
+  const CODE = { workedAfter: 2 }
   const find = (picks: QuizPick[], x: LearnSlip = slip(), more: Record<string, LearnSlip> = {}, asking = [k('클로저')], how: Parameters<typeof baseFor>[6] = {}) => {
     const open = slips(x, more)
-    return baseFor(index, key => open[key], picks, new Set(asking), {}, open, { ...BOTH, ...how })
+    return baseFor(index, key => open[key], picks, new Set(asking), {}, open, { ...CODE, ...how })
   }
-  const X = pick('클로저', { slip: { what: 'i가 하나라고 봄', question: 'Q', mine: '3 3 3' } })
+  /** X met in js code that holds the line its words quote: a worked example's code branch (1.10.0 G1 · G4). */
+  const QUOTED = { file: 'src/a.js', text: 'let total = 0\nfor (const n of [1, 2]) total += n' }
+  const X = pick('클로저', { blurb: '클로저 설명 — `total += n`', code: QUOTED, slip: { what: 'i가 하나라고 봄', question: 'Q', mine: '3 3 3' } })
+  /** X met in no code (1.10.0 G1's branch 'plain'): no base before its worked example (1.10.0 G4). */
+  const PLAIN_X = pick('클로저', { slip: { what: 'i가 하나라고 봄', question: 'Q', mine: '3 3 3' } })
   const D = pick('비동기')
   const F = pick('채우기')
   const B = pick('변수 범위')
@@ -320,7 +340,7 @@ describe('1.9.0: where a quiz asks the base concept (F5, baseFor · withBase · 
     expect(withBase([X, D], added, B).map(one => one.name)).toEqual(['변수 범위', '클로저', '비동기'])
     // A base merged into another is asked as the concept it counts under now.
     const open = slips(slip({ base: 'c:scope' }))
-    expect(baseFor(index, key => open[key], [X, D, F], new Set([k('클로저')]), { 'c:scope': k('변수 범위') }, open, BOTH)?.key).toBe(k('변수 범위'))
+    expect(baseFor(index, key => open[key], [X, D, F], new Set([k('클로저')]), { 'c:scope': k('변수 범위') }, open, CODE)?.key).toBe(k('변수 범위'))
   })
 
   test('no base: no place but slips asked again and a concept answered wrong, or a base known, gone, in the quiz, gone over, open, or a team term', () => {
@@ -349,34 +369,74 @@ describe('1.9.0: where a quiz asks the base concept (F5, baseFor · withBase · 
     expect(find([X, D, F], slip(), {}, [])).toBeUndefined()
     expect(find([{ ...X, team: true }, D, F])).toBeUndefined()
     // 풀이 보고 풀기 off (F4's Infinity): no worked example, no base.
-    expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: Infinity, workedPlainAfter: Infinity })).toBeUndefined()
+    expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: Infinity })).toBeUndefined()
   })
 
-  test('1.10.0 (G1): X a worked example by its branch\'s count alone (workedAfterFor on its pick\'s code and words), as rungOf asks one', () => {
-    const quoted = { file: 'src/a.js', text: 'let total = 0\nfor (const n of [1, 2]) total += n' }
-    const inCode = pick('클로저', { blurb: '클로저 설명 — `total += n`', code: quoted, slip: { what: 'i가 하나라고 봄', question: 'Q', mine: '3 3 3' } })
-    // X met in no code: the plain branch's count, the code branch's none.
-    expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: 2, workedPlainAfter: Infinity })).toBeUndefined()
-    expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: Infinity, workedPlainAfter: 2 })?.key).toBe(k('변수 범위'))
-    // X met in js code that holds its quote: the code branch's count, the plain branch's none.
-    expect(find([inCode, D, F], slip(), {}, [k('클로저')], { workedAfter: 2, workedPlainAfter: Infinity })?.key).toBe(k('변수 범위'))
-    expect(find([inCode, D, F], slip(), {}, [k('클로저')], { workedAfter: Infinity, workedPlainAfter: 2 })).toBeUndefined()
-    // Three misses running with the code branch at 3: the base then.
-    expect(find([inCode, D, F], slip({ times: 3 }), {}, [k('클로저')], { workedAfter: 3, workedPlainAfter: 2 })?.key).toBe(k('변수 범위'))
+  test('1.10.0 (G4): X a worked example of the code branch alone (baseAfterFor on its pick\'s code and words); met in no code, no base whatever the plain branch\'s count', () => {
+    // X met in js code that holds its quote: the code branch's count.
+    expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: 2 })?.key).toBe(k('변수 범위'))
+    expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: Infinity })).toBeUndefined()
+    // Three misses running with the code branch at 3: the base then, not at two.
+    expect(find([X, D, F], slip({ times: 3 }), {}, [k('클로저')], { workedAfter: 3 })?.key).toBe(k('변수 범위'))
+    expect(find([X, D, F], slip(), {}, [k('클로저')], { workedAfter: 3 })).toBeUndefined()
+    // X met in no code: a worked example of the plain branch (1.10.0 G1) and no base before it (G4), its count looked
+    // at nowhere (1.9.0's baseFor, and 1.10.0 G1's, asked one).
+    expect(workedAfterFor(PLAIN_X.code, PLAIN_X.blurb, PLAIN_X.files, BOTH)).toBe(2)
+    expect(baseAfterFor(PLAIN_X.code, PLAIN_X.blurb, PLAIN_X.files, BOTH)).toBe(Infinity)
+    expect(find([PLAIN_X, D, F])).toBeUndefined()
     // Code with no quote of its words, in jsx, or a library's: neither branch, no worked example and no base.
-    for (const code of [{ file: 'src/a.js', text: 'console.log(1)' }, { file: 'src/A.jsx', text: quoted.text }, { file: 'src/a.js', text: `import _ from 'lodash'\n${quoted.text}` }]) {
-      expect(find([{ ...inCode, code }, D, F])).toBeUndefined()
-      expect(workedAfterFor(code, inCode.blurb, [], BOTH)).toBe(Infinity)
+    for (const code of [{ file: 'src/a.js', text: 'console.log(1)' }, { file: 'src/A.jsx', text: QUOTED.text }, { file: 'src/a.js', text: `import _ from 'lodash'\n${QUOTED.text}` }]) {
+      expect(find([{ ...X, code }, D, F])).toBeUndefined()
+      expect(workedAfterFor(code, X.blurb, [], BOTH)).toBe(Infinity)
+      expect(baseAfterFor(code, X.blurb, [], BOTH)).toBe(Infinity)
     }
+    // baseAfterFor: the code branch's count for code that holds its quote, in js, ts or py; the default the constant's (off).
+    for (const file of ['src/a.js', 'src/a.ts', 'app/a.py']) expect(baseAfterFor({ file, text: QUOTED.text }, X.blurb, [file], { workedAfter: 2 })).toBe(2)
+    expect(baseAfterFor(QUOTED, X.blurb, [])).toBe(WORKED_AFTER_TIMES)
     // The default counts are the constants' (off).
     expect(baseFor(index, () => slip(), [X, D, F], new Set([k('클로저')]), {}, {})).toBeUndefined()
+  })
+
+  test('1.10.0 (G4, D33 (4)): no base where the quiz with it would hold a team term, or X would be its one concept beside it; a team term in the place it takes goes with that place', () => {
+    const fresh: QuizPick = { key: 'c:주문서', name: '주문서', count: 0, firstAt: NOW, lastAt: NOW, blurb: '팀 용어', files: [], team: true }
+    const marked = pick('비동기', { isTeamMarked: true })
+    // A team term not met yet in the place the base takes: gone with it, the base asked.
+    expect(find([X, D, fresh])).toEqual({ key: k('변수 범위'), before: k('클로저'), slot: 2 })
+    // A team term left beside it (one not met yet, or a concept of another repository's team): none.
+    expect(find([X, fresh, F])).toBeUndefined()
+    expect(find([X, marked, F])).toBeUndefined()
+    expect(find([X, marked])).toBeUndefined()
+    // X itself a team term of another repository: none.
+    expect(find([{ ...X, isTeamMarked: true }, D, F])).toBeUndefined()
+    // X alone: none; X with one beside it: three with the base.
+    expect(find([X])).toBeUndefined()
+    expect(find([X, D])).toEqual({ key: k('변수 범위'), before: k('클로저'), slot: -1 })
+  })
+
+  test('isBaseKept (1.10.0 G4, D33 (4)): a base only while the pick after it is asked by its worked example as ladderMixed keeps the rungs', () => {
+    const picks = withBase([X, D, F], find([X, D, F])!, B)
+    expect(picks.map(one => [one.name, one.isBase === true])).toEqual([['변수 범위', true], ['클로저', false], ['비동기', false]])
+    expect(isBaseKept(ladderMixed([undefined, 'worked', undefined], picks), picks)).toBe(true)
+    expect(isBaseKept([undefined, undefined, undefined], picks)).toBe(false)
+    expect(isBaseKept(['mine', 'mine', 'mine'], picks)).toBe(false)
+    // No base in the quiz: kept as it is.
+    expect(isBaseKept([undefined, undefined, undefined], [X, D, F])).toBe(true)
+    // A worked example before it in the quiz: ladderMixed keeps that one's alone, X is asked again, the base goes.
+    const Y = pick('다른 도전')
+    const before = [Y, ...picks.slice(0, 2)]
+    const asIs = ladderMixed(['worked', undefined, 'worked'], before)
+    expect(asIs).toEqual(['worked', undefined, undefined])
+    expect(isBaseKept(asIs, before)).toBe(false)
+    // A team term beside it, or X alone but for it: ladderMixed asks X again, the base goes.
+    expect(isBaseKept(ladderMixed([undefined, 'worked', undefined], [picks[0]!, picks[1]!, { ...D, isTeamMarked: true }]), picks)).toBe(false)
+    expect(isBaseKept(ladderMixed([undefined, 'worked'], picks.slice(0, 2)), picks.slice(0, 2))).toBe(false)
   })
 
   test('the line under a miss promises the base just where baseFor asks one: missed workedAfter times running, not set right (4/5 검토)', () => {
     for (const times of [1, 2, 3, 4]) {
       for (const isRight of [false, true]) {
         const x = slip({ times, at: NOW, ...(isRight ? { isRight: true as const } : {}) })
-        const said = isWorkedNext(x, { gradedAt: NOW }, 2) && workedNextText(x, true, 2) === WORKED_BASE_NEXT
+        const said = isWorkedNext(x, { gradedAt: NOW }, 2) && workedNextText(x, true, baseAfterFor(X.code, X.blurb, X.files, CODE)) === WORKED_BASE_NEXT
         expect([times, isRight, said]).toEqual([times, isRight, find([X, D, F], x) !== undefined])
       }
     }
@@ -396,5 +456,132 @@ describe('1.9.0: where a quiz asks the base concept (F5, baseFor · withBase · 
     // quizPrompt is not told: the base is asked as any concept is.
     const plain = picks.map(({ isBase, ...rest }) => rest)
     expect(quizPrompt(picks, 'beginner')).toBe(quizPrompt(plain, 'beginner'))
+  })
+})
+
+describe('1.10.0: 바탕 개념 (G4): each concept listed marked first, a base kept only where its mark says 틀림 (pure parts)', () => {
+  const listed = [
+    { key: 'c:a', name: '함수' },
+    { key: 'c:b', name: '화살표 함수' },
+    { key: 'c:c', name: '변수 범위' },
+    { key: 'c:d', name: '배열·리스트' },
+  ]
+  const audit = (raw: string | undefined, candidates = listed) => Object.fromEntries(baseAuditOf(raw, candidates))
+  /** A grade short of right that asked for a base: its 바탕 점검 `marks`, its 바탕 근거 `why`, its 바탕 `said`. */
+  const reply = (marks: string, said = '바탕: 3', why = '바탕 근거: `let i = 0; i += 1` → 0 → 1', verdict = '틀림') =>
+    [`판정: ${verdict}`, '피드백: 적은 대로면 3이 세 번 나옵니다.', '되묻기: i는 몇 개일까요?', '헷갈린 점: 반복마다 i가 하나라고 봄', marks, why, said, '유형: 변수 범위'].join('\n')
+
+  test('the sentence and the three lines as the design wrote them: the lines with no mark shown as an example; BASE_AUDIT_RETRY\'s bytes fixed before any call, sent nowhere', () => {
+    const i = INPUT_18
+    const prompt = checkPrompt(i.item, i.mine, 'beginner', undefined, i.past, { bases: ['함수', '화살표 함수', '변수 범위'] })
+    expect(prompt).toContain(`기타 중 하나를 그대로 쓴다.\n${G4_CHECK}\n정확히 아래 형식만 쓴다.`)
+    expect(prompt).toContain(`헷갈린 점: (거의·틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)\n${G4_FORMAT.join('\n')}\n유형: (거의·틀림일 때만 위 갈래 중 하나)`)
+    // No mark written out as an example in the format lines: copied word for word, every true base would go.
+    for (const line of G4_FORMAT) expect(line).not.toMatch(/\d\s*(?:틀림|바름|없음)|"|처럼/)
+    expect(BASE_AUDIT_RETRY).toBe('바탕 점검: (번호마다 "번호 표시" 꼴로 쉼표로 잇는다. 표시는 틀림·바름·없음 중 하나이고, 위 목록의 번호를 하나도 빼지 않는다)')
+    expect(prompt).not.toContain(BASE_AUDIT_RETRY)
+    // The order: the slip's line, then 바탕 점검, 바탕 근거, 바탕, then its kind's.
+    const at = (text: string) => prompt.indexOf(text)
+    expect([at('헷갈린 점: ('), at('바탕 점검: ('), at('바탕 근거: ('), at('바탕: ('), at('유형: (')]).toEqual([...[at('헷갈린 점: ('), at('바탕 점검: ('), at('바탕 근거: ('), at('바탕: ('), at('유형: (')]].sort((a, b) => a - b))
+  })
+
+  test('parseCheck { base: true }: the 바탕 점검 line read as baseAudit (bold, no space, 점검 alone, over lines, JSON keys), kept with no base picked, none on a right grade; never in the slip nor its kind', () => {
+    for (const marks of ['바탕 점검: 1 없음, 2 바름, 3 틀림', '**바탕 점검**: 1 없음, 2 바름, 3 틀림', '**바탕 점검:** 1 없음, 2 바름, 3 틀림', '바탕점검: 1 없음, 2 바름, 3 틀림', '점검: 1 없음, 2 바름, 3 틀림', '바탕 점검：1 없음, 2 바름, 3 틀림']) {
+      expect(parseCheck(reply(marks), { base: true })).toEqual({
+        verdict: 'wrong',
+        feedback: '적은 대로면 3이 세 번 나옵니다.',
+        nudge: 'i는 몇 개일까요?',
+        slip: '반복마다 i가 하나라고 봄',
+        slipType: 'scope',
+        base: '3',
+        baseWhy: '`let i = 0; i += 1` → 0 → 1',
+        baseAudit: '1 없음, 2 바름, 3 틀림',
+      })
+    }
+    expect(parseCheck(reply('바탕 점검:\n1번 없음\n2번 바름\n3번 틀림'), { base: true })?.baseAudit).toBe('1번 없음\n2번 바름\n3번 틀림')
+    // No base picked (바탕 0, or 바탕 근거 없음): the marks kept all the same, no base.
+    for (const [said, why] of [['바탕: 0', '바탕 근거: 없음'], ['바탕: 3', '바탕 근거: 없음'], ['바탕: 0', '바탕 근거: `x` → 1 → 2']]) {
+      const graded = parseCheck(reply('바탕 점검: 1 바름, 2 없음, 3 없음', said, why), { base: true })!
+      expect(graded.baseAudit).toBe('1 바름, 2 없음, 3 없음')
+      expect(auditedBase(graded, listed)).toBeUndefined()
+    }
+    // A right grade keeps none; an empty line or none at all, none.
+    expect(parseCheck(reply('바탕 점검: 3 틀림', '바탕: 3', '바탕 근거: x → 1 → 2', '맞음'), { base: true })).not.toHaveProperty('baseAudit')
+    expect(parseCheck(reply('바탕 점검:'), { base: true })).not.toHaveProperty('baseAudit')
+    expect(parseCheck(reply(''), { base: true })).not.toHaveProperty('baseAudit')
+    // JSON: its own key or the Korean ones.
+    for (const key of ['baseAudit', '바탕 점검', '바탕점검']) {
+      const graded = parseCheck(`{"verdict": "거의", "feedback": "가까워요.", "${key}": "1 없음, 2 틀림", "바탕 근거": "x => { x * 2 } → 2 → undefined", "바탕": "2"}`, { base: true })
+      expect(graded).toMatchObject({ baseAudit: '1 없음, 2 틀림', base: '2' })
+      expect(auditedBase(graded!, listed)).toBe('c:b')
+    }
+    // Not asked: the line is the slip's, as 1.8.0 read it; never a mark kept.
+    const plain = parseCheck(reply('바탕 점검: 1 없음, 2 바름, 3 틀림'))!
+    expect(plain).not.toHaveProperty('baseAudit')
+    expect(plain.slip).toBe('반복마다 i가 하나라고 봄 바탕 점검: 1 없음, 2 바름, 3 틀림 바탕 근거: `let i = 0; i += 1` → 0 → 1 바탕: 3')
+    expect(parseCheck('판정: 거의\n피드백: 좋습니다.\n점검: 1 틀림')).toEqual({ verdict: 'partial', feedback: '좋습니다.\n점검: 1 틀림' })
+    expect(parseCheck('판정: 거의\n피드백: 좋습니다.\n바탕 점검: 1 틀림', { rule: true })).toEqual({ verdict: 'partial', feedback: '좋습니다.\n바탕 점검: 1 틀림' })
+  })
+
+  test('baseAuditOf: by number (bare, a colon, 번, in brackets) or by the longest name a part holds; a part per comma, line, \' / \' or \' · \'; the first mark after it counts', () => {
+    expect(audit('1 없음, 2 바름')).toEqual({ 'c:a': 'none', 'c:b': 'right' })
+    expect(audit('1: 틀림 / 2: 없음')).toEqual({ 'c:a': 'wrong', 'c:b': 'none' })
+    expect(audit('1번 틀림\n2번 없음\n3번 바름')).toEqual({ 'c:a': 'wrong', 'c:b': 'none', 'c:c': 'right' })
+    expect(audit('(1) 틀림; [2] 바름；（3） 없음')).toEqual({ 'c:a': 'wrong', 'c:b': 'right', 'c:c': 'none' })
+    expect(audit('1 없음 · 2 틀림 · 3 바름 · 4 없음')).toEqual({ 'c:a': 'none', 'c:b': 'wrong', 'c:c': 'right', 'c:d': 'none' })
+    expect(audit('1. 함수: 바름, 3. 변수 범위 - 틀림')).toEqual({ 'c:a': 'right', 'c:c': 'wrong' })
+    // By name: the longest the part holds (화살표 함수 over 함수), spaces and case aside; · inside a name is no break.
+    expect(audit('화살표 함수 틀림, 함수 없음')).toEqual({ 'c:b': 'wrong', 'c:a': 'none' })
+    expect(audit('화살표 함수 없음, 함수 틀림')).toEqual({ 'c:b': 'none', 'c:a': 'wrong' })
+    expect(audit('화살표함수: 틀림')).toEqual({ 'c:b': 'wrong' })
+    expect(audit('배열·리스트 틀림')).toEqual({ 'c:d': 'wrong' })
+    expect(audit('- 변수 범위: 틀림\n- 함수: 바름')).toEqual({ 'c:c': 'wrong', 'c:a': 'right' })
+    // Two names as long in one part: none of them read.
+    expect(audit('배열과 객체 틀림', [{ key: 'c:x', name: '배열' }, { key: 'c:y', name: '객체' }])).toEqual({})
+    // The first mark wins over words after it.
+    expect(audit('3 틀림 (바르게 말한 곳 없음), 1 없음')).toEqual({ 'c:c': 'wrong', 'c:a': 'none' })
+    expect(audit('3 바름 (다른 곳은 틀렸지만), 1 없음')).toEqual({ 'c:c': 'right', 'c:a': 'none' })
+    // The marks' like: 틀렸 · 잘못 앎, 바르게 말함 · 맞음, 해당 없음 · a dash.
+    expect(audit('1 잘못 앎, 2 바르게 말함, 3 해당 없음, 4 -')).toEqual({ 'c:a': 'wrong', 'c:b': 'right', 'c:c': 'none', 'c:d': 'none' })
+    expect(audit('1 틀렸음, 2 맞음')).toEqual({ 'c:a': 'wrong', 'c:b': 'right' })
+    expect(audit('1 `틀림`, 2 **바름**')).toEqual({ 'c:a': 'wrong', 'c:b': 'right' })
+    // Left out: no mark, a number past the list or 0, a name not listed, a concept read already; none for nothing.
+    expect(audit('1 ○, 2 ?')).toEqual({})
+    expect(audit('5 틀림, 0 틀림')).toEqual({})
+    expect(audit('클로저 틀림')).toEqual({})
+    expect(audit('1 틀림, 1 바름, 함수 없음')).toEqual({ 'c:a': 'wrong' })
+    expect(audit('')).toEqual({})
+    expect(audit(undefined)).toEqual({})
+  })
+
+  test('auditedBase: the base its 바탕 line names, only where its own mark says 틀림; none for 바름 · 없음, no audit, one that does not read, another\'s 틀림, 바탕 0 or 바탕 근거 없음', () => {
+    const read = (marks: string, said = '바탕: 3', why?: string) => auditedBase(parseCheck(reply(marks, said, why), { base: true })!, listed)
+    expect(read('바탕 점검: 1 없음, 2 바름, 3 틀림')).toBe('c:c')
+    expect(read('바탕 점검: 1 없음, 2 바름, 3 틀림', '바탕: 변수 범위')).toBe('c:c')
+    expect(read('바탕 점검: 변수 범위 틀림', '바탕: (3)')).toBe('c:c')
+    expect(read('바탕 점검: 1 없음, 2 바름, 3 바름')).toBeUndefined()
+    expect(read('바탕 점검: 1 없음, 2 바름, 3 없음')).toBeUndefined()
+    expect(read('')).toBeUndefined()
+    expect(read('바탕 점검: 잘 모르겠음')).toBeUndefined()
+    expect(read('바탕 점검: 1 틀림, 2 없음, 3 없음')).toBeUndefined()
+    expect(read('바탕 점검: 1 없음, 2 없음, 3 틀림', '바탕: 0')).toBeUndefined()
+    expect(read('바탕 점검: 1 없음, 2 없음, 3 틀림', '바탕: 3', '바탕 근거: 없음')).toBeUndefined()
+    expect(read('바탕 점검: 1 없음, 2 없음, 3 틀림', '바탕: 1, 3')).toBeUndefined()
+    // baseOf as 1.9.0 read it, under it: the same key for the line as written.
+    expect(auditedBase({ base: '3', baseAudit: '3 틀림' }, listed)).toBe(baseOf('3', listed))
+    expect(auditedBase({ base: '3' }, listed)).toBeUndefined()
+    expect(auditedBase({ baseAudit: '3 틀림' }, listed)).toBeUndefined()
+  })
+
+  test('slipNotice · workedNextText: the base promised at the count it is asked at (baseAfter: the code branch\'s alone), the worked example at its own', () => {
+    const item = { result: 'wrong' as const, gradedAt: NOW, mine: '3 3 3', slip: 'i가 하나라고 봄', slipType: 'scope' as const }
+    const record: LearnSlip = { what: 'i가 하나라고 봄', type: 'scope', question: 'Q', mine: '3 3 3', at: NOW, times: 2, base: 'c:변수범위' }
+    expect(slipNotice(item, record, false, 2, true, 2)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_BASE_NEXT}`)
+    // A concept met in no code (the plain branch's worked example): no base promised.
+    expect(slipNotice(item, record, false, 2, true, Infinity)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_NEXT}`)
+    expect(workedNextText(record, true, Infinity)).toBe(WORKED_NEXT)
+    expect(workedNextText(record, true, 2)).toBe(WORKED_BASE_NEXT)
+    // Not given, the worked example's own (1.9.0's).
+    expect(slipNotice(item, record, false, 2, true)?.text).toBe(`헷갈린 점: i가 하나라고 봄 · ${WORKED_BASE_NEXT}`)
   })
 })

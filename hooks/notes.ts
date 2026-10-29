@@ -5318,6 +5318,22 @@ export function workedAfterFor(
 }
 
 /**
+ * The misses running after which a concept's worked example is asked with its base concept first (1.10.0 G4): the code
+ * branch's count alone (workedBranch 'code', `workedAfter`), Infinity for a concept met in no code and any other, so a
+ * base is asked only of the worked examples its samples measured (met in js, ts or py code), whatever the plain
+ * branch says. The grade that picks a base (register.tsx gradeTyped), the line under it (slipNotice, workedNextText),
+ * /learn 진단 (slipCounts) and baseFor each go by it on the same code, words and files as workedAfterFor.
+ */
+export function baseAfterFor(
+  code: { file: string; text?: string } | undefined,
+  blurb: string,
+  files: readonly string[],
+  { workedAfter = WORKED_AFTER_TIMES }: Partial<Pick<LadderSteps, 'workedAfter'>> = {},
+): number {
+  return workedBranch(code, blurb, files) === 'code' ? workedAfter : Infinity
+}
+
+/**
  * The spans a concept's words quote (backticks, double backticks for one holding a backtick), spaces squashed, of
  * 4 characters or more: what codeFor looks for in a change and isQuoted in lines kept.
  */
@@ -5999,15 +6015,29 @@ const RULE_CHECK =
   '팀 규칙 연습이다. 판정보다 먼저 고친 줄이 위 팀 규칙을 지키는지 본다. 고친 줄이 팀 규칙을 지키고 할 일을 이루면 모범 답과 달라도 맞음이다. 결과가 같아도 규칙을 지키지 않았으면 맞음이 아니다.'
 
 /**
- * How a grade picks a base concept (1.9.0 F5), after the slip's kind: one of the concepts listed as learned before, by its
- * number, only where the answer shows the slip came from getting that one wrong, the answer's words that show it said
- * first (바탕 근거: none, and no base is kept, parseCheck); and its two lines' format, between the slip's and its kind's.
- * The plan's sentence named the concept by its name (`바탕: 이름`); its first sample picked a concept learned before far
- * too often where the answer had it right, and this is the plan's one mend (docs/qa/견본.md).
+ * How a grade picks a base concept (1.10.0 G4, in the place of 1.9.0 F5's, never sent on), after the slip's kind: each
+ * concept listed as learned before marked first (바탕 점검: 틀림 where the answer's wrong idea, carried into short code
+ * that uses that concept alone, still gives a wrong answer; 바름 where it is not so and the answer says or uses the
+ * concept right; 없음 where the answer shows nothing of it), then one marked 틀림 by its number, that concept-only code
+ * with the result the idea would give → the real one said for it (바탕 근거: none, and no base is kept, parseCheck); and
+ * its three lines' format, between the slip's and its kind's, with no mark shown as an example (copied word for word, it
+ * would throw every true base away). A base is kept only where its own mark says 틀림 (auditedBase). 1.9.0 F5's sentence
+ * (the answer's words said for the base) picked a concept the answer had right, or one beside the slip, too often in both
+ * its samples (docs/qa/견본.md); the plan's first sentence, named by its name, more often still.
  */
 const BASE_CHECK =
-  '바탕은 판정이 거의나 틀림일 때만 쓴다. 이번 답의 헷갈림이 위 목록에 있는 개념 하나를 잘못 알아서 생겼다는 근거가 답에 있으면, 바탕 근거에 답의 그 말을 짧게 쓰고 바탕에 그 개념의 번호 하나를 쓴다. 근거가 없거나 이 개념 안에서 생긴 헷갈림이면 바탕 근거는 없음, 바탕은 0이라고 쓴다.'
-const BASE_FORMAT: readonly string[] = ['바탕 근거: (답의 어느 말이 위 개념을 잘못 안 것인지 짧게, 없으면 없음)', '바탕: (위 번호 하나, 없으면 0)']
+  '바탕 점검 · 바탕 근거 · 바탕은 판정이 거의나 틀림일 때만 쓴다. 바탕 점검에는 위 목록의 번호마다 틀림 · 바름 · 없음 중 하나를 쓴다. 틀림은 이번 답의 잘못된 생각을, 이번 문제의 개념은 쓰지 않고 그 개념만 쓰는 짧은 코드에 옮겨도 틀린 답이 나올 때다. 헷갈림이 이번 문제의 개념이 하는 일에 대한 것이면, 목록의 개념 이름이나 유형의 갈래와 닮았어도 틀림이 아니다. 틀림이 아니고 답이 그 개념을 바르게 말하거나 바르게 썼으면 바름, 답에 그 개념이 드러나지 않으면 없음이다. 바탕에는 점검에서 틀림인 번호 하나를 쓰고, 바탕 근거에는 그 개념만 쓰는 짧은 코드 하나와 답의 생각대로면 나올 결과 → 실제 결과를 쓴다. 틀림인 번호가 없으면 바탕 근거는 없음, 바탕은 0이라고 쓴다.'
+const BASE_FORMAT: readonly string[] = [
+  '바탕 점검: (위 번호마다 번호 다음에 틀림·바름·없음 중 하나를 써서 쉼표로 잇는다)',
+  '바탕 근거: (점검에서 틀림인 개념만 쓰는 짧은 코드 하나와, 답의 생각대로면 나올 결과 → 실제 결과. 없으면 없음)',
+  '바탕: (점검에서 틀림인 번호 하나, 없으면 0)',
+]
+/**
+ * The one mend G4's design fixed before any call (its stance 14): in BASE_FORMAT's first line's place, only if its
+ * tuning sample (T3) reads a mark for every number in fewer than 4 in 5 of its grades short of right. Sent nowhere
+ * while no sample has said so (docs/qa/견본.md).
+ */
+export const BASE_AUDIT_RETRY = '바탕 점검: (번호마다 "번호 표시" 꼴로 쉼표로 잇는다. 표시는 틀림·바름·없음 중 하나이고, 위 목록의 번호를 하나도 빼지 않는다)'
 
 /**
  * The one user message the model reads to grade a typed answer; a question's kind adds how that kind is graded.
@@ -6018,8 +6048,9 @@ const BASE_FORMAT: readonly string[] = ['바탕 근거: (답의 어느 말이 �
  * it is mended. `extra` (1.9.0): `rule`, a team-rule practice's (F2), puts the rule the note named after the example
  * answer (its words data, TEAM_IS_DATA), RULE_CHECK in its kind's place and a `규칙:` line before the verdict, with no
  * slip asked for; `bases` (F5, baseCandidates' names), on a grade that asks for the slip, lists the concepts learned
- * before this one by number after `past` and asks for the one the slip came from getting wrong (BASE_CHECK, its
- * `바탕 근거:` and `바탕:` lines after the slip's). With neither (or no base to list), the prompt is 1.8.0's to the byte.
+ * before this one by number after `past` and asks for the one the slip came from getting wrong (BASE_CHECK, 1.10.0 G4:
+ * its `바탕 점검:`, `바탕 근거:` and `바탕:` lines after the slip's). With neither (or no base to list), the prompt is
+ * 1.8.0's to the byte.
  */
 export function checkPrompt(
   item: Pick<LearnQuizItem, 'name' | 'question' | 'answer' | 'kind'>,
@@ -6093,11 +6124,12 @@ const CHECK_LABEL = /^\s*(?:\*\*)?(판정|피드백|되묻기|헷갈린\s*점|�
 
 /**
  * CHECK_LABEL with the labels a grade asked for on top (1.9.0): `규칙` for a team-rule practice's (F2), `바탕` for a base
- * concept's (F5). Only then are they labels: else a line that starts so is the feedback's, as in 1.8.0.
+ * concept's (F5), its `바탕 점검` (or `점검`) too (1.10.0 G4). Only then are they labels: else a line that starts so is
+ * the feedback's, as in 1.8.0.
  */
 function checkLabel(asked: { rule?: true; base?: true }): RegExp {
   if (!asked.rule && !asked.base) return CHECK_LABEL
-  const more = [...(asked.rule ? ['규칙'] : []), ...(asked.base ? ['바탕\\s*근거', '바탕'] : [])].join('|')
+  const more = [...(asked.rule ? ['규칙'] : []), ...(asked.base ? ['(?:바탕\\s*)?점검', '바탕\\s*근거', '바탕'] : [])].join('|')
   return new RegExp(`^\\s*(?:\\*\\*)?(판정|피드백|되묻기|헷갈린\\s*점|유형|${more})(?:\\*\\*)?\\s*[:：]\\s*(?:\\*\\*)?\\s*(.*)$`)
 }
 
@@ -6142,8 +6174,9 @@ function slipOf(raw: unknown): string | undefined {
 /**
  * A grade as parseCheck reads it: the verdict and feedback, and short of right the question asked back and the slip
  * with its kind. Asked for (1.9.0): whether a team-rule practice's line kept its rule (`rule`, F2), and the base
- * concept a grade named as it wrote it (`base`, F5, a number in the list) with the answer's words it named for it
- * (`baseWhy`, 바탕 근거).
+ * concept a grade named as it wrote it (`base`, F5, a number in the list) with what it said for it (`baseWhy`, 바탕
+ * 근거), and (1.10.0 G4) its mark of each concept listed as it wrote it (`baseAudit`, 바탕 점검, read by baseAuditOf):
+ * on any grade short of right that asked for a base, a base named or not. Never kept in the store.
  */
 export type CheckReply = {
   verdict: 'right' | 'partial' | 'wrong'
@@ -6154,6 +6187,7 @@ export type CheckReply = {
   rule?: 'kept' | 'broken'
   base?: string
   baseWhy?: string
+  baseAudit?: string
 }
 
 /**
@@ -6182,7 +6216,7 @@ function baseSaid(raw: unknown): string | undefined {
  * line grades as before 1.7.0. `asked` (1.9.0) reads the lines checkPrompt's `extra` asked for, else none of them:
  * `rule`, a team-rule practice's `규칙:` (F2), a line that broke the rule never right (right is read as 거의); `base`,
  * the `바탕:` line (F5) as written, short of right only and only under a `바탕 근거:` that names the answer's words
- * (baseOf reads it as a concept).
+ * (baseOf reads it as a concept), with its `바탕 점검:` line (1.10.0 G4, `baseAudit`) as written, short of right only.
  */
 export function parseCheck(text: string, asked: { rule?: true; base?: true } = {}): CheckReply | undefined {
   const words: Record<string, 'right' | 'partial' | 'wrong'> = {
@@ -6196,7 +6230,7 @@ export function parseCheck(text: string, asked: { rule?: true; base?: true } = {
     nudge: string | undefined,
     slip: string | undefined,
     type: unknown,
-    more: { rule?: unknown; base?: unknown; baseWhy?: unknown },
+    more: { rule?: unknown; base?: unknown; baseWhy?: unknown; baseAudit?: unknown },
   ): CheckReply => {
     const rule = asked.rule ? ruleKeptOf(more.rule) : undefined
     // A base with no words of the answer said for it is none (1.9.0 F5, 바탕 근거).
@@ -6212,6 +6246,8 @@ export function parseCheck(text: string, asked: { rule?: true; base?: true } = {
       ...(rule !== undefined ? { rule } : {}),
       // A base explains a slip (1.9.0 F5): none on a right answer, which keeps no slip.
       ...(verdict !== 'right' && base !== undefined ? { base, baseWhy: baseWhy! } : {}),
+      // Its marks as written (1.10.0 G4), on any grade short of right that asked for a base, a base named or not.
+      ...(verdict !== 'right' && asked.base && typeof more.baseAudit === 'string' && more.baseAudit.trim() !== '' ? { baseAudit: more.baseAudit.trim() } : {}),
     }
   }
   const json = /\{[\s\S]*\}/.exec(text)?.[0]
@@ -6226,6 +6262,7 @@ export function parseCheck(text: string, asked: { rule?: true; base?: true } = {
             rule: r.rule ?? r['규칙'],
             base: r.base ?? r['바탕'],
             baseWhy: r.baseWhy ?? r['바탕 근거'] ?? r['바탕근거'],
+            baseAudit: r.baseAudit ?? r['바탕 점검'] ?? r['바탕점검'],
           })
         }
       }
@@ -6241,6 +6278,7 @@ export function parseCheck(text: string, asked: { rule?: true; base?: true } = {
     rule: parts.get('규칙'),
     base: parts.get('바탕'),
     baseWhy: parts.get('바탕근거'),
+    baseAudit: parts.get('바탕점검') ?? parts.get('점검'),
   })
 }
 
@@ -6613,8 +6651,8 @@ export function noteSlipName(
  * which rungOf picks by more than the slip); and open with a base concept a quiz would ask before its worked example
  * (1.9.0 F5, `based`: 바탕 개념; missed `workedAfter` times running, not set right on its try again, as baseFor asks).
  * `afterOf` gives each slip's key its own count (1.10.0 G1: workedAfterFor on the code, words and files the next quiz
- * finds for that key, Infinity where isWorkedQuizzable does not hold, register.tsx afterNow), `workedAfter` for every
- * key when not given.
+ * finds for that key, Infinity where isWorkedQuizzable does not hold, register.tsx afterNow; G4: the count its base is
+ * asked at, baseAfterFor, the code branch's alone), `workedAfter` for every key when not given.
  */
 export type SlipCounts = { all: number; open: number; mended: number; other: number; blank: number; againOpen: number; based: number }
 
@@ -6643,8 +6681,8 @@ function isBased(one: LearnSlip): boolean {
 
 /**
  * The keys of the slips slipCounts could count as `based` (1.10.0 G1): with a base, missed as many times as one of
- * `afters` says (the branches' switches that are on). So /learn 진단 looks for the code of these alone, and of none
- * while every branch is off.
+ * `afters` says (the switches that are on: 1.10.0 G4, the code branch's alone, baseAfterFor). So /learn 진단 looks for
+ * the code of these alone, and of none while that branch is off.
  */
 export function basedKeys(slips: Readonly<Record<string, LearnSlip>>, afters: readonly number[]): string[] {
   return Object.entries(slips)
@@ -6666,7 +6704,10 @@ export const WORKED_NEXT = '다음 복습 퀴즈는 풀이부터 보여 줍니�
  * 도전) is graded with the concepts learned before it listed (baseCandidates), and may name the one the slip came from
  * getting wrong (slipBase, then the slip's `base`); missed twice running, the next review quiz asks that one right before
  * the worked example (baseFor). On only once its sample passes twice and 풀이 보고 풀기 is on (docs/qa/견본.md); off, the
- * grade's prompt, the quiz, the store and /learn 진단 are 1.8.0's to the byte.
+ * grade's prompt, the quiz, the store and /learn 진단 are 1.8.0's to the byte. 1.10.0 (G4) asks it anew: each concept
+ * listed marked first (BASE_CHECK, auditedBase), only at the first grade of a question asked again whose slip has words,
+ * of a concept met in code a worked example's code branch asks (baseAfterFor), and never in a quiz of a shape its
+ * samples did not measure (baseFor, isBaseKept); still off here, on only in a model's row of MODEL_SWITCHES.
  */
 export const IS_BASE_ASKED = false
 /**
@@ -6682,13 +6723,13 @@ export const WORKED_BASE_NEXT = '다음 복습 퀴즈는 바탕 개념과 풀이
 
 /**
  * What a miss that makes the next review quiz a worked example (isWorkedNext) says of it: WORKED_BASE_NEXT once its slip
- * (`record`, as the store has it after the grade) has a base, bases are asked (1.9.0 F5) and it was missed `workedAfter`
- * (WORKED_AFTER_TIMES; 1.10.0 G1: its concept's own, workedAfterFor) times running, just where baseFor asks a base
- * before the worked example (a third miss running, after one set right on its try again, is asked with none: once for
- * a slip); else WORKED_NEXT.
+ * (`record`, as the store has it after the grade) has a base, bases are asked (1.9.0 F5) and it was missed `baseAfter`
+ * times running (WORKED_AFTER_TIMES; 1.10.0 G1: its concept's own, workedAfterFor; G4: the code branch's alone,
+ * baseAfterFor, Infinity for a concept met in no code), just where baseFor asks a base before the worked example (a
+ * third miss running, after one set right on its try again, is asked with none: once for a slip); else WORKED_NEXT.
  */
-export function workedNextText(record: Pick<LearnSlip, 'base' | 'times'> | undefined, isBaseAsked = IS_BASE_ASKED, workedAfter = WORKED_AFTER_TIMES): string {
-  return isBaseAsked && record?.base !== undefined && record.times === workedAfter ? WORKED_BASE_NEXT : WORKED_NEXT
+export function workedNextText(record: Pick<LearnSlip, 'base' | 'times'> | undefined, isBaseAsked = IS_BASE_ASKED, baseAfter = WORKED_AFTER_TIMES): string {
+  return isBaseAsked && record?.base !== undefined && record.times === baseAfter ? WORKED_BASE_NEXT : WORKED_NEXT
 }
 
 /**
@@ -6735,7 +6776,7 @@ export function isWorkedQuizzable(index: Readonly<Record<string, LearnConcept>>,
  * a worked example (isWorkedNext) says so in place of the next quiz's other code (the callers add it to `again`), its
  * base first when the slip has one (workedNextText, 1.9.0 F5). `workedAfter` is the concept's own (1.10.0 G1,
  * workedAfterFor, Infinity where isWorkedQuizzable does not hold), so a concept the next quiz asks again is promised no
- * worked example.
+ * worked example; `baseAfter` the count its base is asked at (1.10.0 G4, baseAfterFor: the code branch's alone).
  */
 export function slipNotice(
   item: Pick<LearnQuizItem, 'result' | 'gradedAt' | 'isRetry' | 'mine' | 'slip' | 'slipType' | 'firstTry' | 'rung' | 'team'>,
@@ -6743,6 +6784,7 @@ export function slipNotice(
   isHelped: boolean,
   workedAfter = WORKED_AFTER_TIMES,
   isBaseAsked = IS_BASE_ASKED,
+  baseAfter = workedAfter,
 ): SlipNotice | undefined {
   const at = item.gradedAt
   if (item.result === undefined || at === undefined) return undefined
@@ -6762,7 +6804,7 @@ export function slipNotice(
         ? { kind: 'blank', text: `떠오르지 않았습니다 · ${next}` }
         : { kind: 'blank', text: `답이 짧아 헷갈린 점은 적지 않았습니다 · ${next}` }
     }
-    return { kind: 'slip', text: `헷갈린 점: ${open.what} · ${isWorked ? workedNextText(open, isBaseAsked, workedAfter) : '다음 퀴즈에서 다른 코드로 다시 묻습니다'}` }
+    return { kind: 'slip', text: `헷갈린 점: ${open.what} · ${isWorked ? workedNextText(open, isBaseAsked, baseAfter) : '다음 퀴즈에서 다른 코드로 다시 묻습니다'}` }
   }
   if (item.isRetry && record?.fixedAt === at) return { kind: 'fixed', text: '✓ 지난번 헷갈린 점을 바로잡았습니다' }
   if (isNow) return { kind: 'mended', text: '헷갈린 점을 바로 고쳤습니다 · 다른 날 다른 코드로 한 번 더 확인합니다' }
@@ -6824,20 +6866,89 @@ export function baseOf(raw: string | undefined, candidates: readonly BaseCandida
   return candidates.find(one => plain(one.name) === said || one.key === key)?.key
 }
 
+/**
+ * A 바탕 점검 mark (1.10.0 G4): the first of 틀림 · 바름 · 없음 (and their like) `text` says; a dash standing alone is
+ * 없음 where no word of them is said (`변수 범위 - 틀림` is 틀림); undefined for none.
+ */
+function auditMark(text: string): 'right' | 'wrong' | 'none' | undefined {
+  const said = text.replace(/[`*"'“”‘’]/g, ' ')
+  const found: [number, 'right' | 'wrong' | 'none'][] = []
+  const at = (pattern: RegExp, mark: 'right' | 'wrong' | 'none') => {
+    const m = pattern.exec(said)
+    if (m) found.push([m.index, mark])
+  }
+  at(/틀림|틀렸|잘못\s*(?:앎|알|말|씀|썼)/, 'wrong')
+  at(/바름|바르게\s*(?:앎|알|말|씀|썼)|맞음/, 'right')
+  at(/없음|해당\s*없|드러나지\s*않/, 'none')
+  if (found.length === 0) return /(?:^|\s)[-–—]+(?:\s|$)/.test(said) ? 'none' : undefined
+  return found.sort((a, b) => a[0] - b[0])[0]![1]
+}
+
+/**
+ * A grade's 바탕 점검 line read (1.10.0 G4): each listed concept's mark, by its number (1 the first; in brackets, with
+ * 번, or a colon after it) or by its name (the longest of `candidates`' names the part holds, spaces and case aside; two
+ * as long, none), one part per comma, semicolon, line, ' / ' or ' · '. The first mark after it counts (`3 틀림 (바르게
+ * 말한 곳 없음)` is 틀림). A part that names no listed concept or says no mark, and a concept already read, are left out.
+ */
+export function baseAuditOf(raw: string | undefined, candidates: readonly BaseCandidate[]): Map<string, 'right' | 'wrong' | 'none'> {
+  const found = new Map<string, 'right' | 'wrong' | 'none'>()
+  if (raw === undefined) return found
+  for (const part of raw.split(/[,，;；\n]|\s[/·]\s/)) {
+    const bare = part.trim().replace(/^[-*•]\s*/, '')
+    if (bare === '') continue
+    const numbered = /^[(（[]?\s*(\d+)\s*(?:번)?\s*[)）\].:：]?/.exec(bare)
+    let key: string | undefined
+    let rest = bare
+    if (numbered) {
+      key = candidates[Number(numbered[1]) - 1]?.key
+      rest = bare.slice(numbered[0].length)
+    } else {
+      const flat = squash(bare).toLowerCase()
+      const hits = candidates
+        .filter(one => squash(one.name) !== '' && flat.includes(squash(one.name).toLowerCase()))
+        .sort((a, b) => squash(b.name).length - squash(a.name).length)
+      const top = hits[0]
+      if (top && (hits.length === 1 || squash(hits[1]!.name).length < squash(top.name).length)) {
+        key = top.key
+        const name = squash(top.name).toLowerCase()
+        rest = flat.slice(flat.indexOf(name) + name.length)
+      }
+    }
+    const mark = auditMark(rest)
+    if (key !== undefined && mark !== undefined && !found.has(key)) found.set(key, mark)
+  }
+  return found
+}
+
+/**
+ * The base a grade picked (1.10.0 G4), kept only where its own 바탕 점검 marked that concept 틀림: baseOf's key for its
+ * 바탕 line (none where its 바탕 근거 said none, parseCheck), else none: no audit, one that does not read, or a mark of
+ * 바름 or 없음 for it (another concept's 틀림 too).
+ */
+export function auditedBase(graded: Pick<CheckReply, 'base' | 'baseAudit'>, candidates: readonly BaseCandidate[]): string | undefined {
+  const key = baseOf(graded.base, candidates)
+  if (key === undefined) return undefined
+  return baseAuditOf(graded.baseAudit, candidates).get(key) === 'wrong' ? key : undefined
+}
+
 /** Where a quiz asks a base concept (1.9.0 F5, baseFor): its key, the concept it is asked before, and the place it takes. */
 export type BaseFound = { key: string; before: string; slot: number }
 
 /**
  * The base concept a review quiz asks right before a worked example (1.9.0 F5), if any. The worked example (X) is the
  * first of `picks` asked again (`asking`), no team term of this repository, whose slip (`slipOf`, as it will stand once
- * the quiz this one replaces is settled) is open, missed its branch's count of times running (1.10.0 G1, workedAfterFor
- * on the pick's code, words and files: `workedAfter` met in code, `workedPlainAfter` met in none) and not set right on a try
- * again, with a base: what rungOf makes a worked example. Its base, followed through merges, is asked
+ * the quiz this one replaces is settled) is open, missed the code branch's count of times running (1.10.0 G4,
+ * baseAfterFor on the pick's code, words and files: `workedAfter` for a concept met in code that holds its quote, none
+ * for one met in no code, whatever the plain branch's count) and not set right on a try again, with a base: what rungOf
+ * makes a worked example. Its base, followed through merges, is asked
  * when the index holds it, not known, not X, in no place of the quiz, gone over by no quiz since that slip was kept, with
  * no slip of its own open in the store (`open`: asked again as its own, soon), and no team term of any repository
  * (`teamMarks`). It takes the last place that is no slip asked again, not X and no concept answered wrong (a filler,
  * then a team term not met yet, then a concept due); `slot` -1 adds it to a quiz of fewer than three. None without such
- * a place: a slip asked again keeps its place.
+ * a place: a slip asked again keeps its place. None either (1.10.0 G4, D33 (4)) where the quiz with it would not be of
+ * the shape its samples measured: a team term (`team`, `isTeamMarked`) left in it, or X the one concept beside it; the
+ * quiz is then asked as made, X asked again (ladderMixed), and makeQuiz drops the base too where the quiz does not ask
+ * X by its worked example after all (isBaseKept).
  */
 export function baseFor(
   index: Readonly<Record<string, LearnConcept>>,
@@ -6846,18 +6957,14 @@ export function baseFor(
   asking: ReadonlySet<string>,
   map: Readonly<Record<string, string>>,
   open: Readonly<Record<string, LearnSlip>>,
-  {
-    workedAfter = WORKED_AFTER_TIMES,
-    workedPlainAfter = WORKED_PLAIN_AFTER_TIMES,
-    teamMarks = {},
-  }: { workedAfter?: number; workedPlainAfter?: number; teamMarks?: Readonly<Record<string, readonly string[]>> } = {},
+  { workedAfter = WORKED_AFTER_TIMES, teamMarks = {} }: { workedAfter?: number; teamMarks?: Readonly<Record<string, readonly string[]>> } = {},
 ): BaseFound | undefined {
   const isWorked = (one: QuizPick) => {
     const slip = asking.has(one.key) && one.team !== true ? slipOf(one.key) : undefined
     return (
       slip !== undefined &&
       slip.fixedAt === undefined &&
-      slip.times === workedAfterFor(one.code, one.blurb, one.files, { workedAfter, workedPlainAfter }) &&
+      slip.times === baseAfterFor(one.code, one.blurb, one.files, { workedAfter }) &&
       slip.isRight !== true &&
       slip.base !== undefined
     )
@@ -6869,9 +6976,23 @@ export function baseFor(
   const one = conceptAt(index, key)
   if (!one || isKnown(one) || key === x.key || picks.some(other => other.key === key)) return undefined
   if ((one.reviewedAt ?? 0) > slip.at || openSlip(open, key) !== undefined || isTeamTerm(teamMarks, key)) return undefined
-  if (picks.length < 3) return { key, before: x.key, slot: -1 }
-  const slot = picks.findLastIndex(other => !asking.has(other.key) && other.key !== x.key && !isMissed(other))
-  return slot === -1 ? undefined : { key, before: x.key, slot }
+  const slot = picks.length < 3 ? -1 : picks.findLastIndex(other => !asking.has(other.key) && other.key !== x.key && !isMissed(other))
+  if (picks.length >= 3 && slot === -1) return undefined
+  // The quiz with the base in it (D33 (4)): no team term left, and one concept at least beside X.
+  const kept = picks.filter((_, j) => j !== slot)
+  if (kept.length < 2 || kept.some(other => other.team === true || other.isTeamMarked === true)) return undefined
+  return { key, before: x.key, slot }
+}
+
+/**
+ * Whether a quiz keeps the base concept withBase put in it (1.10.0 G4, D33 (4)), by its rungs as it asks them
+ * (`rungs`, ladderMixed's, in the order of `picks`): only while the pick right after it, the worked example it was
+ * picked for, is asked by its worked example. Not so, ladderMixed asks that one again (a worked example past the
+ * quiz's first, beside a team term or alone), and the quiz is asked with no base, as it was made before baseFor.
+ */
+export function isBaseKept(rungs: readonly (QuizRung | undefined)[], picks: readonly Pick<QuizPick, 'isBase'>[]): boolean {
+  const at = picks.findIndex(one => one.isBase === true)
+  return at === -1 || rungs[at + 1] === 'worked'
 }
 
 /** A quiz's picks with its base concept (`pick`, marked isBase) right before the worked example, in the place baseFor found. */

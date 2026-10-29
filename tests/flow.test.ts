@@ -1084,6 +1084,54 @@ function withFiller(store: Map<string, unknown>, name = '채움'): Map<string, u
   return store
 }
 
+/** The code metInCode's note wrote (counter.js), and the line of it a concept's words quote. */
+const COUNTER_CODE = ['let c = 10', 'const add = () => ++c', 'console.log(add())']
+const COUNTER_QUOTE = 'const add = () => ++c'
+
+/**
+ * `store` with the concept `name` (in its index already) met in code a worked example's code branch asks (1.10.0 G1 ·
+ * G4, workedBranch): a ready note of this project, a month old, that wrote counter.js (COUNTER_CODE), the concept's
+ * words quoting a line of it (COUNTER_QUOTE), counter.js among its files. Its base (1.10.0 G4) is asked only so.
+ * `file` another name for that file (one in a language the code branch does not ask, say).
+ */
+function metInCode(store: Map<string, unknown>, name: string, file = 'counter.js'): Map<string, unknown> {
+  const at = Date.UTC(2026, 9, 3, 1) - 30 * 86_400_000
+  const key = conceptKey(name)
+  const one = (store.get('concepts') as Record<string, { blurb: string; files: string[] }>)[key]!
+  one.blurb = `${one.blurb} — \`${COUNTER_QUOTE}\``
+  if (!one.files.includes(file)) one.files = [...one.files, file]
+  const note = {
+    id: `code-${key}`,
+    turnId: `t-${key}`,
+    at,
+    prompt: '세는 함수를 만들어 줘',
+    answer: '',
+    changes: [
+      {
+        file,
+        path: `/proj/${file}`,
+        tool: 'Write',
+        kind: 'create',
+        added: COUNTER_CODE.length,
+        removed: 0,
+        diff: [`@@ -0,0 +1,${COUNTER_CODE.length} @@`, ...COUNTER_CODE.map(line => `+${line}`)].join('\n'),
+        isCut: false,
+      },
+    ],
+    moreFiles: 0,
+    status: 'ready',
+    text: ['### 한 줄 요약', '세는 함수를 만들었다', '### 배울 개념', `- **${name}**: ${one.blurb}`].join('\n'),
+    savedAs: 'ready',
+    isPast: true,
+    root: '/proj',
+    updatedAt: at,
+    concepts: [key],
+  }
+  const history = (store.get('history') ?? {}) as Record<string, { at: number; notes: unknown[] }>
+  store.set('history', { ...history, '/proj': { at, notes: [...(history['/proj']?.notes ?? []), note] } })
+  return store
+}
+
 function start($: Engine) {
   return $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
 }
@@ -14711,13 +14759,23 @@ describe('1.9.0: 바탕 개념, a base concept asked right before the worked exa
   const F = '배열'
   /** The words of the answer a grade says its base came from (바탕 근거). */
   const WHY = '바탕 근거: "함수가 끝나면 다 사라지니까"'
+  /** The lines a grade that lists bases asks for after the slip's (1.10.0 G4's BASE_FORMAT, to the byte). */
+  const G4_LINES = [
+    '바탕 점검: (위 번호마다 번호 다음에 틀림·바름·없음 중 하나를 써서 쉼표로 잇는다)',
+    '바탕 근거: (점검에서 틀림인 개념만 쓰는 짧은 코드 하나와, 답의 생각대로면 나올 결과 → 실제 결과. 없으면 없음)',
+    '바탕: (점검에서 틀림인 번호 하나, 없으면 0)',
+  ].join('\n')
+  /** Its marks of the concepts listed (1.10.0 G4, 바탕 점검): 변수 범위, the third, 틀림. */
+  const MARKS = '바탕 점검: 1 없음, 2 없음, 3 틀림'
   /**
    * A grade of a question asked again short of right that asks back, its slip read as coming from the concept numbered
-   * `said` in the list (변수 범위 is the third: 비동기 · 배열 · 변수 범위, each named by 클로저's words, the latest met first).
+   * `said` in the list (변수 범위 is the third: 비동기 · 배열 · 변수 범위, each sharing counter.js with 클로저 and named by
+   * its words, the latest met first), each marked first (`marks`, 1.10.0 G4).
    */
-  const based = (said = '3', why = WHY) => ['판정: 틀림', '피드백: 그 값은 바깥 변수가 아닙니다.', '되묻기: 안쪽 함수가 다시 불릴 때 c는 어디에 남아 있을까요?', `헷갈린 점: ${WHAT}`, why, `바탕: ${said}`, '유형: 변수 범위'].join('\n')
+  const based = (said = '3', why = WHY, marks = MARKS) =>
+    ['판정: 틀림', '피드백: 그 값은 바깥 변수가 아닙니다.', '되묻기: 안쪽 함수가 다시 불릴 때 c는 어디에 남아 있을까요?', `헷갈린 점: ${WHAT}`, marks, why, `바탕: ${said}`, '유형: 변수 범위'].join('\n')
   /** The same graded at once: no question asked back. */
-  const atOnce = (said = '3', why = WHY) => ['판정: 틀림', '피드백: 아닙니다.', `헷갈린 점: ${WHAT}`, why, `바탕: ${said}`, '유형: 변수 범위'].join('\n')
+  const atOnce = (said = '3', why = WHY, marks = MARKS) => ['판정: 틀림', '피드백: 아닙니다.', `헷갈린 점: ${WHAT}`, marks, why, `바탕: ${said}`, '유형: 변수 범위'].join('\n')
   const AGAIN_WRONG = '판정: 틀림\n피드백: 아직 아닙니다.'
   const worked = (n: number) =>
     [`T${n}: 예측`, `Q${n}: 풀이: \`let n = 0; const up = () => ++n; up()\` 뒤 n은 1입니다.`, '이제 풀어 보세요: `let c = 10; const add = () => ++c; add()` 뒤 c는?', `H${n}: 바깥 c`, `A${n}: 11`].join('\n')
@@ -14729,11 +14787,11 @@ describe('1.9.0: 바탕 개념, a base concept asked right before the worked exa
   /**
    * X met after B, D and F; X gone over three days ago and its slip kept two days ago (asked again: 다시 도전), D due,
    * F due in six days and B in nine (so F fills the quiz before B), each with its step copy; `more` adds concepts.
-   * X is met in no file (1.10.0 G1: a worked example of the plain branch; one seen in a file whose code is found no
-   * more is none, its 4/7 review), its words naming B, D and F (a grade's base candidates, baseCandidates); the rest
-   * met in counter.js.
+   * All met in counter.js, X by a note that wrote it, its words naming B, D and F and quoting a line of it
+   * (metInCode): a worked example of the code branch (1.10.0 G1), the one a base is asked before (1.10.0 G4; in
+   * 1.9.0's tests X was met in no file, the plain branch's since G1, and G4 asks no base there).
    */
-  const X_WORDS = `${X} 설명 — ${D} · ${F} · ${B}와 함께 씁니다`
+  const X_WORDS = `${X} 설명 — ${D} · ${F} · ${B}와 함께 씁니다 — \`${COUNTER_QUOTE}\``
   const storeOf = (slip: Partial<Row> = {}, more: Record<string, { step: number; ago: number; first: number }> = {}) => {
     const rows: Record<string, { step: number; ago: number; first: number }> = {
       [X]: { step: 1, ago: 3, first: 30 },
@@ -14745,11 +14803,11 @@ describe('1.9.0: 바탕 개념, a base concept asked right before the worked exa
     const concepts = Object.fromEntries(
       Object.entries(rows).map(([name, one]) => [
         conceptKey(name),
-        { name, count: 2, firstAt: NOW - one.first * DAY, lastAt: NOW - one.first * DAY, blurb: name === X ? X_WORDS : `${name} 설명`, files: name === X ? [] : ['counter.js'], step: one.step, reviewedAt: NOW - one.ago * DAY },
+        { name, count: 2, firstAt: NOW - one.first * DAY, lastAt: NOW - one.first * DAY, blurb: name === X ? `${X} 설명 — ${D} · ${F} · ${B}와 함께 씁니다` : `${name} 설명`, files: ['counter.js'], step: one.step, reviewedAt: NOW - one.ago * DAY },
       ]),
     )
     const slips = { [conceptKey(X)]: { what: WHAT, type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * DAY, times: 1, ...slip } }
-    return new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['slips', slips]])
+    return metInCode(new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['slips', slips]]), X)
   }
   /**
    * A world whose build asks bases or not (a harness's), started: with worked examples on as 1.8.0 shipped them unless
@@ -14791,16 +14849,19 @@ describe('1.9.0: 바탕 개념, a base concept asked right before the worked exa
     // The first grade lists the concepts met before 클로저 (each named by its words: the latest met first).
     const first = w.models.at(-1)!
     expect(first).toContain(`## 이 학습자가 지난번에 헷갈린 점\n${WHAT}\n## 학습자가 전에 배운 개념\n1. ${D}\n2. ${F}\n3. ${B}\n## 학습자의 답\n`)
-    expect(first).toContain('헷갈린 점: (거의·틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)\n바탕 근거: (답의 어느 말이 위 개념을 잘못 안 것인지 짧게, 없으면 없음)\n바탕: (위 번호 하나, 없으면 0)\n유형:')
+    // Each listed concept marked first (1.10.0 G4), with room for it (BASE_GRADE_TOKENS).
+    expect(first).toContain(`헷갈린 점: (거의·틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)\n${G4_LINES}\n유형:`)
+    expect(w.budgets.at(-1)).toBe(880)
     expect(quizItems(store)[0]).toMatchObject({ firstTry: { slip: WHAT, slipType: 'scope', slipBase: conceptKey(B) } })
     expect(slipsOf(store)[conceptKey(X)]).not.toHaveProperty('base')
     // The try again asks for no slip, nor a base: the first try's is kept.
     await answer(ui, w, `${mineKey(store, 0)}-again`, '함수 안쪽 어딘가', AGAIN_WRONG)
     expect(w.models.at(-1)).not.toContain('전에 배운 개념')
     expect(w.models.at(-1)).not.toContain('바탕')
+    expect(w.budgets.at(-1)).toBe(480)
     expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 2, base: conceptKey(B), at: NOW })
-    // Under the grade, no name: the base comes first in the next review quiz.
-    expect(await ui.find({ type: 'Text', text: `같은 곳을 또 헷갈렸습니다 · ${WORKED_BASE_NEXT}` })).toBeDefined()
+    // Under the grade, no name: the base comes first in the next review quiz (after where the note is, n).
+    expect(await ui.find({ type: 'Text', text: `같은 곳을 또 헷갈렸습니다 · n: 이 개념을 배운 노트 · ${WORKED_BASE_NEXT}` })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: new RegExp(B) })).toBeUndefined()
     await ui.unmount()
 
@@ -15048,7 +15109,7 @@ describe('1.9.0: 바탕 개념, a base concept asked right before the worked exa
     await answer(ui, w, mineKey(store, 1), '10', AGAIN_WRONG)
     expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 3 })
     expect(slipsOf(store)[conceptKey(X)]).not.toHaveProperty('base')
-    expect(await ui.find({ type: 'Text', text: '같은 곳을 또 헷갈렸습니다 · 다음 복습 퀴즈는 풀이부터 보여 줍니다' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '같은 곳을 또 헷갈렸습니다 · n: 이 개념을 배운 노트 · 다음 복습 퀴즈는 풀이부터 보여 줍니다' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: new RegExp(WORKED_BASE_NEXT) })).toBeUndefined()
     await ui.unmount()
     await w.clock.advance(60_000)
@@ -15155,7 +15216,7 @@ describe('1.9.0: 바탕 개념, a base concept asked right before the worked exa
     expect((await learn($, '퀴즈 1 전역에 남아요')).text).toContain(`\n같은 곳을 또 헷갈렸습니다 · ${WORKED_BASE_NEXT}`)
     expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 3, base: conceptKey(B) })
     const ui = await quizPane($)
-    expect(await ui.find({ type: 'Text', text: `같은 곳을 또 헷갈렸습니다 · ${WORKED_BASE_NEXT}` })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: `같은 곳을 또 헷갈렸습니다 · n: 이 개념을 배운 노트 · ${WORKED_BASE_NEXT}` })).toBeDefined()
     await ui.unmount()
     expect((await learn($, '진단')).text).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 1\n')
     await w.clock.advance(60_000)
@@ -15552,6 +15613,27 @@ describe('1.9.0: the note and quiz calls\' output caps, raised by their sample (
     expect(callsOf(w).at(-1)).toEqual({ budget: 480, system: CHECK_SYSTEM })
   })
 
+  test('(1.10.0 G4) a grade that lists the concepts learned before for a base (on by a harness) asks for 880; the grade of a question not asked again 480 as before', async ($, on) => {
+    // 클로저 met in counter.js by a note (the code branch), its slip kept once two days ago; 변수 범위 met before it there.
+    const slip = { what: '함수가 끝나면 바깥 변수도 사라진다고 봄', type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * DAY, times: 1 }
+    const store = storeOf({ 클로저: 1, '변수 범위': 3 }, 3, { [conceptKey('클로저')]: slip })
+    Object.assign((store.get('concepts') as Record<string, Record<string, unknown>>)[conceptKey('변수 범위')]!, { firstAt: NOW - 60 * DAY, files: ['counter.js'] })
+    metInCode(store, '클로저')
+    const w = world(on, 'ok', null, true, store)
+    w.harness = { workedAfterTimes: 2, isBaseAsked: true }
+    await start($)
+    w.answer = [plainQ(1), plainQ(2)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => [one.name, one.isRetry])).toEqual([['클로저', true], ['변수 범위', undefined]])
+    w.answer = ['판정: 틀림', '피드백: 아닙니다.', '헷갈린 점: 함수가 끝나면 바깥 변수도 사라진다고 봄', '바탕 점검: 1 틀림', '바탕 근거: 없음', '바탕: 0', '유형: 변수 범위'].join('\n')
+    await learn($, '퀴즈 1 전역에 남아요')
+    expect(w.models.at(-1)).toContain('## 학습자가 전에 배운 개념\n1. 변수 범위\n')
+    expect(callsOf(w).at(-1)).toEqual({ budget: 880, system: CHECK_SYSTEM })
+    w.answer = RIGHT
+    await learn($, '퀴즈 2 답 2')
+    expect(callsOf(w).at(-1)).toEqual({ budget: 480, system: CHECK_SYSTEM })
+  })
+
   for (const isOn of [true, false]) {
     test(`code never seen ${isOn ? 'on (a harness\'s step 4): 4600' : 'off: the same concept asked in its own code, 3400'}`, async ($, on) => {
       const store = storeOf({ 'for...of 반복문': 4 }, 31)
@@ -15783,7 +15865,8 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     const reads = aliasReads(on)
     const { calls, diag } = await routeDay($, on, w => {
       w.harness = { models: { sonnet: { ...ON } } }
-      metInNoFile(w.store)
+      // 클로저 met in counter.js by a note: the code branch's worked example, its base asked before it (1.10.0 G4).
+      metInCode(w.store, '클로저')
     })
     const golden = ROUTE19_CALLS.beginner
     // The note's prompt is 1.9.0's whatever the switches (1.10.0 G6), and this one says nothing of a team rule: no
@@ -15968,8 +16051,9 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
   // whose line the callers make (the worked example's tests above and in 1.9.0's 바탕 개념).
   const SLIP_WHAT = '안쪽 함수가 값을 복사해 둔다고 봄'
   /**
-   * 클로저 met after 변수 범위, its words naming it (a grade's base candidate), in no file (a worked example of the plain
-   * branch, 1.10.0 G1's 4/7 review); 변수 범위 in counter.js; 클로저's slip kept once two days ago (asked again: 다시 도전).
+   * 클로저 met after 변수 범위, its words naming it (a grade's base candidate), in counter.js by a note that wrote it
+   * (metInCode: a worked example of the code branch, 1.10.0 G1, the one a base is asked for, G4); 변수 범위 in
+   * counter.js; 클로저's slip kept once two days ago (asked again: 다시 도전).
    */
   function slipStore(): Map<string, unknown> {
     const rows: Record<string, { step: number; ago: number; first: number }> = { 클로저: { step: 1, ago: 3, first: 30 }, '변수 범위': { step: 3, ago: 5, first: 60 } }
@@ -15980,7 +16064,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
       ]),
     )
     const slips = { [conceptKey('클로저')]: { what: '함수가 끝나면 바깥 변수도 사라진다고 봄', type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * ROUTE_DAY, times: 1 } }
-    return new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['slips', slips]])
+    return metInCode(new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['slips', slips]]), '클로저')
   }
   for (const [model, row, tail] of [
     ['sonnet', { workedAfterTimes: 1, workedPlainAfterTimes: 1, isBaseAsked: true }, WORKED_BASE_NEXT],
@@ -15997,7 +16081,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
       w.answer = [routeQ(1), routeQ(2)].join('\n')
       await learn($, '퀴즈 새로')
       expect(itemsOf(store).map(one => [one.name, one.isRetry])[0]).toEqual(['클로저', true])
-      w.answer = ['판정: 틀림', '피드백: 아닙니다.', `헷갈린 점: ${SLIP_WHAT}`, ...(isBase ? ['바탕 근거: "값을 복사해요"', '바탕: 1'] : []), '유형: 값과 참조'].join('\n')
+      w.answer = ['판정: 틀림', '피드백: 아닙니다.', `헷갈린 점: ${SLIP_WHAT}`, ...(isBase ? ['바탕 점검: 1 틀림', '바탕 근거: `let a = 1; let b = a; b = 2` → 2 → 1', '바탕: 1'] : []), '유형: 값과 참조'].join('\n')
       const said = (await learn($, '퀴즈 1 안쪽 함수가 값을 복사해요')).text ?? ''
       expect(w.models.at(-1)!.includes('## 학습자가 전에 배운 개념\n1. 변수 범위\n')).toBe(isBase)
       const slip = (store.get('slips') as Record<string, Record<string, unknown>>)[conceptKey('클로저')]!
@@ -16068,8 +16152,9 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
   for (const isOnFirst of [true, false]) {
     test(`a store another route wrote (${isOnFirst ? 'on, then off' : 'off, then on'}): its quiz kept as written, rung and base and slip; the next quiz by this route`, { options: { model: 'sonnet' } }, async ($, on) => {
       // Two more concepts due, so the slip's base (변수 범위) is no pick of its own and goes right before the worked
-      // example, in the next quiz too once one of them is gone over. 클로저 met in no file: the plain branch's.
-      const store = metInNoFile(routeStore())
+      // example, in the next quiz too once one of them is gone over. 클로저 met in counter.js by a note: the code
+      // branch's, the one a base is asked before (1.10.0 G4).
+      const store = metInCode(routeStore(), '클로저')
       const concepts = {
         ...(store.get('concepts') as Record<string, unknown>),
         [conceptKey('배열')]: { name: '배열', count: 2, firstAt: NOW - 60 * ROUTE_DAY, lastAt: NOW - 60 * ROUTE_DAY, blurb: '배열 설명', files: ['list.js'], step: 1, reviewedAt: NOW - 3 * ROUTE_DAY },
@@ -16816,7 +16901,9 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
     }
     store.set('steps', ownSteps(concepts as never))
     store.set('slips', { [conceptKey(X)]: { what: '함수가 끝나면 바깥 변수도 사라진다고 봄', type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * DAY, times: 2, base: conceptKey(REDUCE) } })
-    // 클로저 met in no code: both branches (1.10.0 G1).
+    // 클로저 met in counter.js by a note (metInCode): the code branch's worked example, the one a base is asked before
+    // (1.10.0 G4; met in no code until then, the plain branch's, which G4 asks no base before).
+    metInCode(store, X)
     const { calls, reads } = await quizWorld($, on, { isBaseAsked: true, ...WORKED_BOTH, rungChangedStep: 2 }, store, w => w.files.set(CART, cartUnder("import { sum } from 'lodash'")))
     const prompt = calls[0]!.prompt
     const place = (name: string) => prompt.search(new RegExp(`^\\d+\\. ${name} — `, 'm'))
@@ -17063,7 +17150,7 @@ describe('1.10.0: 풀이 보고 풀기 (G1) by branch behind its switches: what 
     })
   }
 
-  test('/learn 진단: a test switch names its branch; both differently, both; the release none; a base counted only before a worked example of a branch that is on', async ($, on) => {
+  test('/learn 진단: a test switch names its branch; both differently, both; the release none; a base counted only before a worked example of the code branch, while it is on (1.10.0 G4)', async ($, on) => {
     const store = plainStore(['상대 경로'], 2, { base: conceptKey('변수 범위') })
     const w = world(on, 'ok', null, true, store)
     const diag = async () => (await learn($, '진단')).text ?? ''
@@ -17075,18 +17162,38 @@ describe('1.10.0: 풀이 보고 풀기 (G1) by branch behind its switches: what 
     w.harness = { workedAfterTimes: 2, workedPlainAfterTimes: 3 }
     await start($)
     expect(versionLine(await diag())).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296 · 시험 스위치: 풀이 보고 풀기 오답 수 (코드 개념) 2 · 풀이 보고 풀기 오답 수 (코드 없는 개념) 3')
-    // Bases asked (a harness's): 상대 경로 met in no code, so the code branch on alone asks no base before it.
+    // Bases asked (a harness's): 상대 경로 met in no code, so the code branch on alone asks no base before it, and the
+    // plain branch's worked example none either (1.10.0 G4: a base before the code branch's alone; 1.9.0 and G1 counted it).
     w.harness = { workedAfterTimes: 2, isBaseAsked: true }
     await start($)
     expect(await diag()).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 0\n')
     w.harness = { workedPlainAfterTimes: 2, isBaseAsked: true }
     await start($)
     const plain = await diag()
-    expect(plain).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 1\n')
+    expect(plain).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 0\n')
     expect(plain).not.toContain('상대 경로')
-    w.harness = { workedPlainAfterTimes: 3, isBaseAsked: true }
+  })
+
+  test('(1.10.0 G4) /learn 진단 counts a base before the code branch\'s worked example alone: 클로저 met in code by a note, 상대 경로 in none, each missed twice running with a base', async ($, on) => {
+    const store = metInCode(plainStore(['상대 경로', '클로저'], 2, { base: conceptKey('변수 범위') }), '클로저')
+    const w = world(on, 'ok', null, true, store)
+    const diag = async () => (await learn($, '진단')).text ?? ''
+    for (const [harness, based] of [
+      [{ workedAfterTimes: 2, isBaseAsked: true }, 1],
+      [{ ...WORKED_BOTH, isBaseAsked: true }, 1],
+      [{ workedPlainAfterTimes: 2, isBaseAsked: true }, 0],
+      [{ workedAfterTimes: 3, isBaseAsked: true }, 0],
+    ] as const) {
+      w.harness = harness
+      await start($)
+      const said = await diag()
+      expect([harness, said.includes(`· 열린 채 두 번 이상 2 · 바탕 개념 ${based}\n`)]).toEqual([harness, true])
+      expect(said).not.toContain('클로저')
+    }
+    // Bases not asked: no count said, none looked for.
+    w.harness = { workedAfterTimes: 2 }
     await start($)
-    expect(await diag()).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 0\n')
+    expect(await diag()).toContain('· 열린 채 두 번 이상 2\n')
   })
 
   for (const level of ['beginner', 'intermediate', 'advanced'] as const) {
@@ -17332,9 +17439,10 @@ describe('1.10.0: 풀이 보고 풀기 (G1) by branch behind its switches: what 
   test('(4/7 검토) /learn 진단 with the notes unreadable: no base counted before a worked example, the rest of it as ever', async ($, on) => {
     let isUnread = false
     on('store.get', { key: 'history' }, (_$, e, next) => (isUnread ? { deny: 'learn-notes: $.store.get: the store could not be read' } : next(e)))
-    const store = plainStore(['상대 경로'], 2, { base: conceptKey('변수 범위') })
+    // 클로저 met in counter.js by a note (1.10.0 G4: a base counted before the code branch's worked example alone).
+    const store = metInCode(plainStore(['클로저'], 2, { base: conceptKey('변수 범위') }), '클로저')
     const w = world(on, 'ok', null, true, store)
-    w.harness = { workedPlainAfterTimes: 2, isBaseAsked: true }
+    w.harness = { workedAfterTimes: 2, isBaseAsked: true }
     await start($)
     expect((await learn($, '진단')).text).toContain('· 열린 채 두 번 이상 1 · 바탕 개념 1\n')
     isUnread = true
@@ -17380,5 +17488,292 @@ describe('1.10.0: 풀이 보고 풀기 (G1) by branch behind its switches: what 
     expect(slipsOf(store)[conceptKey('클로저')]).toMatchObject({ times: 3 })
     expect(second).toContain('\n같은 곳을 또 헷갈렸습니다\n')
     expect(second).not.toContain('풀이부터')
+  })
+})
+
+describe('1.10.0: 바탕 개념 (G4) behind its switch: each concept marked first, only at a code-branch concept\'s first grade asked again, never in a quiz shape its samples did not measure', () => {
+  const DAY = 86_400_000
+  const WHAT = '함수가 끝나면 바깥 변수도 사라진다고 봄'
+  const X = '클로저'
+  const B = '변수 범위'
+  const D = '비동기'
+  const F = '배열'
+  /** The concepts a grade of X lists (1.9.0 F5, baseCandidates): each sharing counter.js with it, the latest met first. */
+  const LIST = `## 학습자가 전에 배운 개념\n1. ${D}\n2. ${F}\n3. ${B}\n`
+  const MARKS = '바탕 점검: 1 없음, 2 없음, 3 틀림'
+  /** A grade short of right with no question asked back, its base the third listed (변수 범위), each concept marked by `marks`. */
+  const graded = (marks = MARKS, said = '3') =>
+    ['판정: 틀림', '피드백: 아닙니다.', `헷갈린 점: ${WHAT}`, ...(marks !== '' ? [marks] : []), '바탕 근거: `let c = 1; { let c = 2 }; console.log(c)` → 2 → 1', `바탕: ${said}`, '유형: 변수 범위'].join('\n')
+  const plainQ = (n: number, text = '문제') => [`T${n}: 예측`, `Q${n}: ${text} ${n}`, `A${n}: 답 ${n}`].join('\n')
+  const hinted = (n: number) => [`T${n}: 예측`, `Q${n}: 문제 ${n}`, `H${n}: 힌트 ${n}`, `A${n}: 답 ${n}`].join('\n')
+  const worked = (n: number) =>
+    [`T${n}: 예측`, `Q${n}: 풀이: \`let n = 0; const up = () => ++n; up()\` 뒤 n은 1입니다.`, '이제 풀어 보세요: `let c = 10; const add = () => ++c; add()` 뒤 c는?', `H${n}: 바깥 c`, `A${n}: 11`].join('\n')
+  type Row = { what: string; type: string; question: string; mine: string; at: number; times: number; base?: string }
+  const slipsOf = (store: Map<string, unknown>) => (store.get('slips') ?? {}) as Record<string, Row>
+  const quizItems = (store: Map<string, unknown>) => (store.get('quiz') as { items: Record<string, unknown>[] }).items
+  /** The code branch at two, bases asked (a harness's flat keys: no level looked at, the route's job). */
+  const ON = { workedAfterTimes: 2, isBaseAsked: true }
+  /**
+   * X met after B, D and F, all in counter.js, X by a note that wrote it, its words quoting a line of it (metInCode, the
+   * code branch) unless `inCode` is false (met in no note, `file` none) or `file` names another file; X gone over three
+   * days ago, its slip kept two days ago (asked again: 다시 도전), D due, F in six days, B in nine.
+   */
+  const storeOf = (slip: Partial<Row> = {}, { inCode = true, file = 'counter.js', more = {} as Record<string, { step: number; ago: number; first: number }> } = {}) => {
+    const rows: Record<string, { step: number; ago: number; first: number }> = {
+      [X]: { step: 1, ago: 3, first: 30 },
+      [B]: { step: 3, ago: 5, first: 60 },
+      [D]: { step: 0, ago: 2, first: 40 },
+      [F]: { step: 2, ago: 1, first: 50 },
+      ...more,
+    }
+    const concepts = Object.fromEntries(
+      Object.entries(rows).map(([name, one]) => [
+        conceptKey(name),
+        { name, count: 2, firstAt: NOW - one.first * DAY, lastAt: NOW - one.first * DAY, blurb: name === X ? `${X} 설명 — ${D} · ${F} · ${B}와 함께 씁니다` : `${name} 설명`, files: name === X ? [] : ['counter.js'], step: one.step, reviewedAt: NOW - one.ago * DAY },
+      ]),
+    )
+    const slips = { [conceptKey(X)]: { what: WHAT, type: 'scope', question: '지난 문제', mine: '전역 변수', at: NOW - 2 * DAY, times: 1, ...slip } }
+    const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['slips', slips]])
+    return inCode ? metInCode(store, X, file) : store
+  }
+  /** A world on `store` started with `harness` (null: none, as shipped). */
+  async function opened($: Engine, on: On, store: Map<string, unknown>, harness: Record<string, unknown> | null = ON) {
+    const w = world(on, 'ok', null, true, store)
+    w.harness = harness ?? undefined
+    await start($)
+    return w
+  }
+  /** The first grade of X asked again (the quiz's first question): its prompt and budget. */
+  async function gradeX($: Engine, w: World, reply = graded(), mine = '전역에 남아요') {
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(w.store)[0]).toMatchObject({ name: X, isRetry: true })
+    w.answer = reply
+    const said = (await learn($, `퀴즈 1 ${mine}`)).text ?? ''
+    return { said, prompt: w.models.at(-1)!, budget: w.budgets.at(-1)! }
+  }
+  /** A grade sent as 1.9.0 sends it with bases off: no list, no 바탕 lines, 480. */
+  const asOff = (grade: { prompt: string; budget: number }) => {
+    expect(grade.prompt).not.toContain('전에 배운 개념')
+    expect(grade.prompt).not.toContain('바탕')
+    expect(grade.budget).toBe(480)
+  }
+
+  for (const [marks, isKept] of [
+    [MARKS, true],
+    ['바탕 점검: 1 없음, 2 없음, 3 바름', false],
+    ['바탕 점검: 1 없음, 2 없음, 3 없음', false],
+    ['바탕 점검: 1 틀림, 2 없음, 3 없음', false],
+    ['', false],
+  ] as const) {
+    test(`on (the code branch at two, bases asked): its grade lists the concepts with 880; 변수 범위 picked, ${marks || 'no 바탕 점검'}: ${isKept ? 'kept, promised, asked right before the worked example' : 'not kept nor promised, the worked example with no base'}`, async ($, on) => {
+      const store = storeOf()
+      const w = await opened($, on, store)
+      const grade = await gradeX($, w, graded(marks))
+      expect(grade.prompt).toContain(`## 이 학습자가 지난번에 헷갈린 점\n${WHAT}\n${LIST}## 학습자의 답\n`)
+      expect(grade.prompt).toContain('\n바탕 점검: (위 번호마다 번호 다음에 틀림·바름·없음 중 하나를 써서 쉼표로 잇는다)\n')
+      expect(grade.budget).toBe(880)
+      expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 2 })
+      expect(slipsOf(store)[conceptKey(X)]?.base).toBe(isKept ? conceptKey(B) : undefined)
+      expect(quizItems(store)[0]!.slipBase).toBe(isKept ? conceptKey(B) : undefined)
+      expect(grade.said).toContain(`\n같은 곳을 또 헷갈렸습니다 · ${isKept ? WORKED_BASE_NEXT : WORKED_NEXT}`)
+      expect(grade.said).not.toContain(B)
+      // The marks are kept nowhere: not in the quiz, the slips nor the bank.
+      expect(JSON.stringify([store.get('quiz'), store.get('slips'), store.get('quizBank')])).not.toMatch(/바탕 점검|틀림, 2|→ 2 → 1/)
+      await w.clock.advance(60_000)
+      w.answer = isKept ? [plainQ(1, '바탕'), worked(2), plainQ(3)].join('\n') : [worked(1), plainQ(2), plainQ(3)].join('\n')
+      await learn($, '퀴즈 새로')
+      expect(quizItems(store).map(one => [one.name, one.isBase, one.rung])).toEqual(
+        isKept
+          ? [
+              [B, true, undefined],
+              [X, undefined, 'worked'],
+              [D, undefined, undefined],
+            ]
+          : [
+              [X, undefined, 'worked'],
+              [D, undefined, undefined],
+              [F, undefined, undefined],
+            ],
+      )
+      expect(w.models.at(-1)).toContain('   칸: 풀이 보고 풀기 (js로)')
+      expect(w.budgets.at(-1)).toBe(4600)
+    })
+  }
+
+  test('a grade asked back first: the list and 880 on the first try, its marks read there; the try again 1.9.0\'s with 480, the first try\'s base kept', async ($, on) => {
+    const store = storeOf()
+    const w = await opened($, on, store)
+    const asked = ['판정: 거의', '피드백: 가까워요.', '되묻기: 안쪽 함수가 다시 불릴 때 c는 어디에 있을까요?', `헷갈린 점: ${WHAT}`, MARKS, '바탕 근거: `{ let c = 2 }` 밖의 c → 2 → 1', '바탕: 3', '유형: 변수 범위'].join('\n')
+    const first = await gradeX($, w, asked)
+    expect(first.prompt).toContain(LIST)
+    expect(first.budget).toBe(880)
+    expect(quizItems(store)[0]).toMatchObject({ firstTry: { slip: WHAT, slipBase: conceptKey(B) } })
+    w.answer = '판정: 틀림\n피드백: 아직 아닙니다.'
+    await learn($, '퀴즈 1 함수 안쪽 어딘가')
+    asOff({ prompt: w.models.at(-1)!, budget: w.budgets.at(-1)! })
+    expect(slipsOf(store)[conceptKey(X)]).toMatchObject({ times: 2, base: conceptKey(B) })
+  })
+
+  test('no list after "모르겠어요" (its hint shown, no call): the answer after it graded with the first try\'s lines, as 1.9.0, 480', async ($, on) => {
+    const store = storeOf()
+    const w = await opened($, on, store)
+    w.answer = [hinted(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    const calls = w.models.length
+    await learn($, '퀴즈 1 모르겠어요')
+    expect(w.models).toHaveLength(calls)
+    w.answer = graded()
+    await learn($, '퀴즈 1 전역에 남아요')
+    expect(w.models.at(-1)).toContain('첫 답: (모르겠다고 했다)')
+    asOff({ prompt: w.models.at(-1)!, budget: w.budgets.at(-1)! })
+    expect(slipsOf(store)[conceptKey(X)]).not.toHaveProperty('base')
+  })
+
+  test('no list with the slip mended in another window since the quiz was made (none to read), nor for a slip with no words', async ($, on) => {
+    const store = storeOf()
+    const w = await opened($, on, store)
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    store.set('slips', { [conceptKey(X)]: { ...slipsOf(store)[conceptKey(X)]!, fixedAt: NOW } })
+    w.answer = graded()
+    await learn($, '퀴즈 1 전역에 남아요')
+    asOff({ prompt: w.models.at(-1)!, budget: w.budgets.at(-1)! })
+    // A slip with no words (kept after "모르겠어요" last time), asked again the next minute: no list.
+    store.set('slips', { [conceptKey(X)]: { what: '', type: 'blank', question: '지난 문제', mine: '모르겠어요', at: NOW - DAY, times: 1 } })
+    await w.clock.advance(60_000)
+    asOff(await gradeX($, w))
+  })
+
+  test('no list for a concept met in no code (the plain branch\'s worked example, on here too), nor in jsx (no branch\'s): and no base promised', async ($, on) => {
+    const store = storeOf({}, { inCode: false })
+    const w = await opened($, on, store, { ...WORKED_BOTH, isBaseAsked: true })
+    const grade = await gradeX($, w)
+    asOff(grade)
+    expect(grade.said).toContain(`\n같은 곳을 또 헷갈렸습니다 · ${WORKED_NEXT}`)
+  })
+
+  test('no list for a concept met in a .jsx file (no branch\'s worked example)', async ($, on) => {
+    const w = await opened($, on, storeOf({}, { file: 'Counter.jsx' }), { ...WORKED_BOTH, isBaseAsked: true })
+    const grade = await gradeX($, w)
+    asOff(grade)
+    expect(grade.said).not.toContain('풀이부터')
+  })
+
+  test('the code branch off (G1\'s Infinity), bases asked all the same: no list, no promise; a slip with a base from another window asked again with no base before it', async ($, on) => {
+    const store = storeOf()
+    const w = await opened($, on, store, { isBaseAsked: true })
+    const grade = await gradeX($, w)
+    asOff(grade)
+    expect(grade.said).not.toContain('풀이부터')
+    store.set('slips', { [conceptKey(X)]: { ...slipsOf(store)[conceptKey(X)]!, base: conceptKey(B) } })
+    await w.clock.advance(60_000)
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => [one.name, one.isBase, one.rung, one.isRetry])[0]).toEqual([X, undefined, undefined, true])
+    expect(quizItems(store).some(one => one.isBase)).toBe(false)
+  })
+
+  for (const level of ['beginner', 'intermediate', 'advanced'] as const) {
+    test(`a models row with the code branch and bases on, at ${level}: ${level === 'beginner' ? 'the list and 880' : 'no list, 480 (the route turns every switch off, D17)'}`, { options: { model: 'haiku', level } }, async ($, on) => {
+      const w = await opened($, on, storeOf(), { models: { haiku: { ...ON } } })
+      const grade = await gradeX($, w)
+      if (level === 'beginner') {
+        expect(grade.prompt).toContain(LIST)
+        expect(grade.budget).toBe(880)
+      } else {
+        asOff(grade)
+      }
+    })
+  }
+
+  for (const model of ['haiku', 'sonnet'] as const) {
+    test(`as shipped (${model}, no harness): a question asked again graded as 1.9.0 grades it, 480, no base kept though the reply names one with its mark`, { options: { model } }, async ($, on) => {
+      const store = storeOf()
+      const w = await opened($, on, store, null)
+      const grade = await gradeX($, w)
+      asOff(grade)
+      expect(slipsOf(store)[conceptKey(X)]).not.toHaveProperty('base')
+      expect(grade.said).not.toContain('풀이부터')
+    })
+  }
+
+  test('both branches on, its words\' quote gone from its code after the promise (another note\'s words): the next quiz asks it again with no base, the promise missed once; /learn 진단 counts no base', async ($, on) => {
+    const store = storeOf()
+    const w = await opened($, on, store, { ...WORKED_BOTH, isBaseAsked: true })
+    const grade = await gradeX($, w)
+    expect(grade.budget).toBe(880)
+    expect(grade.said).toContain(`\n같은 곳을 또 헷갈렸습니다 · ${WORKED_BASE_NEXT}`)
+    expect((await learn($, '진단')).text).toContain('· 바탕 개념 1\n')
+    // A note of this turn teaches it again in words that quote no line of its change (a.ts): no branch's worked example
+    // (met in files, so not the plain one), the code the promise was made on found no more.
+    w.answer = CONCEPT_NOTE([X])
+    await turn($, () => $.tool.call(EDIT_A))
+    await finish(w)
+    await w.clock.advance(60_000)
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(quizItems(store).map(one => [one.name, one.isBase, one.rung, one.isRetry])[0]).toEqual([X, undefined, undefined, true])
+    expect(quizItems(store).some(one => one.isBase)).toBe(false)
+    expect((await learn($, '진단')).text).toContain('· 바탕 개념 0\n')
+  })
+
+  /** The quiz this world sends with `harness`, then with bases off and the rest as it was (a minute on): each request. */
+  async function onThenOff($: Engine, on: On, store: Map<string, unknown>, harness: Record<string, unknown>) {
+    const w = await opened($, on, store, harness)
+    w.answer = [plainQ(1), plainQ(2), plainQ(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    const first = { prompt: w.models.at(-1)!, maxTokens: w.budgets.at(-1)!, items: quizItems(store).map(one => [one.name, one.isBase]) }
+    w.harness = { ...harness, isBaseAsked: false }
+    await start($)
+    await w.clock.advance(60_000)
+    await learn($, '퀴즈 새로')
+    return { on: first, off: { prompt: w.models.at(-1)!, maxTokens: w.budgets.at(-1)!, items: quizItems(store).map(one => [one.name, one.isBase]) } }
+  }
+
+  test('(D33 (4)) a team term left in the quiz with the base (비동기 a team term of another repository): no base, the worked example asked again; the request that of bases off to the byte', async ($, on) => {
+    const store = storeOf({ times: 2, base: conceptKey(B) })
+    store.set('teamTerms', { [conceptKey(D)]: [rootTag('/other')] })
+    const both = await onThenOff($, on, store, ON)
+    expect(both.on.items).toEqual([
+      [X, undefined],
+      [D, undefined],
+      [F, undefined],
+    ])
+    expect(both.on.prompt).not.toContain('풀이 보고 풀기')
+    expect({ prompt: both.on.prompt, maxTokens: both.on.maxTokens }).toEqual({ prompt: both.off.prompt, maxTokens: both.off.maxTokens })
+    expect(both.on.maxTokens).toBe(3400)
+  })
+
+  test('(D33 (4)) another worked example first in the quiz (its slip older, missed three times): the base dropped, 클로저 asked again; the request that of bases off to the byte', async ($, on) => {
+    // 함수: met in no code, missed three times running a week ago, no base: the plain branch's worked example, first.
+    const store = storeOf({ times: 2, base: conceptKey(B) }, { more: { 함수: { step: 1, ago: 9, first: 70 } } })
+    ;(store.get('concepts') as Record<string, { files: string[] }>)[conceptKey('함수')]!.files = []
+    store.set('slips', { ...slipsOf(store), [conceptKey('함수')]: { what: '함수는 한 번만 부른다고 봄', type: 'other', question: '지난 문제', mine: '한 번', at: NOW - 7 * DAY, times: 3 } })
+    const both = await onThenOff($, on, store, { ...WORKED_BOTH, isBaseAsked: true })
+    expect(both.on.items).toEqual([
+      ['함수', undefined],
+      [X, undefined],
+      [D, undefined],
+    ])
+    expect(both.on.prompt.split('   칸: 풀이 보고 풀기').length - 1).toBe(1)
+    expect({ prompt: both.on.prompt, maxTokens: both.on.maxTokens }).toEqual({ prompt: both.off.prompt, maxTokens: both.off.maxTokens })
+    expect(both.on.maxTokens).toBe(4600)
+  })
+
+  test('(D33 (4)) the shape its samples measured, beside it: the base right before the worked example; bases off, none', async ($, on) => {
+    const both = await onThenOff($, on, storeOf({ times: 2, base: conceptKey(B) }), ON)
+    expect(both.on.items).toEqual([
+      [B, true],
+      [X, undefined],
+      [D, undefined],
+    ])
+    expect(both.on.prompt).toContain('   칸: 풀이 보고 풀기 (js로)')
+    expect(both.off.items).toEqual([
+      [X, undefined],
+      [D, undefined],
+      [F, undefined],
+    ])
+    expect(both.off.prompt).toContain('   칸: 풀이 보고 풀기 (js로)')
   })
 })

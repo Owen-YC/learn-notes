@@ -10,6 +10,7 @@ import {
   STAMP_LIVE_MS,
   SWITCHES_OFF,
   WORKED_AFTER_TIMES,
+  WORKED_BASE_NEXT,
   WORKED_CODE_ASK,
   WORKED_DEFAULT_ASK,
   WORKED_NEXT,
@@ -40,6 +41,7 @@ import {
   pickForRung,
   quizPrompt,
   rungOf,
+  baseAfterFor,
   baseFor,
   isQuoted,
   slipCounts,
@@ -895,7 +897,7 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
     }
   })
 
-  test('the line under a grade, /learn 진단\'s base count and baseFor go by the same count as rungOf, on the same code and words', () => {
+  test('the line under a grade, /learn 진단\'s base count and baseFor go by the same count as rungOf, on the same code and words (a base, 1.10.0 G4: the code branch\'s alone)', () => {
     const later = { code: JS, blurb: QUOTED, files: ['src/cart.js'] }
     const kinds: Record<string, { code?: { file: string; text: string }; blurb: string; files: string[] }> = {
       code: { code: JS, blurb: QUOTED, files: ['src/cart.js'] },
@@ -924,11 +926,15 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
             expect([...id, isWorkedNext(record, item, after)]).toEqual([...id, isWorked])
             expect([...id, slipNotice(item, record, false, after)?.text.endsWith(WORKED_NEXT)]).toEqual([...id, isWorked])
             expect([...id, workedNextText(record, false, after)]).toEqual([...id, WORKED_NEXT])
-            // A base before the worked example at the count itself, as baseFor asks one; counted so by /learn 진단.
+            // A base before the worked example at the count itself, as baseFor asks one; counted so by /learn 진단. Of the
+            // code branch alone (1.10.0 G4, baseAfterFor): none before the plain branch's worked example.
+            const baseAfter = baseAfterFor(code, blurb, files, steps)
+            expect([...id, baseAfter]).toEqual([...id, kind === 'code' || kind === 'later' ? after : Infinity])
             const x = pick('합계', { blurb, files, ...(code ? { code } : {}), slip: SLIP })
             const found = baseFor({ ...index, 'c:합계': { ...index['c:합계']!, blurb, files } }, () => ({ ...record, at: NOW - DAY }), [x, ...fillers], new Set(['c:합계']), {}, {}, steps)
-            expect([...id, found !== undefined]).toEqual([...id, isWorked && times === after])
-            expect([...id, slipCounts({ 'c:합계': record }, Infinity, () => after).based]).toEqual([...id, found !== undefined ? 1 : 0])
+            expect([...id, found !== undefined]).toEqual([...id, isWorked && times === baseAfter])
+            expect([...id, isWorkedNext(record, item, after) && workedNextText(record, true, baseAfter) === WORKED_BASE_NEXT]).toEqual([...id, found !== undefined])
+            expect([...id, slipCounts({ 'c:합계': record }, Infinity, () => baseAfter).based]).toEqual([...id, found !== undefined ? 1 : 0])
           }
         }
       }
