@@ -3,6 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import {
   CHANGED_TRACE_LINE,
+  NEW_GRADER_SINCE,
   QUIZ_SYSTEM,
   RUNG_CHANGED_STEP,
   RUNG_NEW_STEP,
@@ -20,13 +21,17 @@ import {
   WORKED_TURN_ASK,
   addToBank,
   bankQuestion,
+  checkPrompt,
   cleanStamps,
   codeFor,
   extOf,
   isChangedAskable,
   isChangedRunnable,
   isImportingChange,
+  isExactGrade,
   isNewAskable,
+  isNewLibraryChange,
+  isNewUnrunnableCode,
   isOldGraderOpen,
   isUnrunnableChange,
   isUnrunnableCode,
@@ -37,6 +42,7 @@ import {
   markPartial,
   markReviewed,
   markWrong,
+  parseCheck,
   parseQuiz,
   pickForRung,
   quizPrompt,
@@ -53,9 +59,11 @@ import {
   workedNextText,
   type QuizPick,
 } from '../hooks/notes'
+import { CHECK_19, CHECK_FIRSTS_110, CHECK_ITEM_110, CHECK_MINE_110, CHECK_PASTS_110, NEW_EXACT_110 } from './fixtures/check110'
 import { CODE_FOR_19 } from './fixtures/codefor19'
 import { QUIZ_CASES_18, QUIZ_NOW_18, QUIZ_REPLIES_18 } from './fixtures/quiz18'
 import { QUIZ_OUTPUT_110_ON, QUIZ_OUTPUT_19_OFF } from './fixtures/quiz19'
+import { UNRUNNABLE_110 } from './fixtures/unrunnable110'
 import { WORKED_CASES_110, WORKED_OUTPUT_110 } from './fixtures/worked110'
 
 const NOW = Date.UTC(2026, 9, 3, 1)
@@ -566,7 +574,7 @@ describe('1.9.0: 처음 보는 코드 from the fifth step, for concepts due met 
     expect(parseQuiz('Q1: 문제\nH1: 실마리\nR1: 따라가기\nA1: 답', plainPicks)[0]!.hint).toBe('실마리\nR1: 따라가기')
   })
 
-  test('a window of a build before 1.8.0 stamped within the day keeps code never seen off; 1.8.0 and later, this session\'s own, or a stamp a day old do not', () => {
+  test('a window of a build before 1.10.0 stamped within the day keeps code never seen off (1.8.0 in 1.9.0, G3); 1.10.0 and later, this session\'s own, or a stamp a day old do not', () => {
     const now = NOW
     const at = (v: string, ago: number) => ({ v, at: now - ago })
     const open = (stamps: Record<string, { v: string; at: number }>) => isOldGraderOpen(cleanStamps(stamps, now), 'mine', now)
@@ -579,7 +587,17 @@ describe('1.9.0: 처음 보는 코드 from the fifth step, for concepts due met 
     expect(open({ other: at('1.6.0', STAMP_KEPT_MS - 60_000) })).toBe(true)
     expect(open({ other: at('1.7.1', STAMP_KEPT_MS) })).toBe(false)
     expect(isOldGraderOpen({ other: at('1.7.1', STAMP_KEPT_MS) }, 'mine', now)).toBe(false)
-    expect(open({ other: at('1.8.0', 60_000), third: at('1.9.0', 60_000) })).toBe(false)
+    // 1.10.0 (G3): 1.8 and 1.9 too, which grade a question in code never seen by the stock grade its sample showed
+    // short (a matter of the grade, not of steps lost). Changed on purpose: in 1.9.0 these two were false.
+    expect(NEW_GRADER_SINCE).toBe('1.10.0')
+    expect(open({ other: at('1.8.0', 60_000) })).toBe(true)
+    expect(open({ other: at('1.9.0', 60 * 60_000) })).toBe(true)
+    expect(open({ other: at('1.9.0', STAMP_KEPT_MS - 60_000) })).toBe(true)
+    expect(open({ other: at('1.9.0', 25 * 60 * 60_000) })).toBe(false)
+    expect(isOldGraderOpen({ other: at('1.9.0', 25 * 60 * 60_000) }, 'mine', now)).toBe(false)
+    expect(open({ other: at('1.10.0', 60_000), third: at('1.11.0', 60_000), fourth: at('2.0.0', 60_000) })).toBe(false)
+    expect(open({ other: at('1.10.0', 60_000), third: at('1.9.0', 60_000) })).toBe(true)
+    expect(open({ mine: at('1.9.0', 60_000) })).toBe(false)
     expect(open({ mine: at('1.7.1', 60_000) })).toBe(false)
     expect(open({})).toBe(false)
     expect(isOldGraderOpen({ other: at('1.7.1', 60_000) }, undefined, now)).toBe(true)
@@ -1311,5 +1329,207 @@ describe('1.9.0 마무리 검토: 풀이 보고 풀기 ships off, as the samples
     expect(rungOf(at(0), { ...asking, slip: { times: 2 } })).toBeUndefined()
     // The grade's line promises none: a second miss on no question asked again is told the next quiz's other code.
     expect(slipNotice({ result: 'wrong', gradedAt: NOW }, { ...SLIP, times: 2, at: NOW }, false)).toEqual({ kind: 'slip', text: `헷갈린 점: ${SLIP.what} · 다음 퀴즈에서 다른 코드로 다시 묻습니다` })
+  })
+})
+
+describe('1.10.0 (G3): 처음 보는 코드 graded line by line (right or wrong) by a window whose rung is on; its own code check; 1.9.0\'s bytes everywhere else', () => {
+  const NEW_VERDICTS = '판정은 맞음과 틀림 둘 중 하나다. 이 문제에는 거의를 쓰지 않는다("모르겠다"도 틀림).'
+  const NEW_CHECK =
+    '처음 보는 코드의 예측 문제다. 모범 답은 코드가 찍는 글자를 줄마다 적은 것이다. 판정을 쓰기 전에 대조 줄에, 문제가 물은 모범 답의 줄마다 학습자가 그 줄에 찍힌다고 말한 값을 차례로 견주어 같음·다름·없음을 적는다. 값은 찍히는 글자로 견주고, 따옴표·쉼표·띄어쓰기·조사·말투("3 나와요", "B랑 합격")는 보지 않는다. 여러 줄을 한 줄에 이어 써도 차례대로 견준다. 덧붙인 까닭 속의 말과 값은 견주지 않는다. 물은 줄이 모두 같음이면 맞음이다. 하나라도 다름이나 없음이면 다른 줄이 맞아도 틀림이다. 모범 답에 없는 줄이 찍힌다고 더 말했어도 틀림이다.'
+  const THREE_WAY = '판정은 셋 중 하나다. 맞음: 핵심을 맞게 이해했다. 거의: 방향은 맞지만 중요한 부분이 빠졌거나 일부가 틀렸다. 틀림: 틀렸거나 관계없는 답이다("모르겠다"도 틀림).'
+  const PREDICT_CHECK = '예측 문제다. 학습자가 말한 출력이나 값이 같으면 설명이 없어도 맞음이다. 출력이나 값이 다르면 설명이 그럴듯해도 틀림이다.'
+  const COMPARE = '대조: (물은 줄마다 같음 · 다름 · 없음, 예: 1줄 같음, 2줄 다름)'
+  const KINDS = ['predict', 'why', 'modify', 'none'] as const
+  const itemOf = (kind: (typeof KINDS)[number], rung?: 'mine' | 'changed' | 'worked' | 'new') => ({ ...CHECK_ITEM_110, ...(kind === 'none' ? {} : { kind }), ...(rung ? { rung } : {}) })
+  const NEW = itemOf('predict', 'new')
+
+  test('every grade but a prediction in code never seen with `exact`, and that one without it (an off window, D28), is 1.9.0\'s (fca5988) to the byte, of any rung, kind, first try and slip', () => {
+    let seen = 0
+    for (const rung of [undefined, 'mine', 'changed', 'worked', 'new'] as const) {
+      for (const kind of KINDS) {
+        for (const [f, first] of Object.entries(CHECK_FIRSTS_110)) {
+          for (const [p, past] of Object.entries(CHECK_PASTS_110)) {
+            const want = CHECK_19[`${kind} · ${f} · ${p} · beginner`]!
+            const item = itemOf(kind, rung)
+            expect(checkPrompt(item, CHECK_MINE_110, 'beginner', first, past)).toBe(want)
+            seen += 1
+            if (rung === 'new' && kind === 'predict') continue
+            // `exact` takes no other question: one in code never seen asked why or how to change it, or with no kind, too.
+            expect(checkPrompt(item, CHECK_MINE_110, 'beginner', first, past, { exact: true })).toBe(want)
+            seen += 1
+          }
+        }
+      }
+    }
+    for (const level of ['intermediate', 'advanced'] as const) {
+      for (const [f, first] of Object.entries(CHECK_FIRSTS_110)) {
+        for (const [p, past] of Object.entries(CHECK_PASTS_110)) {
+          expect(checkPrompt(NEW, CHECK_MINE_110, level, first, past)).toBe(CHECK_19[`predict · ${f} · ${p} · ${level}`]!)
+          seen += 1
+        }
+      }
+    }
+    expect(seen).toBe(5 * 4 * 4 * 2 + (5 * 4 - 1) * 4 * 2 + 2 * 4 * 2)
+    // None of it says 대조 or NEW_CHECK.
+    for (const text of Object.values(CHECK_19)) {
+      expect(text).not.toContain('대조')
+      expect(text).not.toContain('처음 보는 코드의 예측 문제다')
+    }
+  })
+
+  test('with `exact`: the design\'s preview to the byte at every level; the two verdicts, NEW_CHECK whole and the 대조 line right before the verdict; 거의 said once, the lines short of right saying 틀림', () => {
+    for (const level of ['beginner', 'intermediate', 'advanced'] as const) {
+      for (const f of ['none', 'wrong', 'hint'] as const) {
+        expect(checkPrompt(NEW, CHECK_MINE_110, level, CHECK_FIRSTS_110[f], undefined, { exact: true })).toBe(NEW_EXACT_110[`${f} · ${level}`]!)
+      }
+    }
+    const first = checkPrompt(NEW, CHECK_MINE_110, 'beginner', undefined, undefined, { exact: true })
+    expect(first).toContain(`\n\n${NEW_VERDICTS}\n${NEW_CHECK}\n피드백은 한두 문장이다.`)
+    expect(first).not.toContain(THREE_WAY)
+    expect(first).not.toContain(PREDICT_CHECK)
+    expect(first).toContain('덧붙인 까닭 속의 말과 값은 견주지 않는다.')
+    expect(first).toContain('모범 답에 없는 줄이 찍힌다고 더 말했어도 틀림이다.')
+    expect(first.match(/거의/g)).toHaveLength(1)
+    expect(first).toContain('\n되묻기는 판정이 틀림일 때만 쓰는 질문 한 문장이다.')
+    expect(first).toContain('\n헷갈린 점은 판정이 틀림일 때만 쓴다.')
+    expect(first.endsWith(`\n정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.\n${COMPARE}\n판정: (맞음 · 틀림 중 하나)\n피드백: (한두 문장)\n되묻기: (틀림일 때만 질문 한 문장. 맞음이면 이 줄을 쓰지 않는다)\n헷갈린 점: (틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)\n유형: (틀림일 때만 위 갈래 중 하나)`)).toBe(true)
+    // The try again: the last, no question asked back; its first try's verdict 틀림, as an exact grade keeps it.
+    const again = checkPrompt(NEW, CHECK_MINE_110, 'beginner', CHECK_FIRSTS_110.wrong, undefined, { exact: true })
+    expect(again).toContain('\n마지막 시도다. 되묻기는 쓰지 않는다.\n')
+    expect(again).toContain('\n첫 판정: 틀림\n')
+    expect(again).not.toContain('\n되묻기: (')
+    expect(again.match(/거의/g)).toHaveLength(1)
+    expect(again.endsWith(`\n${COMPARE}\n판정: (맞음 · 틀림 중 하나)\n피드백: (한두 문장)`)).toBe(true)
+    // After 모르겠어요 and the hint: the hint said, no question asked back, the slip asked for.
+    const hinted = checkPrompt(NEW, CHECK_MINE_110, 'beginner', CHECK_FIRSTS_110.hint, undefined, { exact: true })
+    expect(hinted).toContain('\n첫 답: (모르겠다고 했다)\n받은 힌트: 하나씩 더해 보세요\n')
+    expect(hinted).toContain(NEW_CHECK)
+    expect(hinted).not.toContain('\n되묻기: (')
+    expect(hinted.match(/거의/g)).toHaveLength(1)
+    expect(hinted.endsWith(`\n${COMPARE}\n판정: (맞음 · 틀림 중 하나)\n피드백: (한두 문장)\n헷갈린 점: (틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)\n유형: (틀림일 때만 위 갈래 중 하나)`)).toBe(true)
+  })
+
+  test('isExactGrade takes a prediction in code never seen alone; a team-rule practice is graded as 1.9.0 whatever its item says', () => {
+    expect(isExactGrade({ rung: 'new', kind: 'predict' })).toBe(true)
+    for (const kind of ['why', 'modify', undefined] as const) expect(isExactGrade({ rung: 'new', ...(kind ? { kind } : {}) })).toBe(false)
+    for (const rung of ['mine', 'changed', 'worked', undefined] as const) expect(isExactGrade({ ...(rung ? { rung } : {}), kind: 'predict' })).toBe(false)
+    const rule = '- API 호출은 `fetch`를 바로 쓰지 말고 `fetcher`를 쓴다'
+    expect(checkPrompt(NEW, CHECK_MINE_110, 'beginner', undefined, undefined, { rule, exact: true })).toBe(checkPrompt(NEW, CHECK_MINE_110, 'beginner', undefined, undefined, { rule }))
+    expect(checkPrompt(NEW, CHECK_MINE_110, 'beginner', undefined, undefined, { rule })).not.toContain('대조')
+  })
+
+  test('parseCheck with `exact`: 거의 read as wrong, lines and JSON alike; 맞음 and 틀림 as they are; the 대조 line and the lines under it dropped wherever it stands; what it says changes nothing', () => {
+    const lines = '대조: 1줄 같음, 2줄 다름\n판정: 거의\n피드백: 첫 줄은 맞습니다.\n되묻기: xs에는 값이 몇 개 있나요?\n헷갈린 점: 배열 길이를 마지막 값으로 봄\n유형: 경계값'
+    expect(parseCheck(lines)!.verdict).toBe('partial')
+    expect(parseCheck(lines, { exact: true })).toEqual({ verdict: 'wrong', feedback: '첫 줄은 맞습니다.', nudge: 'xs에는 값이 몇 개 있나요?', slip: '배열 길이를 마지막 값으로 봄', slipType: parseCheck(lines)!.slipType })
+    expect(parseCheck('{"verdict": "거의", "feedback": "첫 줄은 맞습니다.", "nudge": "몇 개?"}', { exact: true })).toMatchObject({ verdict: 'wrong', nudge: '몇 개?' })
+    expect(parseCheck('{"verdict": "partial", "feedback": "f"}', { exact: true })!.verdict).toBe('wrong')
+    expect(parseCheck('{"verdict": "맞음", "feedback": "f"}', { exact: true })!.verdict).toBe('right')
+    expect(parseCheck('판정: 맞음\n피드백: 정확합니다.', { exact: true })).toEqual({ verdict: 'right', feedback: '정확합니다.' })
+    expect(parseCheck('판정: 틀림\n피드백: 아닙니다.', { exact: true })).toEqual({ verdict: 'wrong', feedback: '아닙니다.' })
+    // After the feedback, with a line under it: dropped, the feedback its own. Without `exact`, 1.9.0's: the feedback's.
+    const after = '판정: 틀림\n피드백: 둘째 줄이 다릅니다.\n대조: 1줄 같음, 2줄 다름\n  (따옴표 없음)\n되묻기: 몇 개일까요?'
+    expect(parseCheck(after, { exact: true })).toMatchObject({ verdict: 'wrong', feedback: '둘째 줄이 다릅니다.', nudge: '몇 개일까요?' })
+    expect(parseCheck(after)!.feedback).toBe('둘째 줄이 다릅니다.\n대조: 1줄 같음, 2줄 다름\n  (따옴표 없음)')
+    // Bold, and words in it that say every line is the same: the verdict stands as written.
+    expect(parseCheck('**대조**: 1줄 같음 (따옴표 없음), 2줄 같음\n**판정**: 틀림\n**피드백**: 둘째 줄을 보세요.', { exact: true })).toEqual({ verdict: 'wrong', feedback: '둘째 줄을 보세요.' })
+    expect(parseCheck('대조: 1줄 다름\n판정: 맞음\n피드백: 좋습니다.', { exact: true })).toEqual({ verdict: 'right', feedback: '좋습니다.' })
+    // With a base asked too (never with code never seen in a build, but read so): both labels read.
+    expect(parseCheck('대조: 1줄 다름\n판정: 거의\n피드백: f\n바탕 점검: 1 틀림\n바탕 근거: 없음\n바탕: 0', { base: true, exact: true })).toMatchObject({ verdict: 'wrong', feedback: 'f', baseAudit: '1 틀림' })
+  })
+
+  test('the code check of code never seen alone (NEW_UNRUNNABLE, on top of isUnrunnableCode): jQuery, a framework\'s decorator, the network, the process, Node\'s I/O by `node:`', () => {
+    const caught = [
+      "$('#email').val()",
+      'const v = $("#a")',
+      '@app.route("/users/<name>")\ndef user(name):',
+      '@bp.route("/")',
+      '@router.get("/")',
+      '@pytest.fixture\ndef nums():',
+      '@Component({ selector: "x" })',
+      '@Injectable()\nexport class A {}',
+      "fetch('/api')",
+      'const ws = new WebSocket(url)',
+      'new EventSource(url)',
+      'const req = new XMLHttpRequest()',
+      'const key = process.env.API_KEY',
+      "const fs = require('node:fs')",
+      "import { readFile } from 'node:fs/promises'",
+      "import http from 'node:http'",
+      'const rl = require(`node:readline`)',
+      // What any rung leaves out, as before.
+      "import { useState } from 'react'",
+    ]
+    for (const text of caught) expect([text, isNewUnrunnableCode(text)]).toEqual([text, true])
+    const runs = [
+      '@property\ndef area(self):',
+      '@staticmethod',
+      '@my_decorator\ndef f():',
+      '/**\n * @param x a number\n */',
+      '    @price.setter\n    def price(self, v):',
+      '    @x.getter',
+      '    @name.deleter',
+      'const total = refetch(1)',
+      'this.fetch(x)',
+      'obs$.pipe(map(x => x))',
+      'const s = `${a}-${b}`',
+      "print(f'{x:.2f}')",
+      'const xs = [1, 2].map(x => x * 2)',
+      "const { format } = require('node:util')",
+      "import assert from 'node:assert'",
+    ]
+    for (const text of runs) expect([text, isNewUnrunnableCode(text)]).toEqual([text, false])
+    // The check every other rung goes by is as it was (D29): 1.9.0's `require('node:fs')` runs there still.
+    for (const text of caught.slice(0, -1)) expect([text, isUnrunnableCode(text)]).toEqual([text, false])
+  })
+
+  test('(D29) code of the five patterns: isUnrunnableCode, isUnrunnableChange, workedBranch and rungOf (code changed at 2) as the tree before G3 gave them (unrunnable110)', () => {
+    expect(UNRUNNABLE_110).toHaveLength(18)
+    const add = (lines: string[]) => [`@@ -0,0 +1,${lines.length} @@`, ...lines.map(l => `+${l}`)].join('\n')
+    const edit = (lines: string[]) => [`@@ -10,1 +10,${lines.length} @@`, ...lines.map(l => `+${l}`)].join('\n')
+    for (const row of UNRUNNABLE_110) {
+      const lines = row.text.split('\n')
+      const code = { file: row.file, text: row.text }
+      const one: LearnConcept = { name: 'X', count: 1, firstAt: 0, lastAt: 0, blurb: row.blurb, files: [row.file], step: 4, reviewedAt: 0 }
+      const got = {
+        isUnrunnableCode: isUnrunnableCode(row.text),
+        isUnrunnableChangeCreate: isUnrunnableChange({ kind: 'create', diff: add(lines) }, undefined),
+        isUnrunnableChangeEdit: isUnrunnableChange({ kind: 'update', diff: edit(lines) }, row.text),
+        workedBranch: workedBranch(code, row.blurb, [row.file]) ?? null,
+        rungOf: rungOf(one, { ...plain, code }, Infinity, { changedStep: 2 }) ?? null,
+      }
+      expect([row.id, got]).toEqual([
+        row.id,
+        { isUnrunnableCode: row.isUnrunnableCode, isUnrunnableChangeCreate: row.isUnrunnableChangeCreate, isUnrunnableChangeEdit: row.isUnrunnableChangeEdit, workedBranch: row.workedBranch, rungOf: row.rungOf },
+      ])
+      // Code never seen on (4): none of them is asked so; each is asked as it would be with that rung off.
+      expect([row.id, rungOf(one, { ...plain, code }, 4, { changedStep: 2 })]).toEqual([row.id, row.rungOf])
+      expect(isNewUnrunnableCode(row.text)).toBe(true)
+    }
+  })
+
+  test('rungOf and the change: a due .js concept at its fifth step with `$(`, `@app.route`, `fetch(`, `process.env` or `\'node:fs\'` is not asked in code never seen; a Python property with its setter is; the change\'s lines are read, its file not', () => {
+    const js = (text: string) => ({ file: 'src/a.js', text })
+    for (const text of ["const v = $('#a').val()\nconsole.log(v)", '@app.route("/")\ndef home():\n    return 1', "fetch('/a').then(r => console.log(r.status))", 'const k = process.env.KEY\nconsole.log(k)', "const fs = require('node:fs')\nconsole.log(typeof fs)"]) {
+      const code = js(text)
+      expect([text, rungOf(at(4), { ...plain, code }, 4, ON)]).toEqual([text, rungOf(at(4), { ...plain, code }, Infinity, ON)])
+      expect(rungOf(at(4), { ...plain, code }, 4, ON)).not.toBe('new')
+    }
+    const property = ['class Item:', '    def __init__(self, p):', '        self._p = p', '    @property', '    def price(self):', '        return self._p', '    @price.setter', '    def price(self, v):', '        self._p = max(0, v)', 'it = Item(3)', 'it.price = -1', 'print(it.price)'].join('\n')
+    expect(rungOf(at(4), { ...plain, code: { file: 'app/item.py', text: property } }, 4, ON)).toBe('new')
+    // A change whose lines after it call fetch( away from the lines quoted: code never seen's alone; the file not read for it.
+    const change = { kind: 'update' as const, diff: '@@ -3,2 +3,4 @@\n const total = items.length\n-console.log(total)\n+console.log(total)\n+fetch(`/log?n=${total}`)' }
+    expect(isNewLibraryChange(change)).toBe(true)
+    expect(isUnrunnableChange(change, 'const items = [1, 2]\n')).toBe(false)
+    const quoted = { file: 'src/a.js', text: 'const total = items.length\nconsole.log(total)' }
+    expect(rungOf(at(4), { ...plain, code: quoted }, 4, ON)).toBe('new')
+    expect(rungOf(at(4), { ...plain, code: { ...quoted, isNewLibrary: true } }, 4, ON)).toBe(rungOf(at(4), { ...plain, code: quoted }, Infinity, ON))
+    expect(rungOf(at(4), { ...plain, code: { ...quoted, isNewLibrary: true } }, 4, ON)).toBe('changed')
+    // A line taken away is not the change's: fetch( in a removed line alone, none.
+    expect(isNewLibraryChange({ diff: '@@ -1,2 +1,2 @@\n-const r = await fetch("/a")\n+const r = await get("/a")\n console.log(r)' })).toBe(false)
+    // An edit whose file brings in `node:fs` far above the lines: its file is read for a library alone, as in 1.9.0.
+    const axios = { kind: 'update' as const, diff: '@@ -18,2 +18,2 @@\n-    return 1\n+    return 2\n   }' }
+    expect(isNewLibraryChange(axios)).toBe(false)
+    expect(isUnrunnableChange(axios, "import { get } from './http.js'\nconst fs = require('node:fs')\n")).toBe(false)
   })
 })

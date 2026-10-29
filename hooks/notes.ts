@@ -5083,9 +5083,11 @@ export type QuizPick = RankedConcept & {
    * The learner's code the concept is asked about; `isLibrary` (1.9.0 F3) when the change it came from needs a library,
    * a framework or a browser, read wider than these lines (isUnrunnableChange): set only where code never seen or code
    * changed could ask it; `isImporting` (1.10.0 G2) when that change or its file brings code in by any line
-   * (isImportingChange): set only where code changed could. Neither is kept or sent.
+   * (isImportingChange): set only where code changed could; `isNewLibrary` (1.10.0 G3) when that change's lines need
+   * what code never seen alone looks for (isNewLibraryChange, NEW_UNRUNNABLE): set only where code never seen could.
+   * None is kept or sent.
    */
-  code?: { file: string; text: string; isLibrary?: true; isImporting?: true }
+  code?: { file: string; text: string; isLibrary?: true; isImporting?: true; isNewLibrary?: true }
   noteId?: string
   slip?: Pick<LearnSlip, 'what' | 'question' | 'mine'>
   team?: true
@@ -5133,6 +5135,9 @@ export const RUNG_CHANGED_STEP = Infinity
  * Off in 1.9.0 too: in its run-checked sample (docs/qa/견본.md) the answers were right once the R line was in, but too
  * many replies ran out of room (maxTokens, 1600 then; register.tsx's QUIZ_TRACE_TOKENS since), the last question cut or
  * none at all, and the grade took an answer with one value of several wrong for 거의 more often than the bar allows.
+ * 1.10.0 (G3) asks it anew: its prediction graded line by line, right or wrong only (isExactGrade, NEW_CHECK), its code
+ * check wider (NEW_UNRUNNABLE) and every window before NEW_GRADER_SINCE kept out; still off here, on only in a model's
+ * row of MODEL_SWITCHES.
  */
 export const RUNG_NEW_STEP = Infinity
 /**
@@ -5252,7 +5257,9 @@ export function extOf(file: string): string | undefined {
  * again (`isRight`); none for any other open slip
  * (다시 도전, as in 1.7) or a concept with no code (asked why); code never seen from `newStep` on, for a concept due
  * whose code a sample could run and needs nothing but its language (isNewAskable; 1.9.0: none that a library, a
- * framework or a browser runs, its lines by isUnrunnableCode and its change by `isLibrary`, asked as before); its code
+ * framework or a browser runs, its lines by isUnrunnableCode and its change by `isLibrary`, asked as before; 1.10.0 G3:
+ * none that needs what its quiz forbids either, jQuery, a framework's decorator, the network, the process or Node's
+ * I/O, in its lines or its change, NEW_UNRUNNABLE and `isNewLibrary`, read for code never seen alone); its code
  * changed from `changedStep` (RUNG_CHANGED_STEP) on (a concept filling the quiz before it is due too), from 1.10.0 (G2)
  * only for code that runs as alone (the same `isLibrary` and isUnrunnableCode) in a language its samples ran, with no
  * line bringing code in and whose run settles one output (isChangedRunnable); else its own code. The quiz then keeps
@@ -5261,7 +5268,7 @@ export function extOf(file: string): string | undefined {
 export function rungOf(
   one: LearnConcept,
   how: {
-    code?: { file: string; text?: string; isLibrary?: boolean; isImporting?: boolean }
+    code?: { file: string; text?: string; isLibrary?: boolean; isImporting?: boolean; isNewLibrary?: boolean }
     slip?: Pick<LearnSlip, 'times' | 'isRight'>
     isAsking: boolean
     isTeam: boolean
@@ -5277,7 +5284,10 @@ export function rungOf(
   }
   if (!how.code) return undefined
   const isRunnable = how.code.isLibrary !== true && (how.code.text === undefined || !isUnrunnableCode(how.code.text))
-  if (isNewAskable(one, how.code.file, how.isDue, newStep) && isRunnable) return 'new'
+  // Code never seen also leaves out what its quiz forbids (1.10.0 G3, D29): read for that rung alone, so code changed
+  // and a worked example go by the code check they were measured with.
+  const isNewRunnable = isRunnable && how.code.isNewLibrary !== true && (how.code.text === undefined || !isNewOnlyUnrunnable(how.code.text))
+  if (isNewAskable(one, how.code.file, how.isDue, newStep) && isNewRunnable) return 'new'
   return stepOf(one) >= changedStep && isRunnable && isChangedRunnable(how.code) ? 'changed' : 'mine'
 }
 
@@ -5476,6 +5486,48 @@ export function isUnrunnableChange(change: Pick<LearnChange, 'diff' | 'kind'>, f
   if (isUnrunnableCode(after.join('\n'))) return true
   if (change.kind === 'create') return false
   return file === undefined || LIBRARY_IMPORTS.some(pattern => pattern.test(file))
+}
+
+/**
+ * What else code never seen leaves to the learner's own code (1.10.0 G3): code its quiz (RUNG_ASK's sentence) forbids
+ * or a library needs, which 1.9.0's check let through (its sample's misses): jQuery's `$(` (not `obs$.` or `${`); a
+ * decorator of an object or module (`@app.route`, `@pytest.fixture`) or a capital's call (`@Component(`, `@Injectable()`),
+ * not `@property`, one's own `@my_decorator`, a JSDoc ` * @param` or a Python property's `@x.setter` · `getter` ·
+ * `deleter`; the network (`fetch(`, `WebSocket(`, not `refetch(` or `this.fetch(`); the Node process (`process.`); and
+ * Node's file, network, process or input modules named by `node:` (`'node:fs'`, `'node:fs/promises'`, `'node:http'`;
+ * not `'node:util'` or `'node:assert'`, which run alone). Read for code never seen alone (rungOf, isNewLibraryChange):
+ * the check code changed and a worked example were measured with (isUnrunnableCode, isUnrunnableChange) is as it was
+ * (D29). Wrong only the safe way: a concept it catches is asked in its own code (or code changed), as before.
+ */
+const NEW_UNRUNNABLE: readonly RegExp[] = [
+  /(?<![\w$.])\$\s*\(/,
+  /^[ \t]*@(?![\w$]+\.(?:setter|getter|deleter)\b)(?:[A-Za-z_$][\w$]*\.[\w$.]*[\w$]|[A-Z][\w$]*\s*\()/m,
+  /(?<![\w$.])(?:fetch|XMLHttpRequest|WebSocket|EventSource)\s*\(/,
+  /(?<![\w$.])process\s*\./,
+  /(['"\x60])node:(?:fs|http|https|net|child_process|readline)(?:\/[^'"\x60\s]*)?\1/,
+]
+
+/** True when code holds what code never seen alone leaves out (NEW_UNRUNNABLE), on top of isUnrunnableCode. */
+function isNewOnlyUnrunnable(text: string): boolean {
+  return NEW_UNRUNNABLE.some(pattern => pattern.test(text))
+}
+
+/**
+ * True when code a learner met could not be asked in code never seen by its lines (1.10.0 G3): what any rung leaves out
+ * (isUnrunnableCode) or what code never seen alone does (NEW_UNRUNNABLE).
+ */
+export function isNewUnrunnableCode(text: string): boolean {
+  return isUnrunnableCode(text) || isNewOnlyUnrunnable(text)
+}
+
+/**
+ * True when the change a concept's code came from holds, in any hunk's lines after the change, what code never seen
+ * alone leaves out (1.10.0 G3, NEW_UNRUNNABLE): read wider than the lines a question quotes, as isUnrunnableChange reads
+ * them; a file is read for its imports by isUnrunnableChange alone (LIBRARY_IMPORTS), as it was. Set on a pick as
+ * `isNewLibrary` only where code never seen could ask it, never kept.
+ */
+export function isNewLibraryChange(change: Pick<LearnChange, 'diff'>): boolean {
+  return isNewOnlyUnrunnable(parseDiff(change.diff).map(h => beforeAfter(h).after).join('\n'))
 }
 
 /**
@@ -6015,6 +6067,30 @@ const RULE_CHECK =
   '팀 규칙 연습이다. 판정보다 먼저 고친 줄이 위 팀 규칙을 지키는지 본다. 고친 줄이 팀 규칙을 지키고 할 일을 이루면 모범 답과 달라도 맞음이다. 결과가 같아도 규칙을 지키지 않았으면 맞음이 아니다.'
 
 /**
+ * How a question in code never seen asked as a prediction is graded (1.10.0 G3), in KIND_CHECK's predict place: its
+ * model answer is what the code prints, line by line (the quiz's R line, 1.9.0 F3), so each line asked is set beside the
+ * value the learner said for it first, on a line of its own (대조:, dropped: parseCheck reads it as a label and keeps
+ * nothing of it), and a value different or missing on any line asked, or a line said that the answer has not, is wrong,
+ * never 거의. A reason added is not compared. 1.9.0's sample graded an answer with one value of several wrong 거의 9
+ * times of 27 (docs/qa/견본.md): the stock line calls 거의 "일부가 틀렸다", which a printed value one line off fits.
+ */
+const NEW_CHECK =
+  '처음 보는 코드의 예측 문제다. 모범 답은 코드가 찍는 글자를 줄마다 적은 것이다. 판정을 쓰기 전에 대조 줄에, 문제가 물은 모범 답의 줄마다 학습자가 그 줄에 찍힌다고 말한 값을 차례로 견주어 같음·다름·없음을 적는다. 값은 찍히는 글자로 견주고, 따옴표·쉼표·띄어쓰기·조사·말투("3 나와요", "B랑 합격")는 보지 않는다. 여러 줄을 한 줄에 이어 써도 차례대로 견준다. 덧붙인 까닭 속의 말과 값은 견주지 않는다. 물은 줄이 모두 같음이면 맞음이다. 하나라도 다름이나 없음이면 다른 줄이 맞아도 틀림이다. 모범 답에 없는 줄이 찍힌다고 더 말했어도 틀림이다.'
+/** The verdict line for NEW_CHECK's questions, in the three-way line's place: two verdicts, 거의 not one of them. */
+const NEW_VERDICTS = '판정은 맞음과 틀림 둘 중 하나다. 이 문제에는 거의를 쓰지 않는다("모르겠다"도 틀림).'
+/** The comparison line NEW_CHECK asks for, right before the verdict in the format. */
+const NEW_COMPARE_LINE = '대조: (물은 줄마다 같음 · 다름 · 없음, 예: 1줄 같음, 2줄 다름)'
+
+/**
+ * True when a question is one NEW_CHECK grades (1.10.0 G3): in code never seen (rung new), asked as a prediction. One
+ * in code never seen asked why or how to change it, or with no kind, is graded as 1.9.0 graded it; a team-rule
+ * practice too (checkPrompt). Only a window whose code never seen is on grades it so (register.tsx gradeTyped, D28).
+ */
+export function isExactGrade(item: Partial<Pick<LearnQuizItem, 'rung' | 'kind'>>): boolean {
+  return item.rung === 'new' && item.kind === 'predict'
+}
+
+/**
  * How a grade picks a base concept (1.10.0 G4, in the place of 1.9.0 F5's, never sent on), after the slip's kind: each
  * concept listed as learned before marked first (바탕 점검: 틀림 where the answer's wrong idea, carried into short code
  * that uses that concept alone, still gives a wrong answer; 바름 where it is not so and the answer says or uses the
@@ -6049,21 +6125,29 @@ export const BASE_AUDIT_RETRY = '바탕 점검: (번호마다 "번호 표시" �
  * answer (its words data, TEAM_IS_DATA), RULE_CHECK in its kind's place and a `규칙:` line before the verdict, with no
  * slip asked for; `bases` (F5, baseCandidates' names), on a grade that asks for the slip, lists the concepts learned
  * before this one by number after `past` and asks for the one the slip came from getting wrong (BASE_CHECK, 1.10.0 G4:
- * its `바탕 점검:`, `바탕 근거:` and `바탕:` lines after the slip's). With neither (or no base to list), the prompt is
- * 1.8.0's to the byte.
+ * its `바탕 점검:`, `바탕 근거:` and `바탕:` lines after the slip's). `exact` (1.10.0 G3), given only by a window whose code
+ * never seen is on (register.tsx gradeTyped, D28), grades a question in code never seen asked as a prediction
+ * (isExactGrade) line by line: NEW_VERDICTS in the three-way line's place, NEW_CHECK in its kind's, a `대조:` line before
+ * the verdict, and 틀림 alone where the lines below say short of right; a team-rule practice never so. With none of them
+ * (or no base to list, or a question isExactGrade does not take), the prompt is 1.8.0's to the byte.
  */
 export function checkPrompt(
-  item: Pick<LearnQuizItem, 'name' | 'question' | 'answer' | 'kind'>,
+  item: Pick<LearnQuizItem, 'name' | 'question' | 'answer' | 'kind'> & Partial<Pick<LearnQuizItem, 'rung'>>,
   mine: string,
   level: Level,
   first?: Pick<LearnQuizFirstTry, 'mine' | 'verdict' | 'feedback' | 'nudge'>,
   past?: Pick<LearnSlip, 'what' | 'mine'>,
-  extra: { rule?: string; bases?: readonly string[] } = {},
+  extra: { rule?: string; bases?: readonly string[]; exact?: true } = {},
 ): string {
   const { rule } = extra
   const asksSlip = rule === undefined && (first === undefined || isBlankAnswer(first.mine))
   // The concepts a base may be picked from (1.9.0 F5): only on a grade that asks for the slip it would explain.
   const bases = asksSlip ? (extra.bases ?? []) : []
+  // A question in code never seen asked as a prediction, in a window that asks it (1.10.0 G3): right or wrong only.
+  const isExact = rule === undefined && extra.exact === true && isExactGrade(item)
+  // Short of right, as the lines below say it: 틀림 alone for a grade with no 거의.
+  const shortOf = isExact ? '틀림' : '거의나 틀림'
+  const shortTag = isExact ? '틀림' : '거의·틀림'
   return [
     LEVEL_TEXT[level],
     '',
@@ -6080,27 +6164,29 @@ export function checkPrompt(
     '## 학습자의 답',
     cut(mine, 1500),
     '',
-    '판정은 셋 중 하나다. 맞음: 핵심을 맞게 이해했다. 거의: 방향은 맞지만 중요한 부분이 빠졌거나 일부가 틀렸다. 틀림: 틀렸거나 관계없는 답이다("모르겠다"도 틀림).',
-    ...(rule !== undefined ? [RULE_CHECK] : item.kind ? [KIND_CHECK[item.kind]] : []),
+    isExact
+      ? NEW_VERDICTS
+      : '판정은 셋 중 하나다. 맞음: 핵심을 맞게 이해했다. 거의: 방향은 맞지만 중요한 부분이 빠졌거나 일부가 틀렸다. 틀림: 틀렸거나 관계없는 답이다("모르겠다"도 틀림).',
+    ...(rule !== undefined ? [RULE_CHECK] : isExact ? [NEW_CHECK] : item.kind ? [KIND_CHECK[item.kind]] : []),
     '피드백은 한두 문장이다. 학습자의 답대로라면 무엇이 되는지(값이나 동작)를 먼저 짚고, 맞은 점 하나를 인정한다. 모범 답을 그대로 옮기지 않는다.',
     ...(past ? ['이번 답이 지난번에 헷갈린 점을 바로잡았으면 피드백에서 한 마디로 짚는다.'] : []),
     first
       ? '마지막 시도다. 되묻기는 쓰지 않는다.'
-      : '되묻기는 판정이 거의나 틀림일 때만 쓰는 질문 한 문장이다. 학습자가 자기 답의 어디가 어긋났는지 스스로 알아차리게 묻는다. 답·고칠 코드·개념 이름은 말하지 않는다.',
+      : `되묻기는 판정이 ${shortOf}일 때만 쓰는 질문 한 문장이다. 학습자가 자기 답의 어디가 어긋났는지 스스로 알아차리게 묻는다. 답·고칠 코드·개념 이름은 말하지 않는다.`,
     ...(asksSlip
       ? [
-          '헷갈린 점은 판정이 거의나 틀림일 때만 쓴다. 학습자의 답에 드러난 잘못된 생각을 "~라고 봄"처럼 40자 안팎 한 문장으로 쓴다. 답에서 근거를 찾을 수 없으면 없음이라고 쓴다.',
+          `헷갈린 점은 판정이 ${shortOf}일 때만 쓴다. 학습자의 답에 드러난 잘못된 생각을 "~라고 봄"처럼 40자 안팎 한 문장으로 쓴다. 답에서 근거를 찾을 수 없으면 없음이라고 쓴다.`,
           `유형은 그 헷갈린 점의 갈래다. ${SLIP_TYPE_WORDS.join(', ')} 중 하나를 그대로 쓴다.`,
           ...(bases.length > 0 ? [BASE_CHECK] : []),
         ]
       : []),
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
     ...(rule !== undefined ? ['규칙: (지킴 · 안 지킴 중 하나)'] : []),
-    '판정: (맞음 · 거의 · 틀림 중 하나)',
+    ...(isExact ? [NEW_COMPARE_LINE, '판정: (맞음 · 틀림 중 하나)'] : ['판정: (맞음 · 거의 · 틀림 중 하나)']),
     '피드백: (한두 문장)',
-    ...(first ? [] : ['되묻기: (거의·틀림일 때만 질문 한 문장. 맞음이면 이 줄을 쓰지 않는다)']),
+    ...(first ? [] : [`되묻기: (${shortTag}일 때만 질문 한 문장. 맞음이면 이 줄을 쓰지 않는다)`]),
     ...(asksSlip
-      ? ['헷갈린 점: (거의·틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)', ...(bases.length > 0 ? BASE_FORMAT : []), '유형: (거의·틀림일 때만 위 갈래 중 하나)']
+      ? [`헷갈린 점: (${shortTag}일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)`, ...(bases.length > 0 ? BASE_FORMAT : []), `유형: (${shortTag}일 때만 위 갈래 중 하나)`]
       : []),
   ].join('\n')
 }
@@ -6124,12 +6210,13 @@ const CHECK_LABEL = /^\s*(?:\*\*)?(판정|피드백|되묻기|헷갈린\s*점|�
 
 /**
  * CHECK_LABEL with the labels a grade asked for on top (1.9.0): `규칙` for a team-rule practice's (F2), `바탕` for a base
- * concept's (F5), its `바탕 점검` (or `점검`) too (1.10.0 G4). Only then are they labels: else a line that starts so is
- * the feedback's, as in 1.8.0.
+ * concept's (F5), its `바탕 점검` (or `점검`) too (1.10.0 G4), `대조` for a question graded line by line (1.10.0 G3,
+ * read so it is dropped: nothing reads its part). Only then are they labels: else a line that starts so is the
+ * feedback's, as in 1.8.0.
  */
-function checkLabel(asked: { rule?: true; base?: true }): RegExp {
-  if (!asked.rule && !asked.base) return CHECK_LABEL
-  const more = [...(asked.rule ? ['규칙'] : []), ...(asked.base ? ['(?:바탕\\s*)?점검', '바탕\\s*근거', '바탕'] : [])].join('|')
+function checkLabel(asked: { rule?: true; base?: true; exact?: true }): RegExp {
+  if (!asked.rule && !asked.base && !asked.exact) return CHECK_LABEL
+  const more = [...(asked.rule ? ['규칙'] : []), ...(asked.base ? ['(?:바탕\\s*)?점검', '바탕\\s*근거', '바탕'] : []), ...(asked.exact ? ['대조'] : [])].join('|')
   return new RegExp(`^\\s*(?:\\*\\*)?(판정|피드백|되묻기|헷갈린\\s*점|유형|${more})(?:\\*\\*)?\\s*[:：]\\s*(?:\\*\\*)?\\s*(.*)$`)
 }
 
@@ -6216,9 +6303,12 @@ function baseSaid(raw: unknown): string | undefined {
  * line grades as before 1.7.0. `asked` (1.9.0) reads the lines checkPrompt's `extra` asked for, else none of them:
  * `rule`, a team-rule practice's `규칙:` (F2), a line that broke the rule never right (right is read as 거의); `base`,
  * the `바탕:` line (F5) as written, short of right only and only under a `바탕 근거:` that names the answer's words
- * (baseOf reads it as a concept), with its `바탕 점검:` line (1.10.0 G4, `baseAudit`) as written, short of right only.
+ * (baseOf reads it as a concept), with its `바탕 점검:` line (1.10.0 G4, `baseAudit`) as written, short of right only;
+ * `exact` (1.10.0 G3), a question graded line by line: its `대조:` line and the lines under it dropped wherever they
+ * stand, and 거의, which its prompt does not offer, read as wrong (the learner never sees a 거의 the grade did not
+ * allow); what the 대조 line says never changes the verdict.
  */
-export function parseCheck(text: string, asked: { rule?: true; base?: true } = {}): CheckReply | undefined {
+export function parseCheck(text: string, asked: { rule?: true; base?: true; exact?: true } = {}): CheckReply | undefined {
   const words: Record<string, 'right' | 'partial' | 'wrong'> = {
     맞음: 'right', 정답: 'right', right: 'right', correct: 'right',
     거의: 'partial', 부분: 'partial', 부분정답: 'partial', partial: 'partial',
@@ -6237,7 +6327,8 @@ export function parseCheck(text: string, asked: { rule?: true; base?: true } = {
     const baseWhy = asked.base ? baseSaid(more.baseWhy) : undefined
     const base = baseWhy !== undefined ? baseSaid(more.base) : undefined
     // A line that does what it was to do but breaks the team's rule is never right (1.9.0 F2).
-    const verdict = rule === 'broken' && said === 'right' ? 'partial' : said
+    // A question graded line by line (1.10.0 G3) has no 거의: one said is wrong, as its prompt says.
+    const verdict = rule === 'broken' && said === 'right' ? 'partial' : asked.exact && said === 'partial' ? 'wrong' : said
     return {
       verdict,
       feedback: cut(feedback.replace(/\n{2,}/g, '\n'), 600),
@@ -8383,15 +8474,23 @@ export function newerBuild(stamps: Readonly<Record<string, SessionStamp>>, id: s
 }
 
 /**
- * True when another session (not `id`) of a build before 1.8.0 stamped within STAMP_KEPT_MS (1.9.0 F3): that window
- * reads the quiz every window shares and knows no rung, so a miss there in code never seen would put the concept back
- * to its first step; a quiz made meanwhile asks in no code never seen. Not STAMP_LIVE_MS, the half hour a newer
- * build's notice goes by: a 1.7 window stamps only as it starts and as it keeps a note (at most every STAMP_EVERY_MS),
- * so one left open grading the shared quiz writes none. A day of no code never seen costs a question or two; the
- * other way, a concept's weeks of steps.
+ * The first build whose grade of a question in code never seen is the one its sample measured (1.10.0 G3: graded line
+ * by line, right or wrong only, isExactGrade). A window of a build before it grades such a question by 1.9.0's stock
+ * grade, which fell short of the bar on it (거의 for one value of several wrong); one before 1.8.0 knows no rung at all.
+ */
+export const NEW_GRADER_SINCE = '1.10.0'
+
+/**
+ * True when another session (not `id`) of a build before NEW_GRADER_SINCE stamped within STAMP_KEPT_MS: that window
+ * reads the quiz every window shares, so a quiz made meanwhile asks in no code never seen. Before 1.8.0 it knows no
+ * rung, and a miss there in code never seen would put the concept back to its first step (1.9.0 F3); 1.8 and 1.9 step it
+ * as this build does, but grade it by the stock grade its sample showed short (1.10.0 G3: a matter of the grade, not of
+ * data lost). Not STAMP_LIVE_MS, the half hour a newer build's notice goes by: a 1.7 window stamps only as it starts and
+ * as it keeps a note (at most every STAMP_EVERY_MS), so one left open grading the shared quiz writes none. A day of no
+ * code never seen costs a question or two; the other way, a concept's weeks of steps or a grade below the bar.
  */
 export function isOldGraderOpen(stamps: Readonly<Record<string, SessionStamp>>, id: string | undefined, now: number): boolean {
-  return Object.entries(stamps).some(([other, one]) => other !== id && now - one.at < STAMP_KEPT_MS && compareVersions(one.v, '1.8.0') < 0)
+  return Object.entries(stamps).some(([other, one]) => other !== id && now - one.at < STAMP_KEPT_MS && compareVersions(one.v, NEW_GRADER_SINCE) < 0)
 }
 
 /** The other sessions' stamps (not `id`), the newest first: /learn 진단's 다른 창 line. */

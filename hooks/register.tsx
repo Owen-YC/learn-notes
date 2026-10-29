@@ -40,7 +40,9 @@ import {
   bankQuestion,
   isChangedAskable,
   isImportingChange,
+  isExactGrade,
   isNewAskable,
+  isNewLibraryChange,
   isOldGraderOpen,
   isUnrunnableChange,
   isWorkedNext,
@@ -2599,7 +2601,8 @@ async function askModel(
  * 1.6.0 may hold a .env), so a file left out is never quoted. A concept code never seen could ask (from `newStep`,
  * due, isNewAskable) or code changed could (from `changedStep`, isChangedAskable, 1.10.0 G2) has its change read wider
  * for a library, its file's imports too (isUnrunnableChange, 1.9.0 F3); one code changed could, for any line bringing
- * code in too (isImportingChange, its 3/7 review). With both rungs off, no file is read.
+ * code in too (isImportingChange, its 3/7 review); one code never seen could, for what that rung alone leaves out in
+ * its change's lines too (isNewLibraryChange, 1.10.0 G3). With both rungs off, no file is read.
  */
 async function withCode(
   $: EngineInterface,
@@ -2626,11 +2629,20 @@ async function withCode(
       const text = codeFor(change, one.blurb)
       if (text) {
         const isChanged = isChangedAskable(one, change.file, changedStep)
-        const isAskable = isNewAskable(one, change.file, isDue(one, now), newStep) || isChanged
+        const isNew = isNewAskable(one, change.file, isDue(one, now), newStep)
+        const isAskable = isNew || isChanged
         const file = isAskable && change.kind !== 'create' ? await importsText($, change.path) : undefined
         const isLibrary = isAskable && isUnrunnableChange(change, file)
         const isImporting = isChanged && isImportingChange(change, file)
-        code = { file: baseName(change.file), text, ...(isLibrary ? { isLibrary: true as const } : {}), ...(isImporting ? { isImporting: true as const } : {}) }
+        // What code never seen alone leaves out (1.10.0 G3, D29): read only where that rung could ask it.
+        const isNewLibrary = isNew && isNewLibraryChange(change)
+        code = {
+          file: baseName(change.file),
+          text,
+          ...(isLibrary ? { isLibrary: true as const } : {}),
+          ...(isImporting ? { isImporting: true as const } : {}),
+          ...(isNewLibrary ? { isNewLibrary: true as const } : {}),
+        }
         break
       }
     }
@@ -2735,8 +2747,9 @@ function metTeamConcepts(
 }
 
 /**
- * The step from which this quiz asks a concept due in code never seen (build's, 1.9.0 F3): none (Infinity) while
- * another window of a build before 1.8.0 is open on this device (isOldGraderOpen), or the stamps cannot be read.
+ * The step from which this quiz asks a concept due in code never seen (build's, this model's at level beginner, 1.10.0
+ * G7): none (Infinity) while another window of a build before NEW_GRADER_SINCE (1.10.0 G3; 1.8.0 in 1.9.0) is open on
+ * this device (isOldGraderOpen), or the stamps cannot be read.
  */
 async function newStepNow($: EngineInterface, now: number): Promise<number> {
   try {
@@ -2801,9 +2814,10 @@ async function makeQuiz(
     if (isTeamQuiz) return { error: terms.length > 0 ? TEAM_ALL_KNOWN : NO_TEAM_TERMS }
     return { error: Object.keys(index).length > 0 ? ALL_KNOWN_TEXT : NO_CONCEPTS_FOR_QUIZ }
   }
-  // Code never seen (1.9.0 F3) only while no window of a build before 1.8.0 stamped on this device within the day:
-  // that window reads this quiz too, and would put a concept missed there back to its first step. The stamps are read
-  // once a quiz, and only with the rung on; a store that cannot be read keeps it off for this quiz.
+  // Code never seen (1.9.0 F3) only while no window of a build before NEW_GRADER_SINCE stamped on this device within the
+  // day: that window reads this quiz too, and would put a concept missed there back to its first step (before 1.8.0) or
+  // grade it by the stock grade its sample showed short (1.8, 1.9; 1.10.0 G3). The stamps are read once a quiz, and only
+  // with the rung on; a store that cannot be read keeps it off for this quiz.
   const newStep = build.rungNewStep === Infinity ? Infinity : await newStepNow($, now)
   // A review quiz goes over more than one note where it can (three concepts from one note make one lesson
   // again), the slips to ask again and the concepts due before any other, then the team terms not met yet.
@@ -3179,11 +3193,18 @@ async function gradeTyped(
     (await aftersNow($, cfg, item.key).catch(() => NO_AFTERS)).baseAfter !== Infinity
   const map = isBaseAsked ? await read($, aliases) : {}
   const bases = isBaseAsked ? baseCandidates(await read($, concepts), resolveKey(map, item.key), await storedTeamTerms($, map)) : []
-  const prompt = checkPrompt(item, mine, cfg.level, first, past ? { what: past.what, mine: past.mine } : undefined, bases.length > 0 ? { bases: bases.map(one => one.name) } : {})
+  // A question in code never seen asked as a prediction is graded line by line, right or wrong only (1.10.0 G3,
+  // NEW_CHECK), by a window whose code never seen is on alone (this model's at level beginner, the route; D28): any other
+  // window (another model's, a model or level no sample measured) grades it as 1.9.0 did, 거의 kept as 거의.
+  const isExact = build.rungNewStep !== Infinity && isExactGrade(item)
+  const prompt = checkPrompt(item, mine, cfg.level, first, past ? { what: past.what, mine: past.mine } : undefined, {
+    ...(bases.length > 0 ? { bases: bases.map(one => one.name) } : {}),
+    ...(isExact ? { exact: true as const } : {}),
+  })
   // Room for the marks and the code (BASE_GRADE_TOKENS) only where the bases are listed; else 1.9.0's.
   const asked = await askModel($, cfg, 'grade', { system: CHECK_SYSTEM, prompt, maxTokens: bases.length > 0 ? BASE_GRADE_TOKENS : 480, timeoutMs: 60_000 })
   if ('error' in asked) return { error: `채점하지 못했습니다: ${asked.error}` }
-  const graded = parseCheck(asked.text, bases.length > 0 ? { base: true } : {})
+  const graded = parseCheck(asked.text, { ...(bases.length > 0 ? { base: true as const } : {}), ...(isExact ? { exact: true as const } : {}) })
   if (!graded) {
     void fault($, 'grade', 'unreadable', '채점 결과를 읽지 못했습니다')
     return { error: '채점 결과를 읽지 못했습니다. 다시 보내 보세요.' }

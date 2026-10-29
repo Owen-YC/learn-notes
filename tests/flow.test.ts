@@ -30,6 +30,7 @@ import {
   WORKED_PLAN_LINE,
   WORKED_TURN_ASK,
   WRITER_MARK,
+  checkPrompt,
   cleanConcepts,
   cleanMarkedConcepts,
   conceptKey,
@@ -56,6 +57,7 @@ import { COEXIST_CASES, COEXIST_MIXED, type CoexistStore } from './fixtures/coex
 import { ROUTE19_CALLS, ROUTE19_DIAG } from './fixtures/route19'
 import { INPUT_RULE19, OUTPUT_RULE19 } from './fixtures/rule19'
 import { CHANGED_QUIZ_OFF, CHANGED_QUIZ_ON } from './fixtures/changed110'
+import { CHECK_19, CHECK_FIRSTS_110, CHECK_ITEM_110, CHECK_MINE_110, NEW_EXACT_110 } from './fixtures/check110'
 
 const NOW = Date.UTC(2026, 9, 3, 1)
 const NOTES_DIR = '/home/u/.claude/learning-notes'
@@ -14224,9 +14226,10 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     await again.unmount()
   })
 
-  test('off while a window before 1.8.0 stamped within the day: asked in its code changed, the sentence for code never seen not sent; past the half hour still (3/5 검토), past the day in code never seen', async ($, on) => {
+  test('off while a window before 1.10.0 (1.8.0 in 1.9.0) stamped within the day: asked in its code changed, the sentence for code never seen not sent; past the half hour still (3/5 검토), past the day in code never seen', async ($, on) => {
     const store = storeOf({ [NAME]: 4 }, 31 * DAY)
-    store.set('sessions', { 'session-old': { v: '1.7.1', at: NOW - 20 * 60_000 }, 'session-new': { v: '1.8.0', at: NOW - 60_000 } })
+    // The newer window a 1.10.0 one (1.10.0 G3: 1.8.0 here in 1.9.0, a window that now keeps it off as well).
+    store.set('sessions', { 'session-old': { v: '1.7.1', at: NOW - 20 * 60_000 }, 'session-new': { v: '1.10.0', at: NOW - 60_000 } })
     const w = await opened($, on, store, [NAME], { rungNewStep: 4, rungChangedStep: 2 })
     const changed = ['T1: 예측', 'Q1: 아래 코드는 b를 무엇으로 찍을까요?', '```', 'const a = 10', 'const b = a * 2', 'console.log(b)', '```', 'A1: 20'].join('\n')
     const ui = await quizIn($, w, changed)
@@ -17845,4 +17848,205 @@ describe('1.10.0: 바탕 개념 (G4) behind its switch: each concept marked firs
     expect(both.on.item).not.toHaveProperty('slipBase')
     expect(both.on.said).toContain(`\n같은 곳을 또 헷갈렸습니다 · ${WORKED_NEXT}`)
   })
+})
+
+describe('1.10.0: 처음 보는 코드 (G3) behind its switch: its prediction graded line by line by a window whose rung is on, 1.9.0\'s grade in any other; its own code check; a 1.8 or 1.9 window keeps it off', () => {
+  const DAY = 86_400_000
+  const NAME = CHECK_ITEM_110.name
+  const OTHER = '구조 분해'
+  const MINE = CHECK_MINE_110
+  const HINT = '하나씩 더해 보세요'
+  const NEW_MISS = '처음 보는 코드는 틀려도 한 단계만 내려갑니다'
+  const RIGHT = '판정: 맞음\n피드백: 정확합니다.'
+  const WRONG_FIRST = CHECK_FIRSTS_110.wrong!
+  const PARTIAL_FIRST = CHECK_FIRSTS_110.partial!
+  /** A grade of the prediction as an exact grade is asked for it: its 대조 line, then 거의 (which it does not offer) and a question back. */
+  const NUDGED = ['대조: 1줄 같음, 2줄 다름', '판정: 거의', `피드백: ${WRONG_FIRST.feedback}`, `되묻기: ${WRONG_FIRST.nudge}`, '헷갈린 점: 배열 길이를 마지막 값으로 봄', '유형: 경계값'].join('\n')
+  const OTHER_Q = '아래 코드의 b는 무엇일까요?\n```js\nconst { a, b } = { a: 1, b: 2 }\nconsole.log(b)\n```'
+  const conceptOf = (store: Map<string, unknown>, name: string) => (store.get('concepts') as Record<string, { step?: number; missedAt?: number }>)[conceptKey(name)]!
+  const itemsOf = (store: Map<string, unknown>) => (store.get('quiz') as { items: Record<string, unknown>[] }).items
+  /**
+   * NAME at its fifth step a month on, OTHER at its second; a quiz another window made (or this one, before): NAME's
+   * question in code never seen as a prediction (CHECK_ITEM_110), OTHER's in its own code.
+   */
+  const storeOf = () => {
+    const concepts = {
+      [conceptKey(NAME)]: { name: NAME, count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${NAME} 설명`, files: ['a.ts'], step: 4, reviewedAt: NOW - 31 * DAY },
+      [conceptKey(OTHER)]: { name: OTHER, count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${OTHER} 설명`, files: ['b.js'], step: 1, reviewedAt: NOW - 3 * DAY },
+    }
+    const quiz = {
+      at: NOW - 60_000,
+      isRevealed: false,
+      items: [
+        { key: conceptKey(NAME), name: NAME, question: CHECK_ITEM_110.question, answer: CHECK_ITEM_110.answer, hint: HINT, kind: 'predict', rung: 'new' },
+        { key: conceptKey(OTHER), name: OTHER, question: OTHER_Q, answer: '2', hint: '중괄호 안을 보세요', kind: 'predict', rung: 'mine' },
+      ],
+    }
+    return new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['quiz', quiz]])
+  }
+  /** A window on storeOf() whose build runs with `harness` (none: as shipped), its model calls caught. */
+  async function opened($: Engine, on: On, harness: Record<string, unknown> | null) {
+    const calls = routeCalls(on)
+    const store = storeOf()
+    const w = world(on, 'ok', null, true, store)
+    if (harness) w.harness = harness
+    await start($)
+    return { w, store, calls }
+  }
+
+  test('on (a harness\'s 4): the prediction graded line by line, the design\'s preview to the byte at 480 and 60000; 거의 with a question back read 틀림: the head red ✗, not △; the 대조 line kept nowhere; the same quiz\'s 내 코드 question 1.9.0\'s', async ($, on) => {
+    const { w, store, calls } = await opened($, on, { rungNewStep: 4 })
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-quiz' })
+    w.answer = NUDGED
+    await ui.input({ key: mineKey(store, 0), text: MINE })
+    await w.clock.settle()
+    expect(calls.at(-1)).toEqual({ model: 'haiku', effort: 'low', system: CHECK_SYSTEM, prompt: NEW_EXACT_110['none · beginner'], maxTokens: 480, timeoutMs: 60_000 })
+    expect((await ui.find({ type: 'Text', text: '✗ 아직입니다 · 한 번 더 떠올려 보세요' }))?.props.color).toBe('red')
+    expect(await ui.find({ type: 'Text', text: '△ 아직입니다 · 방향은 맞습니다' })).toBeUndefined()
+    expect(itemsOf(store)[0]!.firstTry).toMatchObject({ mine: MINE, verdict: 'wrong', feedback: WRONG_FIRST.feedback, nudge: WRONG_FIRST.nudge })
+    expect(JSON.stringify(store.get('quiz'))).not.toContain('2줄 다름')
+    // Its try again, right: the preview's prompt with the first try 틀림; right, its step as it was.
+    w.answer = RIGHT
+    await ui.input({ key: `${mineKey(store, 0)}-again`, text: MINE })
+    await w.clock.settle()
+    expect(calls.at(-1)!.prompt).toBe(NEW_EXACT_110['wrong · beginner'])
+    expect(itemsOf(store)[0]).toMatchObject({ result: 'right', rung: 'new' })
+    expect(conceptOf(store, NAME).step).toBe(4)
+    // The 내 코드 question of the same quiz: 1.9.0's grade, no 대조.
+    w.answer = RIGHT
+    await ui.input({ key: mineKey(store, 1), text: '2요' })
+    await w.clock.settle()
+    const other = itemsOf(store)[1]! as { name: string; question: string; answer: string; kind: 'predict' }
+    expect(calls.at(-1)).toEqual({ model: 'haiku', effort: 'low', system: CHECK_SYSTEM, prompt: checkPrompt(other, '2요', 'beginner'), maxTokens: 480, timeoutMs: 60_000 })
+    expect(calls.at(-1)!.prompt).not.toContain('대조')
+    expect(calls.at(-1)!.prompt).toContain('판정은 셋 중 하나다.')
+    await ui.unmount()
+  })
+
+  test('on: 거의 both times, read 틀림 each time: one step back, no missedAt, the sentence for code never seen; the try again\'s prompt the preview\'s', async ($, on) => {
+    const { w, store, calls } = await opened($, on, { rungNewStep: 4 })
+    w.answer = NUDGED
+    expect((await learn($, `퀴즈 1 ${MINE}`)).text).toContain('1번 ✗ 아직입니다 · 한 번 더 떠올려 보세요 · ')
+    w.answer = '대조: 1줄 같음, 2줄 다름\n판정: 거의\n피드백: 둘째 줄이 아직 다릅니다.'
+    await learn($, `퀴즈 1 ${MINE}`)
+    expect(calls.at(-1)!.prompt).toBe(NEW_EXACT_110['wrong · beginner'])
+    expect(itemsOf(store)[0]).toMatchObject({ result: 'wrong', verdict: 'wrong', rung: 'new' })
+    expect(conceptOf(store, NAME).step).toBe(3)
+    expect(conceptOf(store, NAME).missedAt).toBeUndefined()
+    w.answer = RIGHT
+    expect((await learn($, '퀴즈 2 2요')).text).toContain(`${NEW_MISS}.`)
+  })
+
+  test('on: 모르겠어요, its hint, then an answer: graded line by line with the hint said and no question back (the preview\'s, to the byte)', async ($, on) => {
+    const { w, store, calls } = await opened($, on, { rungNewStep: 4 })
+    const count = calls.length
+    expect((await learn($, '퀴즈 1 모르겠어요')).text).toContain(`힌트: ${HINT}`)
+    expect(calls).toHaveLength(count)
+    w.answer = '대조: 1줄 같음, 2줄 다름\n판정: 틀림\n피드백: 둘째 줄이 다릅니다.\n헷갈린 점: 배열 길이를 마지막 값으로 봄\n유형: 경계값'
+    await learn($, `퀴즈 1 ${MINE}`)
+    expect(calls.at(-1)!.prompt).toBe(NEW_EXACT_110['hint · beginner'])
+    expect(itemsOf(store)[0]).toMatchObject({ result: 'wrong', rung: 'new' })
+  })
+
+  // D28: a window whose code never seen is off grades a question in it another window made as 1.9.0 graded it.
+  for (const [what, options, harness] of [
+    ['haiku as shipped (its row has it off)', { model: 'haiku' }, null],
+    ['sonnet with only haiku\'s row turning it on', { model: 'sonnet' }, { models: { haiku: { rungNewStep: 4 } } }],
+    ['haiku at intermediate, both rows turning it on', { model: 'haiku', level: 'intermediate' }, { models: { haiku: { rungNewStep: 4 }, sonnet: { rungNewStep: 4 } } }],
+  ] as const) {
+    test(`(D28) off, ${what}: a stored prediction in code never seen graded as 1.9.0 (fca5988) to the byte; 거의 kept as 거의, its head △ and one step back as in 1.9.0`, { options }, async ($, on) => {
+      const level = 'level' in options ? options.level : 'beginner'
+      const { w, store, calls } = await opened($, on, harness)
+      w.answer = ['판정: 거의', `피드백: ${PARTIAL_FIRST.feedback}`, `되묻기: ${PARTIAL_FIRST.nudge}`].join('\n')
+      expect((await learn($, `퀴즈 1 ${MINE}`)).text).toContain('1번 △ 아직입니다 · 방향은 맞습니다 · ')
+      expect(calls.at(-1)).toEqual({ model: options.model, effort: 'low', system: CHECK_SYSTEM, prompt: CHECK_19[`predict · none · none · ${level}`], maxTokens: 480, timeoutMs: 60_000 })
+      expect(itemsOf(store)[0]!.firstTry).toMatchObject({ mine: MINE, verdict: 'partial' })
+      w.answer = '판정: 거의\n피드백: 둘째 줄이 아직 다릅니다.'
+      await learn($, `퀴즈 1 ${MINE}`)
+      expect(calls.at(-1)!.prompt).toBe(CHECK_19[`predict · partial · none · ${level}`])
+      expect(itemsOf(store)[0]).toMatchObject({ result: 'wrong', verdict: 'partial', rung: 'new' })
+      expect(conceptOf(store, NAME).step).toBe(3)
+      expect(conceptOf(store, NAME).missedAt).toBeUndefined()
+    })
+  }
+
+  /** A quiz reply whose first question shows code: its rung kept as asked (one with no code is a why, as in 1.9.0). */
+  const QUIZ_REPLY = ['T1: 예측', 'Q1: 아래 코드는 무엇을 찍을까요?', '```js', 'let s = 0', 'for (const x of [3, 4]) s += x', 'console.log(s)', '```', 'H1: 하나씩 더해 보세요', 'R1: s는 3, 다시 7', 'A1: 7'].join('\n')
+  /** Two concepts met in no note and not due for weeks: they fill a quiz to three picks (D33). */
+  const FILLERS = ['채움 하나', '채움 둘']
+  /** NAME due at its fifth step, met in a note's code (a.ts by EDIT_A, or `write` a file of its own), with `fillers`; the quiz this world sends. */
+  async function quizOf($: Engine, on: On, harness: Record<string, unknown> | null, setup: (w: World, store: Map<string, unknown>) => void = () => {}, fillers = FILLERS, write?: { path: string; content: string }) {
+    const concepts = Object.fromEntries([
+      [conceptKey(NAME), { name: NAME, count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${NAME} 설명 — \`for (const n of nums)\``, files: [], step: 4, reviewedAt: NOW - 31 * DAY }],
+      ...fillers.map(name => [conceptKey(name), { name, count: 1, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${name} 설명`, files: [], step: 3, reviewedAt: NOW }]),
+    ])
+    const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)]])
+    const w = world(on, 'ok', null, true, store)
+    if (harness) w.harness = harness
+    setup(w, store)
+    await start($)
+    w.answer = CONCEPT_NOTE([NAME])
+    await turn($, () => (write ? $.tool.call({ tool: 'Write', tool_use_id: 'w1', file_path: write.path, content: write.content }) : $.tool.call(EDIT_A)))
+    await finish(w)
+    w.answer = QUIZ_REPLY
+    await learn($, '퀴즈 새로')
+    return { w, store, prompt: w.models.at(-1)!, maxTokens: w.budgets.at(-1)! }
+  }
+
+  for (const [v, isOpen] of [
+    ['1.9.0', true],
+    ['1.8.0', true],
+    ['1.10.0', false],
+  ] as const) {
+    test(`on, a ${v} window stamped 20 minutes ago: ${isOpen ? 'asked in its own code, no sentence for code never seen (NEW_GRADER_SINCE)' : 'nothing kept off, asked in code never seen'}`, async ($, on) => {
+      const { prompt, maxTokens } = await quizOf($, on, { rungNewStep: 4 }, (_w, store) => store.set('sessions', { 'session-other': { v, at: NOW - 20 * 60_000 } }))
+      expect(prompt.includes('   칸: 처음 보는 코드 (ts로)')).toBe(!isOpen)
+      expect(prompt.includes('처음 보는 코드:')).toBe(!isOpen)
+      expect(prompt.includes(`1. ${NAME} — `)).toBe(true)
+      expect(prompt.includes('\n   칸: 내 코드\n   학습자가 만든 코드 (a.ts):')).toBe(isOpen)
+      expect(maxTokens).toBe(isOpen ? 3400 : 4600)
+    })
+  }
+
+  /** The quiz this world sends again with code never seen off (the harness's null), a minute on: its prompt and cap. */
+  async function offAgain($: Engine, w: World) {
+    w.harness = { rungNewStep: null }
+    await start($)
+    await w.clock.advance(60_000)
+    const count = w.budgets.length
+    w.answer = QUIZ_REPLY
+    await learn($, '퀴즈 새로')
+    expect(w.budgets.length).toBe(count + 1)
+    return { prompt: w.models.at(-1)!, maxTokens: w.budgets.at(-1)! }
+  }
+
+  for (const [what, picks] of [
+    ['of three with a team term in it', 3],
+    ['of two', 2],
+  ] as const) {
+    test(`(D33) on (a harness's 4), a quiz ${what}: each in its own code, the prompt and cap those of it off to the byte`, async ($, on) => {
+      const team = ['## 용어', '- **캐시 키**: 요청마다 캐시를 나누는 이름입니다', ''].join('\n')
+      const setup = (w: World) => (picks === 3 ? w.files.set('/proj/.claude/learn-notes.md', team) : undefined)
+      const onRun = await quizOf($, on, { rungNewStep: 4 }, setup, picks === 3 ? FILLERS : FILLERS.slice(0, 1))
+      expect(onRun.prompt.split(/^\d+\. /m).length - 1).toBe(picks)
+      expect(onRun.prompt.includes('(팀 용어) 캐시 키')).toBe(picks === 3)
+      expect(onRun.prompt).not.toContain('처음 보는 코드')
+      const offRun = await offAgain($, onRun.w)
+      expect({ prompt: onRun.prompt, maxTokens: onRun.maxTokens }).toEqual(offRun)
+      expect(offRun.maxTokens).toBe(3400)
+    })
+  }
+
+  const LINES = ['const nums = [1, 2]', 'for (const n of nums) console.log(n)', ...Array.from({ length: 14 }, (_, i) => `// line ${i + 1}`)]
+  for (const isFetched of [true, false]) {
+    test(`on: a concept due at its fifth step met in a file written whole ${isFetched ? 'whose lines call fetch( far from the lines quoted: asked in its own code (NEW_UNRUNNABLE, the change read whole)' : 'with no such call: asked in code never seen'}`, async ($, on) => {
+      const last = isFetched ? "fetch('/log')" : "console.log('/log')"
+      const { store, prompt } = await quizOf($, on, { rungNewStep: 4 }, () => {}, FILLERS, { path: '/proj/src/a.js', content: [...LINES, last, ''].join('\n') })
+      expect(prompt.includes('\n   칸: 내 코드\n   학습자가 만든 코드 (a.js):')).toBe(isFetched)
+      expect(prompt.includes('   칸: 처음 보는 코드 (js로)')).toBe(!isFetched)
+      expect(prompt).not.toContain(last)
+      expect(itemsOf(store)[0]!.rung).toBe(isFetched ? 'mine' : 'new')
+    })
+  }
 })
