@@ -1657,26 +1657,33 @@ export const ASK_SYSTEM = [
 export const TRACE_LABEL = '예시로 따라가기'
 /**
  * What r's walk-through is asked to end with (생각해 보기): one question on the example just followed, one input
- * changed and the final result asked for alone (1.9.0 F6: 1.8.0's asked how the result changed, and half of a
- * sample's questions asked two things, so no answer could be told right from nearly), for the learner to answer in
- * the question field under the note (openThink). Said by values and names, not step numbers, so the question reads
- * on its own; ending on its question mark, the one end thinkOf reads; its label named bare, not in backticks (a
- * sample's reply copied them). Left out of r's prompt (traceQuestion), no reply ends on one and the rest reads as
- * 1.7.0 (thinkOf finds nothing).
+ * changed and the final result asked for alone, for the learner to answer in the question field under the note
+ * (openThink). 1.10.0 G5: the question's form given whole, a name and its new value in its two backticks (1.9.0 F6's
+ * free wording let a line give a hint, ask two things or come under a change with no run to follow, which its
+ * sentence alone asked to leave out), and no input whose result the note or the walk-through already said. Asked
+ * only of a note whose change has a run to follow (isThinkCode, askNote), its line kept only in the closed form
+ * (isThinkShape, thinkKept). Left out of r's prompt (traceQuestion), no reply ends on one and the rest reads as 1.7.0
+ * (thinkOf finds nothing).
  */
 export const THINK_ASK =
-  "마지막 줄에는 번호 없이, 굵게 쓴 생각해 보기: 로 시작하고 물음표로 끝나는 질문 한 문장을 더해 주세요. 방금 따라간 예시에서 입력 값 하나를 바꾸면 최종 결과가 무엇이 되는지 하나만 묻고('각각'이나 두 가지를 함께 묻지 마세요), 단계 번호 대신 입력 값과 변수·줄 이름으로 묻고 그 답은 쓰지 마세요. 따라갈 실행 흐름이 없는 변경이면 이 줄은 빼 주세요."
+  '마지막 줄에는 번호 없이, 굵게 쓴 생각해 보기: 뒤에 이 꼴의 질문 한 문장만 더해 주세요: `바꿀 이름`을 `새 값`으로 바꾸면 최종 결과는 무엇이 될까요? 방금 따라간 예시에서 입력 값 하나만 바꾸고, 두 백틱 자리에는 코드의 이름과 값만 쓰세요(을/를 · 으로/로는 앞말에 맞춥니다). 조건이 맞는지, 어느 줄에서 멈추는지 같은 실마리나 그 답은 쓰지 말고, 노트나 따라가기 글에서 결과를 이미 말한 입력은 고르지 마세요. 따라갈 실행 흐름이 없는 변경이면 이 줄은 빼 주세요.'
 /**
  * Whether r asks for THINK_ASK's line, and an answer to it is checked by a call of its own (1.9.0 F6: THINK_SYSTEM,
  * thinkCheckPrompt, thinkReply) and a question after it answered by THINK_QUESTION_RULE. Set by the samples in
  * docs/qa/견본.md ((가) the line and its cut, (나) the check, twice): off in 1.9.0. (가) put the line under four of six
  * changes with no run to follow and let one question say its answer, for which the plan names no mending; (나), mended
- * once, still missed its bar once. Off, r's prompt and a question's are 1.8.0's to the byte, the help says nothing of
- * it, no check is called, and the rest (thinkOf, the dim line, 이어서) waits on a reply that ends on a question by
- * itself, answered as 1.8.0 answers it (THINK_RULE).
+ * once, still missed its bar once. 1.10.0 G5 moved those three places from the model's sentences to code (which notes
+ * get the line, isThinkCode; its form, isThinkShape and thinkKept; the check's order, its 따라가기 line first) and
+ * measures it per model: still off here, on only in a model's row of MODEL_SWITCHES. Off, r's prompt and a question's
+ * are 1.8.0's to the byte, the help says nothing of it, no check is called, and the rest (thinkOf, the dim line,
+ * 이어서) waits on a reply that ends on a question by itself, answered as 1.8.0 answers it (THINK_RULE).
  */
 export const IS_THINK_ASKED = false
-/** What r asks (TRACE_LABEL): its walk-through, and the line it ends on while `isThinkAsked` (IS_THINK_ASKED, or a test harness's). */
+/**
+ * What r asks (TRACE_LABEL): its walk-through, and the line it ends on while `isThinkAsked`. askNote passes it
+ * isThinkCode of the note's changes while the switch is on (1.10.0 G5), so a note with no run to follow is asked
+ * 1.7.0's words to the byte.
+ */
 export function traceQuestion(isThinkAsked = IS_THINK_ASKED): string {
   return [
     '바뀐 코드를 구체적인 예시 입력 하나로 한 단계씩 따라가 주세요.',
@@ -1687,6 +1694,59 @@ export function traceQuestion(isThinkAsked = IS_THINK_ASKED): string {
   ].join(' ')
 }
 export const TRACE_QUESTION = traceQuestion()
+
+/**
+ * The languages r's 생각해 보기 is asked in (1.10.0 G5): the ones its samples measure, each a learner can follow
+ * line by line. Any other (go, rb, sh, vue, html, css, md, json …) is asked as 1.7.0 asks it.
+ */
+export const THINK_EXTS: readonly string[] = ['js', 'mjs', 'cjs', 'jsx', 'ts', 'mts', 'cts', 'tsx', 'py']
+/**
+ * A file's name that is a tool's setup or a type's declaration, not code that runs for the app (1.10.0 G5, on its
+ * last part): `vite.config.ts`, `.eslintrc.cjs`, `types.d.ts`, `settings.py`, `setup.py`. A file named `config.js`
+ * is code like any other.
+ */
+export const THINK_SETUP_NAME = /\.config\.[cm]?[jt]sx?$|^\.[\w.-]+rc\.[cm]?[jt]s$|\.d\.[cm]?ts$|^(?:settings|setup)\.py$/i
+/**
+ * What a changed line's flow is read past (hasFlowLine): its comments and its strings and template text, in one
+ * pass from the left, so a `//` or a `#` inside a string ends no line and a quote inside a comment opens no string.
+ */
+const FLOW_SKIP_JS = /\/\*.*?\*\/|\/\/.*$|`(?:\\.|[^`\\])*`|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g
+const FLOW_SKIP_PY = /#.*$|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g
+/** A word that runs or leaves a step, or an arrow function's `=>`. */
+const FLOW_WORD = /\b(?:return|if|else|elif|for|while|switch|case|throw|raise|try|catch|except|finally|await|yield|def|function|lambda|break|continue)\b|=>/
+/** A call: `(` right after a name, a `)` or a `]`. */
+const FLOW_CALL = /[\w\])]\s*\(/
+/** A sum or a comparison between two operands. */
+const FLOW_OP = /[\w)\]]\s*(?:\*\*|[-+*/%]|===?|!==?|<=|>=|&&|\|\||\?\?|\band\b|\bor\b)\s*[\w(\[!-]/
+
+/**
+ * Whether a diff's changed lines carry a run to follow (1.10.0 G5): a line added or taken out (not a `+++`/`---`
+ * head) holding, past its comments and strings (FLOW_SKIP_JS, or FLOW_SKIP_PY for `py`), a word that runs or leaves a
+ * step, a call, or a sum or comparison between two operands. A className or a jsx text changed, a constant's value or
+ * a data file's are none: a word heuristic, so `60 * 60` in a constant reads as one.
+ */
+export function hasFlowLine(diff: string, ext: string): boolean {
+  const skip = ext === 'py' ? FLOW_SKIP_PY : FLOW_SKIP_JS
+  return diff.split('\n').some(line => {
+    if (!/^[+-]/.test(line) || /^(?:\+\+\+|---)(?:\s|$)/.test(line)) return false
+    const code = line.slice(1).replace(skip, found => (found.startsWith('/') || found.startsWith('#') ? ' ' : '""'))
+    return FLOW_WORD.test(code) || FLOW_CALL.test(code) || FLOW_OP.test(code)
+  })
+}
+
+/**
+ * Whether a note's changes hold code with a run to follow (1.10.0 G5), the one kind r asks 생각해 보기 of: one change
+ * not a deletion, in a language of THINK_EXTS, not a tool's setup or a type's declaration (THINK_SETUP_NAME), whose
+ * changed lines carry a flow (hasFlowLine). None for no changes or one with no diff. Wrong this way, there is only no
+ * line, as with the switch off.
+ */
+export function isThinkCode(changes: readonly Pick<LearnChange, 'file' | 'kind' | 'diff'>[]): boolean {
+  return changes.some(one => {
+    if (one.kind === 'delete') return false
+    const ext = extOf(one.file)
+    return ext !== undefined && THINK_EXTS.includes(ext) && !THINK_SETUP_NAME.test(baseName(one.file)) && hasFlowLine(one.diff, ext)
+  })
+}
 
 /**
  * How long a walk-through's 생각해 보기 stays open after its answer came (1.8.0): the dim line under it, the field's
@@ -1710,61 +1770,153 @@ const THINK_CLOSE = /^[\s*)）]*$/
  */
 const THINK_END = /[?？][\s*)）]*$/u
 
+/** A piece of code in backticks, as the closed form of a 생각해 보기 line names a name, a value or a call (THINK_SHAPE). */
+const SHAPE_SPAN = '`[^`\\n]+`'
+/** A value written bare: a number, a quoted string, a list, an object, or a literal word. */
+const SHAPE_LIT = String.raw`-?\d[\d_,]*(?:\.\d+)?|'[^'\n]*'|"[^"\n]*"|\[[^\]\n]*\]|\{[^}\n]*\}|true|false|null|undefined|None|True|False|NaN`
+/** A name written bare, with its fields and indexes (`items[1].qty`). */
+const SHAPE_IDENT = String.raw`[A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|\[[^\]\n]*\])*`
+/** A name or a value, in backticks or bare. */
+const SHAPE_TOK = `(?:${SHAPE_SPAN}|${SHAPE_LIT}|${SHAPE_IDENT})`
+/** Where the change is said, each part left out at will: 방금/같은/위, the example, the call it is in, 입력. */
+const SHAPE_PRE = String.raw`(?:(?:방금|같은|위)\s*)?(?:(?:따라간\s*)?예시(?:에서|의)\s*)?(?:${SHAPE_SPAN}\s*(?:에서|처럼)\s*)?(?:입력\s*)?`
+/** The change itself: a name and its new value, or a call made, in these words alone. */
+const SHAPE_CHANGE =
+  String.raw`(?:${SHAPE_TOK}\s*(?:(?:의\s*)?(?:값|인자|입력)\s*)?(?:을|를)\s*${SHAPE_TOK}\s*(?:으로|로)\s*(?:바꾸면|바꿔\s*넣으면|넣으면)` +
+  String.raw`|(?:입력을\s*)${SHAPE_TOK}\s*(?:으로|로)\s*바꾸면` +
+  String.raw`|${SHAPE_TOK}\s*(?:에|에다)\s*${SHAPE_TOK}\s*(?:을|를)\s*(?:넣으면|넘기면|주면)` +
+  String.raw`|${SHAPE_TOK}\s*대신\s*${SHAPE_TOK}\s*(?:을|를)\s*넣으면` +
+  String.raw`|${SHAPE_TOK}\s*(?:이|가)\s*${SHAPE_TOK}\s*(?:이면|면|이라면|라면|일\s*때)` +
+  String.raw`|${SHAPE_SPAN}\s*(?:을|를|으로|로)?\s*(?:부르면|호출하면|실행하면|넣으면))`
+/** How the final result is asked for. */
+const SHAPE_ASKS = String.raw`(?:무엇이\s*(?:될까요|되나요|됩니까|나올까요|나오나요|출력될까요)|무엇일까요|무엇인가요|무엇입니까|얼마일까요|얼마인가요|얼마가\s*(?:될까요|되나요|됩니까)|어떻게\s*(?:될까요|되나요))`
+/** Whose result: a line, a function or a call in backticks, and what it gives back or prints. */
+const SHAPE_WHOSE = String.raw`(?:,\s*)?(?:(?:마지막\s*)?${SHAPE_SPAN}\s*(?:(?:줄|함수|호출)\s*)?(?:의|이|가)\s*(?:화면에\s*)?(?:(?:돌려주는|반환하는|출력하는|찍는)\s*)?)?`
+/** The result asked for, by one of these nouns (on the screen too: a jsx or tsx change's own question). */
+const SHAPE_NOUN = String.raw`(?:화면에\s*(?:보이는|나오는|찍히는)\s*)?(?:(?:최종|마지막)\s*)?(?:결과|값|출력|반환값|출력값|객체|배열|목록|문자열|합계)(?:은|는|이|가)`
+/** The ask: the result (SHAPE_WHOSE · SHAPE_NOUN) or a named variable's last value, then the question's words and its `?`. */
+const SHAPE_END = String.raw`(?:${SHAPE_WHOSE}${SHAPE_NOUN}|(?:마지막에\s*)?${SHAPE_SPAN}(?:\s*의\s*${SHAPE_SPAN})?\s*(?:값)?(?:은|는|이|가))\s*${SHAPE_ASKS}\s*[?？][\s*)）]*$`
+/**
+ * The closed form of a 생각해 보기 line (1.10.0 G5): where the change is said, the change in set words between names
+ * and values, the final result asked for in set words, and its question mark. No word outside these fits, so a hint
+ * (a condition, a line, an error), a second ask or an explanation is never one.
+ */
+const THINK_SHAPE = new RegExp(`^${SHAPE_PRE}${SHAPE_CHANGE}\\s*${SHAPE_END}`, 'u')
+
+/**
+ * Whether a 생각해 보기 question (thinkOf's) is in the closed form (1.10.0 G5, THINK_SHAPE), with no Korean and no
+ * comment (`//`, `/*`, `#`) in its backticks outside quotes: so THINK_ASK's own placeholders (`바꿀 이름`) copied as
+ * they are never fit either.
+ */
+export function isThinkShape(said: string): boolean {
+  if (!THINK_SHAPE.test(said.trim())) return false
+  for (const found of said.matchAll(/`([^`\n]+)`/g)) {
+    const bare = found[1]!.replace(/'[^']*'|"[^"]*"/g, '')
+    if (/[가-힣]/.test(bare) || /\/\/|\/\*|#/.test(bare)) return false
+  }
+  return true
+}
+
+/**
+ * What a 생각해 보기 line names as its question (THINK_LINE), or undefined for a line that names none: '' for a label
+ * alone. The closing backtick of a label written in backticks (the one an odd count of them has over) is dropped.
+ */
+function thinkLabelOf(line: string | undefined): string | undefined {
+  const said = line === undefined ? undefined : THINK_LINE.exec(line)?.[1]?.replace(/\*\*$/, '').trim()
+  return said !== undefined && said.startsWith('`') && (said.match(/`/g)?.length ?? 0) % 2 === 1 ? said.slice(1).trim() : said
+}
+
 /**
  * The question a walk-through ends on (생각해 보기, THINK_ASK), or undefined: its last line that is not blank, or
  * the line after a label alone (`**생각해 보기**` with the question on the next line, the last). None when the
  * question is empty, says its answer (`답:`, 정답), goes on past its last `?` or ends on no question mark (THINK_END:
  * a reply cut inside the line, or a line that asks nothing): such a line stays in the answer as written, but nothing
  * opens for it. A backtick left alone after the label (the label written in backticks, `` `**생각해 보기:**` ``) is
- * dropped (1.9.0 F6), so the question reads as it was meant.
+ * dropped (1.9.0 F6), so the question reads as it was meant. `isShaped` (1.10.0 G5, the switch on): none either for
+ * a question out of the closed form (isThinkShape).
  * Cut to 300 characters.
  */
-export function thinkOf(answer: string): string | undefined {
+export function thinkOf(answer: string, isShaped = false): string | undefined {
   const lines = clean(answer)
     .split('\n')
     .map(line => line.trim())
     .filter(line => line !== '')
   const last = lines.at(-1)
   if (last === undefined) return undefined
-  const label = (line: string | undefined) => {
-    const said = line === undefined ? undefined : THINK_LINE.exec(line)?.[1]?.replace(/\*\*$/, '').trim()
-    // The closing backtick of a label written in backticks: the one an odd count of them has over.
-    return said !== undefined && said.startsWith('`') && (said.match(/`/g)?.length ?? 0) % 2 === 1 ? said.slice(1).trim() : said
-  }
-  const own = label(last)
+  const own = thinkLabelOf(last)
   // A label alone on the last line asks nothing; one alone on the line before gives that line its question.
-  const said = own !== undefined ? own : label(lines.at(-2)) === '' ? last.replace(/^(?:[-*+•]\s+|>\s*)+/, '').replace(/\*\*$/, '').trim() : undefined
+  const said = own !== undefined ? own : thinkLabelOf(lines.at(-2)) === '' ? last.replace(/^(?:[-*+•]\s+|>\s*)+/, '').replace(/\*\*$/, '').trim() : undefined
   if (said === undefined || said === '' || THINK_GIVEN.test(said)) return undefined
   const asked = Math.max(said.lastIndexOf('?'), said.lastIndexOf('？'))
   if ((asked !== -1 && !THINK_CLOSE.test(said.slice(asked + 1))) || !THINK_END.test(said)) return undefined
+  if (isShaped && !isThinkShape(said)) return undefined
   return cut(said, 300)
+}
+
+/** A horizontal rule's line (`---`, `***`, `___`, spaced or not). */
+const RULED_LINE = /^[^\S\n]*([-*_])(?:[^\S\n]*\1){2,}[^\S\n]*$/
+
+/**
+ * r's answer as kept while the switch is on (1.10.0 G5): every line a 생각해 보기 is named on (THINK_LINE; a label
+ * alone with the line it gives its question) taken out wherever it stands, but for a note of code with a run to follow
+ * (`isCode`, isThinkCode) the last one, when it is the answer's last line and in the closed form (thinkOf(…, true)).
+ * Once any went, the blank lines and rules left at the end go too. An answer with none is kept as it came. So under
+ * a note with no run to follow no line shows or opens, and a line out of form never does; neither is ever stored, so
+ * an older window opens none either.
+ */
+export function thinkKept(answer: string, isCode: boolean): string {
+  const lines = answer.split('\n')
+  const named: [number, number][] = []
+  for (let i = 0; i < lines.length; i++) {
+    const said = thinkLabelOf(clean(lines[i]!).trim())
+    if (said === undefined) continue
+    let end = i
+    if (said === '') {
+      // A label alone takes its question from the next line that is not blank.
+      let next = i + 1
+      while (next < lines.length && lines[next]!.trim() === '') next++
+      if (next < lines.length) end = next
+    }
+    named.push([i, end])
+    i = end
+  }
+  if (named.length === 0) return answer
+  const lastLine = lines.findLastIndex(line => line.trim() !== '')
+  const final = named.at(-1)!
+  const kept = isCode && final[1] === lastLine && thinkOf(answer, true) !== undefined ? final : undefined
+  const gone = new Set(named.filter(one => one !== kept).flatMap(([from, to]) => Array.from({ length: to - from + 1 }, (_, k) => from + k)))
+  if (gone.size === 0) return answer
+  const left = lines.filter((_, i) => !gone.has(i))
+  while (left.length > 0 && (left.at(-1)!.trim() === '' || RULED_LINE.test(left.at(-1)!))) left.pop()
+  return left.join('\n')
 }
 
 /**
  * A walk-through's question still open (1.8.0, 생각해 보기): the note's last question is r's (TRACE_LABEL), its answer
- * ends on a question (thinkOf), and that answer came THINK_OPEN_MS ago at most. With it, the walk-through in full as
- * far as 2000 characters, for the call that checks an answer to it (askPrompt). One stamped ahead of `now` (a clock
- * set back since) is closed, never open for as long as it is ahead.
+ * ends on a question (thinkOf, in the closed form while `isShaped`: 1.10.0 G5), and that answer came THINK_OPEN_MS
+ * ago at most. With it, the walk-through in full as far as 2000 characters, for the call that checks an answer to it
+ * (askPrompt). One stamped ahead of `now` (a clock set back since) is closed, never open for as long as it is ahead.
  */
-export function openThink(asks: readonly LearnAsk[] | undefined, now: number): { question: string; trace: string } | undefined {
+export function openThink(asks: readonly LearnAsk[] | undefined, now: number, isShaped = false): { question: string; trace: string } | undefined {
   const last = asks?.at(-1)
   if (last === undefined || last.question !== TRACE_LABEL || !isThinkAge(now - last.at)) return undefined
-  const question = thinkOf(last.answer)
+  const question = thinkOf(last.answer, isShaped)
   return question === undefined ? undefined : { question, trace: cut(last.answer, 2000) }
 }
 
 /**
  * Whether the question at `i` came while the walk-through just before it was open (openThink): typed, not a key's,
- * right after r's answer ending on a question, THINK_OPEN_MS after it at most. Its head says `이어서`. Both times
- * are when the answers came (all a note keeps), so every window reads it alike; a question put in the bound's last
- * seconds whose answer came past it is headed 질문, though it went with the walk-through (askNote reads the bound
- * when the question is put). One stamped before the walk-through (the clock set back between them) is none.
+ * right after r's answer ending on a question (in the closed form while `isShaped`, as openThink reads it: 1.10.0
+ * G5), THINK_OPEN_MS after it at most. Its head says `이어서`. Both times are when the answers came (all a note keeps),
+ * so every window reads it alike; a question put in the bound's last seconds whose answer came past it is headed
+ * 질문, though it went with the walk-through (askNote reads the bound when the question is put). One stamped before
+ * the walk-through (the clock set back between them) is none.
  */
-export function isThinkFollow(asks: readonly LearnAsk[], i: number): boolean {
+export function isThinkFollow(asks: readonly LearnAsk[], i: number, isShaped = false): boolean {
   const one = asks[i]
   const before = asks[i - 1]
   if (one === undefined || before === undefined || KEYED_LABELS.includes(one.question)) return false
-  return before.question === TRACE_LABEL && isThinkAge(one.at - before.at) && thinkOf(before.answer) !== undefined
+  return before.question === TRACE_LABEL && isThinkAge(one.at - before.at) && thinkOf(before.answer, isShaped) !== undefined
 }
 
 /** Whether a time since r's walk-through answered is within its open bound (THINK_OPEN_MS); never one below zero. */
@@ -1864,16 +2016,32 @@ const THINK_ASK_PLEASE = /(?:주세요|주실래요|주시겠어요)[\s~ㅠㅜ.!
 const THINK_ASK_WORD = /(?:^|\s)(?:왜(?!곡|냐)|뭐(?!든|라도|랄)|뭘|뭔(?!가\s)|무슨|무엇(?!이든|보다)|어떻게(?!든)|어디(?!든|선가|엔가)|언제(?!나|든)|몇(?!몇)|어느(?!새|덧))/u
 /** Words that ask to be told or say what is unclear. */
 const THINK_ASK_HELP = /모르겠|궁금|헷갈|이해가\s*안|알려|설명|가르쳐/u
+/**
+ * A value with a question mark and nothing else (1.10.0 G5): a guess said as a question (`97.5인가요?`, `14000?`,
+ * `2000 나오나요?ㅠ`, `"a-b" 맞나요?`), a lead word (그럼, 혹시, 답은 …) and an ending (이 · 가, 나와요 · 인가요 · 맞나요 …)
+ * allowed around one value (a code span, a number, a quoted string, a list, an object, a literal word). A question
+ * word, a word asking for help, a word past these or no value at all (`꼭 0이어야 해요?`, `에러 나요?`, `??`) is none.
+ */
+const THINK_VALUE_GUESS = new RegExp(
+  String.raw`^(?:(?:그럼|혹시|답은|결과는|최종\s*결과는|이번엔)\s*)?` +
+    String.raw`(?:\x60[^\x60\n]+\x60|-?\d[\d_,]*(?:\.\d+)?|'[^'\n]*'|"[^"\n]*"|\[[^\]\n]*\]|\{[^}\n]*\}|true|false|null|undefined|None|True|False|NaN)` +
+    String.raw`(?:\s*(?:이|가)?\s*(?:나와요|나오나요|나올까요|나오죠|돼요|되나요|될까요|인가요|이에요|예요|이죠|죠|일까요|맞나요|맞죠|맞아요|이요|요|인데요|일걸요))?` +
+    String.raw`\s*[?？]+[\s~ㅠㅜ.!]*$`,
+  'u',
+)
 
 /**
  * Whether words typed after an open walk-through are a question, not a guess at its 생각해 보기 (1.9.0 F6): one ending
- * on a question mark (`2000 나오나요?`, `2000?`), on 주세요 and the like, holding a question word anywhere (왜, 뭐가,
- * 어디서 …), or asking to be told (모르겠, 궁금, 헷갈, 설명 …). Leaning to the question: a question checked as a guess
- * is told it is wrong, worse than a guess answered as a question. A bare "모르겠어요" (isBlankAnswer) is no question:
- * it is checked, and told the right result. "??" is a question (isBlankAnswer leaves it be).
+ * on a question mark (`왜 0이에요?`), on 주세요 and the like, holding a question word anywhere (왜, 뭐가, 어디서 …),
+ * or asking to be told (모르겠, 궁금, 헷갈, 설명 …). Leaning to the question: a question checked as a guess is told it
+ * is wrong, worse than a guess answered as a question. A bare "모르겠어요" (isBlankAnswer) is no question: it is
+ * checked, and told the right result. "??" is a question (isBlankAnswer leaves it be). A value with a question mark
+ * alone (THINK_VALUE_GUESS: `2000?`, `2000 나오나요?ㅠ`) is a guess (1.10.0 G5: 1.9.0's sample answered such as
+ * questions, with no verdict). Read only while the switch is on (askNote).
  */
 export function isThinkQuestion(text: string): boolean {
   const said = text.trim()
+  if (THINK_VALUE_GUESS.test(said)) return false
   return !isBlankAnswer(said) && (THINK_ASK_END.test(said) || THINK_ASK_PLEASE.test(said) || THINK_ASK_WORD.test(said) || THINK_ASK_HELP.test(said))
 }
 
@@ -1897,11 +2065,14 @@ export const THINK_SYSTEM = [
  * The one user message for the check of a guess at a walk-through's 생각해 보기 (1.9.0 F6, THINK_SYSTEM): the
  * question, the walk-through it ends (openThink's, to 2000 characters), the guess ("모르겠어요" said as such), then
  * the note's request, the note with no practice (withoutDrill: its check line is the result once the learner has
- * changed the code, which a sample's check took for the code's own) and its code as askPrompt has them. The right
- * result worked out first from the code as it is, then the guess against it; four verdicts told by the final result
- * alone (a sample's first wording graded a wrong guess right in part as nearly), the fourth (질문) for a question that
- * came this way after all; three lines only, with no room to ask for an error message. No team section and no
- * questions before: how the code runs is all it is.
+ * changed the code, which a sample's check took for the code's own) and its code as askPrompt has them. The changed
+ * input followed through the code as it is first, on a 따라가기 line of its own (1.10.0 G5: 1.9.0's sample wrote the
+ * right result before working it out, and took the request's or the note's word for it), the right result copied
+ * from where that ends, then the guess against it; four verdicts told by the final result alone (a sample's first
+ * wording graded a wrong guess right in part as nearly), the fourth (질문) for a question that came this way after
+ * all; four lines only, with no room to ask for an error message. The 따라가기 line is read past and never kept
+ * (withoutTrace). No team section and no questions before: how the code runs is all it is. Called only while the
+ * switch is on.
  */
 export function thinkCheckPrompt(
   note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles' | 'withheld'>,
@@ -1930,10 +2101,11 @@ export function thinkCheckPrompt(
     '## 바뀐 코드',
     ...diffBlocks(note, PROMPT_DIFF_BUDGET),
     '',
-    '먼저 물음대로 입력을 바꾼 최종 결과를 따라가기와 지금의 바뀐 코드로 직접 구해, 바른 결과 줄에 값이나 동작 하나로 쓴다. 그다음 학습자의 짐작과 견준다.',
+    '먼저 따라가기 줄에, 물음대로 입력을 바꿔 지금의 바뀐 코드를 위 따라가기처럼 한 단계씩 따라간 과정을 한 줄로 쓴다(조건마다 참인지 거짓인지와 바뀐 값). 바른 결과 줄에는 그 따라가기가 끝난 값이나 동작을 그대로 옮긴다. 요청이나 노트가 말하는 결과가 아니라 지금 코드를 따라간 결과다. 그다음 학습자의 짐작과 견준다.',
     '판정은 넷 중 하나다. 맞음: 최종 결과를 맞게 짐작했다(값만 적었거나 까닭이나 이름을 빠뜨려도, 물음이 여러 가지를 물어도 최종 결과를 맞혔으면 맞음). 거의: 최종 결과는 맞혔지만 덧붙인 까닭에 틀린 데가 있다. 틀림: 최종 결과가 다르거나 물음과 관계없는 말이다(과정이나 중간 값, 일부가 맞아도 최종 결과가 다르면 틀림. 모르겠다도 틀림). 질문: 결과를 짐작하지 않고 무엇을 묻거나 모른다고 했다.',
     '피드백은 두 문장 이내다. 맞음이면 왜 그렇게 되는지 짚는다. 거의·틀림이면 짐작과 무엇이 다른지와 바른 결과의 까닭을 쓴다. 질문이면 그 물음에 세 문장 이내로 답한다. 생각해 보기를 새로 쓰지 않는다.',
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
+    '따라가기: (바꾼 입력으로 한 단계씩, 한 줄)',
     '바른 결과: (값이나 동작 한 줄)',
     '판정: (맞음 · 거의 · 틀림 · 질문 중 하나)',
     '피드백: (두 문장 이내, 질문이면 세 문장 이내)',
@@ -1947,6 +2119,32 @@ export const VERDICT_TEXT: Readonly<Record<'right' | 'partial' | 'wrong', string
 const THINK_RESULT = /^[^\S\n]*(?:\*\*)?바른[^\S\n]*결과(?:\*\*)?[^\S\n]*[:：][^\S\n]*(?:\*\*)?[^\S\n]*(.*?)(?:\*\*)?[^\S\n]*$/m
 /** A check's verdict that the words were a question after all (판정: 질문), however bold. */
 const THINK_ASKED_VERDICT = /^(?:질문|question)/i
+/** Where a check's walk-through starts (따라가기:, 따라가 보기:), bold or not (1.10.0 G5). */
+const TRACE_START = /^[^\S\n]*(?:\*\*)?따라가(?:기|\s*보기)(?:\*\*)?[^\S\n]*[:：]/
+/** A check's own line that ends its walk-through: the right result, the verdict or the feedback, bold or not. */
+const TRACE_NEXT = /^[^\S\n]*(?:\*\*)?(?:바른[^\S\n]*결과|판정|피드백)(?:\*\*)?[^\S\n]*[:：]/
+
+/**
+ * A check's reply with its walk-through taken out (1.10.0 G5, thinkCheckPrompt's 따라가기 line): from each line it
+ * starts on to the next line of the check's own (TRACE_NEXT) or the end, wherever it stands, however many lines,
+ * bold or not; the blank lines then left at the end go too. A reply with none comes back as it came. Never kept, so
+ * no window shows it.
+ */
+export function withoutTrace(text: string): string {
+  const left: string[] = []
+  let isTrace = false
+  let isCut = false
+  for (const line of text.split('\n')) {
+    if (TRACE_START.test(line)) {
+      isTrace = true
+      isCut = true
+      continue
+    }
+    if (isTrace && TRACE_NEXT.test(line)) isTrace = false
+    if (!isTrace) left.push(line)
+  }
+  return isCut ? left.join('\n').replace(/\s+$/, '') : text
+}
 
 /**
  * A check's reply with its right result's line read and taken out, wherever it stands. A line with the label alone
@@ -1974,10 +2172,11 @@ function thinkResultOf(text: string): { result: string | undefined; rest: string
  * or a JSON object with a verdict: braces in the feedback's code are no reply in JSON). Right: `**맞혔습니다.**
  * feedback`. Nearly or wrong: the head and the feedback, a blank line, `바른 결과: …` (when it said one). "모르겠어요"
  * (`isBlank`): the right result's line, a blank line, the feedback, no verdict's word. 판정: 질문: the feedback alone,
- * its answer, with no verdict's word.
+ * its answer, with no verdict's word. Its walk-through (따라가기) is taken out first (withoutTrace, 1.10.0 G5), so it
+ * never runs into the feedback and its braces are never read as a reply in JSON.
  */
 export function thinkReply(text: string, isBlank: boolean): string | undefined {
-  const { result: found, rest } = thinkResultOf(text)
+  const { result: found, rest } = thinkResultOf(withoutTrace(text))
   let json: Record<string, unknown> | undefined
   const object = /\{[\s\S]*\}/.exec(rest)?.[0]
   if (object) {

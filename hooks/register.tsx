@@ -251,13 +251,16 @@ import {
   EASIER_LABEL,
   EASIER_QUESTION,
   KEYED_LABELS,
+  isThinkCode,
   isThinkFollow,
   isThinkQuestion,
   openThink,
   THINK_OPEN_MS,
   THINK_SYSTEM,
   thinkCheckPrompt,
+  thinkKept,
   thinkReply,
+  withoutTrace,
   VERDICT_TEXT,
   type RankedConcept,
   shortPath,
@@ -3495,30 +3498,40 @@ async function askNote(
 ): Promise<{ answer: string; note: LearnNote; path: string | undefined; at: number } | { error: string }> {
   const note = (await read($, notes)).find(one => one.id === id)
   if (!note) return { error: '그 노트가 패널에 없습니다.' }
-  // A key pasted into a question is masked before the model, the store or the journal sees it.
-  const masked = redactText(question).text
-  const kept = label === question ? masked : redactText(label).text
   const rules = await teamOf($, note.root)
   // A note kept before 1.6.0 may hold a .env diff or a key: neither goes to the model or the journal.
   const shown = await screened($, cfg, note)
+  // 생각해 보기 as this load runs it (1.10.0 G5), read once for every step below: r's own question (its key's, never
+  // words typed as its label) asks for the line only of a note whose change has a run to follow, the rest 1.7.0's
+  // words to the byte; rebuilt before it is masked, as any question is.
+  const isThinkAsked = build.isThinkAsked
+  const isTrace = isThinkAsked && label === TRACE_LABEL && question !== label
+  const isCode = isTrace && isThinkCode(shown.changes)
+  // A key pasted into a question is masked before the model, the store or the journal sees it.
+  const masked = redactText(isTrace ? traceQuestion(isCode) : question).text
+  const kept = label === question ? masked : redactText(label).text
   // A question typed (in the field or by /learn 질문, never r's or e's) while r's walk-through is open (1.8.0): sent
-  // with the walk-through in full and its 생각해 보기, to be checked as an answer or answered as a question.
+  // with the walk-through in full and its 생각해 보기, to be checked as an answer or answered as a question. While
+  // the switch is on, only a 생각해 보기 in its closed form is open (1.10.0 G5, isThinkShape).
   const askedAt = await $.clock.now()
-  const think = label === question ? openThink(shown.asks, askedAt) : undefined
+  const think = label === question ? openThink(shown.asks, askedAt, isThinkAsked) : undefined
   // A guess at it, while the check is on (1.9.0 F6): a call of its own, its reply headed by its verdict; a question
   // (isThinkQuestion, leaning that way) goes as before.
-  const isCheck = build.isThinkAsked && think !== undefined && !isThinkQuestion(masked)
+  const isCheck = isThinkAsked && think !== undefined && !isThinkQuestion(masked)
   const asked = await askModel(
     $,
     cfg,
     'ask',
     isCheck
       ? { system: THINK_SYSTEM, prompt: thinkCheckPrompt(shown, think, masked, level), maxTokens: THINK_CHECK_TOKENS }
-      : { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules, think, build.isThinkAsked), maxTokens: 900 },
+      : { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules, think, isThinkAsked), maxTokens: 900 },
   )
   if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
-  // A check's reply not in its format is shown as it came.
-  const answer = cut((isCheck ? thinkReply(asked.text, isBlankAnswer(masked)) : undefined) ?? asked.text, 4000)
+  // A check's reply not in its format is shown as it came, its walk-through taken out (1.10.0 G5), unless that was
+  // all it said. r's answer while the switch is on keeps a 생각해 보기 only as thinkKept lets (1.10.0 G5).
+  const bare = isCheck ? withoutTrace(asked.text) : asked.text
+  const unread = isCheck ? (bare.trim() === '' ? asked.text : bare) : isTrace ? thinkKept(asked.text, isCode) : asked.text
+  const answer = cut((isCheck ? thinkReply(asked.text, isBlankAnswer(masked)) : undefined) ?? unread, 4000)
   const now = await $.clock.now()
   const latest = (await read($, notes)).find(one => one.id === id) ?? note
   await setNote($, id, { asks: [...(latest.asks ?? []), { question: cut(kept, 1000), answer, at: now }].slice(-ASKS_KEPT) })
@@ -3527,8 +3540,12 @@ async function askNote(
   return { answer, note, path, at: now }
 }
 
-/** The output budget of the check of a guess at a 생각해 보기 (1.9.0 F6): three short lines, as a quiz grade's. */
-const THINK_CHECK_TOKENS = 480
+/**
+ * The output budget of the check of a guess at a 생각해 보기, reached only while the switch is on: 1.9.0 F6's 480 (three
+ * short lines, as a quiz grade's) raised to a question's 900 for its 따라가기 line (1.10.0 G5: a quiz's R line added
+ * about 600 to its middle output in 1.9.0 F3); only what is written is spent.
+ */
+const THINK_CHECK_TOKENS = 900
 
 /** True while the pane shows this note's own view, where its questions and answers are drawn. */
 async function isNoteShown($: EngineInterface, id: string): Promise<boolean> {
@@ -6144,7 +6161,7 @@ function noteTools(
   const Input = fieldOf(el, surface)
   const fieldKey = `ask-${note.id}`
   const isPractice = drill !== undefined && (practice.open === note.id || note.drill !== undefined)
-  const think = ask.isAsking ? undefined : openThink(note.asks, now)
+  const think = ask.isAsking ? undefined : openThink(note.asks, now, build.isThinkAsked)
   if (think) shutThinkLater($, note.asks!.at(-1)!.at, now)
   const thinkHint = !Input ? THINK_HINT_ELSEWHERE : surface !== 'terminal' ? THINK_HINT_CLICK : isFocused ? THINK_HINT_FOCUSED : THINK_HINT_KEYS
   return (
@@ -6172,7 +6189,7 @@ function noteTools(
         <Button key="write" hotkey="w" plain dimColor label={writeLabel} onPress={() => void writeNote($, cfg, note.id, { isRewrite: note.savedAs !== null })} />
       </Box>
       {(note.asks ?? [])
-        .map((one, i, all) => ({ one, key: askedKey(note.id, all, i), isFollow: isThinkFollow(all, i), isLast: i === all.length - 1 }))
+        .map((one, i, all) => ({ one, key: askedKey(note.id, all, i), isFollow: isThinkFollow(all, i, build.isThinkAsked), isLast: i === all.length - 1 }))
         .slice(-2)
         .map(({ one, key, isFollow, isLast }) => (
           <Box key={key} flexDirection="column" marginTop={1}>

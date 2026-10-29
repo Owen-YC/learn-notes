@@ -16,6 +16,7 @@ import {
   RULE_DRILL_SYSTEM,
   RULE_DRILL_TOKENS,
   SYSTEM,
+  THINK_ASK,
   THINK_SYSTEM,
   WORKED_BASE_NEXT,
   WORKED_NEXT,
@@ -50,6 +51,7 @@ import {
   stepMarks,
   storedConcepts,
   switchKeys,
+  traceQuestion,
   withKnownMarks,
   type Switches,
 } from '../hooks/notes'
@@ -58,6 +60,7 @@ import { ROUTE19_CALLS, ROUTE19_DIAG } from './fixtures/route19'
 import { INPUT_RULE19, OUTPUT_RULE19 } from './fixtures/rule19'
 import { CHANGED_QUIZ_OFF, CHANGED_QUIZ_ON } from './fixtures/changed110'
 import { CHECK_19, CHECK_FIRSTS_110, CHECK_ITEM_110, CHECK_MINE_110, NEW_EXACT_110 } from './fixtures/check110'
+import { THINK19_R, THINK19_SYSTEM, THINK19_TYPED } from './fixtures/think19'
 
 const NOW = Date.UTC(2026, 9, 3, 1)
 const NOTES_DIR = '/home/u/.claude/learning-notes'
@@ -445,6 +448,20 @@ function world(
         },
       }
     }
+    // An edit with a run to follow (1.10.0 G5, isThinkCode): `b` made from `a`, where a.ts's own makes it a constant.
+    if (e.file_path.endsWith('sum.ts')) {
+      return {
+        result: {
+          filePath: e.file_path,
+          oldString: e.old_string,
+          newString: e.new_string,
+          originalFile: 'const a = 1\nlet b = 2\n',
+          structuredPatch: [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, lines: [' const a = 1', '-let b = 2', '+const b = a + 1'] }],
+          userModified: false,
+          replaceAll: false,
+        },
+      }
+    }
     // A file whose one new line is what the edit wrote: a line holding a secret, say.
     if (e.file_path.endsWith('db.ts')) {
       return {
@@ -582,6 +599,8 @@ async function fullscreen($: Engine, isFullscreen = true) {
 }
 
 const EDIT_A = { tool: 'Edit', tool_use_id: 'u1', file_path: '/proj/src/a.ts', old_string: 'let', new_string: 'const' } as const
+/** EDIT_A's like, its change with a run to follow (1.10.0 G5: the one kind r asks 생각해 보기 of while it is on). */
+const EDIT_FLOW = { tool: 'Edit', tool_use_id: 'u1', file_path: '/proj/src/sum.ts', old_string: 'let', new_string: 'const' } as const
 
 test('a turn that edits files becomes a written, saved note', async ($, on) => {
   const w = world(on)
@@ -15252,12 +15271,15 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
   const fieldOf = async (ui: Pick<Ui, 'find'>) => (await ui.find({ type: 'Input' }))!
   const asksOf = (store: Map<string, unknown>) => (store.get('history') as Record<string, { notes: { asks?: Record<string, unknown>[] }[] }>)['/proj']!.notes[0]!.asks ?? []
 
-  /** A written note, nothing asked under it yet, the build's 생각해 보기 as `harness` sets it. */
+  /**
+   * A written note, nothing asked under it yet, the build's 생각해 보기 as `harness` sets it. Its change has a run to
+   * follow (EDIT_FLOW): since 1.10.0 G5 the only kind r asks the line of, and keeps it under, while it is on.
+   */
   async function noted($: Engine, on: On, harness: Record<string, unknown> | null = { isThinkAsked: true }, store = new Map<string, unknown>()) {
     const w = world(on, 'ok', null, true, store)
     if (harness) w.harness = harness
     await start($)
-    await turn($, () => $.tool.call(EDIT_A), 't1', 'b를 상수로 바꿔줘')
+    await turn($, () => $.tool.call(EDIT_FLOW), 't1', 'b를 상수로 바꿔줘')
     await finish(w)
     return w
   }
@@ -15274,14 +15296,14 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
     await w.clock.settle()
   }
 
-  test('on, in the terminal with the keys in the pane: r asks for the line; a guess goes to a check of its own (THINK_SYSTEM, 480), headed 맞혔습니다, the line gone, nothing graded', async ($, on) => {
+  test('on, in the terminal with the keys in the pane: r asks for the line; a guess goes to a check of its own (THINK_SYSTEM, 900 since 1.10.0 G5), headed 맞혔습니다, the line gone, nothing graded', async ($, on) => {
     const store = new Map<string, unknown>()
     const w = await noted($, on, { isThinkAsked: true }, store)
     const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
     const index = JSON.stringify(store.get('concepts'))
     await trace(ui, w)
-    // r's own call: its walk-through and, now, the line it ends on.
-    expect(w.models.at(-1)).toContain('화면이나 동작에서 어떻게 보이는지 설명해 주세요. 마지막 줄에는 번호 없이, 굵게 쓴 생각해 보기: 로 시작하고 물음표로 끝나는 질문 한 문장을 더해 주세요.')
+    // r's own call: its walk-through and, now, the line it ends on (1.10.0 G5's words).
+    expect(w.models.at(-1)).toContain(`화면이나 동작에서 어떻게 보이는지 설명해 주세요. ${THINK_ASK}\n\n`)
     expect(w.systems.at(-1)).toBe(ASK_SYSTEM)
     expect(w.budgets.at(-1)).toBe(900)
     expect(await hintsOf(ui)).toEqual([HINT])
@@ -15291,7 +15313,7 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
     await typed(ui, w, '3이요', checked('맞음'))
     expect(w.models).toHaveLength(calls + 1)
     expect(w.systems.at(-1)).toBe(THINK_SYSTEM)
-    expect(w.budgets.at(-1)).toBe(480)
+    expect(w.budgets.at(-1)).toBe(900)
     const prompt = w.models.at(-1)!
     expect(prompt).toContain(`## 생각해 보기 물음\n${THOUGHT}\n\n## 그 물음이 붙은 '예시로 따라가기'\n${TRACED}\n\n${GUESSED}\n3이요\n`)
     expect(prompt).not.toContain('## 학습자의 질문')
@@ -15359,7 +15381,12 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
     const store = new Map<string, unknown>()
     const w = await noted($, on, { isThinkAsked: true }, store)
     const ui = await pane($)
-    for (const question of ['3 나오나요?', '뭐가 달라요']) {
+    // A bare value with a question mark ('3 나오나요?', a question here in 1.9.0) is a guess since 1.10.0 G5: checked.
+    await trace(ui, w)
+    await typed(ui, w, '3 나오나요?', checked('맞음'))
+    expect(w.systems.at(-1)).toBe(THINK_SYSTEM)
+    expect(asksOf(store).at(-1)!.answer).toBe('**맞혔습니다.** `b`에 3을 넣으면 마지막 줄도 3을 읽습니다.')
+    for (const question of ['꼭 3이어야 해요?', '뭐가 달라요']) {
       await trace(ui, w)
       await typed(ui, w, question, '네, 3이 나옵니다.')
       expect(w.systems.at(-1)).toBe(ASK_SYSTEM)
@@ -15420,10 +15447,11 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
     expect(await ui.find({ type: 'Text', text: '질문 · 3이요' })).toBeDefined()
     expect(w.systems.at(-1)).toBe(ASK_SYSTEM)
     expect(w.models.at(-1)).not.toContain(SECTION)
-    // `…따져 보세요.`: drawn as written, nothing under it, a guess typed after it a plain question.
+    // `…따져 보세요.`: out of the closed form since 1.10.0 G5, so not kept (thinkKept), nothing under it, a guess
+    // typed after it a plain question.
     const told = '1. a는 1입니다.\n\n**생각해 보기:** `b`를 3으로 바꿔 결과를 따져 보세요.'
     await trace(ui, w, told)
-    expect(await ui.find({ type: 'Markdown', text: told })).toBeDefined()
+    expect(await ui.find({ type: 'Markdown', text: '1. a는 1입니다.' })).toBeDefined()
     expect(await hintsOf(ui)).toEqual([])
     expect((await fieldOf(ui)).props.placeholder).toBe(SHUT)
     await typed(ui, w, '3이요', '네.')
@@ -18084,6 +18112,219 @@ describe('1.10.0: 처음 보는 코드 (G3) behind its switch: its prediction gr
       expect(prompt.includes('   칸: 처음 보는 코드 (js로)')).toBe(!isFetched)
       expect(prompt).not.toContain(last)
       expect(itemsOf(store)[0]!.rung).toBe(isFetched ? 'mine' : 'new')
+    })
+  }
+})
+
+/**
+ * One change under a note, as a store keeps it, for r's prompt by kind (1.10.0 G5, tests/fixtures/think19.ts): a
+ * stylesheet, a document, a data file, a language r asks no 생각해 보기 of, a deletion, a className changed, a
+ * constant's value, a Python value, a tool's setup, and code with a run to follow.
+ */
+const THINK_CHANGES: Readonly<Record<string, { file: string; kind: 'create' | 'update' | 'delete'; diff: string }>> = {
+  css: { file: 'src/styles/main.css', kind: 'update', diff: '@@ -1,3 +1,3 @@\n .btn {\n-  color: blue;\n+  color: red;\n }' },
+  md: { file: 'README.md', kind: 'update', diff: '@@ -1,2 +1,2 @@\n-# 앱\n+# 할 일 앱\n 설명입니다.' },
+  json: { file: 'package.json', kind: 'update', diff: '@@ -1,4 +1,4 @@\n {\n   "name": "app",\n-  "version": "1.0.0"\n+  "version": "1.1.0"\n }' },
+  go: { file: 'main.go', kind: 'update', diff: '@@ -1,3 +1,6 @@\n func total(n int) int {\n+\tif n < 0 {\n+\t\treturn 0\n+\t}\n \treturn n * 2\n }' },
+  deleted: { file: 'src/old.js', kind: 'delete', diff: '@@ -1,3 +0,0 @@\n-function add(a, b) {\n-  return a + b\n-}' },
+  className: { file: 'src/Button.jsx', kind: 'update', diff: '@@ -2,3 +2,3 @@\n   return (\n-    <button className="bg-blue-500 px-4">저장</button>\n+    <button className="bg-red-500 px-4">저장</button>\n   )' },
+  constant: { file: 'src/limits.js', kind: 'update', diff: '@@ -1,2 +1,2 @@\n-export const MAX_ITEMS = 10\n+export const MAX_ITEMS = 20\n export const MIN_ITEMS = 1' },
+  pyValue: { file: 'app/flags.py', kind: 'update', diff: "@@ -1,2 +1,3 @@\n-DEBUG = True\n+DEBUG = False\n+ALLOWED = ['a.com', 'b.com']\n PORT = 8000" },
+  setup: { file: 'vite.config.ts', kind: 'update', diff: '@@ -1,3 +1,3 @@\n export default defineConfig({\n-  plugins: [],\n+  plugins: [react()],\n })' },
+  code: { file: 'src/cart.js', kind: 'update', diff: "@@ -1,3 +1,6 @@\n function itemTotal(price, qty) {\n+  if (qty < 0) {\n+    throw new Error('수량은 0 이상이어야 합니다')\n+  }\n   return price * qty\n }" },
+}
+
+/** A store holding one written note with THINK_CHANGES' change `kind` (and `asks` under it), as any version keeps it. */
+function thinkStore(kind: string, asks?: { question: string; answer: string; at: number }[]): Map<string, unknown> {
+  const one = THINK_CHANGES[kind]!
+  const lines = one.diff.split('\n')
+  const change = {
+    file: one.file,
+    path: `/proj/${one.file}`,
+    tool: one.kind === 'delete' ? 'Bash' : one.kind === 'create' ? 'Write' : 'Edit',
+    kind: one.kind,
+    added: lines.filter(line => line.startsWith('+')).length,
+    removed: lines.filter(line => line.startsWith('-')).length,
+    diff: one.diff,
+    isCut: false,
+  }
+  const note = { id: `think-${kind}`, turnId: `think-${kind}`, at: NOW - 60_000, prompt: '수량 검사를 넣어 줘', answer: '', changes: [change], moreFiles: 0, status: 'ready', text: NOTE_TEXT, savedAs: 'ready', ...(asks ? { asks } : {}) }
+  return new Map<string, unknown>([['history', { '/proj': { at: NOW, notes: [note] } }]])
+}
+
+/**
+ * The request r's key sends under THINK_CHANGES' note `kind` (or, with `typed`, the words typed in its question field),
+ * the build's switches as `harness` sets them: its system, prompt and output budget.
+ */
+async function thinkAsked($: Engine, on: On, kind: string, harness?: Record<string, unknown>, typed?: string): Promise<{ system: string | undefined; prompt: string; maxTokens: number | undefined }> {
+  const w = world(on, 'ok', null, true, thinkStore(kind))
+  if (harness) w.harness = harness
+  await start($)
+  const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+  w.answer = '1. `itemTotal(1000, 2)`를 부르면 2000을 돌려줍니다.'
+  if (typed === undefined) await ui.press({ key: 'trace' })
+  else await ui.input({ key: `ask-think-${kind}`, text: typed })
+  await w.clock.settle()
+  await ui.unmount()
+  return { system: w.systems.at(-1), prompt: w.models.at(-1)!, maxTokens: w.budgets.at(-1) }
+}
+
+describe('1.10.0: 생각해 보기 (G5) behind its switch: the line only under code with a run to follow and only in its closed form, the check\'s walk-through never kept, a bare value guessed; 1.9.0\'s requests with it off', () => {
+  const HINT = 'i(영문 상태): 질문 칸에 답 적기 · 넘어가도 됩니다'
+  const SHUT = '궁금한 것을 적고 Enter'
+  const STEPS = '1. `itemTotal(1000, 2)`를 부르면 `qty`가 2라 검사를 지나고 2000을 돌려줍니다.'
+  const SHAPED_Q = '`qty`를 `-1`로 바꾸면 최종 결과는 무엇이 될까요?'
+  const SHAPED = `${STEPS}\n\n**생각해 보기:** ${SHAPED_Q}`
+  const FREE = `${STEPS}\n\n**생각해 보기:** 수량이 음수면 어느 줄에서 멈출까요?`
+  const TRACE_170 = traceQuestion(false)
+  /** r's prompt under the code note while the switch is on: 1.9.0's with the line asked for after its words. */
+  const CODE_ON = THINK19_R.code!.replace(`## 학습자의 질문\n${TRACE_170}\n`, `## 학습자의 질문\n${TRACE_170} ${THINK_ASK}\n`)
+  type Ui = Awaited<ReturnType<typeof pane>>
+  const hintsOf = async (ui: Pick<Ui, 'findAll'>) => (await ui.findAll({ type: 'Text' })).filter(one => one.text === HINT).map(one => one.text)
+  const asksOf = (store: Map<string, unknown>) => (store.get('history') as Record<string, { notes: { asks?: { question: string; answer: string; at: number }[] }[] }>)['/proj']!.notes[0]!.asks ?? []
+
+  for (const kind of Object.keys(THINK_CHANGES)) {
+    test(`off (no harness) and on, r under a ${kind} note: 1.9.0's request to the byte${kind === 'code' ? ' off; on, the line asked for after its words' : ' in either state'}`, async ($, on) => {
+      expect(await thinkAsked($, on, kind)).toEqual({ system: THINK19_SYSTEM, prompt: THINK19_R[kind], maxTokens: 900 })
+    })
+    test(`on (a harness), r under a ${kind} note: ${kind === 'code' ? 'the line asked for after 1.9.0\'s words, nothing else changed' : '1.9.0\'s request to the byte (no run to follow)'}`, async ($, on) => {
+      const got = await thinkAsked($, on, kind, { isThinkAsked: true })
+      expect(got).toEqual({ system: THINK19_SYSTEM, prompt: kind === 'code' ? CODE_ON : THINK19_R[kind], maxTokens: 900 })
+    })
+  }
+
+  test('CODE_ON differs from 1.9.0\'s in the question alone', () => {
+    expect(CODE_ON).not.toBe(THINK19_R.code)
+    expect(CODE_ON.replace(` ${THINK_ASK}`, '')).toBe(THINK19_R.code)
+  })
+
+  for (const harness of [undefined, { isThinkAsked: true }]) {
+    test(`the words '예시로 따라가기' typed in the field (${harness ? 'on' : 'off'}): sent as typed, as 1.9.0 sent them, never rebuilt as r's`, async ($, on) => {
+      expect(await thinkAsked($, on, 'code', harness, '예시로 따라가기')).toEqual({ system: THINK19_SYSTEM, prompt: THINK19_TYPED, maxTokens: 900 })
+    })
+  }
+
+  test('sonnet with only haiku\'s row turned on runs 1.9.0\'s r (its own row off)', { options: { model: 'sonnet' } }, async ($, on) => {
+    expect(await thinkAsked($, on, 'code', { models: { haiku: { isThinkAsked: true } } })).toEqual({ system: THINK19_SYSTEM, prompt: THINK19_R.code, maxTokens: 900 })
+  })
+
+  test('haiku with its row turned on (a harness\'s models row) asks for the line under code; sonnet\'s row on leaves haiku 1.9.0\'s', { options: { model: 'haiku' } }, async ($, on) => {
+    expect((await thinkAsked($, on, 'code', { models: { haiku: { isThinkAsked: true } } })).prompt).toBe(CODE_ON)
+  })
+
+  test('haiku with only sonnet\'s row turned on runs 1.9.0\'s r', { options: { model: 'haiku' } }, async ($, on) => {
+    expect((await thinkAsked($, on, 'code', { models: { sonnet: { isThinkAsked: true } } })).prompt).toBe(THINK19_R.code)
+  })
+
+  /** A window on THINK_CHANGES' note `kind`, the pane up with the keys in it. */
+  async function opened($: Engine, on: On, kind: string, harness?: Record<string, unknown>, asks?: { question: string; answer: string; at: number }[]) {
+    const store = thinkStore(kind, asks)
+    const w = world(on, 'ok', null, true, store)
+    if (harness) w.harness = harness
+    await start($)
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    const trace = async (answer: string) => {
+      w.answer = answer
+      await ui.press({ key: 'trace' })
+      await w.clock.settle()
+    }
+    const typed = async (text: string, reply: string) => {
+      w.answer = reply
+      await ui.input({ key: `ask-think-${kind}`, text })
+      await w.clock.settle()
+    }
+    return { w, ui, store, trace, typed }
+  }
+
+  test('on: under code a free 생각해 보기 line is not kept (no dim line, a guess after it a plain question headed 질문); one in its closed form is kept and opens', async ($, on) => {
+    const { w, ui, store, trace, typed } = await opened($, on, 'code', { isThinkAsked: true })
+    await trace(FREE)
+    expect(asksOf(store).at(-1)!.answer).toBe(STEPS)
+    expect(await ui.find({ type: 'Markdown', text: STEPS })).toBeDefined()
+    expect(await hintsOf(ui)).toEqual([])
+    expect((await ui.find({ type: 'Input' }))!.props.placeholder).toBe(SHUT)
+    await typed('2000이요', '네.')
+    expect(w.systems.at(-1)).toBe(ASK_SYSTEM)
+    expect(w.models.at(-1)).not.toContain("## 바로 앞 '예시로 따라가기'")
+    expect(await ui.find({ type: 'Text', text: '질문 · 2000이요' })).toBeDefined()
+    expect(w.files.get(JOURNAL) ?? '').not.toContain('(생각해 보기 뒤)')
+    expect(w.files.get(JOURNAL) ?? '').not.toContain('어느 줄에서 멈출까요')
+    await trace(SHAPED)
+    expect(asksOf(store).at(-1)!.answer).toBe(SHAPED)
+    expect(await hintsOf(ui)).toEqual([HINT])
+    await ui.unmount()
+  })
+
+  test('on: under a stylesheet r\'s 생각해 보기 line goes, whatever its form', async ($, on) => {
+    const { w, ui, store, trace } = await opened($, on, 'css', { isThinkAsked: true })
+    await trace(SHAPED)
+    expect(w.models.at(-1)).toBe(THINK19_R.css)
+    expect(asksOf(store).at(-1)!.answer).toBe(STEPS)
+    expect(await hintsOf(ui)).toEqual([])
+    await ui.unmount()
+  })
+
+  test('off (a harness): r\'s answer is kept as it came, a free line too, and opens as in 1.9.0', async ($, on) => {
+    const { ui, store, trace } = await opened($, on, 'code', { isThinkAsked: false })
+    await trace(FREE)
+    expect(asksOf(store).at(-1)!.answer).toBe(FREE)
+    expect(await hintsOf(ui)).toEqual([HINT])
+    await ui.unmount()
+  })
+
+  test('on: a bare value guessed is checked (THINK_SYSTEM, 900), its walk-through first in the form and never shown, kept or journaled; a question with a word is a question (ASK_SYSTEM, 900, the rule that the learner ran nothing)', async ($, on) => {
+    const { w, ui, store, trace, typed } = await opened($, on, 'code', { isThinkAsked: true })
+    await trace(SHAPED)
+    const walk = '따라가기: `qty`가 -1이라 `qty < 0`이 참이 되어 에러를 던집니다.'
+    await typed('97.5인가요?', `${walk}\n바른 결과: \`Error: 수량은 0 이상이어야 합니다\`\n판정: 틀림\n피드백: 음수 수량은 검사에서 멈춥니다.`)
+    expect(w.systems.at(-1)).toBe(THINK_SYSTEM)
+    expect(w.budgets.at(-1)).toBe(900)
+    const prompt = w.models.at(-1)!
+    expect(prompt).toContain(`## 생각해 보기 물음\n${SHAPED_Q}\n`)
+    expect(prompt).toContain('## 학습자의 짐작\n97.5인가요?\n')
+    expect(prompt).toContain('먼저 따라가기 줄에, 물음대로 입력을 바꿔 지금의 바뀐 코드를 위 따라가기처럼 한 단계씩 따라간 과정을 한 줄로 쓴다')
+    expect(prompt.endsWith('따라가기: (바꾼 입력으로 한 단계씩, 한 줄)\n바른 결과: (값이나 동작 한 줄)\n판정: (맞음 · 거의 · 틀림 · 질문 중 하나)\n피드백: (두 문장 이내, 질문이면 세 문장 이내)')).toBe(true)
+    const shown = '**아쉽지만 틀렸습니다.** 음수 수량은 검사에서 멈춥니다.\n\n바른 결과: `Error: 수량은 0 이상이어야 합니다`'
+    expect(asksOf(store).at(-1)!.answer).toBe(shown)
+    expect(await ui.find({ type: 'Markdown', text: shown })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '이어서 · 97.5인가요?' })).toBeDefined()
+    // A reply out of form: shown as it came, its walk-through taken out; one that is all walk-through, as it came.
+    await trace(SHAPED)
+    await typed('2000?', `음수면 에러가 납니다.\n${walk}`)
+    expect(w.systems.at(-1)).toBe(THINK_SYSTEM)
+    expect(asksOf(store).at(-1)!.answer).toBe('음수면 에러가 납니다.')
+    await trace(SHAPED)
+    await typed('2000 나오나요?ㅠ', walk)
+    expect(asksOf(store).at(-1)!.answer).toBe(walk)
+    const journal = w.files.get(JOURNAL) ?? ''
+    expect(journal.split('따라가기:')).toHaveLength(2)
+    expect(journal).toContain(`**물음** (생각해 보기 뒤): 97.5인가요?\n\n${shown}\n`)
+    // A question with a question word: a question, as 1.9.0 F6 answered one.
+    await trace(SHAPED)
+    await typed('꼭 0이어야 해요?', '아니요, 0 이상이면 됩니다.')
+    expect(w.systems.at(-1)).toBe(ASK_SYSTEM)
+    expect(w.budgets.at(-1)).toBe(900)
+    expect(w.models.at(-1)).toContain(`생각해 보기: ${SHAPED_Q}\n학습자의 질문 칸 글은 이 생각해 보기 뒤에 적은 질문이다. 학습자는 이 코드를 실행하지 않았다.`)
+    expect(asksOf(store).at(-1)!.answer).toBe('아니요, 0 이상이면 됩니다.')
+    await ui.unmount()
+  })
+
+  for (const [isOn, head] of [[false, '이어서'], [true, '질문']] as const) {
+    test(`a store with r's free line kept young (1.9.0 F6's kind), ${isOn ? 'on' : 'off'}: a question after it is headed ${head}, the asks as they were${isOn ? ', no dim line' : ''}`, async ($, on) => {
+      const kept = [{ question: '예시로 따라가기', answer: FREE, at: NOW - 5 * 60_000 }, { question: '2000이요', answer: '맞습니다.', at: NOW - 4 * 60_000 }]
+      const { ui, store } = await opened($, on, 'code', { isThinkAsked: isOn }, kept)
+      expect(await ui.find({ type: 'Text', text: `${head} · 2000이요` })).toBeDefined()
+      expect(asksOf(store)).toEqual(kept)
+      await ui.unmount()
+    })
+    test(`a store with r's free line its last, kept young, ${isOn ? 'on: no dim line, a guess after it a plain question' : 'off: open to a guess, as 1.9.0'}`, async ($, on) => {
+      const kept = [{ question: '예시로 따라가기', answer: FREE, at: NOW - 5 * 60_000 }]
+      const { w, ui, typed } = await opened($, on, 'code', { isThinkAsked: isOn }, kept)
+      expect(await hintsOf(ui)).toEqual(isOn ? [] : [HINT])
+      await typed('2000이요', '맞습니다.')
+      expect(w.models.at(-1)!.includes("## 바로 앞 '예시로 따라가기'")).toBe(!isOn)
+      expect(await ui.find({ type: 'Text', text: `${head} · 2000이요` })).toBeDefined()
+      await ui.unmount()
     })
   }
 })

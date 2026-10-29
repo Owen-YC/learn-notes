@@ -15,17 +15,25 @@ import {
   askSection,
   changeOf,
   cut,
+  hasFlowLine,
+  isThinkCode,
   isThinkFollow,
   isThinkQuestion,
+  isThinkShape,
   journalEntries,
   openThink,
   parseTeamFile,
+  THINK_EXTS,
   thinkCheckPrompt,
+  thinkKept,
   thinkOf,
   thinkReply,
   traceQuestion,
   withoutDrill,
+  withoutTrace,
 } from '../hooks/notes'
+import { THINK19_CHECK, THINK19_REPLIES, THINK19_THINK_SYSTEM } from './fixtures/think19'
+import { THINK_FLOW_19 } from './fixtures/thinkflow19'
 
 /** A walk-through as r's answer ends on one (1.8.0, 생각해 보기). */
 const TRACE = [
@@ -298,8 +306,9 @@ describe('1.8.0: 생각해 보기 at the end of r\'s walk-through (E4)', () => {
 
   test('the line r would ask for is by values and names, its answer left out; off in 1.8.0, r\'s prompt and the others are 1.7.0\'s; the journal says which question followed it', () => {
     expect(THINK_ASK).toContain('번호 없이')
-    expect(THINK_ASK).toContain('그 답은 쓰지 마세요')
-    expect(THINK_ASK).toContain('단계 번호 대신 입력 값과 변수·줄 이름으로')
+    // 1.10.0 G5 gives the question's form whole and leaves out a hint as well as its answer (its own describe, below).
+    expect(THINK_ASK).toContain('실마리나 그 답은 쓰지 말고')
+    expect(THINK_ASK).toContain('`바꿀 이름`을 `새 값`으로 바꾸면 최종 결과는 무엇이 될까요?')
     expect(THINK_ASK).toContain('따라갈 실행 흐름이 없는 변경이면 이 줄은 빼 주세요')
     // r's prompt is 1.7.0's while the line is not asked for (IS_THINK_ASKED, set by 1.9.0's samples: F6's tests).
     expect(traceQuestion(false)).toBe(TRACE_170)
@@ -354,11 +363,11 @@ describe('1.9.0: 생각해 보기 back on behind IS_THINK_ASKED: a guess checked
   })
 
   test('r\'s line asks one final result, ending on `?`, its label bare; r\'s prompt ends on it while asked for; the question rule says the learner ran nothing; with it off every prompt is 1.8.0\'s', () => {
-    expect(THINK_ASK).toContain('물음표로 끝나는')
-    expect(THINK_ASK).toContain('하나만 묻고')
-    expect(THINK_ASK).toContain('최종 결과가 무엇이 되는지')
+    // 1.10.0 G5: the line's form given whole, one input changed, its result asked for alone (its own describe, below).
+    expect(THINK_ASK).toContain('최종 결과는 무엇이 될까요?')
+    expect(THINK_ASK).toContain('입력 값 하나만 바꾸고')
     expect(THINK_ASK).toContain('굵게 쓴 생각해 보기:')
-    expect(THINK_ASK).not.toContain('`')
+    expect(THINK_ASK).not.toContain('`생각해 보기')
     expect(traceQuestion(true)).toBe(`${TRACE_170} ${THINK_ASK}`)
     expect(traceQuestion(false)).toBe(TRACE_170)
     expect(TRACE_QUESTION).toBe(traceQuestion(IS_THINK_ASKED))
@@ -385,9 +394,9 @@ describe('1.9.0: 생각해 보기 back on behind IS_THINK_ASKED: a guess checked
 
   test('isThinkQuestion leans to the question: a `?` at the end, 주세요 and the like, a question word anywhere, asking to be told; a value, a guessed error or what code does, and a bare 모르겠어요 are guesses', () => {
     const guesses = ['2000이요', '0 곱하면 터질 것 같아요', '에러로 끝나요', '빈 배열을 돌려줘요', '에러 메시지를 보여 줘요', '합계를 찍어 줘요', '모르겠어요', '잘 모르겠습니다', '몰라요', '모름', '  2000  ', '[]']
+    // 1.10.0 G5 (THINK_VALUE_GUESS): a value with a question mark alone is a guess now, 1.9.0's '2000 나오나요?ㅠ',
+    // '2000?' and '2000 맞나요？~' with it (its own describe, below).
     const questions = [
-      '2000 나오나요?ㅠ',
-      '2000?',
       '에러 나지 않을까요?',
       '0 나오나?',
       'i++는 무슨 뜻이에요?',
@@ -403,7 +412,6 @@ describe('1.9.0: 생각해 보기 back on behind IS_THINK_ASKED: a guess checked
       '이게 왜 그런지 모르겠어요',
       '초깃값 설명해 주세요',
       '다시 알려 줘요',
-      '2000 맞나요？~',
       '한 번 더 따라가 주시겠어요',
       '몇 번 도나요',
       '어떻게 0이 돼요',
@@ -442,10 +450,11 @@ describe('1.9.0: 생각해 보기 back on behind IS_THINK_ASKED: a guess checked
       '## 그 노트의 요청\n합계를 구해 줘\n',
       '## 학습 노트\n### 한 줄 요약\n',
       '## 바뀐 코드\n### src/sum.js (수정, +2 −1)\n',
-      '먼저 물음대로 입력을 바꾼 최종 결과를 따라가기와 지금의 바뀐 코드로 직접 구해, 바른 결과 줄에 값이나 동작 하나로 쓴다. 그다음 학습자의 짐작과 견준다.',
+      // 1.10.0 G5: the walk-through first, on a line of its own (its own describe, below).
+      '먼저 따라가기 줄에, 물음대로 입력을 바꿔 지금의 바뀐 코드를 위 따라가기처럼 한 단계씩 따라간 과정을 한 줄로 쓴다',
       '판정은 넷 중 하나다.',
       '피드백은 두 문장 이내다.',
-      '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.\n바른 결과: (값이나 동작 한 줄)\n판정: (맞음 · 거의 · 틀림 · 질문 중 하나)\n피드백: (두 문장 이내, 질문이면 세 문장 이내)',
+      '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.\n따라가기: (바꾼 입력으로 한 단계씩, 한 줄)\n바른 결과: (값이나 동작 한 줄)\n판정: (맞음 · 거의 · 틀림 · 질문 중 하나)\n피드백: (두 문장 이내, 질문이면 세 문장 이내)',
     ]
     const at = order.map(one => prompt.indexOf(one))
     expect(at.every(one => one !== -1)).toBe(true)
@@ -517,5 +526,239 @@ describe('1.9.0: 생각해 보기 back on behind IS_THINK_ASKED: a guess checked
     // 모르겠어요 with a verdict alone, no right result and no feedback: nothing to show, so unread (5/5 검토).
     for (const text of ['판정: 틀림', '판정: 틀림\n피드백:', '바른 결과:\n판정: 틀림\n피드백:'])
       expect([text, thinkReply(text, true)]).toEqual([text, undefined])
+  })
+})
+
+describe('1.10.0: 생각해 보기 (G5): which notes get the line, its closed form, what is kept, the check\'s walk-through first, a bare value guessed', () => {
+  const steps = '1. `sum([2, 3])`을 부르면 `total`은 0입니다.\n2. `n`이 2일 때 `total`은 2입니다.\n'
+  /** A 생각해 보기 line in the closed form, and one in free words (1.9.0 F6's kind). */
+  const SHAPED = '**생각해 보기:** `items`를 `[]`로 바꾸면 최종 결과는 무엇이 될까요?'
+  const FREE = '**생각해 보기:** 배열이 비면 결과는 어떻게 될까요?'
+  /** One change of `file` with `lines` as its hunk, kind `kind`. */
+  const change = (file: string, lines: string[], kind: 'create' | 'update' | 'delete' = 'update') =>
+    changeOf({ path: `/proj/${file}`, root: '/proj', tool: kind === 'delete' ? 'Bash' : 'Edit', kind, hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines }] })
+  const FLOW_JS = ['+  if (qty < 0) throw new Error(\'수량\')']
+  const FLOW_PY = ['+    if amount > balance:', "+        raise ValueError('잔액 부족')"]
+
+  test('off: r\'s prompt is 1.7.0\'s (TRACE_170), the check\'s system 1.9.0\'s, a question\'s rule 1.8.0\'s; on, r\'s words fit askPrompt\'s cut whole', () => {
+    expect(traceQuestion(false)).toBe(TRACE_170)
+    expect(TRACE_QUESTION).toBe(TRACE_170)
+    expect(IS_THINK_ASKED).toBe(false)
+    expect(THINK_SYSTEM).toBe(THINK19_THINK_SYSTEM)
+    // On: TRACE_170 and the new line, under askPrompt's cut of a question (1000), whole.
+    expect(traceQuestion(true)).toBe(`${TRACE_170} ${THINK_ASK}`)
+    expect(traceQuestion(true).length).toBeLessThan(1000)
+    expect(THINK_ASK).toHaveLength(271)
+    expect(askPrompt(NOTE, traceQuestion(true), 'beginner')).toContain(`## 학습자의 질문\n${TRACE_170} ${THINK_ASK}\n\n`)
+    // A question after an open walk-through, the switch off: 1.8.0's rule, to the byte (1.8.0 describe above).
+    const think = openThink(NOTE.asks, 2)!
+    expect(askPrompt(NOTE, '0이요', 'beginner', undefined, think, false)).toContain('학습자의 질문 칸 글은 이 물음에 대한 답일 수도, 새 질문일 수도 있다.')
+  })
+
+  test('THINK_ASK gives the form whole: a name and its new value in backticks, no hint or answer, no input the note or walk-through already answered, none under a change with no run', () => {
+    expect(THINK_ASK).toBe(
+      '마지막 줄에는 번호 없이, 굵게 쓴 생각해 보기: 뒤에 이 꼴의 질문 한 문장만 더해 주세요: `바꿀 이름`을 `새 값`으로 바꾸면 최종 결과는 무엇이 될까요? 방금 따라간 예시에서 입력 값 하나만 바꾸고, 두 백틱 자리에는 코드의 이름과 값만 쓰세요(을/를 · 으로/로는 앞말에 맞춥니다). 조건이 맞는지, 어느 줄에서 멈추는지 같은 실마리나 그 답은 쓰지 말고, 노트나 따라가기 글에서 결과를 이미 말한 입력은 고르지 마세요. 따라갈 실행 흐름이 없는 변경이면 이 줄은 빼 주세요.',
+    )
+    // The form it gives, copied with its placeholders, is never kept (isThinkShape below).
+    expect(isThinkShape('`바꿀 이름`을 `새 값`으로 바꾸면 최종 결과는 무엇이 될까요?')).toBe(false)
+  })
+
+  test('isThinkCode: a change with a run to follow in js · mjs · cjs · jsx · ts · mts · cts · tsx · py; never a tool\'s setup, a type\'s declaration, another language, a deletion or no diff', () => {
+    expect(THINK_EXTS).toEqual(['js', 'mjs', 'cjs', 'jsx', 'ts', 'mts', 'cts', 'tsx', 'py'])
+    for (const file of ['src/a.js', 'src/a.mjs', 'src/a.cjs', 'src/a.jsx', 'src/a.ts', 'src/a.mts', 'src/a.cts', 'src/A.TSX', 'src/config.js', 'config.ts'])
+      expect([file, isThinkCode([change(file, FLOW_JS)])]).toEqual([file, true])
+    expect(isThinkCode([change('app/bank.py', FLOW_PY)])).toBe(true)
+    const none = [
+      'vite.config.ts',
+      'eslint.config.js',
+      '.eslintrc.cjs',
+      '.prettierrc.js',
+      'tailwind.config.js',
+      'src/types.d.ts',
+      'app/settings.py',
+      'setup.py',
+      'src/a.css',
+      'src/a.scss',
+      'README.md',
+      'package.json',
+      'ci.yml',
+      'pyproject.toml',
+      'index.html',
+      '.prettierrc',
+      'Dockerfile',
+      'main.go',
+      'app.rb',
+      'run.sh',
+      'App.vue',
+    ]
+    for (const file of none) expect([file, isThinkCode([change(file, file.endsWith('.py') ? FLOW_PY : FLOW_JS)])]).toEqual([file, false])
+    // A deletion, a change with no diff, none at all.
+    expect(isThinkCode([change('src/old.js', ['-  if (qty < 0) throw new Error(\'수량\')'], 'delete')])).toBe(false)
+    expect(isThinkCode([{ ...change('src/a.js', FLOW_JS), diff: '' }])).toBe(false)
+    expect(isThinkCode([])).toBe(false)
+    // One file of code with a run among others is enough: js beside css.
+    expect(isThinkCode([change('src/a.css', ['+  color: red;']), change('src/a.js', FLOW_JS)])).toBe(true)
+    expect(isThinkCode([change('src/a.css', ['+  color: red;']), change('src/limits.js', ['+export const MAX_ITEMS = 20'])])).toBe(false)
+  })
+
+  test('hasFlowLine: the design\'s table (seven with a run, seven with none), headers unread, strings and comments read past in one pass; 1.9.0 F6\'s 14 changes with a run all have one', () => {
+    const flow: [string, string][] = [
+      ['js', "+  if (qty < 0) throw new Error('수량')"],
+      ['js', '-  return price * qty\n+  return Math.max(price * qty, 0)'],
+      ['jsx', '+      <button onClick={() => setCount(count + 2)}>더하기</button>'],
+      ['py', "+    if amount > balance:\n+        raise ValueError('잔액 부족')"],
+      ['ts', '+const total = items.reduce((sum, item) => sum + item.price, 0)'],
+      ['js', "-  if (score >= 90) return 'A'"],
+      ['py', "+    return [t.strip() for t in tags.split(',') if t.strip()]"],
+    ]
+    const none: [string, string][] = [
+      ['jsx', '-      <button className="bg-blue-500 px-4">저장</button>\n+      <button className="bg-red-500 px-4">저장</button>'],
+      ['tsx', '-  <h1>안녕하세요</h1>\n+  <h1>환영합니다</h1>'],
+      ['js', '-export const MAX_ITEMS = 10\n+export const MAX_ITEMS = 20'],
+      ['ts', "+export const PLANS = [{ name: 'Free', price: 0 }, { name: 'Pro', price: 9900 }]"],
+      ['py', "-DEBUG = True\n+DEBUG = False\n+ALLOWED = ['a.com', 'b.com']"],
+      ['js', '+// return this later if needed'],
+      ['ts', "+  label: 'if you can, return here',"],
+    ]
+    for (const [ext, diff] of flow) expect([diff, hasFlowLine(diff, ext)]).toEqual([diff, true])
+    for (const [ext, diff] of none) expect([diff, hasFlowLine(diff, ext)]).toEqual([diff, false])
+    // A file's head and a context line are no changed line.
+    expect(hasFlowLine('--- a/src/a.js\n+++ b/src/a.js\n@@ -1,2 +1,2 @@\n   return a + b\n-const A = 1\n+const A = 2', 'js')).toBe(false)
+    // A `//` or `#` inside a string ends no line: the run after it is read.
+    expect(hasFlowLine("+  const url = 'https://a.com/x'; if (ok) go()", 'js')).toBe(true)
+    expect(hasFlowLine("+    color = '#fff' if dark else '#000'", 'py')).toBe(true)
+    // A comment's quote opens no string; a py comment's words are no run.
+    expect(hasFlowLine("+const A = 1 // it's if-free", 'js')).toBe(false)
+    expect(hasFlowLine('+RATE = 0.2  # return later', 'py')).toBe(false)
+    for (const one of THINK_FLOW_19) {
+      const changes = one.changes.map(c => changeOf({ ...c, root: '/proj' }))
+      expect([one.id, isThinkCode(changes)]).toEqual([one.id, one.hasFlow])
+    }
+    expect(THINK_FLOW_19.filter(one => one.hasFlow)).toHaveLength(14)
+  })
+
+  test('isThinkShape: the closed form takes the design\'s sixteen and refuses its twelve; a backtick pair from the line\'s start is its code', () => {
+    const kept = [
+      '`qty`를 `0`으로 바꾸면 최종 결과는 무엇이 될까요?',
+      '`price`를 `40000`으로 바꾸면 최종 결과는 무엇이 될까요?',
+      '`n` 값을 6으로 바꾸면 최종 결과는 무엇이 될까요?',
+      '방금 예시에서 `items[1].qty`를 `1`로 바꾸면 최종 결과는 무엇이 될까요?',
+      '`checkout(20000, { rate: 0.8 })`에서 `rate`를 `0.3`으로 바꾸면 `checkout`의 최종 결과는 무엇이 될까요?',
+      '`withdraw(1000, 1500)`을 호출하면 최종 결과는 무엇이 될까요?',
+      '`text`가 `"a a a"`이면 최종 결과는 무엇일까요?',
+      '`nums`를 `[5, -7, 0]`으로 바꾸면 최종 결과는 무엇이 될까요?',
+      '`name`을 `"안녕"`으로 바꾸면 최종 결과는 무엇이 될까요?',
+      '`user`를 `{ address: {} }`로 바꾸면 `return` 줄의 최종 결과는 무엇이 될까요?',
+      "예시의 입력을 `{ size: 'l' }`로 바꾸면 `withDefaults`가 돌려주는 최종 객체는 어떻게 될까요?",
+      '`text`를 `"a a a"`로 바꾸면 마지막에 `counts`는 무엇이 될까요?',
+      "`parse_tags(' , ,python')`을 넣으면 `tags`의 최종 결과는 무엇이 될까요?",
+      '`limit`에 2를 넘기면 최종 결과는 무엇이 될까요?',
+      '`count`를 `3`으로 바꾸면 화면에 보이는 결과는 무엇이 될까요?',
+      '`title`을 `"안녕"`으로 바꾸면 화면에 보이는 최종 결과는 무엇일까요?',
+    ]
+    const refused = [
+      '`finalPrice(40000)`처럼 조건에 맞지 않는 가격이 들어오면 `if` 조건은 어떻게 판단되나요?',
+      '같은 함수에 `nums = [5, -2, 0]` 대신 `x`에 해당하는 값만 `-7`로 바꾸면 `return` 결과는 무엇이 되나요?',
+      "`name` 값이 `'ab'`일 때 `trimmed.length`는 얼마이고, 최종 결과는 무엇이 될까요?",
+      '`withdraw(1000, 1500)`을 호출하면 어떤 줄에서 에러가 발생하나요?',
+      '입력 `title`을 공백이 없는 `"Hi"`로 바꾸면 최종 결과는 무엇이 될까요?',
+      '`price`를 `40000 // 할인 없음`으로 바꾸면 최종 결과는 무엇이 될까요?',
+      '`qty`를 `0`으로 바꾸면 최종 결과는 무엇이 될까요',
+      '배경 줄의 `#2563eb`를 `#dc2626`(빨강 계열)으로 바꾸면 버튼의 배경색은 어떻게 보일까요?',
+      '`price`를 `40000`으로 바꾸면 할인 조건이 거짓이 되어 최종 결과는 무엇이 될까요?',
+      '`qty`를 `0`으로 바꾸면 에러가 날까요?',
+      '실행 명령이 바뀌면 README의 어느 부분을 함께 고쳐야 할까요?',
+      '`count`를 `3`으로 바꾸면 화면에 에러가 보이는 결과는 무엇이 될까요?',
+    ]
+    for (const one of kept) expect([one, isThinkShape(one)]).toEqual([one, true])
+    for (const one of refused) expect([one, isThinkShape(one)]).toEqual([one, false])
+    expect(kept).toHaveLength(16)
+    expect(refused).toHaveLength(12)
+    // Read through thinkOf as a reply writes it: bold, a `?**` end, its label in backticks (an odd one dropped),
+    // and a pair of backticks from the question's start kept as its code.
+    for (const [last, said] of [
+      [`**생각해 보기:** ${kept[0]}`, kept[0]],
+      [`**생각해 보기: ${kept[0]}**`, kept[0]],
+      [`\`**생각해 보기:**\` ${kept[0]}`, kept[0]],
+      [`**생각해 보기:** ${kept[7]}`, kept[7]],
+    ] as const)
+      expect([last, thinkOf(`${steps}\n${last}`, true)]).toEqual([last, said])
+    expect(thinkOf(`${steps}\n${FREE}`, true)).toBeUndefined()
+    expect(thinkOf(`${steps}\n${FREE}`)).toBe('배열이 비면 결과는 어떻게 될까요?')
+  })
+
+  test('thinkKept: a code note keeps its last line in form; every other 생각해 보기 line goes wherever it stands, with a lone label\'s question and the blank lines and rules left at the end; none is as it came', () => {
+    const traced = `${steps}\n${SHAPED}`
+    expect(thinkKept(traced, true)).toBe(traced)
+    // Not code: any line goes.
+    expect(thinkKept(traced, false)).toBe(steps.trimEnd())
+    // Free words: gone, code or not.
+    expect(thinkKept(`${steps}\n${FREE}`, true)).toBe(steps.trimEnd())
+    // A label alone and its question on the next line: kept together, or gone together.
+    const lone = `${steps}\n---\n**생각해 보기**\n\`items\`를 \`[]\`로 바꾸면 최종 결과는 무엇이 될까요?\n\n`
+    expect(thinkKept(lone, true)).toBe(lone)
+    expect(thinkKept(lone, false)).toBe(steps.trimEnd())
+    // A line with a sentence after it is not the last: gone, the sentence kept.
+    expect(thinkKept(`${steps}\n${SHAPED}\n이 값으로 직접 따라가 보세요.`, true)).toBe(`${steps}\n이 값으로 직접 따라가 보세요.`)
+    // One in the middle goes; the last in form stays.
+    expect(thinkKept(`${FREE}\n${steps}\n${SHAPED}`, true)).toBe(`${steps}\n${SHAPED}`)
+    // A label alone on the last line asks nothing: gone.
+    expect(thinkKept(`${steps}\n**생각해 보기:**`, true)).toBe(steps.trimEnd())
+    // No line: as it came, to the byte.
+    for (const answer of [steps, `${steps}\n\n---\n`, '따라갈 실행 흐름이 없는 변경입니다.', ''])
+      for (const isCode of [true, false]) expect([answer, thinkKept(answer, isCode)]).toEqual([answer, answer])
+  })
+
+  test('openThink and isThinkFollow with isShaped open only a line in form; their default reads as 1.9.0', () => {
+    const at = 1_000_000
+    const r = (answer: string) => ({ question: TRACE_LABEL, answer, at })
+    const typed = { question: '0이요', answer: '맞습니다.', at: at + 1 }
+    expect(openThink([r(`${steps}\n${SHAPED}`)], at, true)?.question).toBe('`items`를 `[]`로 바꾸면 최종 결과는 무엇이 될까요?')
+    expect(openThink([r(`${steps}\n${FREE}`)], at, true)).toBeUndefined()
+    expect(openThink([r(`${steps}\n${FREE}`)], at)?.question).toBe('배열이 비면 결과는 어떻게 될까요?')
+    expect(isThinkFollow([r(`${steps}\n${SHAPED}`), typed], 1, true)).toBe(true)
+    expect(isThinkFollow([r(`${steps}\n${FREE}`), typed], 1, true)).toBe(false)
+    expect(isThinkFollow([r(`${steps}\n${FREE}`), typed], 1)).toBe(true)
+  })
+
+  test('isThinkQuestion: a bare value with a question mark is a guess; a question word, a help word or no value is a question; 1.9.0\'s table otherwise as it was', () => {
+    for (const one of ['97.5인가요?', '14000?', '2000 나오나요?ㅠ', '`[]` 나와요?', '0이요?', '"a-b" 맞나요?', 'None인가요?', '결과는 2000인가요?', '2000??', "'B'요?", '2000 맞나요？~', '  2000?  '])
+      expect([one, isThinkQuestion(one)]).toEqual([one, false])
+    for (const one of ['??', '0이면 터지는 거 아니에요?', '꼭 0이어야 해요?', '0이어야 해요?', '왜 0이에요?', '뭐가 0이에요?', '에러 나요?', 'i++는 무슨 뜻이에요?', '이것도 터져요?', '두 번째 if에서 걸려요?', '0 나오나?'])
+      expect([one, isThinkQuestion(one)]).toEqual([one, true])
+  })
+
+  test('thinkCheckPrompt: 1.9.0\'s bytes but the walk-through first (its rule line) and its 따라가기 line first in the form', () => {
+    const think = openThink(NOTE.asks, 2)!
+    const prompt = thinkCheckPrompt(NOTE, think, '2000이요', 'beginner')
+    const rule19 = '먼저 물음대로 입력을 바꾼 최종 결과를 따라가기와 지금의 바뀐 코드로 직접 구해, 바른 결과 줄에 값이나 동작 하나로 쓴다. 그다음 학습자의 짐작과 견준다.'
+    const rule110 =
+      '먼저 따라가기 줄에, 물음대로 입력을 바꿔 지금의 바뀐 코드를 위 따라가기처럼 한 단계씩 따라간 과정을 한 줄로 쓴다(조건마다 참인지 거짓인지와 바뀐 값). 바른 결과 줄에는 그 따라가기가 끝난 값이나 동작을 그대로 옮긴다. 요청이나 노트가 말하는 결과가 아니라 지금 코드를 따라간 결과다. 그다음 학습자의 짐작과 견준다.'
+    expect(THINK19_CHECK).toContain(rule19)
+    expect(prompt).toBe(THINK19_CHECK.replace(rule19, rule110).replace('다른 말은 쓰지 않는다.\n바른 결과:', '다른 말은 쓰지 않는다.\n따라가기: (바꾼 입력으로 한 단계씩, 한 줄)\n바른 결과:'))
+    expect(prompt.split('\n').slice(-4)).toEqual(['따라가기: (바꾼 입력으로 한 단계씩, 한 줄)', '바른 결과: (값이나 동작 한 줄)', '판정: (맞음 · 거의 · 틀림 · 질문 중 하나)', '피드백: (두 문장 이내, 질문이면 세 문장 이내)'])
+  })
+
+  test('thinkReply reads past its walk-through, wherever and however written: each reply as 1.9.0 read it with none; braces in it are no JSON; withoutTrace leaves a reply with none as it came', () => {
+    const forms = [
+      (reply: string) => `따라가기: \`items\`가 \`[]\`라 반복이 돌지 않고 \`total\`은 0입니다.\n${reply}`,
+      (reply: string) => `**따라가기:**\n1. \`items\`는 \`[]\`입니다.\n2. 반복은 돌지 않습니다.\n\n${reply}`,
+      (reply: string) => `**따라가기**: { total: 0 } 그대로입니다.\n${reply}`,
+      (reply: string) => `${reply}\n따라가 보기: \`{"verdict": "right"}\`를 만들고 끝납니다.`,
+      (reply: string) => `${reply}\n\n따라가기：\n- {a: 1}\n- {a: 2}`,
+    ]
+    for (const { reply, isBlank, out } of THINK19_REPLIES) {
+      expect([reply, thinkReply(reply, isBlank) ?? null]).toEqual([reply, out])
+      expect(withoutTrace(reply)).toBe(reply)
+      // A reply in JSON has its walk-through after it, if anywhere: a line before it would run to the end.
+      for (const form of reply.startsWith('{') ? forms.slice(3) : forms) {
+        const traced = form(reply)
+        expect([traced, thinkReply(traced, isBlank) ?? null]).toEqual([traced, out])
+        expect(withoutTrace(traced).includes('따라가')).toBe(false)
+      }
+    }
+    // A reply that is all walk-through: nothing left (askNote then keeps it as it came).
+    expect(withoutTrace('따라가기: `total`은 0입니다.')).toBe('')
+    expect(thinkReply('따라가기: `total`은 0입니다.', false)).toBeUndefined()
   })
 })
