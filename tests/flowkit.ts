@@ -4,7 +4,7 @@
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { On } from 'claude-code'
+import type { On, SettingsSource } from 'claude-code'
 import type { LearnNote } from '../types'
 import {
   BASE_LEAD,
@@ -108,6 +108,34 @@ export type Reply = 'ok' | 'timeout' | 'cut' | { status: number | null; error: s
 
 export const ZERO_USAGE = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
+/**
+ * Whose settings each layer of a read holds, lowest precedence first, as the engine folds them (index.d.ts
+ * `$.settings.read`, SettingsLayerSource): the enabled plugins' base beneath `user` (~/.claude/settings.json), then
+ * `project` (.claude/settings.json), `local` (.claude/settings.local.json), `flag` (`--settings`) and `policy` (the
+ * managed settings, every managed tier merged).
+ */
+export const SETTINGS_LAYERS = ['plugin', 'user', 'project', 'local', 'flag', 'policy'] as const satisfies readonly ('plugin' | SettingsSource)[]
+
+/** What each source of settings holds, as its file loads (a source with no file left out). */
+export type SettingsLayers = { [source in (typeof SETTINGS_LAYERS)[number]]?: Record<string, unknown> }
+
+/**
+ * The settings merged over the layers given, lowest precedence first, as the engine merges them with no hook
+ * (index.d.ts `$.settings.read`): a scalar from the last layer that has it, lists joined, objects merged. The layers
+ * are left as they were.
+ */
+export function mergeSettings(layers: readonly (Record<string, unknown> | undefined)[]): Record<string, unknown> {
+  const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+  const merge = (into: Record<string, unknown>, from: Record<string, unknown>): Record<string, unknown> => {
+    for (const [key, value] of Object.entries(from)) {
+      const was = into[key]
+      into[key] = Array.isArray(was) && Array.isArray(value) ? [...was, ...value] : isObject(was) && isObject(value) ? merge({ ...was }, value) : value
+    }
+    return into
+  }
+  return layers.reduce<Record<string, unknown>>((into, layer) => (layer === undefined ? into : merge(into, layer)), {})
+}
+
 export type World = {
   /** How the model answers from now on. */
   model: Model
@@ -150,10 +178,12 @@ export type World = {
    */
   harness?: Record<string, unknown>
   /**
-   * The settings merged over every source, as `$.settings.read()` answers them (1.10.0 cross-review: a window whose
-   * route turns a switch on reads `modelOverrides` there); undefined for none of note, answered as `{}`.
+   * What each source of settings holds (1.10.0 cross-review: a window whose route turns a switch on reads
+   * `modelOverrides` there), answered as the engine answers `$.settings.read`: a read naming a source (`{ source }`)
+   * gets that source's alone, `{}` when it holds none; a read naming none gets every layer merged (mergeSettings).
+   * Undefined: no source holds any.
    */
-  settings?: Record<string, unknown>
+  settings?: SettingsLayers
   /** True while each settings read is refused. */
   settingsFails?: boolean
   /** How many times the settings were read (a read of one key is the object's, projected: one event, no key named). */
@@ -317,11 +347,14 @@ export function world(
     return { value: undefined }
   })
   on('store.keys', () => ({ value: [...w.store.keys()] }))
-  // The settings as the engine merges them, a snapshot in plain data each read (a key's read is the object's, projected).
-  on('settings.read', () => {
+  // The settings as the engine answers a read: the one source the read names (`e.source`) as loaded, else every layer
+  // merged; a snapshot in plain data each read (a key's read is the object's, projected, its source on `e` the same).
+  on('settings.read', (_$, e) => {
     w.settingsReads += 1
     if (w.settingsFails) return { deny: 'refused by policy' }
-    return { value: JSON.parse(JSON.stringify(w.settings ?? {})) as Record<string, unknown> }
+    const layers = w.settings ?? {}
+    const value = e.source !== undefined ? (layers[e.source] ?? {}) : mergeSettings(SETTINGS_LAYERS.map(source => layers[source]))
+    return { value: JSON.parse(JSON.stringify(value)) as Record<string, unknown> }
   })
   on('ui.log', (_$, e) => {
     w.logs.push(e.text)

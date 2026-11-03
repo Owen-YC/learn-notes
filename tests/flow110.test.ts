@@ -71,6 +71,7 @@ import {
   ROUTE_DAY,
   ROUTE_RIGHT,
   type Reply,
+  type SettingsLayers,
   THINK_CHANGES,
   WORKED_BOTH,
   type World,
@@ -155,6 +156,17 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
   }
   /** A settings' `modelOverrides` turning one id to another (fakes: no model id in tests). */
   const OVERRIDES = { modelOverrides: { 'some-model-1': 'override-target-x' } }
+  /**
+   * The sources a settings read is made of (index.d.ts SettingsSource): `flag` `--settings`, `user`
+   * ~/.claude/settings.json, `project` .claude/settings.json, `local` .claude/settings.local.json, `policy` the
+   * managed settings. Claude Code 2.1.317 turns the alias with the `modelOverrides` of each (docs/qa/견본.md, 1.10.0
+   * cross-review, rounds 3 and 4; the managed settings' in a session the host does not manage).
+   */
+  const SOURCES = ['flag', 'user', 'project', 'local', 'policy'] as const
+  /** The settings with `settings` in `source` alone. */
+  const only = (source: (typeof SOURCES)[number], settings: Record<string, unknown>): SettingsLayers => ({ [source]: settings })
+  /** The settings with `OVERRIDES` in every source. */
+  const OVERRIDDEN_EVERYWHERE: SettingsLayers = Object.fromEntries(SOURCES.map(source => [source, { ...OVERRIDES }]))
   /** What a window whose route read its alias at session start reads by then: once there, once again for each /learn 진단 while the alias is kept (recheckRemap). */
   const readTwice = (name: string) => [name, name]
 
@@ -357,27 +369,51 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
   })
 
   // The settings' `modelOverrides` (1.10.0 cross-review, round 3): Claude Code 2.1.317 turns `haiku` and `sonnet` to the
-  // ids it names with no variable set, whichever settings hold it (`--settings`, the user's, the project's; checked on
-  // real windows, docs/qa/견본.md), so every switch is off there as for an alias variable set (R1–R4). Read after the
-  // variables, only where the route turns a switch on; looked at for being empty alone, never kept, shown or sent.
+  // ids it names with no variable set, whichever settings hold it (`--settings`, the user's, the project's, the local
+  // file, the managed settings in a session the host does not manage; checked on real windows, docs/qa/견본.md), so
+  // every switch is off there as for an alias variable set (R1–R4). Read after the variables, only where the route
+  // turns a switch on, as every source merged: a read of one source alone misses the others (round 4, the world
+  // answers each source's read with its own); looked at for being empty alone, never kept, shown or sent.
   for (const model of ['haiku', 'sonnet'] as const) {
-    test(`${model} as shipped with modelOverrides in the settings, no variable set: every switch off, 1.9.0's requests; /learn 진단 says the setting is there, with neither id`, { options: { model } }, async ($, on) => {
-      const reads = aliasReads(on)
-      const flags = providerReads(on)
-      const { calls, diag, w } = await routeDay($, on, w => {
-        w.settings = { model: 'sonnet', ...OVERRIDES }
+    for (const source of SOURCES) {
+      test(`${model} as shipped with modelOverrides in the ${source} settings alone, no variable set: every switch off, 1.9.0's requests; /learn 진단 says the setting is there, with neither id`, { options: { model } }, async ($, on) => {
+        const reads = aliasReads(on)
+        const flags = providerReads(on)
+        const { calls, diag, w } = await routeDay($, on, w => {
+          w.settings = only(source, { model: 'sonnet', ...OVERRIDES })
+        })
+        expect(calls).toEqual(ROUTE19_CALLS.beginner.map(call => ({ model, ...call })))
+        expect(modelSaid(diag)).toBe(`${model}(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)`)
+        expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
+        expect(diag).not.toContain('some-model-1')
+        expect(diag).not.toContain('override-target-x')
+        // Read once at session start, after the variables: a route not kept is not read again (recheckRemap).
+        expect(reads).toEqual([model === 'haiku' ? HAIKU_ALIAS : SONNET_ALIAS])
+        expect(flags).toEqual([...PROVIDERS])
+        expect(w.settingsReads).toBe(1)
       })
-      expect(calls).toEqual(ROUTE19_CALLS.beginner.map(call => ({ model, ...call })))
-      expect(modelSaid(diag)).toBe(`${model}(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)`)
-      expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
-      expect(diag).not.toContain('some-model-1')
-      expect(diag).not.toContain('override-target-x')
-      // Read once at session start, after the variables: a route not kept is not read again (recheckRemap).
-      expect(reads).toEqual([model === 'haiku' ? HAIKU_ALIAS : SONNET_ALIAS])
-      expect(flags).toEqual([...PROVIDERS])
-      expect(w.settingsReads).toBe(1)
-    })
+    }
   }
+
+  // The sources merge as the engine merges them, objects merged: an empty modelOverrides in a source above does not
+  // hide a lower one's entry, and one empty in every source leaves none.
+  test('modelOverrides in the user settings, an empty one in every source above: every switch off (objects merged)', { options: { model: 'haiku' } }, async ($, on) => {
+    const w = world(on)
+    w.settings = { user: { ...OVERRIDES }, project: { modelOverrides: {} }, local: { modelOverrides: {} }, flag: { modelOverrides: {} }, policy: { modelOverrides: {} } }
+    await start($)
+    const diag = (await learn($, '진단')).text ?? ''
+    expect(modelSaid(diag)).toBe('haiku(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)')
+    expect(diag).not.toContain('override-target-x')
+    expect(w.settingsReads).toBe(1)
+  })
+
+  test('an empty modelOverrides in every source: the route stands, read again by /learn 진단', { options: { model: 'sonnet' } }, async ($, on) => {
+    const w = world(on)
+    w.settings = Object.fromEntries(SOURCES.map(source => [source, { modelOverrides: {} }]))
+    await start($)
+    expect(modelSaid((await learn($, '진단')).text ?? '')).toBe('sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)')
+    expect(w.settingsReads).toBe(2)
+  })
 
   for (const [what, settings, isKept] of [
     ['absent (other keys alone)', { model: 'sonnet', env: { SOME_OTHER: '1' } }, true],
@@ -389,7 +425,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
   ] as const) {
     test(`modelOverrides ${what}: ${isKept ? 'the route stands, read again by /learn 진단' : 'every switch off'}`, { options: { model: 'sonnet' } }, async ($, on) => {
       const w = world(on)
-      w.settings = settings
+      w.settings = only('project', settings)
       await start($)
       const diag = (await learn($, '진단')).text ?? ''
       expect(modelSaid(diag)).toBe(isKept ? 'sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)' : 'sonnet(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)')
@@ -409,7 +445,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
 
   test('an alias variable or a provider\'s switch set: modelOverrides is not read (the first reason found is the one said)', { options: { model: 'sonnet' } }, async ($, on) => {
     const w = world(on, 'ok', null, true, new Map(), { CLAUDE_CODE_USE_BEDROCK: '1' })
-    w.settings = { ...OVERRIDES }
+    w.settings = OVERRIDDEN_EVERYWHERE
     await start($)
     expect(modelSaid((await learn($, '진단')).text ?? '')).toBe('sonnet(제공자 변수를 둠 · 모델별 기능 모두 끔)')
     expect(w.settingsReads).toBe(0)
@@ -422,9 +458,9 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     ['at advanced', { model: 'sonnet', level: 'advanced' }, undefined],
     ['with both rows turned all off', { model: 'sonnet', level: 'beginner' }, { models: { haiku: { ...FLAT_OFF }, sonnet: { ...FLAT_OFF } } }],
   ] as const) {
-    test(`${what}, modelOverrides in the settings: no settings read, 1.9.0's requests`, { options }, async ($, on) => {
+    test(`${what}, modelOverrides in every source of the settings: no settings read, 1.9.0's requests`, { options }, async ($, on) => {
       const { calls, w } = await routeDay($, on, w => {
-        w.settings = { ...OVERRIDES }
+        w.settings = OVERRIDDEN_EVERYWHERE
         w.harness = harness
       })
       expect(calls).toEqual(ROUTE19_CALLS[options.level].map(call => ({ model: options.model, ...call })))
@@ -432,19 +468,21 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     })
   }
 
-  test('modelOverrides set in the session (sonnet as shipped): /learn 진단 says every switch off from then on, and so it stays once the setting goes', { options: { model: 'sonnet' } }, async ($, on) => {
-    const w = world(on)
-    await start($)
-    expect(modelSaid((await learn($, '진단')).text ?? '')).toBe('sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)')
-    w.settings = { ...OVERRIDES }
-    const diag = (await learn($, '진단')).text ?? ''
-    expect(modelSaid(diag)).toBe('sonnet(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)')
-    expect(diag).not.toContain('override-target-x')
-    w.settings = {}
-    expect(modelSaid((await learn($, '진단')).text ?? '')).toBe('sonnet(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)')
-    // Read at session start and by the first two /learn 진단; none once the route is off.
-    expect(w.settingsReads).toBe(3)
-  })
+  for (const source of SOURCES) {
+    test(`modelOverrides set in the ${source} settings in the session (sonnet as shipped): /learn 진단 says every switch off from then on, and so it stays once the setting goes`, { options: { model: 'sonnet' } }, async ($, on) => {
+      const w = world(on)
+      await start($)
+      expect(modelSaid((await learn($, '진단')).text ?? '')).toBe('sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)')
+      w.settings = only(source, { ...OVERRIDES })
+      const diag = (await learn($, '진단')).text ?? ''
+      expect(modelSaid(diag)).toBe('sonnet(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)')
+      expect(diag).not.toContain('override-target-x')
+      w.settings = {}
+      expect(modelSaid((await learn($, '진단')).text ?? '')).toBe('sonnet(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)')
+      // Read at session start and by the first two /learn 진단; none once the route is off.
+      expect(w.settingsReads).toBe(3)
+    })
+  }
 
   // The settings' env changed in a session turns the alias with it, and this window's environment too, with no reload
   // (Claude Code 2.1.317, 1.10.0 cross-review): the route session start found kept is read again by /learn 진단 (and
@@ -486,7 +524,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         on,
         w => {
           w.harness = { models: { haiku: { ...FLAT_OFF }, sonnet: { ...FLAT_OFF } } }
-          w.settings = { ...OVERRIDES }
+          w.settings = OVERRIDDEN_EVERYWHERE
         },
         { [model === 'haiku' ? HAIKU_ALIAS : SONNET_ALIAS]: 'pinned-model-x', CLAUDE_CODE_USE_BEDROCK: '1' },
       )
@@ -886,7 +924,7 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
    * the answered calls' texts `texts`, the calls' replies `replies` first, the environment `env`. Its calls, store, and
    * the note as stored.
    */
-  async function wrote($: Engine, on: On, harness: Record<string, unknown> | undefined, texts: string[], replies: Reply[] = [], env: Record<string, string> = {}, settings?: Record<string, unknown>) {
+  async function wrote($: Engine, on: On, harness: Record<string, unknown> | undefined, texts: string[], replies: Reply[] = [], env: Record<string, string> = {}, settings?: SettingsLayers) {
     const calls = routeCalls(on)
     const store = new Map<string, unknown>()
     const w = world(on, 'ok', null, true, store, env)
@@ -1194,11 +1232,12 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
   }
 
   // The settings' modelOverrides (1.10.0 cross-review, round 3): Claude Code turns the alias to the id it names with no
-  // variable set, so the one cell shipped on reaches nothing there either, at session start or once set in the session.
+  // variable set, so the one cell shipped on reaches nothing there either, at session start or once set in the session
+  // (here the project's settings, next to the team file, and the local file; each source alone in G7's tests).
   const OVERRIDDEN = { modelOverrides: { 'some-model-1': 'override-target-x' } }
   for (const model of ['haiku', 'sonnet'] as const) {
     test(`as shipped (${model}, no harness), modelOverrides in the settings: every switch off, a practice bringing the rule's name in under a rule line kept as 1.9.0 kept it, its t the concept's`, { options: { model } }, async ($, on) => {
-      const { calls, note, w } = await wrote($, on, undefined, [PLAIN], [], {}, OVERRIDDEN)
+      const { calls, note, w } = await wrote($, on, undefined, [PLAIN], [], {}, { project: OVERRIDDEN })
       expect(calls.map(call => [call.model, call.system])).toEqual([[model, SYSTEM]])
       expect(note().text).toBe(PLAIN)
       expect(w.journal().at(-1)!.text).toContain(`- 할 일: ${PLAIN_TASK}`)
@@ -1212,7 +1251,7 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
   test('as shipped (haiku), modelOverrides set in the session: the next note is kept as every switch off keeps it, its t the concept\'s; the one before stays marked', { options: { model: 'haiku' } }, async ($, on) => {
     const { note, w, store } = await wrote($, on, undefined, [PLAIN])
     expect(note().text).toBe(PLAIN_KEPT)
-    w.settings = OVERRIDDEN
+    w.settings = { local: OVERRIDDEN }
     w.texts = [PLAIN]
     await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
     await finish(w)
