@@ -186,7 +186,7 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
   test('routeOf: none while no row turns anything on, whatever the model, level or alias; else unmeasured, level, the alias, then the features on', () => {
     for (const model of ['haiku', 'sonnet', 'some-model-1', '']) {
       for (const level of ['beginner', 'advanced']) {
-        for (const remap of ['kept', 'remapped', 'provider', 'unreadable'] as const) expect(routeOf(model, level, remap, SWITCHES_OFF, ALL_OFF)).toBeUndefined()
+        for (const remap of ['kept', 'remapped', 'provider', 'overridden', 'unreadable'] as const) expect(routeOf(model, level, remap, SWITCHES_OFF, ALL_OFF)).toBeUndefined()
       }
     }
     expect(routeOf('haiku', 'beginner', 'kept', SWITCHES_OFF, ALL_OFF)).toBeUndefined()
@@ -206,6 +206,8 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
     expect(routeOf('sonnet', 'beginner', 'remapped', SWITCHES_OFF, SPLIT)).toBe('remapped')
     expect(routeOf('haiku', 'beginner', 'provider', SWITCHES_OFF, SPLIT)).toBe('provider')
     expect(routeOf('haiku', 'advanced', 'provider', SWITCHES_OFF, SPLIT)).toBe('level')
+    expect(routeOf('sonnet', 'beginner', 'overridden', SWITCHES_OFF, SPLIT)).toBe('overridden')
+    expect(routeOf('some-model-1', 'beginner', 'overridden', SWITCHES_OFF, SPLIT)).toBe('unmeasured')
     expect(routeOf('sonnet', 'beginner', 'unreadable', SWITCHES_OFF, SPLIT)).toBe('unreadable')
     // The features named are the released ones, never a harness's.
     expect(routeOf('sonnet', 'beginner', 'kept', SWITCHES_OFF, SPLIT)).toEqual({ on: [] })
@@ -250,6 +252,8 @@ describe('1.10.0: 모델별 갈래 (G7): the switches each model setting runs wi
       // The variable set, whatever it names (the same id as the alias's own too): what the code checks, no more.
       ['sonnet', 'remapped', 'sonnet(별칭 변수를 둠 · 모델별 기능 모두 끔)'],
       ['haiku', 'provider', 'haiku(제공자 변수를 둠 · 모델별 기능 모두 끔)'],
+      // The setting there, whatever ids it names: no id said.
+      ['sonnet', 'overridden', 'sonnet(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)'],
       ['sonnet', 'unreadable', 'sonnet(별칭을 확인하지 못함 · 모델별 기능 모두 끔)'],
     ]
     for (const [model, route, said] of cases) {

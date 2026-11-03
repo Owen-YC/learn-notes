@@ -713,8 +713,11 @@ function switched(): string[] {
  * ANTHROPIC_DEFAULT_SONNET_MODEL for `sonnet`; checked on a real window, docs/qa/견본.md); a value that is not blank is
  * `remapped`. Then, the alias kept, the switches of the providers under which Claude Code turns `haiku` and `sonnet` to
  * models no sample was run with though no alias variable is set (Bedrock, Vertex, Foundry and the others, 2.1.317;
- * docs/qa/견본.md, 1.10.0 cross-review), each by its name as written: one that is not blank is `provider`. A read that
- * throws is `unreadable`. Each value is looked at for being blank alone: never kept, shown or sent.
+ * docs/qa/견본.md, 1.10.0 cross-review), each by its name as written: one that is not blank is `provider`. Then, none
+ * set, the settings' `modelOverrides` (merged over every source, as the engine runs under it), with which Claude Code
+ * turns `haiku` and `sonnet` to the ids it names though no variable is set, whichever settings hold it (2.1.317;
+ * docs/qa/견본.md, 1.10.0 cross-review, round 3): anything there but nothing, null or an empty object is `overridden`.
+ * A read that throws is `unreadable`. Each value is looked at for being empty alone: never kept, shown or sent.
  */
 async function remapState($: EngineInterface, model: MeasuredModel): Promise<Remap> {
   const isSet = (value: string | undefined) => value !== undefined && value.trim() !== ''
@@ -729,7 +732,9 @@ async function remapState($: EngineInterface, model: MeasuredModel): Promise<Rem
       await $.env.get('CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD'),
       await $.env.get('CLAUDE_CODE_USE_MANTLE'),
     ]
-    return providers.some(isSet) ? 'provider' : 'kept'
+    if (providers.some(isSet)) return 'provider'
+    const overrides = await $.settings.read({ key: 'modelOverrides' })
+    return overrides === undefined || overrides === null || (isRecord(overrides) && Object.keys(overrides).length === 0) ? 'kept' : 'overridden'
   } catch {
     return 'unreadable'
   }
@@ -756,10 +761,11 @@ async function chooseSwitches($: EngineInterface, cfg: Config, harness: Record<s
 
 /**
  * Whether this load's alias still points where it did at session start (1.10.0 cross-review): the settings' `env`
- * can change in a session, and Claude Code then turns the alias with it and this load's environment too, with no
- * reload. Read again (remapState, the same variables) only where session start read them and found them kept; one
- * no longer kept turns every switch off for the rest of the load, as session start would have (the harness laid
- * again), and never back on. Asked right before the shipped switch on takes effect (writeNote) and by /learn 진단.
+ * and `modelOverrides` can change in a session, and Claude Code then turns the alias with them (the environment too,
+ * for `env`), with no reload. Read again (remapState, the same variables and key) only where session start read them
+ * and found them kept; one no longer kept turns every switch off for the rest of the load, as session start would
+ * have (the harness laid again), and never back on. Asked right before the shipped switch on takes effect (writeNote)
+ * and by /learn 진단.
  */
 async function recheckRemap($: EngineInterface): Promise<boolean> {
   if (aliasRead === undefined || remap !== 'kept') return remap === 'kept'

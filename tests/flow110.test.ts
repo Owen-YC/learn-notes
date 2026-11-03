@@ -153,6 +153,8 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     })
     return reads
   }
+  /** A settings' `modelOverrides` turning one id to another (fakes: no model id in tests). */
+  const OVERRIDES = { modelOverrides: { 'some-model-1': 'override-target-x' } }
   /** What a window whose route read its alias at session start reads by then: once there, once again for each /learn 진단 while the alias is kept (recheckRemap). */
   const readTwice = (name: string) => [name, name]
 
@@ -162,10 +164,10 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
   // Every switch off at beginner (1.9.0's route) is the flat-keys test below.
   for (const level of ['beginner', 'intermediate', 'advanced'] as const) {
     for (const model of ['haiku', 'sonnet'] as const) {
-      test(`as shipped, ${model} at ${level}: 1.9.0's requests to the byte with the setting as each call's model; /learn 진단 as 1.9.0 said it but its route; ${level === 'beginner' ? 'its alias and the providers\' switches read' : 'no alias read'}`, { options: { model, level } }, async ($, on) => {
+      test(`as shipped, ${model} at ${level}: 1.9.0's requests to the byte with the setting as each call's model; /learn 진단 as 1.9.0 said it but its route; ${level === 'beginner' ? 'its alias, the providers\' switches and the settings read' : 'no alias or settings read'}`, { options: { model, level } }, async ($, on) => {
         const reads = aliasReads(on)
         const flags = providerReads(on)
-        const { calls, diag } = await routeDay($, on)
+        const { calls, diag, w } = await routeDay($, on)
         expect(calls).toEqual(ROUTE19_CALLS[level].map(call => ({ model, ...call })))
         const route = level === 'beginner' ? '(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)' : '(설명 수준이 beginner가 아님 · 모델별 기능 모두 끔)'
         const said = ROUTE19_DIAG[`${model}/${level}`]!
@@ -174,6 +176,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
         expect(reads).toEqual(level === 'beginner' ? readTwice(model === 'haiku' ? HAIKU_ALIAS : SONNET_ALIAS) : [])
         expect(flags).toEqual(level === 'beginner' ? [...PROVIDERS, ...PROVIDERS] : [])
+        expect(w.settingsReads).toBe(level === 'beginner' ? 2 : 0)
       })
     }
   }
@@ -353,6 +356,96 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     expect(flags).toEqual(PROVIDERS.slice(0, 3))
   })
 
+  // The settings' `modelOverrides` (1.10.0 cross-review, round 3): Claude Code 2.1.317 turns `haiku` and `sonnet` to the
+  // ids it names with no variable set, whichever settings hold it (`--settings`, the user's, the project's; checked on
+  // real windows, docs/qa/견본.md), so every switch is off there as for an alias variable set (R1–R4). Read after the
+  // variables, only where the route turns a switch on; looked at for being empty alone, never kept, shown or sent.
+  for (const model of ['haiku', 'sonnet'] as const) {
+    test(`${model} as shipped with modelOverrides in the settings, no variable set: every switch off, 1.9.0's requests; /learn 진단 says the setting is there, with neither id`, { options: { model } }, async ($, on) => {
+      const reads = aliasReads(on)
+      const flags = providerReads(on)
+      const { calls, diag, w } = await routeDay($, on, w => {
+        w.settings = { model: 'sonnet', ...OVERRIDES }
+      })
+      expect(calls).toEqual(ROUTE19_CALLS.beginner.map(call => ({ model, ...call })))
+      expect(modelSaid(diag)).toBe(`${model}(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)`)
+      expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
+      expect(diag).not.toContain('some-model-1')
+      expect(diag).not.toContain('override-target-x')
+      // Read once at session start, after the variables: a route not kept is not read again (recheckRemap).
+      expect(reads).toEqual([model === 'haiku' ? HAIKU_ALIAS : SONNET_ALIAS])
+      expect(flags).toEqual([...PROVIDERS])
+      expect(w.settingsReads).toBe(1)
+    })
+  }
+
+  for (const [what, settings, isKept] of [
+    ['absent (other keys alone)', { model: 'sonnet', env: { SOME_OTHER: '1' } }, true],
+    ['an empty object', { modelOverrides: {} }, true],
+    ['null', { modelOverrides: null }, true],
+    ['one entry whose target is blank (looked at for being empty alone)', { modelOverrides: { 'some-model-1': '' } }, false],
+    ['not an object', { modelOverrides: 'override-target-x' }, false],
+    ['an array', { modelOverrides: ['override-target-x'] }, false],
+  ] as const) {
+    test(`modelOverrides ${what}: ${isKept ? 'the route stands, read again by /learn 진단' : 'every switch off'}`, { options: { model: 'sonnet' } }, async ($, on) => {
+      const w = world(on)
+      w.settings = settings
+      await start($)
+      const diag = (await learn($, '진단')).text ?? ''
+      expect(modelSaid(diag)).toBe(isKept ? 'sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)' : 'sonnet(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)')
+      expect(diag).not.toContain('override-target-x')
+      expect(w.settingsReads).toBe(isKept ? 2 : 1)
+    })
+  }
+
+  test('settings that cannot be read: every switch off; /learn 진단 says the alias could not be checked', { options: { model: 'haiku' } }, async ($, on) => {
+    const w = world(on)
+    w.settingsFails = true
+    await start($)
+    const diag = (await learn($, '진단')).text ?? ''
+    expect(modelSaid(diag)).toBe('haiku(별칭을 확인하지 못함 · 모델별 기능 모두 끔)')
+    expect(w.settingsReads).toBe(1)
+  })
+
+  test('an alias variable or a provider\'s switch set: modelOverrides is not read (the first reason found is the one said)', { options: { model: 'sonnet' } }, async ($, on) => {
+    const w = world(on, 'ok', null, true, new Map(), { CLAUDE_CODE_USE_BEDROCK: '1' })
+    w.settings = { ...OVERRIDES }
+    await start($)
+    expect(modelSaid((await learn($, '진단')).text ?? '')).toBe('sonnet(제공자 변수를 둠 · 모델별 기능 모두 끔)')
+    expect(w.settingsReads).toBe(0)
+  })
+
+  // A window whose route turns nothing on reads no settings, modelOverrides there or not: another level, both rows
+  // turned off by a harness (1.9.0's reads to the byte; a model string with no row is routeOf's 'unmeasured', route.test.ts).
+  for (const [what, options, harness] of [
+    ['at intermediate', { model: 'haiku', level: 'intermediate' }, undefined],
+    ['at advanced', { model: 'sonnet', level: 'advanced' }, undefined],
+    ['with both rows turned all off', { model: 'sonnet', level: 'beginner' }, { models: { haiku: { ...FLAT_OFF }, sonnet: { ...FLAT_OFF } } }],
+  ] as const) {
+    test(`${what}, modelOverrides in the settings: no settings read, 1.9.0's requests`, { options }, async ($, on) => {
+      const { calls, w } = await routeDay($, on, w => {
+        w.settings = { ...OVERRIDES }
+        w.harness = harness
+      })
+      expect(calls).toEqual(ROUTE19_CALLS[options.level].map(call => ({ model: options.model, ...call })))
+      expect(w.settingsReads).toBe(0)
+    })
+  }
+
+  test('modelOverrides set in the session (sonnet as shipped): /learn 진단 says every switch off from then on, and so it stays once the setting goes', { options: { model: 'sonnet' } }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    expect(modelSaid((await learn($, '진단')).text ?? '')).toBe('sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)')
+    w.settings = { ...OVERRIDES }
+    const diag = (await learn($, '진단')).text ?? ''
+    expect(modelSaid(diag)).toBe('sonnet(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)')
+    expect(diag).not.toContain('override-target-x')
+    w.settings = {}
+    expect(modelSaid((await learn($, '진단')).text ?? '')).toBe('sonnet(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)')
+    // Read at session start and by the first two /learn 진단; none once the route is off.
+    expect(w.settingsReads).toBe(3)
+  })
+
   // The settings' env changed in a session turns the alias with it, and this window's environment too, with no reload
   // (Claude Code 2.1.317, 1.10.0 cross-review): the route session start found kept is read again by /learn 진단 (and
   // where the switch acts, writeNote); one no longer kept is off from then on, never on again.
@@ -385,14 +478,15 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
   // off, as a later table may, gives 1.9.0's requests and /learn 진단 as 1.9.0 said it, no route named (routeOf over the
   // table the window runs); the window's own row alone turned off reads none either (1.10.0 cross-review).
   for (const model of ['haiku', 'sonnet'] as const) {
-    test(`${model} with both models rows turned all off: 1.9.0's requests and /learn 진단 (no route, its test switch named), no alias or provider's switch read though both are set`, { options: { model } }, async ($, on) => {
+    test(`${model} with both models rows turned all off: 1.9.0's requests and /learn 진단 (no route, its test switch named), no alias, provider's switch or settings read though all three are set`, { options: { model } }, async ($, on) => {
       const reads = aliasReads(on)
       const flags = providerReads(on)
-      const { calls, diag } = await routeDay(
+      const { calls, diag, w } = await routeDay(
         $,
         on,
         w => {
           w.harness = { models: { haiku: { ...FLAT_OFF }, sonnet: { ...FLAT_OFF } } }
+          w.settings = { ...OVERRIDES }
         },
         { [model === 'haiku' ? HAIKU_ALIAS : SONNET_ALIAS]: 'pinned-model-x', CLAUDE_CODE_USE_BEDROCK: '1' },
       )
@@ -401,6 +495,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
       expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · ${model}${SETTINGS_TAIL} beginner`)
       expect(reads).toEqual([])
       expect(flags).toEqual([])
+      expect(w.settingsReads).toBe(0)
     })
   }
 
@@ -791,12 +886,13 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
    * the answered calls' texts `texts`, the calls' replies `replies` first, the environment `env`. Its calls, store, and
    * the note as stored.
    */
-  async function wrote($: Engine, on: On, harness: Record<string, unknown> | undefined, texts: string[], replies: Reply[] = [], env: Record<string, string> = {}) {
+  async function wrote($: Engine, on: On, harness: Record<string, unknown> | undefined, texts: string[], replies: Reply[] = [], env: Record<string, string> = {}, settings?: Record<string, unknown>) {
     const calls = routeCalls(on)
     const store = new Map<string, unknown>()
     const w = world(on, 'ok', null, true, store, env)
     w.files.set('/proj/.claude/learn-notes.md', TEAM_MD)
     w.harness = harness
+    w.settings = settings
     await start($)
     w.texts = [...texts]
     w.replies = [...replies]
@@ -1096,6 +1192,35 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
       expect((await learn($, '진단')).text ?? '').toContain(name === 'ANTHROPIC_DEFAULT_HAIKU_MODEL' ? '(별칭 변수를 둠 · 모델별 기능 모두 끔)' : '(제공자 변수를 둠 · 모델별 기능 모두 끔)')
     })
   }
+
+  // The settings' modelOverrides (1.10.0 cross-review, round 3): Claude Code turns the alias to the id it names with no
+  // variable set, so the one cell shipped on reaches nothing there either, at session start or once set in the session.
+  const OVERRIDDEN = { modelOverrides: { 'some-model-1': 'override-target-x' } }
+  for (const model of ['haiku', 'sonnet'] as const) {
+    test(`as shipped (${model}, no harness), modelOverrides in the settings: every switch off, a practice bringing the rule's name in under a rule line kept as 1.9.0 kept it, its t the concept's`, { options: { model } }, async ($, on) => {
+      const { calls, note, w } = await wrote($, on, undefined, [PLAIN], [], {}, OVERRIDDEN)
+      expect(calls.map(call => [call.model, call.system])).toEqual([[model, SYSTEM]])
+      expect(note().text).toBe(PLAIN)
+      expect(w.journal().at(-1)!.text).toContain(`- 할 일: ${PLAIN_TASK}`)
+      await conceptT($)
+      const diag = (await learn($, '진단')).text ?? ''
+      expect(diag).toContain(`· ${model}(modelOverrides 설정을 둠 · 모델별 기능 모두 끔) ·`)
+      expect(diag).not.toContain('시험 스위치')
+    })
+  }
+
+  test('as shipped (haiku), modelOverrides set in the session: the next note is kept as every switch off keeps it, its t the concept\'s; the one before stays marked', { options: { model: 'haiku' } }, async ($, on) => {
+    const { note, w, store } = await wrote($, on, undefined, [PLAIN])
+    expect(note().text).toBe(PLAIN_KEPT)
+    w.settings = OVERRIDDEN
+    w.texts = [PLAIN]
+    await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
+    await finish(w)
+    expect(note().text).toBe(PLAIN)
+    expect(notesIn(store).map(one => one.text)).toEqual([PLAIN_KEPT, PLAIN])
+    await conceptT($)
+    expect((await learn($, '진단')).text ?? '').toContain('(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)')
+  })
 
   // Every rule's names, not the first's alone (the notes above bring apiRequest in): a practice bringing in the name of
   // a later rule under that rule's line is kept marked too (1.10.0 cross-review).

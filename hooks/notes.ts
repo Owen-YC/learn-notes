@@ -8279,8 +8279,8 @@ export function switchKeys(): (keyof Switches)[] {
 /**
  * Every switch off: each its constant, as 1.9.0 shipped them (false · Infinity), and isRuleWide false (1.10.0 G6: no
  * constant, 1.9.0's ruleLabelled). The constants stay off in 1.10.0; a feature turns on only in MODEL_SWITCHES, for the
- * model it was measured with. A model string with no row of its own, an alias turned to another model (its variable
- * or a provider's switch set: Remap), or a level other than beginner runs with these.
+ * model it was measured with. A model string with no row of its own, an alias turned to another model (its variable,
+ * a provider's switch or the settings' modelOverrides set: Remap), or a level other than beginner runs with these.
  */
 export const SWITCHES_OFF: Readonly<Switches> = Object.freeze({
   isRuleDrill: IS_RULE_DRILL,
@@ -8410,18 +8410,20 @@ export function overlaySwitches(base: Readonly<Switches>, raw: unknown): Switche
  * Whether the model setting's alias points where Claude Code's own does (1.10.0 G7, D24): `kept`; `remapped` when the
  * environment sets its variable (ANTHROPIC_DEFAULT_HAIKU_MODEL · ANTHROPIC_DEFAULT_SONNET_MODEL, not blank), whatever
  * it names; `provider` when it sets a provider's switch (CLAUDE_CODE_USE_BEDROCK and the others, not blank), under
- * which Claude Code turns `haiku` and `sonnet` to models no sample was run with (1.10.0 cross-review); `unreadable`
- * when either could not be read. Read only in a window whose route has a switch on.
+ * which Claude Code turns `haiku` and `sonnet` to models no sample was run with (1.10.0 cross-review); `overridden`
+ * when the settings hold a `modelOverrides` that is not empty, with which Claude Code turns them to the ids it names
+ * with no variable set (1.10.0 cross-review, round 3); `unreadable` when any of these could not be read. Read only in
+ * a window whose route has a switch on.
  */
-export type Remap = 'kept' | 'remapped' | 'provider' | 'unreadable'
+export type Remap = 'kept' | 'remapped' | 'provider' | 'overridden' | 'unreadable'
 
 /**
  * What /learn 진단's settings line says after the model setting (1.10.0 G7): the features this window's route turns on
  * (`on`, maybe none), or why every one is off: a model string no row is for (`unmeasured`), a level other than
- * beginner (`level`), an alias whose variable is set (`remapped`), a provider's switch set (`provider`) or either one
- * that could not be checked (`unreadable`).
+ * beginner (`level`), an alias whose variable is set (`remapped`), a provider's switch set (`provider`), the
+ * settings' modelOverrides set (`overridden`) or any of these that could not be checked (`unreadable`).
  */
-export type Route = { on: readonly string[] } | 'unmeasured' | 'level' | 'remapped' | 'provider' | 'unreadable'
+export type Route = { on: readonly string[] } | 'unmeasured' | 'level' | 'remapped' | 'provider' | 'overridden' | 'unreadable'
 
 /**
  * This window's route for /learn 진단 (1.10.0 G7), from the model setting, the level, the alias's state and the
@@ -8443,6 +8445,7 @@ export function routeText(route: Route | undefined): string {
   if (route === 'level') return '(설명 수준이 beginner가 아님 · 모델별 기능 모두 끔)'
   if (route === 'remapped') return '(별칭 변수를 둠 · 모델별 기능 모두 끔)'
   if (route === 'provider') return '(제공자 변수를 둠 · 모델별 기능 모두 끔)'
+  if (route === 'overridden') return '(modelOverrides 설정을 둠 · 모델별 기능 모두 끔)'
   if (route === 'unreadable') return '(별칭을 확인하지 못함 · 모델별 기능 모두 끔)'
   return route.on.length === 0 ? '(이 모델에서 켠 기능 없음)' : `(이 모델에서 켠 기능: ${route.on.join(' · ')})`
 }

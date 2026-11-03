@@ -149,6 +149,15 @@ export type World = {
    * session start; undefined for none, as a release's plugin.json has: each is then its constant in notes.ts.
    */
   harness?: Record<string, unknown>
+  /**
+   * The settings merged over every source, as `$.settings.read()` answers them (1.10.0 cross-review: a window whose
+   * route turns a switch on reads `modelOverrides` there); undefined for none of note, answered as `{}`.
+   */
+  settings?: Record<string, unknown>
+  /** True while each settings read is refused. */
+  settingsFails?: boolean
+  /** How many times the settings were read (a read of one key is the object's, projected: one event, no key named). */
+  settingsReads: number
   /** This session's id, as `$.session.id()` answers it. */
   sessionId: string
   /** The key of each store write that went in, in order. */
@@ -237,6 +246,7 @@ export function world(
     locked: [],
     version: '1.7.0',
     sessionId: 'session-mine',
+    settingsReads: 0,
     sets: [],
     gets: [],
     journal: () => w.writes.filter(write => !write.path.endsWith('/concepts.md')),
@@ -307,6 +317,12 @@ export function world(
     return { value: undefined }
   })
   on('store.keys', () => ({ value: [...w.store.keys()] }))
+  // The settings as the engine merges them, a snapshot in plain data each read (a key's read is the object's, projected).
+  on('settings.read', () => {
+    w.settingsReads += 1
+    if (w.settingsFails) return { deny: 'refused by policy' }
+    return { value: JSON.parse(JSON.stringify(w.settings ?? {})) as Record<string, unknown> }
+  })
   on('ui.log', (_$, e) => {
     w.logs.push(e.text)
     if (e.to !== 'debug') w.transcript.push(e.text)
