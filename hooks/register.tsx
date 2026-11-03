@@ -682,7 +682,8 @@ let myVersion: string | undefined
 /**
  * The model-gated features' switches this load runs with (1.10.0 G7; 1.9.0 had each feature's constant here): the
  * route of its model setting and level, decided once at session start (chooseSwitches), before anything there calls a
- * model; until then each off, its constant in notes.ts (SWITCHES_OFF). Every call that hands a feature its switch hands
+ * model, and turned all off later only by an alias that no longer points where it did then (recheckRemap); until
+ * then each off, its constant in notes.ts (SWITCHES_OFF). Every call that hands a feature its switch hands
  * it this, so one load runs every path with the one route. A test's harness turns one the other way through the
  * plugin.json it serves (its `harness` object, read with the version at session start, readManifest): `models`, a row
  * for `haiku` or `sonnet` laid over MODEL_SWITCHES' as a measured route would be, and the 1.9.0 flat keys over all (a
@@ -694,6 +695,11 @@ const build: Switches = { ...SWITCHES_OFF }
 let release: Readonly<Switches> = SWITCHES_OFF
 /** Whether this load's model alias points where Claude Code's own does (remapState): read only when its route turns one on. */
 let remap: Remap = 'kept'
+/**
+ * The model setting whose alias session start read (chooseSwitches: its route turned a switch on), and the harness it
+ * laid over the switches: what recheckRemap reads again and lays again. Undefined while nothing was read.
+ */
+let aliasRead: { model: MeasuredModel; harness: Record<string, unknown> | undefined } | undefined
 /** The table of routes this load runs: MODEL_SWITCHES, or a test harness's `models` rows over it (chooseSwitches). */
 let routes: Readonly<Record<MeasuredModel, Readonly<Switches>>> = MODEL_SWITCHES
 /** The switches this load runs the other way from its route's (a harness's), with their state, for /learn 진단. */
@@ -702,15 +708,28 @@ function switched(): string[] {
 }
 
 /**
- * Whether the environment turns the model setting's alias to another model (1.10.0 G7, D24): only the variable of
+ * Whether the environment turns the model setting's alias to another model (1.10.0 G7, D24): first the variable of
  * that alias, read by its name as written (Claude Code reads ANTHROPIC_DEFAULT_HAIKU_MODEL for `haiku` and
- * ANTHROPIC_DEFAULT_SONNET_MODEL for `sonnet`; checked on a real window, docs/qa/견본.md). A value that is not blank is
- * `remapped`, a read that throws `unreadable`. The value is looked at for being blank alone: never kept, shown or sent.
+ * ANTHROPIC_DEFAULT_SONNET_MODEL for `sonnet`; checked on a real window, docs/qa/견본.md); a value that is not blank is
+ * `remapped`. Then, the alias kept, the switches of the providers under which Claude Code turns `haiku` and `sonnet` to
+ * models no sample was run with though no alias variable is set (Bedrock, Vertex, Foundry and the others, 2.1.317;
+ * docs/qa/견본.md, 1.10.0 cross-review), each by its name as written: one that is not blank is `provider`. A read that
+ * throws is `unreadable`. Each value is looked at for being blank alone: never kept, shown or sent.
  */
 async function remapState($: EngineInterface, model: MeasuredModel): Promise<Remap> {
+  const isSet = (value: string | undefined) => value !== undefined && value.trim() !== ''
   try {
     const value = model === 'haiku' ? await $.env.get('ANTHROPIC_DEFAULT_HAIKU_MODEL') : await $.env.get('ANTHROPIC_DEFAULT_SONNET_MODEL')
-    return value !== undefined && value.trim() !== '' ? 'remapped' : 'kept'
+    if (isSet(value)) return 'remapped'
+    const providers = [
+      await $.env.get('CLAUDE_CODE_USE_BEDROCK'),
+      await $.env.get('CLAUDE_CODE_USE_VERTEX'),
+      await $.env.get('CLAUDE_CODE_USE_FOUNDRY'),
+      await $.env.get('CLAUDE_CODE_USE_ANTHROPIC_AWS'),
+      await $.env.get('CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD'),
+      await $.env.get('CLAUDE_CODE_USE_MANTLE'),
+    ]
+    return providers.some(isSet) ? 'provider' : 'kept'
   } catch {
     return 'unreadable'
   }
@@ -729,9 +748,27 @@ async function chooseSwitches($: EngineInterface, cfg: Config, harness: Record<s
   routes = { haiku: row('haiku'), sonnet: row('sonnet') }
   const real = switchesFor(cfg.model, cfg.level)
   const wanted = switchesFor(cfg.model, cfg.level, routes)
-  remap = hasOn(wanted) && (cfg.model === 'haiku' || cfg.model === 'sonnet') ? await remapState($, cfg.model) : 'kept'
+  aliasRead = hasOn(wanted) && (cfg.model === 'haiku' || cfg.model === 'sonnet') ? { model: cfg.model, harness } : undefined
+  remap = aliasRead !== undefined ? await remapState($, aliasRead.model) : 'kept'
   release = remap === 'kept' ? real : SWITCHES_OFF
   Object.assign(build, overlaySwitches(remap === 'kept' ? wanted : SWITCHES_OFF, harness))
+}
+
+/**
+ * Whether this load's alias still points where it did at session start (1.10.0 cross-review): the settings' `env`
+ * can change in a session, and Claude Code then turns the alias with it and this load's environment too, with no
+ * reload. Read again (remapState, the same variables) only where session start read them and found them kept; one
+ * no longer kept turns every switch off for the rest of the load, as session start would have (the harness laid
+ * again), and never back on. Asked right before the shipped switch on takes effect (writeNote) and by /learn 진단.
+ */
+async function recheckRemap($: EngineInterface): Promise<boolean> {
+  if (aliasRead === undefined || remap !== 'kept') return remap === 'kept'
+  const now = await remapState($, aliasRead.model)
+  if (now === 'kept' || remap !== 'kept') return remap === 'kept'
+  remap = now
+  release = SWITCHES_OFF
+  Object.assign(build, overlaySwitches(SWITCHES_OFF, aliasRead.harness))
+  return false
 }
 
 /**
@@ -4107,6 +4144,11 @@ async function writeNote(
     // While this model's isRuleWide is on (1.10.0 G6), a practice that brings a rule's name in is kept so too.
     const ruleNames = rules ? ruleNamesOf(rules.rules) : []
     let text = 'error' in asked ? '' : keptNoteText(asked.text, build.isRuleWide ? ruleNames : [])
+    // A note the switch keeps otherwise than 1.9.0 is kept so only while the alias still points where it did at
+    // session start (recheckRemap); one turned since keeps the note as every switch off does.
+    if (!('error' in asked) && build.isRuleWide && ruleNames.length > 0 && text !== keptNoteText(asked.text) && !(await recheckRemap($))) {
+      text = keptNoteText(asked.text, build.isRuleWide ? ruleNames : [])
+    }
     // While this model's isRuleDrill is on (1.10.0 G6), a note that says the change may differ from a team rule has
     // that rule's practice made by a call of its own, in place of its own; one that fails or that withRuleDrill does
     // not take leaves the note its own, as with the switch off. Never `auto`: the note alone counts toward the day's
@@ -7060,6 +7102,8 @@ const SETTING_FIELDS = ['autoNote', 'model', 'dailyAutoNotes', 'level', 'autoSav
  * that cannot be read is left out or said unknown: it is what is asked for when things fail.
  */
 async function diagCommand($: EngineInterface, cfg: Config, isAway: boolean): Promise<string> {
+  // The route as it stands now: an alias or a provider's switch set since session start turns every switch off.
+  await recheckRemap($)
   const now = await $.clock.now().catch(() => Date.now())
   const day = stamp(now).day
   const quiet = <T,>(work: Promise<T>, fallback: T) => work.catch(() => fallback)

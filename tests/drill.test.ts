@@ -961,6 +961,55 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note kept as 1.9.0 kept it, a wide
     expect(ruleLabelled(two, NAMES)).toBe([...HEAD, ...PLAIN_KEPT, '', '- 할 일 (팀 규칙): 응답을 기다리지 않고 Promise 그대로 돌려주게 바꿔 보세요', ...CONCEPT.slice(2)].join('\n'))
   })
 
+  // The 팀 규칙: line read in one pass (1.10.0 cross-review): the spaces before its colon one run, the bold's own after
+  // it, never two runs side by side. A line of spaces with no colon (ideographic ones too, as an IME types them) took
+  // a time growing with the square of its length (about 0.15 s at the 9000 characters a note keeps, more on a slow
+  // laptop) on every note of a window whose switch is on; now as little as any line. The lines it reads are the same.
+  test('W2\'s 팀 규칙: line takes no time over a long run of spaces with no colon (ideographic too), and reads the same lines: bold before or after the colon, spaces either side, full-width colon; none without a colon', () => {
+    const untouched = HEAD.filter(line => line !== RULE_LINE)
+    for (const space of [' ', '\u3000']) {
+      const run = `팀 규칙${space.repeat(8200)}다음 줄에 적습니다`
+      const note = [...untouched.slice(0, 4), run, ...untouched.slice(4), ...PLAIN].join('\n')
+      expect(note.length).toBeLessThan(9000)
+      const started = Date.now()
+      expect(keptNoteText(note, NAMES)).toBe(note)
+      expect(Date.now() - started).toBeLessThan(50)
+    }
+    const plain = [...HEAD, ...PLAIN].join('\n')
+    const kept = [...HEAD, ...PLAIN_KEPT].join('\n')
+    for (const said of ['**팀 규칙**: 서버 요청은 apiRequest로 합니다', '**팀 규칙** : 서버 요청은 apiRequest로 합니다', '팀 규칙 ** : 서버 요청은 apiRequest로 합니다', '팀 규칙 :  서버 요청은 apiRequest로 합니다', '팀규칙:서버 요청은 apiRequest로 합니다', `팀 규칙${'\u3000'.repeat(3)}：**서버 요청은 apiRequest로 합니다**`]) {
+      expect(ruleLabelled(plain.replace(RULE_LINE, said), NAMES)).toBe(kept.replace(RULE_LINE, said))
+    }
+    for (const said of ['팀 규칙 ** 서버 요청은 apiRequest로 합니다', '팀 규칙 **: 없음', '팀 규칙 ****: 서버 요청', `팀 규칙${' '.repeat(40)}서버 요청은 apiRequest로 합니다`]) {
+      const untouchedNote = plain.replace(RULE_LINE, said)
+      expect(ruleLabelled(untouchedNote, NAMES)).toBe(untouchedNote)
+    }
+  })
+
+  // W2 reads every name the rules write in backticks (ruleNamesOf): the ones a rule says not to use and words of the
+  // language a rule names too. Under a note that touched a rule, a practice of its concept whose example brings one of
+  // them in is kept as the rule's, no t: by G6's §11 a W false mark, which the measured samples never held (docs/qa/견본.md,
+  // G6 '다시 잴 때', 1.10.0 cross-review). Held here as shipped, a record: a later W2 that narrows the names shows here.
+  test('W2 as shipped (a record): a concept practice bringing in a name a rule says not to use (console.log), or a word of the language a rule names (const · let), is kept as the rule\'s under a note that touched a rule', () => {
+    const LANG_RULES = ['변수는 `var` 대신 `const`나 `let`으로 선언한다', '커밋 전에 `console.log`를 지운다', 'TypeScript에서 `any`를 쓰지 않는다']
+    const names = ruleNamesOf(LANG_RULES)
+    expect(names).toEqual(['var', 'const', 'let', 'console.log', 'any'])
+    const noteOf = (said: string, line: string, example: string) =>
+      ['### 한 줄 요약', '합계를 내는 함수를 만들었습니다', '### 왜 이렇게 바꿨을까', said, '### 배울 개념', '- **for...of**: 배열을 하나씩 돕니다 — `for (const item of items) {`', '### 직접 해 보기', '- 할 일: 반복할 때마다 값이 어떻게 바뀌는지 보이게 해 보세요', `- 고칠 줄: \`${line}\``, '- 확인: `sum([1, 2])` → 3', `- 예시 답: \`${example}\``].join('\n')
+    const cases = [
+      noteOf('팀 규칙과 다를 수 있음: 변수는 `const`나 `let`으로 선언하라는 규칙과 달리 `var`를 씁니다', 'for (const item of items) {', 'for (let item of items) {'),
+      noteOf('팀 규칙: 커밋 전에 console.log를 지웠습니다', 'total += item.price', 'console.log(total += item.price)'),
+    ]
+    for (const note of cases) {
+      expect(keptNoteText(note, names)).toBe(note.replace('- 할 일: ', '- 할 일 (팀 규칙): '))
+      expect(keptNoteText(note)).toBe(note)
+    }
+    // The measured team file: a concept practice that brings console.log in under its fetch rule's line.
+    const logged = [...HEAD, '### 직접 해 보기', '- 할 일: 돌려주기 전에 값을 한 번 찍어 보세요', '- 고칠 줄: `return res.json()`', '- 확인: `loadUser(1)` → 같은 사용자 정보가 나옵니다', '- 예시 답: `console.log(res); return res.json()`'].join('\n')
+    expect(keptNoteText(logged, NAMES)).toBe(logged.replace('- 할 일: ', '- 할 일 (팀 규칙): '))
+    expect(keptNoteText(logged)).toBe(logged)
+  })
+
   test('ruleLabelled: a 팀 규칙: line and a task naming the team that brings no rule name in is left (no W1); a task in the team\'s words that changes a format is left (G19); twice is once, every shape', () => {
     const teamSaid = [...HEAD.map(line => (line === RULE_LINE ? '팀 규칙: 서버 요청은 apiRequest로 합니다' : line)), '### 직접 해 보기', '- 할 일: 팀 규칙처럼 응답을 기다리지 않게 바꿔 보세요', ...CONCEPT.slice(2)].join('\n')
     expect(ruleLabelled(teamSaid, NAMES)).toBe(teamSaid)

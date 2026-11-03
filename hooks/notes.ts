@@ -2434,8 +2434,13 @@ export function ruleLabelled(text: string, ruleNames: readonly string[] = []): s
   return [...out.slice(0, first.start + 1), ...merged, ...(rest.length > 0 ? ['', ...rest] : [])].join('\n')
 }
 
-/** A line saying the change touches a team rule (1.6.0's other shape, `팀 규칙: …`), bold, bulleted or quoted too. */
-const TEAM_RULE_SAID = /^[^\p{L}\p{N}]*팀\s*규칙\s*(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*)$/u
+/**
+ * A line saying the change touches a team rule (1.6.0's other shape, `팀 규칙: …`), bold, bulleted or quoted too.
+ * The spaces before the colon are one run with the bold's own after it (`(?:\*\*\s*)?`), never two runs side by
+ * side: the same lines read, with the same words, in a time that grows with the line, not with its square (1.10.0
+ * cross-review; the measured reading of 1.10.0 G6, docs/qa/견본.md).
+ */
+const TEAM_RULE_SAID = /^[^\p{L}\p{N}]*팀\s*규칙\s*(?:\*\*\s*)?[:：]\s*(?:\*\*)?\s*(.*)$/u
 
 /** Whether a note's lines before `end` hold a `팀 규칙:` line (TEAM_RULE_SAID) that says something, not "없음". */
 function teamRuleSaid(lines: readonly string[], end: number): boolean {
@@ -8274,8 +8279,8 @@ export function switchKeys(): (keyof Switches)[] {
 /**
  * Every switch off: each its constant, as 1.9.0 shipped them (false · Infinity), and isRuleWide false (1.10.0 G6: no
  * constant, 1.9.0's ruleLabelled). The constants stay off in 1.10.0; a feature turns on only in MODEL_SWITCHES, for the
- * model it was measured with. A model string with no row of its own, an alias turned to another model, or a level
- * other than beginner runs with these.
+ * model it was measured with. A model string with no row of its own, an alias turned to another model (its variable
+ * or a provider's switch set: Remap), or a level other than beginner runs with these.
  */
 export const SWITCHES_OFF: Readonly<Switches> = Object.freeze({
   isRuleDrill: IS_RULE_DRILL,
@@ -8403,17 +8408,20 @@ export function overlaySwitches(base: Readonly<Switches>, raw: unknown): Switche
 
 /**
  * Whether the model setting's alias points where Claude Code's own does (1.10.0 G7, D24): `kept`; `remapped` when the
- * environment turns it to another model (ANTHROPIC_DEFAULT_HAIKU_MODEL · ANTHROPIC_DEFAULT_SONNET_MODEL set);
- * `unreadable` when that could not be read. Read only in a window whose route has a switch on.
+ * environment sets its variable (ANTHROPIC_DEFAULT_HAIKU_MODEL · ANTHROPIC_DEFAULT_SONNET_MODEL, not blank), whatever
+ * it names; `provider` when it sets a provider's switch (CLAUDE_CODE_USE_BEDROCK and the others, not blank), under
+ * which Claude Code turns `haiku` and `sonnet` to models no sample was run with (1.10.0 cross-review); `unreadable`
+ * when either could not be read. Read only in a window whose route has a switch on.
  */
-export type Remap = 'kept' | 'remapped' | 'unreadable'
+export type Remap = 'kept' | 'remapped' | 'provider' | 'unreadable'
 
 /**
  * What /learn 진단's settings line says after the model setting (1.10.0 G7): the features this window's route turns on
  * (`on`, maybe none), or why every one is off: a model string no row is for (`unmeasured`), a level other than
- * beginner (`level`), an alias turned to another model (`remapped`) or one that could not be checked (`unreadable`).
+ * beginner (`level`), an alias whose variable is set (`remapped`), a provider's switch set (`provider`) or either one
+ * that could not be checked (`unreadable`).
  */
-export type Route = { on: readonly string[] } | 'unmeasured' | 'level' | 'remapped' | 'unreadable'
+export type Route = { on: readonly string[] } | 'unmeasured' | 'level' | 'remapped' | 'provider' | 'unreadable'
 
 /**
  * This window's route for /learn 진단 (1.10.0 G7), from the model setting, the level, the alias's state and the
@@ -8433,7 +8441,8 @@ export function routeText(route: Route | undefined): string {
   if (route === undefined) return ''
   if (route === 'unmeasured') return '(잰 적 없는 모델 · 모델별 기능 모두 끔)'
   if (route === 'level') return '(설명 수준이 beginner가 아님 · 모델별 기능 모두 끔)'
-  if (route === 'remapped') return '(별칭을 다른 모델로 바꿔 둠 · 모델별 기능 모두 끔)'
+  if (route === 'remapped') return '(별칭 변수를 둠 · 모델별 기능 모두 끔)'
+  if (route === 'provider') return '(제공자 변수를 둠 · 모델별 기능 모두 끔)'
   if (route === 'unreadable') return '(별칭을 확인하지 못함 · 모델별 기능 모두 끔)'
   return route.on.length === 0 ? '(이 모델에서 켠 기능 없음)' : `(이 모델에서 켠 기능: ${route.on.join(' · ')})`
 }
