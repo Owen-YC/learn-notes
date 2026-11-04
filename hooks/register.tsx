@@ -764,8 +764,10 @@ async function chooseSwitches($: EngineInterface, cfg: Config, harness: Record<s
  * and `modelOverrides` can change in a session, and Claude Code then turns the alias with them (the environment too,
  * for `env`), with no reload. Read again (remapState, the same variables and key) only where session start read them
  * and found them kept; one no longer kept turns every switch off for the rest of the load, as session start would
- * have (the harness laid again), and never back on. Asked right before the shipped switch on takes effect (writeNote)
- * and by /learn 진단.
+ * have (the harness laid again), and never back on. Asked right before the shipped switch on takes effect (writeNote),
+ * by askNote while 생각해 보기 is on (a harness's alone in this build: 1.11.0 review), and by /learn 진단. The other
+ * switches (the quiz's G1 · G2 · G3 · G4 and G6's isRuleDrill, off in both rows) are not asked again where they act: a
+ * row that turns one on asks there first.
  */
 async function recheckRemap($: EngineInterface): Promise<boolean> {
   if (aliasRead === undefined || remap !== 'kept') return remap === 'kept'
@@ -3546,12 +3548,16 @@ async function askNote(
   const shown = await screened($, cfg, note)
   // 생각해 보기 as this load runs it (1.10.0 G5), read once for every step below: r's own question (its key's, never
   // words typed as its label) asks for the line only of a note whose change has a run to follow, the rest 1.7.0's
-  // words to the byte; rebuilt before it is masked, as any question is.
-  const isThinkAsked = build.isThinkAsked
-  const isTrace = isThinkAsked && label === TRACE_LABEL && question !== label
+  // words to the byte; rebuilt before it is masked, as any question is. While on, the alias is read again first
+  // (recheckRemap, 1.11.0 review): one turned in the session turns it off here, as /learn 진단 would, so r's key, which
+  // built its words with the switch as it stood, is asked 1.7.0's and the rest goes as 1.9.0 sent it. Off, nothing is read.
+  const wasThinkAsked = build.isThinkAsked
+  const isThinkAsked = wasThinkAsked && (await recheckRemap($))
+  const isKeyed = label === TRACE_LABEL && question !== label
+  const isTrace = isThinkAsked && isKeyed
   const isCode = isTrace && isThinkCode(shown.changes)
   // A key pasted into a question is masked before the model, the store or the journal sees it.
-  const masked = redactText(isTrace ? traceQuestion(isCode) : question).text
+  const masked = redactText(wasThinkAsked && isKeyed ? traceQuestion(isCode) : question).text
   const kept = label === question ? masked : redactText(label).text
   // A question typed (in the field or by /learn 질문, never r's or e's) while r's walk-through is open (1.8.0): sent
   // with the walk-through in full and its 생각해 보기, to be checked as an answer or answered as a question. While

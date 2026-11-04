@@ -700,6 +700,12 @@ describe('1.10.0: 생각해 보기 (G5): which notes get the line, its closed fo
     expect(thinkKept(lone, false)).toBe(steps.trimEnd())
     // A line with a sentence after it is not the last: gone, the sentence kept.
     expect(thinkKept(`${steps}\n${SHAPED}\n이 값으로 직접 따라가 보세요.`, true)).toBe(`${steps}\n이 값으로 직접 따라가 보세요.`)
+    // Nor is one with a line after it holding a control character alone (1.11.0 review): thinkOf reads past that line
+    // (clean), the last line is counted as it came, so the line goes, the rest as it came, and nothing opens.
+    const stray = `${steps}\n${SHAPED}\n\u001b`
+    expect(thinkOf(stray, true)).toBe('`items`를 `[]`로 바꾸면 최종 결과는 무엇이 될까요?')
+    expect(thinkKept(stray, true)).toBe(`${steps}\n\u001b`)
+    expect(openThink([{ question: TRACE_LABEL, answer: thinkKept(stray, true), at: 0 }], 0, true)).toBeUndefined()
     // One in the middle goes; the last in form stays.
     expect(thinkKept(`${FREE}\n${steps}\n${SHAPED}`, true)).toBe(`${steps}\n${SHAPED}`)
     // A label alone on the last line asks nothing: gone.

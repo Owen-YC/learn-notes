@@ -31,6 +31,7 @@ import {
   WORKED_PLAN_LINE,
   WORKED_TURN_ASK,
   WRITER_MARK,
+  askPrompt,
   checkPrompt,
   cleanConcepts,
   cleanMarkedConcepts,
@@ -219,7 +220,9 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     expect(calls.filter(call => call.maxTokens === 4600)).toHaveLength(1)
     expect(calls.filter(call => call.maxTokens === 3600)).toHaveLength(0)
     expect(calls.every(call => call.model === 'sonnet' && call.effort === 'low')).toBe(true)
-    expect(reads).toEqual(readTwice(SONNET_ALIAS))
+    // Read at session start, again by each of the day's three questions while 생각해 보기 is on (r, e and /learn 질문:
+    // askNote, 1.11.0 review) and by /learn 진단.
+    expect(reads).toEqual(Array.from({ length: 5 }, () => SONNET_ALIAS))
     // The route's own table turns 팀 규칙 표지 넓힘 on (1.10.0 G6): the harness's row is named as a test switch where
     // it differs from that table, each one; a cell the shipped row has on already is none.
     expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)${SETTINGS_TAIL} beginner`)
@@ -2921,5 +2924,41 @@ describe('1.10.0: 생각해 보기 (G5) behind its switch: the line only under c
       expect(await ui.find({ type: 'Text', text: `${head} · 2000이요` })).toBeDefined()
       await ui.unmount()
     })
+  }
+
+  // An alias turned in the session (its variable, a provider's switch or modelOverrides in the settings: 1.10.0
+  // cross-review) turns every switch off for the rest of the load (G7 R4). askNote reads it again where it reads the
+  // switch (1.11.0 review), so r and a guess after it go as 1.9.0 sent them from then on, before any /learn 진단.
+  for (const model of ['haiku', 'sonnet'] as const) {
+    for (const [what, name] of [
+      ['its alias variable', model === 'haiku' ? 'ANTHROPIC_DEFAULT_HAIKU_MODEL' : 'ANTHROPIC_DEFAULT_SONNET_MODEL'],
+      ["a provider's switch", 'CLAUDE_CODE_USE_VERTEX'],
+      ['modelOverrides in the user settings', undefined],
+    ] as const) {
+      test(`on (${model}'s models row), ${what} set in the session: r and a guess after it are 1.9.0's requests to the byte; /learn 진단 says every switch off`, { options: { model } }, async ($, on) => {
+        const now: Record<string, string> = {}
+        if (name !== undefined) on('env.get', { name }, (_$, e, next) => (now[e.name] !== undefined ? { value: now[e.name] } : next(e)))
+        const { w, ui, store, trace, typed } = await opened($, on, 'code', { models: { [model]: { isThinkAsked: true } } })
+        if (name !== undefined) now[name] = 'set-in-session-x'
+        else w.settings = { user: { modelOverrides: { 'some-model-1': 'override-target-x' } } }
+        const from = w.models.length
+        await trace(SHAPED)
+        await typed('2000?', '네, 2000입니다.')
+        await ui.unmount()
+        const calls = w.models.slice(from).map((prompt, i) => ({ system: w.systems[from + i], prompt, maxTokens: w.budgets[from + i] }))
+        // 1.9.0's r (THINK19_R, no line asked for) and its question after an open walk-through (THINK_RULE, never the check).
+        const note = (store.get('history') as Record<string, { notes: LearnNote[] }>)['/proj']!.notes[0]!
+        const off = askPrompt({ ...note, asks: note.asks!.slice(0, 1) }, '2000?', 'beginner', undefined, { question: SHAPED_Q, trace: SHAPED }, false)
+        expect(off).not.toBe(askPrompt({ ...note, asks: note.asks!.slice(0, 1) }, '2000?', 'beginner', undefined, { question: SHAPED_Q, trace: SHAPED }, true))
+        expect(calls).toEqual([
+          { system: THINK19_SYSTEM, prompt: THINK19_R.code, maxTokens: 900 },
+          { system: ASK_SYSTEM, prompt: off, maxTokens: 900 },
+        ])
+        expect(asksOf(store).map(({ question, answer }) => ({ question, answer }))).toEqual([{ question: '예시로 따라가기', answer: SHAPED }, { question: '2000?', answer: '네, 2000입니다.' }])
+        const diag = (await learn($, '진단')).text ?? ''
+        const said = name === undefined ? 'modelOverrides 설정을 둠' : name === 'CLAUDE_CODE_USE_VERTEX' ? '제공자 변수를 둠' : '별칭 변수를 둠'
+        expect(diag).toContain(`· ${model}(${said} · 모델별 기능 모두 끔) ·`)
+      })
+    }
   }
 })
