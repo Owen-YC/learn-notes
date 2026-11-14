@@ -608,9 +608,9 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
       { key: conceptKey(names[1]!), name: names[1]!, question: '문제 2', hint: '힌트 2', answer: '답 2', kind: 'why', rung: 'mine' },
       { key: conceptKey(names[2]!), name: names[2]!, question: '문제 3', hint: '힌트 3', answer: '답 3', kind: 'why', rung: 'mine' },
     ]
-    async function opened($: Engine, on: On, isOn: boolean) {
+    async function opened($: Engine, on: On, isOn: boolean, list: typeof items = items) {
       const concepts = Object.fromEntries(names.map(name => [conceptKey(name), { name, count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${name} 설명`, files: [], step: 2, reviewedAt: NOW - 8 * DAY }]))
-      const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['quiz', { at: NOW - 60_000, isRevealed: false, items }]])
+      const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['quiz', { at: NOW - 60_000, isRevealed: false, items: list }]])
       const w = world(on, 'ok', null, true, store)
       if (isOn) w.harness = { rungChangedStep: 2 }
       await start($)
@@ -624,7 +624,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
       const { w, store } = await opened($, on, true)
       const count = w.models.length
       const said = (await learn($, "퀴즈 2\n4\n{ name: '콩이', age: 9 }")).text
-      expect(said).toBe([ASKED, `1번 답이 "2, 4, { name: '콩이', age: 9 }"라면: /learn 퀴즈 1 2, 4, { name: '콩이', age: 9 }`, `2번 답이 "4, { name: '콩이', age: 9 }"라면: /learn 퀴즈 2번 4, { name: '콩이', age: 9 }`].join('\n'))
+      expect(said).toBe([ASKED, `숫자부터 모두 1번 답이면: /learn 퀴즈 1 2, 4, { name: '콩이', age: 9 }`, `숫자가 문제 번호면: /learn 퀴즈 2번 4, { name: '콩이', age: 9 }`].join('\n'))
       expect(w.models).toHaveLength(count)
       expect(untouched(store)).toBe(true)
     })
@@ -632,15 +632,15 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     test('on one line, its number another question\'s: asked back too; a number as the open one\'s, and 번 · 1. forms, are graded as before', async ($, on) => {
       const { w, store } = await opened($, on, true)
       const count = w.models.length
-      expect((await learn($, '퀴즈 2 4 { name }')).text).toBe([ASKED, '1번 답이 "2 4 { name }"라면: /learn 퀴즈 1 2 4 { name }', '2번 답이 "4 { name }"라면: /learn 퀴즈 2번 4 { name }'].join('\n'))
-      expect((await learn($, '퀴즈 1\n2\n4')).text).toBe([ASKED, '1번 답이 "1, 2, 4"라면: /learn 퀴즈 1 1, 2, 4', '1번 답이 "2, 4"라면: /learn 퀴즈 1번 2, 4'].join('\n'))
+      expect((await learn($, '퀴즈 2 4 { name }')).text).toBe([ASKED, '숫자부터 모두 1번 답이면: /learn 퀴즈 1 2 4 { name }', '숫자가 문제 번호면: /learn 퀴즈 2번 4 { name }'].join('\n'))
+      expect((await learn($, '퀴즈 1\n2\n4')).text).toBe([ASKED, '숫자부터 모두 1번 답이면: /learn 퀴즈 1 1, 2, 4', '숫자가 문제 번호면: /learn 퀴즈 1번 2, 4'].join('\n'))
       expect(w.models).toHaveLength(count)
       expect(untouched(store)).toBe(true)
       await learn($, '퀴즈 2번 답 2')
       expect(w.models).toHaveLength(count + 1)
       expect(quizItems(store)[1]!.result).toBe('right')
       // Question 2 graded: a number naming it is not offered back.
-      expect((await learn($, '퀴즈 2 4')).text).toBe([ASKED, '1번 답이 "2 4"라면: /learn 퀴즈 1 2 4'].join('\n'))
+      expect((await learn($, '퀴즈 2 4')).text).toBe([ASKED, '숫자부터 모두 1번 답이면: /learn 퀴즈 1 2 4'].join('\n'))
       await learn($, "퀴즈 1 2, 4, { name: '콩이', age: 9 }")
       expect(w.models).toHaveLength(count + 2)
       expect(w.models.at(-1)).toContain("2, 4, { name: '콩이', age: 9 }")
@@ -650,7 +650,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     test('haiku as shipped asks back; once its alias is overridden after the window started, read as 1.9.0 read it', { options: { model: 'haiku' } }, async ($, on) => {
       const { w, store } = await opened($, on, false)
       const count = w.models.length
-      expect((await learn($, '퀴즈 2\n4')).text).toBe([ASKED, '1번 답이 "2, 4"라면: /learn 퀴즈 1 2, 4', '2번 답이 "4"라면: /learn 퀴즈 2번 4'].join('\n'))
+      expect((await learn($, '퀴즈 2\n4')).text).toBe([ASKED, '숫자부터 모두 1번 답이면: /learn 퀴즈 1 2, 4', '숫자가 문제 번호면: /learn 퀴즈 2번 4'].join('\n'))
       expect(w.models).toHaveLength(count)
       w.settings = { user: { modelOverrides: { 'some-model-1': 'override-target-x' } } }
       await learn($, '퀴즈 2\n4')
@@ -678,8 +678,22 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
       expect(quizItems(store)[1]!.result).toBe('right')
       expect(quizItems(store)[0]!.result).toBeUndefined()
       // What may be its output is still asked back (question 3, its hint seen, still open).
-      expect((await learn($, '퀴즈 3 4')).text).toBe([ASKED, '1번 답이 "3 4"라면: /learn 퀴즈 1 3 4', '3번 답이 "4"라면: /learn 퀴즈 3번 4'].join('\n'))
+      expect((await learn($, '퀴즈 3 4')).text).toBe([ASKED, '숫자부터 모두 1번 답이면: /learn 퀴즈 1 3 4', '숫자가 문제 번호면: /learn 퀴즈 3번 4'].join('\n'))
       expect(w.models).toHaveLength(count + 1)
+    })
+
+    test('(cross-review 2) text ending in a final consonant (합격, 3): the lines name each reading, no particle after what was typed (haiku as shipped)', { options: { model: 'haiku' } }, async ($, on) => {
+      // Korean picks 이라면 or 라면 by the last syllable even after quotes ("합격"이라면, "3"이라면), so no line puts a
+      // particle after the learner's text: each says which reading it is and the command shows the text.
+      const code = ['const score = 3', "console.log('합격', score)"].join('\n')
+      const list = [{ ...items[0]!, question: `${CHANGED_LEAD}\n\`\`\`js\n${code}\n\`\`\``, answer: '합격 3' }, items[1]!, items[2]!]
+      const { w, store } = await opened($, on, false, list)
+      const count = w.models.length
+      const said = (await learn($, '퀴즈 3 합격')).text ?? ''
+      expect(said).toBe([ASKED, '숫자부터 모두 1번 답이면: /learn 퀴즈 1 3 합격', '숫자가 문제 번호면: /learn 퀴즈 3번 합격'].join('\n'))
+      expect(said).not.toMatch(/"(이)?라면/)
+      expect(w.models).toHaveLength(count)
+      expect(untouched(store)).toBe(true)
     })
 
     test('off (sonnet as shipped, no harness): read as 1.9.0 read it, the first number the question\'s', { options: { model: 'sonnet' } }, async ($, on) => {

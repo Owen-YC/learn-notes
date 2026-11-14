@@ -4984,11 +4984,12 @@ async function numberUnsure($: EngineInterface, current: Quiz, rest: string, n: 
   if (!Number.isFinite(build.rungChangedStep) || !(await recheckRemap($)) || !Number.isFinite(build.rungChangedStep)) return undefined
   const flat = (text: string) => text.trim().split(/\s*\n\s*/).filter(line => line !== '').join(', ')
   const other = current.items[n - 1]
-  // The text in quotes, so no particle has to agree with it.
+  // Each line names its reading and the command shows the text (cross-review 2): Korean picks 이라면 or 라면 by the
+  // text's last syllable even in quotes ("합격"이라면), so no particle follows what was typed.
   return [
     '숫자로 시작해 문제 번호인지 답인지 알 수 없어 채점하지 않았습니다.',
-    `${open + 1}번 답이 "${flat(rest)}"라면: /learn 퀴즈 ${open + 1} ${flat(rest)}`,
-    ...(other && isOpen(current, other) ? [`${n}번 답이 "${flat(after)}"라면: /learn 퀴즈 ${n}번 ${flat(after)}`] : []),
+    `숫자부터 모두 ${open + 1}번 답이면: /learn 퀴즈 ${open + 1} ${flat(rest)}`,
+    ...(other && isOpen(current, other) ? [`숫자가 문제 번호면: /learn 퀴즈 ${n}번 ${flat(after)}`] : []),
   ].join('\n')
 }
 
