@@ -14,7 +14,11 @@ import {
   outputLines,
   parseQuiz,
   quizPrompt,
+  redactText,
   rungOf,
+  addToBank,
+  ankiText,
+  bankQuestion,
   type QuizPick,
 } from '../hooks/notes'
 
@@ -168,5 +172,37 @@ describe('1.12.0 (G2): 비슷한 코드 made by the plugin', () => {
     expect(answerShown(item)).toBe('\`\`\`\n***\n\`\`\`')
     expect(answerShown({ ...item, rung: 'mine' })).toBe('***')
     expect(CHANGED_HINT(4, '  if (x > 10) n += 1')).toBe('바뀐 곳은 4번째 줄 \`if (x > 10) n += 1\`입니다. 그 줄 때문에 달라지는 값부터 보세요.')
+  })
+
+  test('review (1.12.0, 3/5): a file with a secret masked is never asked as changed; the masked count decides, the text check is a second guard', () => {
+    const secret = `const token = 'sk-ant-api03-${'A'.repeat(20)}'\n${CODE}`
+    const change = created(secret)
+    expect(change.redacted).toBe(1)
+    const shown = codeFor(change, BLURB)!
+    expect(redactText(shown).hits).toBe(0)
+    expect(isWholeShown(change, shown)).toBe(false)
+    // The masked count alone keeps it out: the same text counted as unmasked would be shown whole and asked as changed.
+    expect(isWholeShown({ ...change, redacted: 0 }, shown)).toBe(true)
+    expect(isChangedShaped({ file: 'a.js', text: shown, isWhole: true }, BLURB)).toBe(true)
+    expect(rung(pickOf(secret))).toBe('mine')
+    // Text not screened (a second guard): a secret still in it is never asked as changed.
+    expect(isChangedShaped({ file: 'a.js', text: secret, isWhole: true }, BLURB)).toBe(false)
+  })
+
+  test('review (1.12.0, 3/5): the question bank keeps a changed question whole or leaves it out, never cut mid-code', () => {
+    const question = (lines: number) => `${CHANGED_LEAD}\n\`\`\`js\n${[...Array.from({ length: lines }, (_, i) => `const v${i} = ${i} * 2`), 'console.log(v0 + v1)'].join('\n')}\n\`\`\``
+    const short = question(4)
+    const long = question(20)
+    expect(short.length).toBeLessThanOrEqual(400)
+    expect(long.length).toBeGreaterThan(400)
+    expect(bankQuestion({ question: short, rung: 'changed' })).toBe(short)
+    expect(bankQuestion({ question: long, rung: 'changed' })).toBeUndefined()
+    const [card] = addToBank([], [{ key: 'c:k', name: 'k', question: bankQuestion({ question: short, rung: 'changed' })!, answer: '2' }], 1)
+    expect(card!.question).toBe(short)
+    const front = ankiText([card!], {}).text.split('\n').at(-2)!.split('\t')[0]!
+    expect(front).toContain('console.log(v0 + v1)</code></pre>')
+    // Any other question as before: kept, cut to the bank's length.
+    expect(bankQuestion({ question: long, rung: 'mine' })).toBe(long)
+    expect(addToBank([], [{ key: 'c:k', name: 'k', question: long, answer: '2' }], 1)[0]!.question.length).toBeLessThan(long.length)
   })
 })

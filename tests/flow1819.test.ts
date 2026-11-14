@@ -470,6 +470,197 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     await ui.unmount()
   })
 
+  /**
+   * 1.12.0 review: a world whose quiz picks `names` (due, at step 2, met in a.js written whole) as 비슷한 코드 by a harness's
+   * step, with `fillers` not due; the quiz made through `/learn 퀴즈 새로` with `reply` (or `replies` queued first).
+   */
+  async function changedWorld($: Engine, on: On, names: string[], fillers: string[]) {
+    const store = storeOf(names, 2, 8 * DAY, false)
+    const concepts = store.get('concepts') as Record<string, unknown>
+    for (const filler of fillers) concepts[conceptKey(filler)] = { name: filler, count: 1, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${filler} 설명`, files: [], step: 3, reviewedAt: NOW }
+    store.set('steps', ownSteps(concepts as never))
+    const w = world(on, 'ok', null, true, store)
+    w.harness = { rungChangedStep: 2 }
+    w.files.set('/proj/src/a.js', FILE_JS)
+    await start($)
+    w.answer = CONCEPT_NOTE(names)
+    await turn($, () => $.tool.call(WRITE_JS))
+    await finish(w)
+    return { w, store }
+  }
+  const diagText = async ($: Engine) => (await learn($, '진단')).text ?? ''
+  const OTHERS = ['T2: 왜', 'Q2: 문제 2', 'A2: 답 2', 'T3: 왜', 'Q3: 문제 3', 'A3: 답 3'].join('\n')
+  const MINE_REPLY = ['T1: 예측', 'Q1: 아래 코드의 total은?', 'A1: 7', OTHERS].join('\n')
+  const REFUSED_CON = (n: number) => [`C${n}: ${n}a 10`, 'const items = [10, 4]', `O${n}:`, '7', `N${n}:`, '7'].join('\n')
+
+  for (const failure of ['empty', 'timeout'] as const) {
+    test(`(1.12.0 review) a quiz with code changed whose call came back ${failure === 'empty' ? 'empty (as a refusal arrives)' : 'past its time limit'}: the next quiz asks that concept in its own code`, async ($, on) => {
+      const name = 'for...of 반복문'
+      const { w, store } = await changedWorld($, on, [name], ['채움 하나', '채움 둘'])
+      w.replies.push(failure)
+      const asking = learn($, '퀴즈 새로')
+      if (failure === 'timeout') {
+        await w.clock.settle()
+        await w.clock.advance(90_000)
+      }
+      const said = (await asking).text ?? ''
+      expect(said).toContain('퀴즈를 내지 못했습니다')
+      expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n')
+      expect(store.get('quiz')).toBeUndefined()
+      await w.clock.advance(60_000)
+      w.answer = MINE_REPLY
+      await learn($, '퀴즈 새로')
+      expect(w.models.at(-1)).toContain('\n   칸: 내 코드\n   학습자가 만든 코드 (a.js):')
+      expect(w.models.at(-1)).not.toContain('비슷한 코드')
+    })
+  }
+
+  test('(1.12.0 review) a quiz with code changed cut at once (a reload or escape, not its time limit): the next quiz asks it as code changed again', async ($, on) => {
+    const { w } = await changedWorld($, on, ['for...of 반복문'], ['채움 하나', '채움 둘'])
+    w.replies.push('cut')
+    await learn($, '퀴즈 새로')
+    const first = w.models.at(-1)!
+    expect(first).toContain('\n   칸: 비슷한 코드\n')
+    await w.clock.advance(60_000)
+    w.answer = [CON(1), OTHERS].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(w.models.at(-1)).toBe(first)
+  })
+
+  test('(1.12.0 review) a concept code changed could not check stays asked in its own code after a reload (quizRun.changedMissed kept by session start)', async ($, on) => {
+    const name = 'for...of 반복문'
+    const { w, store } = await changedWorld($, on, [name], ['채움 하나', '채움 둘'])
+    w.answer = [REFUSED_CON(1), OTHERS].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n')
+    expect(quizItems(store).map(one => one.name)).not.toContain(name)
+    await start($)
+    await w.clock.settle()
+    await w.clock.advance(60_000)
+    w.answer = MINE_REPLY
+    await learn($, '퀴즈 새로')
+    expect(w.models.at(-1)).toContain('\n   칸: 내 코드\n   학습자가 만든 코드 (a.js):')
+    expect(w.models.at(-1)).not.toContain('비슷한 코드')
+  })
+
+  test('(1.12.0 review) the pane\'s quiz failing on a throw keeps the concepts code changed could not check (startQuiz\'s catch)', async ($, on) => {
+    const name = 'for...of 반복문'
+    // The notes' store key unreadable once, when armed: the quiz made next throws (makeQuiz reads it unguarded).
+    let isArmed = false
+    on('store.get', { key: 'history' }, async (_$, e, next) => {
+      if (!isArmed) return next(e)
+      isArmed = false
+      return { deny: 'unreadable' }
+    })
+    const { w, store } = await changedWorld($, on, [name], ['채움 하나', '채움 둘'])
+    const ui = await quizIn($, w, [REFUSED_CON(1), OTHERS].join('\n'))
+    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n')
+    expect(quizItems(store).map(one => one.name)).not.toContain(name)
+    await w.clock.advance(60_000)
+    const count = w.models.length
+    // Its questions not all graded: the first press arms a new quiz, the second makes it (and throws).
+    await ui.press({ key: 'quiz-new' })
+    isArmed = true
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(count)
+    expect(w.logs.join('\n')).toContain('learn-notes: 퀴즈를 내지 못했습니다 (')
+    expect(await ui.find({ type: 'Text', text: /퀴즈를 내지 못했습니다\. 잠시 뒤 다시 해 보세요\./ })).toBeDefined()
+    w.answer = MINE_REPLY
+    await ui.press({ key: 'quiz-new' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(count + 1)
+    expect(w.models.at(-1)).toContain('\n   칸: 내 코드\n   학습자가 만든 코드 (a.js):')
+    expect(w.models.at(-1)).not.toContain('비슷한 코드')
+    await ui.unmount()
+  })
+
+  test('(1.12.0 review) every pick code changed and none checked: its own words (this window, its own code), no fault counted; the next quiz asks all three in their own code', async ($, on) => {
+    const names = ['for...of 반복문', '배열 합', '누적 변수']
+    const { w, store } = await changedWorld($, on, names, [])
+    w.answer = [REFUSED_CON(1), REFUSED_CON(2), REFUSED_CON(3)].join('\n')
+    const said = (await learn($, '퀴즈 새로')).text ?? ''
+    expect(w.models.at(-1)!.split('\n   칸: 비슷한 코드\n')).toHaveLength(4)
+    expect(said).toBe('퀴즈를 내지 못했습니다: 바꾼 코드 문제를 확인하지 못했습니다. 이 창에서 다시 해 보면 그 개념은 내 코드로 냅니다.')
+    await w.clock.advance(60_000)
+    expect(JSON.stringify(store.get('faults') ?? null)).not.toContain('unreadable')
+    expect(await diagText($)).not.toContain('답을 읽지 못함')
+    w.answer = [MINE_REPLY.split('\nT2:')[0], 'T2: 예측', 'Q2: 아래 코드의 total은?', 'A2: 7', 'T3: 예측', 'Q3: 아래 코드의 total은?', 'A3: 7'].join('\n')
+    await learn($, '퀴즈 새로')
+    const again = w.models.at(-1)!
+    expect(again).not.toContain('비슷한 코드')
+    expect(again.split('\n   칸: 내 코드\n   학습자가 만든 코드 (a.js):')).toHaveLength(4)
+  })
+
+  describe('(1.12.0 review) an answer typed in the conversation that starts with a number while the first open question is code changed', () => {
+    const CODE = ['const pet = { name: \'콩이\', age: 9 }', 'console.log(pet.age - 7)', 'console.log(pet.age - 5)', 'console.log(pet)'].join('\n')
+    const names = ['객체 리터럴', '채움 하나', '채움 둘']
+    const items = [
+      { key: conceptKey(names[0]!), name: names[0]!, question: `${CHANGED_LEAD}\n\`\`\`js\n${CODE}\n\`\`\``, hint: CHANGED_HINT(1, ''), answer: "2\n4\n{ name: '콩이', age: 9 }", kind: 'predict', rung: 'changed' },
+      { key: conceptKey(names[1]!), name: names[1]!, question: '문제 2', hint: '힌트 2', answer: '답 2', kind: 'why', rung: 'mine' },
+      { key: conceptKey(names[2]!), name: names[2]!, question: '문제 3', hint: '힌트 3', answer: '답 3', kind: 'why', rung: 'mine' },
+    ]
+    async function opened($: Engine, on: On, isOn: boolean) {
+      const concepts = Object.fromEntries(names.map(name => [conceptKey(name), { name, count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${name} 설명`, files: [], step: 2, reviewedAt: NOW - 8 * DAY }]))
+      const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['quiz', { at: NOW - 60_000, isRevealed: false, items }]])
+      const w = world(on, 'ok', null, true, store)
+      if (isOn) w.harness = { rungChangedStep: 2 }
+      await start($)
+      w.answer = RIGHT
+      return { w, store }
+    }
+    const ASKED = '숫자로 시작해 문제 번호인지 답인지 알 수 없어 채점하지 않았습니다.'
+    const untouched = (store: Map<string, unknown>) => quizItems(store).every(one => one.result === undefined && one.firstTry === undefined)
+
+    test('its output on lines, the first a number: asked back, nothing graded, no call', async ($, on) => {
+      const { w, store } = await opened($, on, true)
+      const count = w.models.length
+      const said = (await learn($, "퀴즈 2\n4\n{ name: '콩이', age: 9 }")).text
+      expect(said).toBe([ASKED, "1번 답이 2, 4, { name: '콩이', age: 9 }이면: /learn 퀴즈 1 2, 4, { name: '콩이', age: 9 }", "2번 답이 4, { name: '콩이', age: 9 }이면: /learn 퀴즈 2번 4, { name: '콩이', age: 9 }"].join('\n'))
+      expect(w.models).toHaveLength(count)
+      expect(untouched(store)).toBe(true)
+    })
+
+    test('on one line, its number another question\'s: asked back too; a number as the open one\'s, and 번 · 1. forms, are graded as before', async ($, on) => {
+      const { w, store } = await opened($, on, true)
+      const count = w.models.length
+      expect((await learn($, '퀴즈 2 4 { name }')).text).toBe([ASKED, '1번 답이 2 4 { name }이면: /learn 퀴즈 1 2 4 { name }', '2번 답이 4 { name }이면: /learn 퀴즈 2번 4 { name }'].join('\n'))
+      expect((await learn($, '퀴즈 1\n2\n4')).text).toBe([ASKED, '1번 답이 1, 2, 4이면: /learn 퀴즈 1 1, 2, 4', '1번 답이 2, 4이면: /learn 퀴즈 1번 2, 4'].join('\n'))
+      expect(w.models).toHaveLength(count)
+      expect(untouched(store)).toBe(true)
+      await learn($, '퀴즈 2번 답 2')
+      expect(w.models).toHaveLength(count + 1)
+      expect(quizItems(store)[1]!.result).toBe('right')
+      // Question 2 graded: a number naming it is not offered back.
+      expect((await learn($, '퀴즈 2 4')).text).toBe([ASKED, '1번 답이 2 4이면: /learn 퀴즈 1 2 4'].join('\n'))
+      await learn($, "퀴즈 1 2, 4, { name: '콩이', age: 9 }")
+      expect(w.models).toHaveLength(count + 2)
+      expect(w.models.at(-1)).toContain("2, 4, { name: '콩이', age: 9 }")
+      expect(quizItems(store)[0]!.result).toBe('right')
+    })
+
+    test('haiku as shipped asks back; once its alias is overridden after the window started, read as 1.9.0 read it', { options: { model: 'haiku' } }, async ($, on) => {
+      const { w, store } = await opened($, on, false)
+      const count = w.models.length
+      expect((await learn($, '퀴즈 2\n4')).text).toBe([ASKED, '1번 답이 2, 4이면: /learn 퀴즈 1 2, 4', '2번 답이 4이면: /learn 퀴즈 2번 4'].join('\n'))
+      expect(w.models).toHaveLength(count)
+      w.settings = { user: { modelOverrides: { 'some-model-1': 'override-target-x' } } }
+      await learn($, '퀴즈 2\n4')
+      expect(w.models).toHaveLength(count + 1)
+      expect(quizItems(store)[1]!.result).toBe('right')
+    })
+
+    test('off (sonnet as shipped, no harness): read as 1.9.0 read it, the first number the question\'s', { options: { model: 'sonnet' } }, async ($, on) => {
+      const { w, store } = await opened($, on, false)
+      const count = w.models.length
+      await learn($, "퀴즈 2\n4\n{ name: '콩이', age: 9 }")
+      expect(w.models).toHaveLength(count + 1)
+      expect(quizItems(store)[1]!.result).toBe('right')
+      expect(quizItems(store)[0]!.result).toBeUndefined()
+    })
+  })
+
   test('a concept met once is asked in the learner\'s own code with no tag, as in 1.7; the rung is kept on the question', async ($, on) => {
     const w = world(on, 'ok', null, true)
     await start($)

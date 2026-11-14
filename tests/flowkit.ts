@@ -102,9 +102,9 @@ export type Model = 'ok' | 'error' | 'reject' | 'hold'
 /**
  * One model call's answer, from the queue `replies` holds (1.7.0 D3): the note's text, an API error (`status` null
  * for a connection that dropped before any response), `timeout` (the call runs out its own time limit, then is cut),
- * or `cut` (cut at once, as a reload cuts it).
+ * `cut` (cut at once, as a reload cuts it), or `empty` (answered with no text, as a refusal arrives: 1.12.0 review).
  */
-export type Reply = 'ok' | 'timeout' | 'cut' | { status: number | null; error: string }
+export type Reply = 'ok' | 'timeout' | 'cut' | 'empty' | { status: number | null; error: string }
 
 export const ZERO_USAGE = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
@@ -442,6 +442,7 @@ export function world(
     if (queued === 'ok') return { value: { isAnswered: true as const, text: w.texts.shift() ?? w.answer, usage: w.usage } }
     if (queued === 'timeout') await w.clock.sleep(e.timeoutMs ?? 0)
     if (queued === 'timeout' || queued === 'cut') return { value: { isAnswered: false as const, reason: 'aborted' as const, usage: ZERO_USAGE } }
+    if (queued === 'empty') return { value: { isAnswered: false as const, reason: 'empty-reply' as const, usage: ZERO_USAGE } }
     if (queued !== undefined) return { value: { isAnswered: false as const, reason: 'api-error' as const, status: queued.status, error: queued.error as 'unknown', usage: ZERO_USAGE } }
     if (w.model === 'reject') return { deny: 'model blocked by policy' }
     if (w.model === 'hold') await held

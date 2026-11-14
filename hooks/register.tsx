@@ -41,6 +41,7 @@ import {
   isChangedAskable,
   isWholeShown,
   answerShown,
+  isChangedAsked,
   isImportingChange,
   isExactGrade,
   localRight,
@@ -2976,13 +2977,21 @@ async function makeQuiz(
   // only as far as it is used.
   const isLong = picks.some(one => one.rung === 'changed' || one.rung === 'new' || one.rung === 'worked')
   const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: isLong ? QUIZ_TRACE_TOKENS : QUIZ_TOKENS })
-  if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
+  const missChanged = (keys: readonly string[]) =>
+    keys.length > 0 ? update($, quizRun, run => ({ ...run, changedMissed: [...new Set([...(run.changedMissed ?? []), ...keys])].slice(-50) })) : Promise.resolve()
+  if ('error' in asked) {
+    // A reply with no text (how a refusal arrives) or a call past its time limit, code changed asked (1.12.0 review): the
+    // same request would go again, so those concepts are asked another way for the rest of the session, as a reply that
+    // could not be checked. A call cut at once (a reload, escape) or an API error says nothing of the request.
+    if (asked.fail?.reason === 'empty-reply' || asked.fail?.isTimeout === true) await missChanged(picks.filter(one => one.rung === 'changed').map(one => one.key))
+    return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
+  }
   const items = parseQuiz(asked.text, picks)
   const gone = picks.filter(one => (one.rung === 'changed' || one.rung === 'new') && !items.some(item => item.key === one.key))
   // A question in code changed or code never seen the plugin could not check is asked another way for the rest of the session.
   const goneChanged = gone.filter(one => one.rung === 'changed').map(one => one.key)
   const goneNew = gone.filter(one => one.rung === 'new').map(one => one.key)
-  if (goneChanged.length > 0) await update($, quizRun, run => ({ ...run, changedMissed: [...new Set([...(run.changedMissed ?? []), ...goneChanged])].slice(-50) }))
+  await missChanged(goneChanged)
   if (goneNew.length > 0) await update($, quizRun, run => ({ ...run, newMissed: [...new Set([...(run.newMissed ?? []), ...goneNew])].slice(-50) }))
   if (items.length === 0 && picks.every(one => one.rung === 'new')) {
     // Counted in /learn 진단 like an unreadable quiz (a code and a time; no concept, no text).
@@ -2991,7 +3000,8 @@ async function makeQuiz(
   }
   if (items.length === 0) {
     // Every pick a changed one the plugin could not check: no fault, and the next try asks them from the learner's code.
-    if (gone.length === picks.length) return { error: '퀴즈를 내지 못했습니다: 바꾼 코드 문제를 확인하지 못했습니다. 다시 해 보면 다른 문제로 냅니다.' }
+    // Said for this window alone (1.12.0 review): the session's list is empty in a new one (-p, a new conversation).
+    if (gone.length === picks.length) return { error: '퀴즈를 내지 못했습니다: 바꾼 코드 문제를 확인하지 못했습니다. 이 창에서 다시 해 보면 그 개념은 내 코드로 냅니다.' }
     void fault($, 'quiz', 'unreadable', '모델의 답을 문제로 읽지 못했습니다')
     return { error: '퀴즈를 내지 못했습니다: 모델의 답을 문제로 읽지 못했습니다. 다시 해 보세요.' }
   }
@@ -4941,6 +4951,28 @@ function quizListText(current: Quiz, now: number, tail: string, checking?: numbe
 }
 
 /**
+ * Asked back instead of graded (1.12.0 review): an answer typed in the conversation that starts with a bare number
+ * (no 번, no `.`, `)` or `:` after it) while the first question still open is a prediction in code the plugin changed,
+ * whose answer is a run's output and may well start with a number (its lead asks for the lines as they print). The
+ * number is read as the question's only when it names that question on the same line; on a line of its own, or naming
+ * another question, it may be the output's first line. Only with code changed on in this window (the alias asked again
+ * first); undefined otherwise, the number then the question's as in 1.9.0.
+ */
+async function numberUnsure($: EngineInterface, current: Quiz, rest: string, n: number, after: string): Promise<string | undefined> {
+  const open = firstOpen(current)
+  const bare = /^\d+(\s+)/.exec(rest)
+  if (open === -1 || !bare || !isChangedAsked(current.items[open]!) || (n === open + 1 && !bare[1]!.includes('\n'))) return undefined
+  if (!Number.isFinite(build.rungChangedStep) || !(await recheckRemap($)) || !Number.isFinite(build.rungChangedStep)) return undefined
+  const flat = (text: string) => text.trim().split(/\s*\n\s*/).filter(line => line !== '').join(', ')
+  const other = current.items[n - 1]
+  return [
+    '숫자로 시작해 문제 번호인지 답인지 알 수 없어 채점하지 않았습니다.',
+    `${open + 1}번 답이 ${flat(rest)}이면: /learn 퀴즈 ${open + 1} ${flat(rest)}`,
+    ...(other && isOpen(current, other) ? [`${n}번 답이 ${flat(after)}이면: /learn 퀴즈 ${n}번 ${flat(after)}`] : []),
+  ].join('\n')
+}
+
+/**
  * Claude grades a typed answer to question `n` in the conversation: the grade,
  * the answer and what comes next (`lead` before them), or why it was not graded.
  */
@@ -5218,6 +5250,8 @@ async function quizReply($: EngineInterface, cfg: Config, said: string, now: num
     // The replies' own "내 답" · "새 답", sent as they stand: what goes there, not an answer to grade.
     const placeholder = /^[내새]\s*답$/.exec(typed[2]!.trim())?.[0]
     if (placeholder !== undefined) return `'${placeholder}' 자리에 떠올린 답을 적어 보내 주세요: /learn 퀴즈 ${typed[1]} (떠올린 답)`
+    const unsure = await numberUnsure($, current, rest, Number(typed[1]), typed[2]!)
+    if (unsure !== undefined) return unsure
     return typedAnswer($, cfg, current, Number(typed[1]), typed[2]!.trim())
   }
   if (rest !== '' && !isNew) {

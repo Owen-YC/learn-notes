@@ -6497,6 +6497,10 @@ export const CHANGED_HINT = (line: number, text: string) => {
   const quote = shown.length === 0 || shown.length > 60 ? '' : shown.includes('`') ? ` \`\` ${shown} \`\`` : ` \`${shown}\``
   return `바뀐 곳은 ${line}번째 줄${quote}입니다. 그 줄 때문에 달라지는 값부터 보세요.`
 }
+/** A prediction in code the plugin changed (1.12.0 G2): its question the plugin's own (CHANGED_LEAD), over that code. */
+export function isChangedAsked(item: Pick<LearnQuizItem, 'question' | 'rung' | 'kind'>): boolean {
+  return item.rung === 'changed' && item.kind === 'predict' && item.question.startsWith(CHANGED_LEAD.slice(0, 20))
+}
 /**
  * A question's answer as it is shown: a changed question's (1.12.0 G2 review) and a prediction in code never seen the
  * plugin made (1.12.0 G3) in a code block, so an output such as `***` or `- 1` is not read as Markdown. Stored text is
@@ -6504,7 +6508,7 @@ export const CHANGED_HINT = (line: number, text: string) => {
  */
 export function answerShown(item: Pick<LearnQuizItem, 'answer' | 'question' | 'rung' | 'kind'>): string {
   if (item.rung === 'new' && (item.question.startsWith(NEW_LEAD) || item.question.startsWith(NEW_LEAD_LINES))) return `\`\`\`text\n${item.answer}\n\`\`\``
-  if (item.rung !== 'changed' || item.kind !== 'predict' || !item.question.startsWith(CHANGED_LEAD.slice(0, 20))) return item.answer
+  if (!isChangedAsked(item)) return item.answer
   const fence = fenceFor(item.answer)
   return `${fence}\n${item.answer}\n${fence}`
 }
@@ -7147,9 +7151,12 @@ function workedAsked(question: string): string {
 
 /**
  * The question a flash card asks (/learn 안키): a worked example's, only what follows 이제 풀어 보세요 (the example
- * would give the card away), none when that is not there; any other question as it is.
+ * would give the card away), none when that is not there; a question in code the plugin changed (1.12.0 G2) none when
+ * it is longer than the bank keeps (1.12.0 review): cut, its code would end mid-line while its answer is the whole
+ * run's output; any other question as it is.
  */
 export function bankQuestion(item: Pick<LearnQuizItem, 'question' | 'rung'>): string | undefined {
+  if (item.rung === 'changed' && item.question.startsWith(CHANGED_LEAD) && cut(item.question, BANK_TEXT) !== clean(item.question).trim()) return undefined
   if (item.rung !== 'worked') return item.question
   const m = WORKED_ASKS.exec(item.question)
   if (!m) return undefined
