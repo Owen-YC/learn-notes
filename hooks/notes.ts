@@ -7333,6 +7333,15 @@ export function isChangedAsked(item: Pick<LearnQuizItem, 'question' | 'rung' | '
   return item.rung === 'changed' && item.kind === 'predict' && item.question.startsWith(CHANGED_LEAD.slice(0, 20))
 }
 /**
+ * The code a changed question shows and its language (1.12.0 G2), read back from the question changedItem wrote:
+ * CHANGED_LEAD, then the changed code in one fence named js or python. Undefined for any other question.
+ */
+export function changedShown(question: string): { code: string; lang: 'js' | 'py' } | undefined {
+  if (!question.startsWith(`${CHANGED_LEAD}\n`)) return undefined
+  const m = /^(`{3,})(js|python)\n([\s\S]*)\n\1$/.exec(question.slice(CHANGED_LEAD.length + 1))
+  return m ? { code: m[3]!, lang: m[2] === 'python' ? 'py' : 'js' } : undefined
+}
+/**
  * A question's answer as it is shown: a changed question's (1.12.0 G2 review) and a prediction in code never seen the
  * plugin made (1.12.0 G3) in a code block, so an output such as `***` or `- 1` is not read as Markdown. Stored text is
  * unchanged.

@@ -624,7 +624,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
       const { w, store } = await opened($, on, true)
       const count = w.models.length
       const said = (await learn($, "퀴즈 2\n4\n{ name: '콩이', age: 9 }")).text
-      expect(said).toBe([ASKED, "1번 답이 2, 4, { name: '콩이', age: 9 }이면: /learn 퀴즈 1 2, 4, { name: '콩이', age: 9 }", "2번 답이 4, { name: '콩이', age: 9 }이면: /learn 퀴즈 2번 4, { name: '콩이', age: 9 }"].join('\n'))
+      expect(said).toBe([ASKED, `1번 답이 "2, 4, { name: '콩이', age: 9 }"라면: /learn 퀴즈 1 2, 4, { name: '콩이', age: 9 }`, `2번 답이 "4, { name: '콩이', age: 9 }"라면: /learn 퀴즈 2번 4, { name: '콩이', age: 9 }`].join('\n'))
       expect(w.models).toHaveLength(count)
       expect(untouched(store)).toBe(true)
     })
@@ -632,15 +632,15 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     test('on one line, its number another question\'s: asked back too; a number as the open one\'s, and 번 · 1. forms, are graded as before', async ($, on) => {
       const { w, store } = await opened($, on, true)
       const count = w.models.length
-      expect((await learn($, '퀴즈 2 4 { name }')).text).toBe([ASKED, '1번 답이 2 4 { name }이면: /learn 퀴즈 1 2 4 { name }', '2번 답이 4 { name }이면: /learn 퀴즈 2번 4 { name }'].join('\n'))
-      expect((await learn($, '퀴즈 1\n2\n4')).text).toBe([ASKED, '1번 답이 1, 2, 4이면: /learn 퀴즈 1 1, 2, 4', '1번 답이 2, 4이면: /learn 퀴즈 1번 2, 4'].join('\n'))
+      expect((await learn($, '퀴즈 2 4 { name }')).text).toBe([ASKED, '1번 답이 "2 4 { name }"라면: /learn 퀴즈 1 2 4 { name }', '2번 답이 "4 { name }"라면: /learn 퀴즈 2번 4 { name }'].join('\n'))
+      expect((await learn($, '퀴즈 1\n2\n4')).text).toBe([ASKED, '1번 답이 "1, 2, 4"라면: /learn 퀴즈 1 1, 2, 4', '1번 답이 "2, 4"라면: /learn 퀴즈 1번 2, 4'].join('\n'))
       expect(w.models).toHaveLength(count)
       expect(untouched(store)).toBe(true)
       await learn($, '퀴즈 2번 답 2')
       expect(w.models).toHaveLength(count + 1)
       expect(quizItems(store)[1]!.result).toBe('right')
       // Question 2 graded: a number naming it is not offered back.
-      expect((await learn($, '퀴즈 2 4')).text).toBe([ASKED, '1번 답이 2 4이면: /learn 퀴즈 1 2 4'].join('\n'))
+      expect((await learn($, '퀴즈 2 4')).text).toBe([ASKED, '1번 답이 "2 4"라면: /learn 퀴즈 1 2 4'].join('\n'))
       await learn($, "퀴즈 1 2, 4, { name: '콩이', age: 9 }")
       expect(w.models).toHaveLength(count + 2)
       expect(w.models.at(-1)).toContain("2, 4, { name: '콩이', age: 9 }")
@@ -650,12 +650,36 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     test('haiku as shipped asks back; once its alias is overridden after the window started, read as 1.9.0 read it', { options: { model: 'haiku' } }, async ($, on) => {
       const { w, store } = await opened($, on, false)
       const count = w.models.length
-      expect((await learn($, '퀴즈 2\n4')).text).toBe([ASKED, '1번 답이 2, 4이면: /learn 퀴즈 1 2, 4', '2번 답이 4이면: /learn 퀴즈 2번 4'].join('\n'))
+      expect((await learn($, '퀴즈 2\n4')).text).toBe([ASKED, '1번 답이 "2, 4"라면: /learn 퀴즈 1 2, 4', '2번 답이 "4"라면: /learn 퀴즈 2번 4'].join('\n'))
       expect(w.models).toHaveLength(count)
       w.settings = { user: { modelOverrides: { 'some-model-1': 'override-target-x' } } }
       await learn($, '퀴즈 2\n4')
       expect(w.models).toHaveLength(count + 1)
       expect(quizItems(store)[1]!.result).toBe('right')
+    })
+
+    test('(cross-review 1) words that cannot be its output, or 모르겠어요: read as 1.9.0 read them, the number the question\'s (haiku as shipped)', { options: { model: 'haiku' } }, async ($, on) => {
+      const { w, store } = await opened($, on, false)
+      const count = w.models.length
+      // 모르겠어요: nothing to grade, taken for question 3 (its hint), never asked back.
+      const blank = (await learn($, '퀴즈 3 모르겠어요')).text ?? ''
+      expect(blank).not.toContain(ASKED)
+      expect(w.models).toHaveLength(count)
+      expect(quizItems(store)[2]!.firstTry).toMatchObject({ mine: '모르겠어요' })
+      // A question mark alone says the same (isBlankAnswer), though a run could print it: question 2's hint.
+      expect((await learn($, '퀴즈 2 ?')).text ?? '').not.toContain(ASKED)
+      expect(w.models).toHaveLength(count)
+      expect(quizItems(store)[1]!.firstTry).toMatchObject({ mine: '?' })
+      // A sentence no run of question 1's code prints (its words not in the code): question 2's answer, graded.
+      const said = (await learn($, '퀴즈 2 원래 배열이 바뀌어서')).text ?? ''
+      expect(said).not.toContain(ASKED)
+      expect(w.models).toHaveLength(count + 1)
+      expect(w.models.at(-1)).toContain('원래 배열이 바뀌어서')
+      expect(quizItems(store)[1]!.result).toBe('right')
+      expect(quizItems(store)[0]!.result).toBeUndefined()
+      // What may be its output is still asked back (question 3, its hint seen, still open).
+      expect((await learn($, '퀴즈 3 4')).text).toBe([ASKED, '1번 답이 "3 4"라면: /learn 퀴즈 1 3 4', '3번 답이 "4"라면: /learn 퀴즈 3번 4'].join('\n'))
+      expect(w.models).toHaveLength(count + 1)
     })
 
     test('off (sonnet as shipped, no harness): read as 1.9.0 read it, the first number the question\'s', { options: { model: 'sonnet' } }, async ($, on) => {

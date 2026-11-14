@@ -41,7 +41,9 @@ import {
   isChangedAskable,
   isWholeShown,
   answerShown,
+  changedShown,
   isChangedAsked,
+  outputLines,
   isImportingChange,
   isExactGrade,
   localRight,
@@ -4962,20 +4964,26 @@ function quizListText(current: Quiz, now: number, tail: string, checking?: numbe
  * (no 번, no `.`, `)` or `:` after it) while the first question still open is a prediction in code the plugin changed,
  * whose answer is a run's output and may well start with a number (its lead asks for the lines as they print). The
  * number is read as the question's only when it names that question on the same line; on a line of its own, or naming
- * another question, it may be the output's first line. Only with code changed on in this window (the alias asked again
- * first); undefined otherwise, the number then the question's as in 1.9.0.
+ * another question, it may be the output's first line. Asked back only when the whole text could be what that code
+ * prints (outputLines over the code the question shows, cross-review 1): a sentence whose words the code does not hold,
+ * or 모르겠어요 after the number, is the number's question's as in 1.9.0. Only with code changed on in this window (the
+ * alias asked again first); undefined otherwise, the number then the question's as in 1.9.0.
  */
 async function numberUnsure($: EngineInterface, current: Quiz, rest: string, n: number, after: string): Promise<string | undefined> {
   const open = firstOpen(current)
   const bare = /^\d+(\s+)/.exec(rest)
   if (open === -1 || !bare || !isChangedAsked(current.items[open]!) || (n === open + 1 && !bare[1]!.includes('\n'))) return undefined
+  if (isBlankAnswer(after)) return undefined
+  const shown = changedShown(current.items[open]!.question)
+  if (shown && outputLines(rest, shown.code, shown.lang) === undefined) return undefined
   if (!Number.isFinite(build.rungChangedStep) || !(await recheckRemap($)) || !Number.isFinite(build.rungChangedStep)) return undefined
   const flat = (text: string) => text.trim().split(/\s*\n\s*/).filter(line => line !== '').join(', ')
   const other = current.items[n - 1]
+  // The text in quotes, so no particle has to agree with it.
   return [
     '숫자로 시작해 문제 번호인지 답인지 알 수 없어 채점하지 않았습니다.',
-    `${open + 1}번 답이 ${flat(rest)}이면: /learn 퀴즈 ${open + 1} ${flat(rest)}`,
-    ...(other && isOpen(current, other) ? [`${n}번 답이 ${flat(after)}이면: /learn 퀴즈 ${n}번 ${flat(after)}`] : []),
+    `${open + 1}번 답이 "${flat(rest)}"라면: /learn 퀴즈 ${open + 1} ${flat(rest)}`,
+    ...(other && isOpen(current, other) ? [`${n}번 답이 "${flat(after)}"라면: /learn 퀴즈 ${n}번 ${flat(after)}`] : []),
   ].join('\n')
 }
 

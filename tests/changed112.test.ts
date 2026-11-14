@@ -7,6 +7,7 @@ import {
   changeOf,
   changeSites,
   changedItem,
+  changedShown,
   codeFor,
   creationHunk,
   isChangedShaped,
@@ -204,5 +205,14 @@ describe('1.12.0 (G2): 비슷한 코드 made by the plugin', () => {
     // Any other question as before: kept, cut to the bank's length.
     expect(bankQuestion({ question: long, rung: 'mine' })).toBe(long)
     expect(addToBank([], [{ key: 'c:k', name: 'k', question: long, answer: '2' }], 1)[0]!.question.length).toBeLessThan(long.length)
+  })
+
+  test('cross-review 1: changedShown reads back the code and language a changed question shows, and nothing else', () => {
+    expect(changedShown(`${CHANGED_LEAD}\n\`\`\`python\nxs = [1]\nprint(len(xs))\n\`\`\``)).toEqual({ code: 'xs = [1]\nprint(len(xs))', lang: 'py' })
+    // A fence longer than a run of backticks in the code (fenceFor), closed by the same.
+    const ticks = 'const s = `a```b`\nconsole.log(s)'
+    expect(changedShown(`${CHANGED_LEAD}\n\`\`\`\`js\n${ticks}\n\`\`\`\``)).toEqual({ code: ticks, lang: 'js' })
+    expect(changedShown('아래 코드는 무엇을 찍을까요?\n```js\nconsole.log(1)\n```')).toBeUndefined()
+    expect(changedShown(`${CHANGED_LEAD}\n\`\`\`ts\nconsole.log(1)\n\`\`\``)).toBeUndefined()
   })
 })
