@@ -785,9 +785,10 @@ async function chooseSwitches($: EngineInterface, cfg: Config, harness: Record<s
  * for `env`), with no reload. Read again (remapState, the same variables and key) only where session start read them
  * and found them kept; one no longer kept turns every switch off for the rest of the load, as session start would
  * have (the harness laid again), and never back on. Asked right before the shipped switch on takes effect (writeNote),
- * by askNote while 생각해 보기 is on (a harness's alone in this build: 1.11.0 review), and by /learn 진단. The other
- * switches (the quiz's G1 · G2 · G3 · G4 and G6's isRuleDrill, off in both rows) are not asked again where they act: a
- * row that turns one on asks there first.
+ * by askNote while 생각해 보기 is on (1.11.0 review), by /learn 진단, by makeQuiz before a quiz is made while code changed
+ * or code never seen is on (1.12.0 G2 · G3: haiku's code changed as shipped), before an exact grade of code never seen,
+ * and before and after G6's rule drill call (1.12.0 G6). The quiz's G1 and G4, off in both rows, are not asked again
+ * where they act: a row that turns one on asks there first.
  */
 async function recheckRemap($: EngineInterface): Promise<boolean> {
   if (aliasRead === undefined || remap !== 'kept') return remap === 'kept'

@@ -668,6 +668,102 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     })
   })
 
+  describe('(1.12.0 cross-review 1) haiku as shipped (its row\'s 비슷한 코드, no harness): the alias asked again before a quiz is made', () => {
+    // The one quiz cell on as shipped (MODEL_SWITCHES.haiku.rungChangedStep 2): an alias, a provider's switch or the
+    // settings' modelOverrides set after the window started turns it off where it acts (recheckRemap's rule), so the
+    // quiz is 1.9.0's, its own code and 3400; read but not laid, it would send the request measured on haiku elsewhere.
+    const name = 'for...of 반복문'
+    async function shipped($: Engine, on: On, now: Record<string, string>) {
+      for (const key of ['ANTHROPIC_DEFAULT_HAIKU_MODEL', 'CLAUDE_CODE_USE_BEDROCK']) on('env.get', { name: key }, (_$, e, next) => (now[e.name] !== undefined ? { value: now[e.name] } : next(e)))
+      const store = storeOf([name], 2, 8 * DAY, false)
+      const concepts = store.get('concepts') as Record<string, unknown>
+      for (const filler of ['채움 하나', '채움 둘']) concepts[conceptKey(filler)] = { name: filler, count: 1, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${filler} 설명`, files: [], step: 3, reviewedAt: NOW }
+      store.set('steps', ownSteps(concepts as never))
+      const w = world(on, 'ok', null, true, store)
+      w.files.set('/proj/src/a.js', FILE_JS)
+      await start($)
+      w.answer = CONCEPT_NOTE([name])
+      await turn($, () => $.tool.call(WRITE_JS))
+      await finish(w)
+      w.answer = MINE_REPLY
+      return w
+    }
+
+    test('the alias kept: the quiz asks code changed, 4600', { options: { model: 'haiku' } }, async ($, on) => {
+      const w = await shipped($, on, {})
+      await learn($, '퀴즈 새로')
+      expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (a.js):')
+      expect(w.budgets.at(-1)).toBe(4600)
+    })
+
+    for (const [what, said] of [
+      ['the settings\' modelOverrides', 'modelOverrides 설정을 둠 · 모델별 기능 모두 끔'],
+      ['its alias variable', '별칭 변수를 둠 · 모델별 기능 모두 끔'],
+      ["a provider's switch", '제공자 변수를 둠 · 모델별 기능 모두 끔'],
+    ] as const) {
+      test(`${what} set after the window started: the quiz is 1.9.0's (its own code, 3400), and /learn 진단 says every switch off`, { options: { model: 'haiku' } }, async ($, on) => {
+        const now: Record<string, string> = {}
+        const w = await shipped($, on, now)
+        if (what === 'its alias variable') now.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'set-in-session-x'
+        else if (what === "a provider's switch") now.CLAUDE_CODE_USE_BEDROCK = '1'
+        else w.settings = { user: { modelOverrides: { 'some-model-1': 'override-target-x' } } }
+        await learn($, '퀴즈 새로')
+        expect(w.models.at(-1)).toContain('\n   칸: 내 코드\n   학습자가 만든 코드 (a.js):')
+        expect(w.models.at(-1)).not.toContain('비슷한 코드')
+        expect(w.budgets.at(-1)).toBe(3400)
+        const diag = await diagText($)
+        expect(diag).toContain(`haiku(${said})`)
+        expect(diag).not.toContain('set-in-session-x')
+        expect(diag).not.toContain('override-target-x')
+      })
+    }
+  })
+
+  describe('(1.12.0 cross-review 1) a changed question\'s answer in a code block wherever it is shown (answerShown), other answers as they are', () => {
+    const CODE = ['const xs = [1]', 'for (const x of xs) console.log("-", x)'].join('\n')
+    const names = ['for...of 반복문', '배열 순회', '누적 변수']
+    const changed = (i: number, answer: string) => ({ key: conceptKey(names[i]!), name: names[i]!, question: `${CHANGED_LEAD}\n\`\`\`js\n${CODE}\n\`\`\``, hint: 'h', answer, kind: 'predict', rung: 'changed' })
+    const plain = (i: number, answer: string) => ({ key: conceptKey(names[i]!), name: names[i]!, question: '문제 셋', hint: '힌트 셋', answer, kind: 'why', rung: 'mine' })
+    function opened(on: On, items: Record<string, unknown>[]) {
+      const concepts = Object.fromEntries(names.map(name => [conceptKey(name), { name, count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${name} 설명`, files: [], step: 4, reviewedAt: NOW - 31 * DAY }]))
+      const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)], ['quiz', { at: NOW - 60_000, isRevealed: false, items }]])
+      return { w: world(on, 'ok', null, true, store), store }
+    }
+
+    test('in the conversation: the grade\'s 정답, and every answer once none is open', { options: { model: 'haiku' } }, async ($, on) => {
+      const { w } = opened(on, [changed(0, '- 1'), plain(1, '- 2')])
+      await start($)
+      w.answer = RIGHT
+      expect((await learn($, '퀴즈 1 - 1')).text).toContain('정답\n```\n- 1\n```')
+      const second = (await learn($, '퀴즈 2 - 2')).text ?? ''
+      expect(second).toContain('정답\n- 2')
+      expect(second).not.toContain('```\n- 2')
+      const all = (await learn($, '퀴즈 정답')).text ?? ''
+      expect(all).toContain(`1. \`\`\`\n   - 1\n   \`\`\`\n   (개념: ${names[0]}`)
+      expect(all).toContain(`2. - 2\n   (개념: ${names[1]}`)
+    })
+
+    test('in the pane: the card graded and the card whose answer is seen', { options: { model: 'haiku' } }, async ($, on) => {
+      const { w, store } = opened(on, [changed(0, '- 1'), changed(1, '- 3'), plain(2, '- 2')])
+      await start($)
+      const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+      await ui.press({ key: 'view-quiz' })
+      await answer(ui, w, mineKey(store, 0), '- 1', RIGHT)
+      expect(quizItems(store)[0]!.result).toBe('right')
+      expect(await ui.find({ type: 'Markdown', text: '```\n- 1\n```' })).toBeDefined()
+      await ui.unmount()
+      // The mobile app draws no field: there a shows the answer before a try (the card whose answer is seen).
+      const phone = await $.ui.mount({ plugin: 'learn-notes', surface: 'mobile', component: 'Pane', requestId: 'learn-notes', props: PANE_PROPS })
+      await phone.press({ key: 'quiz-answer' })
+      expect(await phone.find({ type: 'Markdown', text: '```\n- 3\n```' })).toBeDefined()
+      await phone.press({ key: 'quiz-right' })
+      await phone.press({ key: 'quiz-answer' })
+      expect(await phone.find({ type: 'Markdown', text: '- 2' })).toBeDefined()
+      expect(await phone.find({ type: 'Markdown', text: '```\n- 2\n```' })).toBeUndefined()
+      await phone.unmount()
+    })
+  })
+
   test('a concept met once is asked in the learner\'s own code with no tag, as in 1.7; the rung is kept on the question', async ($, on) => {
     const w = world(on, 'ok', null, true)
     await start($)
