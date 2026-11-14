@@ -154,10 +154,11 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
   }
   /**
    * The switches of the providers under which Claude Code turns `haiku` and `sonnet` to models no sample was run with,
-   * no alias variable set (2.1.317, 1.10.0 cross-review), in the order remapState reads them.
+   * no alias variable set (2.1.317, 1.10.0 cross-review), in the order remapState reads them; the gateway's last
+   * (1.12.0 cross-review 2: a gateway set up, its address and token with it, turns both on 2.1.323; re-pinned on purpose).
    */
-  const PROVIDERS = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', 'CLAUDE_CODE_USE_MANTLE'] as const
-  /** Each read of a provider's switch (the gateway's too), caught above the world's env; `refused` names one whose read is refused. Register before `world`. */
+  const PROVIDERS = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', 'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_GATEWAY'] as const
+  /** Each read of a provider's switch, caught above the world's env; `refused` names one whose read is refused. Register before `world`. */
   function providerReads(on: On, refused?: string): string[] {
     const reads: string[] = []
     on('env.get', { name: /^CLAUDE_CODE_USE_/ }, (_$, e, next) => {
@@ -374,16 +375,30 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
   for (const [what, env, isKept] of [
     ['blank', { CLAUDE_CODE_USE_BEDROCK: '' }, true],
     ['spaces alone', { CLAUDE_CODE_USE_VERTEX: '   ' }, true],
-    ["the gateway's alone (its models are Claude Code's own)", { CLAUDE_CODE_USE_GATEWAY: '1' }, true],
+    // 1.12.0 cross-review 2: Claude Code 2.1.323 turns `haiku` and `sonnet` to other ids in a window whose gateway is
+    // set up (the switch, ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN; docs/qa/견본.md '별칭 바꿈 감지 다시 확인 (2.1.323)'),
+    // and the switch alone is read as set too (the stricter side, as for "0"); the address and token alone are not read.
+    ['the gateway\'s alone (set, as any provider\'s: read last)', { CLAUDE_CODE_USE_GATEWAY: '1' }, false],
+    ['the gateway\'s with its address and token (2.1.323 turns both aliases)', { CLAUDE_CODE_USE_GATEWAY: '1', ANTHROPIC_BASE_URL: 'https://gw.invalid', ANTHROPIC_AUTH_TOKEN: 'fake-token' }, false],
+    ['blank, with a gateway\'s address and token but not its switch (2.1.323 keeps both aliases)', { CLAUDE_CODE_USE_GATEWAY: '', ANTHROPIC_BASE_URL: 'https://gw.invalid', ANTHROPIC_AUTH_TOKEN: 'fake-token' }, true],
     ['"0" (any value not blank is set, as for an alias variable)', { CLAUDE_CODE_USE_BEDROCK: '0' }, false],
   ] as const) {
-    test(`a provider's switch ${what}: ${isKept ? 'the route stands' : 'every switch off'}; the gateway's never read`, { options: { model: 'sonnet' } }, async ($, on) => {
+    test(`a provider's switch ${what}: ${isKept ? 'the route stands' : 'every switch off'}`, { options: { model: 'sonnet' } }, async ($, on) => {
       const flags = providerReads(on)
+      const others: string[] = []
+      on('env.get', { name: /^ANTHROPIC_(BASE_URL|AUTH_TOKEN)$/ }, (_$, e, next) => {
+        others.push(e.name)
+        return next(e)
+      })
       world(on, 'ok', null, true, new Map(), env)
       await start($)
       const diag = (await learn($, '진단')).text ?? ''
       expect(modelSaid(diag)).toBe(isKept ? 'sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)' : 'sonnet(제공자 변수를 둠 · 모델별 기능 모두 끔)')
       expect(flags).toEqual(isKept ? [...PROVIDERS, ...PROVIDERS] : [...PROVIDERS])
+      // The gateway's address and token are never read, kept, shown or sent (the switch alone decides).
+      expect(others).toEqual([])
+      expect(diag).not.toContain('gw.invalid')
+      expect(diag).not.toContain('fake-token')
     })
   }
 

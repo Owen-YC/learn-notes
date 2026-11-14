@@ -735,7 +735,11 @@ function switched(): string[] {
  * ANTHROPIC_DEFAULT_SONNET_MODEL for `sonnet`; checked on a real window, docs/qa/견본.md); a value that is not blank is
  * `remapped`. Then, the alias kept, the switches of the providers under which Claude Code turns `haiku` and `sonnet` to
  * models no sample was run with though no alias variable is set (Bedrock, Vertex, Foundry and the others, 2.1.317;
- * docs/qa/견본.md, 1.10.0 cross-review), each by its name as written: one that is not blank is `provider`. Then, none
+ * docs/qa/견본.md, 1.10.0 cross-review), each by its name as written: one that is not blank is `provider`. The gateway's
+ * last (1.12.0 cross-review 2): set up with its address and token, 2.1.323 turns both aliases to other ids; its switch
+ * alone does not, but is read as set all the same (the stricter side), and the address and token are never read. A
+ * gateway signed in to with no variable at all cannot be seen here (docs/qa/견본.md, '별칭 바꿈 감지 다시 확인
+ * (2.1.323)'). Then, none
  * set, the settings' `modelOverrides` (merged over every source, as the engine runs under it), with which Claude Code
  * turns `haiku` and `sonnet` to the ids it names though no variable is set, whichever settings hold it (2.1.317;
  * docs/qa/견본.md, 1.10.0 cross-review, round 3): anything there but nothing, null or an empty object is `overridden`.
@@ -753,6 +757,7 @@ async function remapState($: EngineInterface, model: MeasuredModel): Promise<Rem
       await $.env.get('CLAUDE_CODE_USE_ANTHROPIC_AWS'),
       await $.env.get('CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD'),
       await $.env.get('CLAUDE_CODE_USE_MANTLE'),
+      await $.env.get('CLAUDE_CODE_USE_GATEWAY'),
     ]
     if (providers.some(isSet)) return 'provider'
     const overrides = await $.settings.read({ key: 'modelOverrides' })
