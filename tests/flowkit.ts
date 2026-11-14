@@ -516,6 +516,20 @@ export function world(
         },
       }
     }
+    // An edit inside one short function that returns a value (1.12.0 G5, thinkCallees): a call of it is the line's.
+    if (e.file_path.endsWith('odd.js')) {
+      return {
+        result: {
+          filePath: e.file_path,
+          oldString: e.old_string,
+          newString: e.new_string,
+          originalFile: 'function sumOdd(xs) {\n  let t = 0\n  for (const x of xs) t += x\n  return t\n}\n',
+          structuredPatch: [{ oldStart: 1, oldLines: 5, newStart: 1, newLines: 5, lines: [' function sumOdd(xs) {', '   let t = 0', '-  for (const x of xs) t += x', '+  for (const x of xs) if (x % 2) t += x', '   return t', ' }'] }],
+          userModified: false,
+          replaceAll: false,
+        },
+      }
+    }
     // A file whose one new line is what the edit wrote: a line holding a secret, say.
     if (e.file_path.endsWith('db.ts')) {
       return {
@@ -655,6 +669,8 @@ export async function fullscreen($: Engine, isFullscreen = true) {
 export const EDIT_A = { tool: 'Edit', tool_use_id: 'u1', file_path: '/proj/src/a.ts', old_string: 'let', new_string: 'const' } as const
 /** EDIT_A's like, its change with a run to follow (1.10.0 G5: the one kind r asks 생각해 보기 of while it is on). */
 export const EDIT_FLOW = { tool: 'Edit', tool_use_id: 'u1', file_path: '/proj/src/sum.ts', old_string: 'let', new_string: 'const' } as const
+/** An edit inside one short function that returns a value (1.12.0 G5): the only kind of note code's 생각해 보기 comes under. */
+export const EDIT_CALL = { tool: 'Edit', tool_use_id: 'u1', file_path: '/proj/src/odd.js', old_string: 't += x', new_string: 'if (x % 2) t += x' } as const
 
 /** /learn save (저장), retired in 1.6.0, as 1.7.0 answers it: a note is saved by itself, and the few most used. */
 export const SAVE_REPLY =

@@ -58,6 +58,12 @@ import {
   storedConcepts,
   switchKeys,
   traceQuestion,
+  THINK_SLOT_SYSTEM,
+  THINK_VARIANT,
+  thinkCallLine,
+  thinkCallees,
+  thinkSlotCheckPrompt,
+  traceCallQuestion,
   withKnownMarks,
   type Switches,
 } from '../hooks/notes'
@@ -2979,8 +2985,16 @@ describe('1.10.0: 생각해 보기 (G5) behind its switch: the line only under c
   const SHAPED = `${STEPS}\n\n**생각해 보기:** ${SHAPED_Q}`
   const FREE = `${STEPS}\n\n**생각해 보기:** 수량이 음수면 어느 줄에서 멈출까요?`
   const TRACE_170 = traceQuestion(false)
-  /** r's prompt under the code note while the switch is on: 1.9.0's with the line asked for after its words. */
-  const CODE_ON = THINK19_R.code!.replace(`## 학습자의 질문\n${TRACE_170}\n`, `## 학습자의 질문\n${TRACE_170} ${THINK_ASK}\n`)
+  /**
+   * r's prompt under the code note while the switch is on (1.12.0 G5): 1.9.0's with its question traceCallQuestion's
+   * for the function code found (itemTotal, no anchor), nothing else changed.
+   */
+  const CODE_NOTE = (thinkStore('code').get('history') as Record<string, { notes: LearnNote[] }>)['/proj']!.notes[0]!
+  const CALLEES = thinkCallees(CODE_NOTE.changes)
+  const CALL_ON = THINK19_R.code!.replace(`## 학습자의 질문\n${TRACE_170}\n`, `## 학습자의 질문\n${traceCallQuestion(CALLEES)}\n`)
+  /** The swap line SHAPED asks, settled against the walked call `itemTotal(1000, 2)` and put in code's own words. */
+  const SETTLED_Q = '`itemTotal(1000, -1)`를 실행하면 최종 결과는 무엇이 될까요?'
+  const SETTLED = `${STEPS}\n\n${thinkCallLine('itemTotal(1000, -1)')}`
   type Ui = Awaited<ReturnType<typeof pane>>
   const hintsOf = async (ui: Pick<Ui, 'findAll'>) => (await ui.findAll({ type: 'Text' })).filter(one => one.text === HINT).map(one => one.text)
   const asksOf = (store: Map<string, unknown>) => (store.get('history') as Record<string, { notes: { asks?: { question: string; answer: string; at: number }[] }[] }>)['/proj']!.notes[0]!.asks ?? []
@@ -2989,15 +3003,17 @@ describe('1.10.0: 생각해 보기 (G5) behind its switch: the line only under c
     test(`off (no harness) and on, r under a ${kind} note: 1.9.0's request to the byte${kind === 'code' ? ' off; on, the line asked for after its words' : ' in either state'}`, async ($, on) => {
       expect(await thinkAsked($, on, kind)).toEqual({ system: THINK19_SYSTEM, prompt: THINK19_R[kind], maxTokens: 900 })
     })
-    test(`on (a harness), r under a ${kind} note: ${kind === 'code' ? 'the line asked for after 1.9.0\'s words, nothing else changed' : '1.9.0\'s request to the byte (no run to follow)'}`, async ($, on) => {
+    test(`on (a harness), r under a ${kind} note: ${kind === 'code' ? 'one call of the function code found asked for in 1.9.0\'s question\'s place, nothing else changed' : '1.9.0\'s request to the byte (no run to follow)'}`, async ($, on) => {
       const got = await thinkAsked($, on, kind, { isThinkAsked: true })
-      expect(got).toEqual({ system: THINK19_SYSTEM, prompt: kind === 'code' ? CODE_ON : THINK19_R[kind], maxTokens: 900 })
+      expect(got).toEqual({ system: THINK19_SYSTEM, prompt: kind === 'code' ? CALL_ON : THINK19_R[kind], maxTokens: 900 })
     })
   }
 
-  test('CODE_ON differs from 1.9.0\'s in the question alone', () => {
-    expect(CODE_ON).not.toBe(THINK19_R.code)
-    expect(CODE_ON.replace(` ${THINK_ASK}`, '')).toBe(THINK19_R.code)
+  test('CALL_ON differs from 1.9.0\'s in the question alone, which asks for no 1.10.0 closed line (THINK_ASK)', () => {
+    expect(CALLEES.map(one => [one.name, one.anchor])).toEqual([['itemTotal', undefined]])
+    expect(CALL_ON).not.toBe(THINK19_R.code)
+    expect(CALL_ON.replace(traceCallQuestion(CALLEES), TRACE_170)).toBe(THINK19_R.code)
+    expect(CALL_ON).not.toContain(THINK_ASK)
   })
 
   for (const harness of [undefined, { isThinkAsked: true }]) {
@@ -3010,8 +3026,8 @@ describe('1.10.0: 생각해 보기 (G5) behind its switch: the line only under c
     expect(await thinkAsked($, on, 'code', { models: { haiku: { isThinkAsked: true } } })).toEqual({ system: THINK19_SYSTEM, prompt: THINK19_R.code, maxTokens: 900 })
   })
 
-  test('haiku with its row turned on (a harness\'s models row) asks for the line under code; sonnet\'s row on leaves haiku 1.9.0\'s', { options: { model: 'haiku' } }, async ($, on) => {
-    expect((await thinkAsked($, on, 'code', { models: { haiku: { isThinkAsked: true } } })).prompt).toBe(CODE_ON)
+  test('haiku with its row turned on (a harness\'s models row) asks for one call under code; sonnet\'s row on leaves haiku 1.9.0\'s', { options: { model: 'haiku' } }, async ($, on) => {
+    expect((await thinkAsked($, on, 'code', { models: { haiku: { isThinkAsked: true } } })).prompt).toBe(CALL_ON)
   })
 
   test('haiku with only sonnet\'s row turned on runs 1.9.0\'s r', { options: { model: 'haiku' } }, async ($, on) => {
@@ -3038,7 +3054,7 @@ describe('1.10.0: 생각해 보기 (G5) behind its switch: the line only under c
     return { w, ui, store, trace, typed }
   }
 
-  test('on: under code a free 생각해 보기 line is not kept (no dim line, a guess after it a plain question headed 질문); one in its closed form is kept and opens', async ($, on) => {
+  test('on: under code a free 생각해 보기 line is not kept (no dim line, a text after it a plain question headed 질문); a swap of the walked call\'s argument is put in code\'s own words and opens', async ($, on) => {
     const { w, ui, store, trace, typed } = await opened($, on, 'code', { isThinkAsked: true })
     await trace(FREE)
     expect(asksOf(store).at(-1)!.answer).toBe(STEPS)
@@ -3052,8 +3068,26 @@ describe('1.10.0: 생각해 보기 (G5) behind its switch: the line only under c
     expect(w.files.get(JOURNAL) ?? '').not.toContain('(생각해 보기 뒤)')
     expect(w.files.get(JOURNAL) ?? '').not.toContain('어느 줄에서 멈출까요')
     await trace(SHAPED)
-    expect(asksOf(store).at(-1)!.answer).toBe(SHAPED)
+    expect(asksOf(store).at(-1)!.answer).toBe(SETTLED)
     expect(await hintsOf(ui)).toEqual([HINT])
+    await ui.unmount()
+  })
+
+  test('on: code\'s line kept young under a note with a withheld file (.env) opens in the pane and the ask alike: the dim line, then the check', async ($, on) => {
+    const store = thinkStore('code', [{ question: '예시로 따라가기', answer: SETTLED, at: NOW - 5 * 60_000 }])
+    const history = store.get('history') as Record<string, { notes: Record<string, unknown>[] }>
+    history['/proj']!.notes[0]!.withheld = [{ file: '.env', why: 'secret' }]
+    const w = world(on, 'ok', null, true, store)
+    w.harness = { isThinkAsked: true }
+    await start($)
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    expect(await hintsOf(ui)).toEqual([HINT])
+    w.answer = '종류: 짐작\n따라가기: 한 줄\n바른 결과: `Error`\n판정: 맞음\n까닭: 음수입니다.\n답: 없음'
+    await ui.input({ key: 'ask-think-code', text: '에러요' })
+    await w.clock.settle()
+    expect(w.systems.at(-1)).toBe(THINK_SLOT_SYSTEM)
+    expect(w.models.at(-1)).toContain(`## 생각해 보기 물음\n${SETTLED_Q}\n`)
+    expect(asksOf(store).at(-1)!.answer).toBe('**맞혔습니다.** 음수입니다.')
     await ui.unmount()
   })
 
@@ -3074,42 +3108,39 @@ describe('1.10.0: 생각해 보기 (G5) behind its switch: the line only under c
     await ui.unmount()
   })
 
-  test('on: a bare value guessed is checked (THINK_SYSTEM, 900), its walk-through first in the form and never shown, kept or journaled; a question with a word is a question (ASK_SYSTEM, 900, the rule that the learner ran nothing)', async ($, on) => {
-    const { w, ui, store, trace, typed } = await opened($, on, 'code', { isThinkAsked: true })
-    await trace(SHAPED)
-    const walk = '따라가기: `qty`가 -1이라 `qty < 0`이 참이 되어 에러를 던집니다.'
-    await typed('97.5인가요?', `${walk}\n바른 결과: \`Error: 수량은 0 이상이어야 합니다\`\n판정: 틀림\n피드백: 음수 수량은 검사에서 멈춥니다.`)
-    expect(w.systems.at(-1)).toBe(THINK_SYSTEM)
-    expect(w.budgets.at(-1)).toBe(900)
-    const prompt = w.models.at(-1)!
-    expect(prompt).toContain(`## 생각해 보기 물음\n${SHAPED_Q}\n`)
-    expect(prompt).toContain('## 학습자의 짐작\n97.5인가요?\n')
-    expect(prompt).toContain('먼저 따라가기 줄에, 물음대로 입력을 바꿔 지금의 바뀐 코드를 위 따라가기처럼 한 단계씩 따라간 과정을 한 줄로 쓴다')
-    expect(prompt.endsWith('따라가기: (바꾼 입력으로 한 단계씩, 한 줄)\n바른 결과: (값이나 동작 한 줄)\n판정: (맞음 · 거의 · 틀림 · 질문 중 하나)\n피드백: (두 문장 이내, 질문이면 세 문장 이내)')).toBe(true)
-    const shown = '**아쉽지만 틀렸습니다.** 음수 수량은 검사에서 멈춥니다.\n\n바른 결과: `Error: 수량은 0 이상이어야 합니다`'
-    expect(asksOf(store).at(-1)!.answer).toBe(shown)
-    expect(await ui.find({ type: 'Markdown', text: shown })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '이어서 · 97.5인가요?' })).toBeDefined()
-    // A reply out of form: shown as it came, its walk-through taken out; one that is all walk-through, as it came.
-    await trace(SHAPED)
-    await typed('2000?', `음수면 에러가 납니다.\n${walk}`)
-    expect(w.systems.at(-1)).toBe(THINK_SYSTEM)
-    expect(asksOf(store).at(-1)!.answer).toBe('음수면 에러가 납니다.')
-    await trace(SHAPED)
-    await typed('2000 나오나요?ㅠ', walk)
-    expect(asksOf(store).at(-1)!.answer).toBe(walk)
-    const journal = w.files.get(JOURNAL) ?? ''
-    expect(journal.split('따라가기:')).toHaveLength(2)
-    expect(journal).toContain(`**물음** (생각해 보기 뒤): 97.5인가요?\n\n${shown}\n`)
-    // A question with a question word: a question, as 1.9.0 F6 answered one.
-    await trace(SHAPED)
-    await typed('꼭 0이어야 해요?', '아니요, 0 이상이면 됩니다.')
-    expect(w.systems.at(-1)).toBe(ASK_SYSTEM)
-    expect(w.budgets.at(-1)).toBe(900)
-    expect(w.models.at(-1)).toContain(`생각해 보기: ${SHAPED_Q}\n학습자의 질문 칸 글은 이 생각해 보기 뒤에 적은 질문이다. 학습자는 이 코드를 실행하지 않았다.`)
-    expect(asksOf(store).at(-1)!.answer).toBe('아니요, 0 이상이면 됩니다.')
-    await ui.unmount()
-  })
+  for (const model of ['haiku', 'sonnet'] as const) {
+    test(`on (${model}'s models row): any text typed after code's line goes to the check (THINK_SLOT_SYSTEM, 900) in THINK_VARIANT.${model}'s words; its kind, work and basis lines never shown, kept or journaled`, { options: { model } }, async ($, on) => {
+      const { w, ui, store, trace, typed } = await opened($, on, 'code', { models: { [model]: { isThinkAsked: true } } })
+      await trace(SHAPED)
+      expect(asksOf(store).at(-1)!.answer).toBe(SETTLED)
+      const work = model === 'haiku' ? '따라가기: `qty`가 -1이라 `qty < 0`이 참이 되어 에러를 던집니다.' : '근거: `qty < 0`'
+      await typed('97.5인가요?', `종류: 짐작\n${work}\n바른 결과: \`Error: 수량은 0 이상이어야 합니다\`\n판정: 틀림\n까닭: 음수 수량은 검사에서 멈춥니다.\n답: 없음`)
+      expect(w.systems.at(-1)).toBe(THINK_SLOT_SYSTEM)
+      expect(w.budgets.at(-1)).toBe(900)
+      const note = (store.get('history') as Record<string, { notes: LearnNote[] }>)['/proj']!.notes[0]!
+      const prompt = w.models.at(-1)!
+      expect(prompt).toBe(thinkSlotCheckPrompt(note, { question: SETTLED_Q, trace: SETTLED }, '97.5인가요?', 'beginner', THINK_VARIANT[model]))
+      expect(prompt).toContain(`## 생각해 보기 물음\n${SETTLED_Q}\n`)
+      expect(prompt).toContain('## 학습자의 글\n97.5인가요?\n')
+      expect(prompt.includes('\n따라가기: (한 단계씩, 한 줄)\n')).toBe(model === 'haiku')
+      expect(prompt.includes('\n근거: (식이나 조건 하나)\n')).toBe(model === 'sonnet')
+      const shown = '**아쉽지만 틀렸습니다.** 음수 수량은 검사에서 멈춥니다.\n\n바른 결과: `Error: 수량은 0 이상이어야 합니다`'
+      expect(asksOf(store).at(-1)!.answer).toBe(shown)
+      expect(await ui.find({ type: 'Markdown', text: shown })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: '이어서 · 97.5인가요?' })).toBeDefined()
+      // A question with a word goes to the same check: its answer alone.
+      await trace(SHAPED)
+      await typed('꼭 0이어야 해요?', `종류: 질문\n${work}\n바른 결과: \`Error: 수량은 0 이상이어야 합니다\`\n판정: 없음\n까닭: 없음\n답: 아니요, 0 이상이면 됩니다.`)
+      expect(w.systems.at(-1)).toBe(THINK_SLOT_SYSTEM)
+      expect(asksOf(store).at(-1)!.answer).toBe('아니요, 0 이상이면 됩니다.')
+      const journal = w.files.get(JOURNAL) ?? ''
+      expect(journal).toContain(`**물음** (생각해 보기 뒤): 97.5인가요?\n\n${shown}\n`)
+      for (const label of ['종류:', '따라가기:', '근거:', '판정:', '까닭:']) expect(journal).not.toContain(label)
+      for (const one of asksOf(store)) expect(one.answer).not.toMatch(/^(?:종류|따라가기|근거|판정|까닭|답)\s*:/m)
+      expect(w.systems).not.toContain(THINK_SYSTEM)
+      await ui.unmount()
+    })
+  }
 
   for (const [isOn, head] of [[false, '이어서'], [true, '질문']] as const) {
     test(`a store with r's free line kept young (1.9.0 F6's kind), ${isOn ? 'on' : 'off'}: a question after it is headed ${head}, the asks as they were${isOn ? ', no dim line' : ''}`, async ($, on) => {

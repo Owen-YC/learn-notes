@@ -259,16 +259,18 @@ import {
   EASIER_LABEL,
   EASIER_QUESTION,
   KEYED_LABELS,
-  isThinkCode,
   isThinkFollow,
-  isThinkQuestion,
   openThink,
   THINK_OPEN_MS,
-  THINK_SYSTEM,
-  thinkCheckPrompt,
   thinkKept,
-  thinkReply,
-  withoutTrace,
+  thinkCallees,
+  traceCallQuestion,
+  thinkCallKept,
+  THINK_SLOT_SYSTEM,
+  thinkSlotCheckPrompt,
+  thinkSlotReply,
+  slotFallback,
+  thinkVariantOf,
   VERDICT_TEXT,
   type RankedConcept,
   shortPath,
@@ -3628,32 +3630,33 @@ async function askNote(
   const isThinkAsked = wasThinkAsked && (await recheckRemap($))
   const isKeyed = label === TRACE_LABEL && question !== label
   const isTrace = isThinkAsked && isKeyed
-  const isCode = isTrace && isThinkCode(shown.changes)
+  // 1.12.0 G5: the functions the line may call (thinkCallees), read only while on; none asks 1.7.0's words to the byte.
+  const callees = isThinkAsked ? thinkCallees(shown.changes) : []
+  const isCode = isTrace && callees.length > 0
   // A key pasted into a question is masked before the model, the store or the journal sees it.
-  const masked = redactText(wasThinkAsked && isKeyed ? traceQuestion(isCode) : question).text
+  const masked = redactText(wasThinkAsked && isKeyed ? (isCode ? traceCallQuestion(callees) : traceQuestion(false)) : question).text
   const kept = label === question ? masked : redactText(label).text
   // A question typed (in the field or by /learn 질문, never r's or e's) while r's walk-through is open (1.8.0): sent
   // with the walk-through in full and its 생각해 보기, to be checked as an answer or answered as a question. While
   // the switch is on, only a 생각해 보기 in its closed form is open (1.10.0 G5, isThinkShape).
   const askedAt = await $.clock.now()
-  const think = label === question ? openThink(shown.asks, askedAt, isThinkAsked) : undefined
-  // A guess at it, while the check is on (1.9.0 F6): a call of its own, its reply headed by its verdict; a question
-  // (isThinkQuestion, leaning that way) goes as before.
-  const isCheck = isThinkAsked && think !== undefined && !isThinkQuestion(masked)
+  const think = label === question ? openThink(shown.asks, askedAt, isThinkAsked, isThinkAsked) : undefined
+  // 1.12.0 G5: while code's line is open, every text typed goes to the check, which tells its kind itself.
+  const isCheck = isThinkAsked && think !== undefined
   const asked = await askModel(
     $,
     cfg,
     'ask',
     isCheck
-      ? { system: THINK_SYSTEM, prompt: thinkCheckPrompt(shown, think, masked, level), maxTokens: THINK_CHECK_TOKENS }
+      ? { system: THINK_SLOT_SYSTEM, prompt: thinkSlotCheckPrompt(shown, think, masked, level, thinkVariantOf(cfg.model)), maxTokens: THINK_CHECK_TOKENS }
       : { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules, think, isThinkAsked), maxTokens: 900 },
   )
   if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
   // A check's reply not in its format is shown as it came, its walk-through taken out (1.10.0 G5), unless that was
   // all it said. r's answer while the switch is on keeps a 생각해 보기 only as thinkKept lets (1.10.0 G5).
-  const bare = isCheck ? withoutTrace(asked.text) : asked.text
-  const unread = isCheck ? (bare.trim() === '' ? asked.text : bare) : isTrace ? thinkKept(asked.text, isCode) : asked.text
-  const answer = cut((isCheck ? thinkReply(asked.text, isBlankAnswer(masked)) : undefined) ?? unread, 4000)
+  const diffs = shown.changes.map(one => one.diff)
+  const unread = isCheck ? slotFallback(asked.text) : isTrace ? (isCode ? thinkCallKept(asked.text, callees, shown.text, diffs) : thinkKept(asked.text, false)) : asked.text
+  const answer = cut((isCheck ? thinkSlotReply(asked.text, masked) : undefined) ?? unread, 4000)
   const now = await $.clock.now()
   const latest = (await read($, notes)).find(one => one.id === id) ?? note
   await setNote($, id, { asks: [...(latest.asks ?? []), { question: cut(kept, 1000), answer, at: now }].slice(-ASKS_KEPT) })
@@ -6328,7 +6331,7 @@ function noteTools(
   const Input = fieldOf(el, surface)
   const fieldKey = `ask-${note.id}`
   const isPractice = drill !== undefined && (practice.open === note.id || note.drill !== undefined)
-  const think = ask.isAsking ? undefined : openThink(note.asks, now, build.isThinkAsked)
+  const think = ask.isAsking ? undefined : openThink(note.asks, now, build.isThinkAsked, build.isThinkAsked)
   if (think) shutThinkLater($, note.asks!.at(-1)!.at, now)
   const thinkHint = !Input ? THINK_HINT_ELSEWHERE : surface !== 'terminal' ? THINK_HINT_CLICK : isFocused ? THINK_HINT_FOCUSED : THINK_HINT_KEYS
   return (
@@ -6356,7 +6359,7 @@ function noteTools(
         <Button key="write" hotkey="w" plain dimColor label={writeLabel} onPress={() => void writeNote($, cfg, note.id, { isRewrite: note.savedAs !== null })} />
       </Box>
       {(note.asks ?? [])
-        .map((one, i, all) => ({ one, key: askedKey(note.id, all, i), isFollow: isThinkFollow(all, i, build.isThinkAsked), isLast: i === all.length - 1 }))
+        .map((one, i, all) => ({ one, key: askedKey(note.id, all, i), isFollow: isThinkFollow(all, i, build.isThinkAsked, build.isThinkAsked), isLast: i === all.length - 1 }))
         .slice(-2)
         .map(({ one, key, isFollow, isLast }) => (
           <Box key={key} flexDirection="column" marginTop={1}>
@@ -7845,7 +7848,7 @@ function helpLines(isThinkAsked: boolean): string {
     '- `/learn 복습`: 오늘 복습을 패널 퀴즈로 바로 시작 · 답 칸에 바로 적고 Enter (패널이 없는 화면에서는 대화창에 문제를 냅니다)',
     '- 패널: `1` 노트 · `2` 전/후 · `3` 개념 모음 · `4` 퀴즈 · `q` 오늘 복습 바로 시작 · `p`·`n` 이전·다음 노트 · `w` 노트 쓰기, 다시 쓰기',
     // r's 생각해 보기 named only while r asks for it (isThinkAsked: IS_THINK_ASKED, or a harness's): 1.7.0's line otherwise.
-    `- 노트 아래: \`t\` 직접 해 보기(한 번 고친 뒤 \`a\` 예시 답) · \`e\` 더 쉽게 · \`r\` 예시로 따라가기${isThinkAsked ? '(끝의 생각해 보기는 `i`로 답하기)' : ''} · \`i\` 질문하기 · \`c\` 복사`,
+    `- 노트 아래: \`t\` 직접 해 보기(한 번 고친 뒤 \`a\` 예시 답) · \`e\` 더 쉽게 · \`r\` 예시로 따라가기${isThinkAsked ? '(생각해 보기가 붙으면 `i`로 답하기)' : ''} · \`i\` 질문하기 · \`c\` 복사`,
     '- 퀴즈(`4`): 답을 적고 Enter로 채점 · 틀리면 되묻기를 보고 한 번 더 (모르면 `모르겠어요`) · Tab으로 버튼에 가서 `h` 힌트 · `i` 답 적기 · `a` 정답(한 번 적은 뒤 · 첫 판정대로 매김) · `f` 채점 바꾸기 · `s` 새 문제(남은 문제가 있으면 두 번) · `n` 틀린 개념을 배운 노트 · 정답을 채점 전에 봤으면(입력칸이 없는 화면 · 채점 실패 · `/learn 퀴즈 정답`) `o`·`x`로 채점',
     '- `/learn 퀴즈`: 대화창에서 풀기 · 풀던 퀴즈, 없으면 복습할 개념으로 새 퀴즈 · `/learn 퀴즈 내 답`: Claude에게 채점받기 · `새로` · `힌트`(`힌트 2`) · `정답`',
     '- `/learn 정리`: 오늘 배운 것 정리 (`어제` · `이번주` · `최근 7일` · `2026-10-03`도 됩니다)',
