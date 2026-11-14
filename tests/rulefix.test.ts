@@ -15,6 +15,7 @@ import {
   RULE_DRILL_SYSTEM,
   RULE_FIX_TASK,
   renamedLine,
+  RULE_FIX_LINES_MAX,
   ruleDrillPrompt,
   ruleFixCheck,
   ruleFixFault,
@@ -122,6 +123,72 @@ describe('1.12.0: 팀 규칙 연습 (G6): code makes the task, the check and, wh
       expect(one(js, line)).toEqual([])
     }
     for (const line of ['r = requests.get(url)', 'key = os.environ["API_KEY"]', 'key = os.environ.get("K")', 'print("a", b)', 'print()', 'print(*rows)']) expect(one(py, line)).toEqual([])
+  })
+
+  test('renamedLine swaps a name only where the line\'s code calls or reads it: never in a comment at its end, a definition, a write or delete of a member, or JSX text (review 1.12.0)', () => {
+    const js = rulePairsOf(RULES).filter(p => p.lang === 'js')
+    const py = rulePairsOf(RULES).filter(p => p.lang === 'py')
+    const one = (pairs: typeof js, line: string) => pairs.map(p => renamedLine(line, p, AVOIDS)).filter(x => x !== undefined)
+    for (const line of [
+      'const s = 1 // console.log(s)',
+      'const res = load(url) // was fetch(url)',
+      'const n = 1 /* console.log(n) */',
+      'async function fetch(url) {',
+      'function fetch(url) {',
+      'export default function fetch(url) {',
+      'fetch(url) {',
+      'async fetch(url) {',
+      'static fetch(url): Promise<Res> {',
+      'fetch(url) { return get(url) },',
+      'process.env.API_URL = base',
+      'process.env.API_URL ??= base',
+      'process.env.COUNT++',
+      'delete process.env.API_URL',
+      '<p>Use fetch(url) here</p>',
+      '<li key={id}>Then console.log(x)</li>',
+    ]) expect(one(js, line)).toEqual([])
+    for (const line of ['s = sum(rows)  # print(s)', 'def print(msg):', 'async def print(msg):', 'del os.environ.API_URL']) expect(one(py, line)).toEqual([])
+    // The code before a comment, a call in an arrow or in JSX's braces, a compared read, a private field and Python's
+    // floor division are still the line's code.
+    expect(one(js, 'console.log(s) // show it')).toEqual(['log.info(s) // show it'])
+    expect(one(js, 'const get = () => fetch(url)')).toEqual(['const get = () => apiRequest(url)'])
+    expect(one(js, 'return <p>{fetch(url)}</p>')).toEqual(['return <p>{apiRequest(url)}</p>'])
+    expect(one(js, 'const on = process.env.DEBUG === "1"')).toEqual(['const on = config.DEBUG === "1"'])
+    expect(one(js, 'this.#n = fetch(url)')).toEqual(['this.#n = apiRequest(url)'])
+    expect(one(py, 'n = rows // 2; print(n)')).toEqual(['n = rows // 2; log.info(n)'])
+  })
+
+  test('a rule\'s name in a comment at a line\'s end is no hint and no fix: no practice made by code, no call, no reply taken that changes the comment (review 1.12.0)', () => {
+    const saidLog = '기록은 `log.info`로 남기라는 규칙과 달리 `console.log`가 남아 있습니다'
+    const saidPrint = '기록은 `log.info`로 남기라는 규칙과 달리 `print`가 보입니다'
+    expect(ruleFixPlan({ changes: [change('src/a.js', ['const s = 1 // console.log(s)'])] }, RULES, saidLog)).toEqual({ skip: 'no-line' })
+    expect(ruleFixPlan({ changes: [change('app/a.py', ['def total(rows):', '    s = 1  # print(s)', '    return s'])] }, RULES, saidPrint)).toEqual({ skip: 'no-line' })
+    expect(ruleFixPlan({ changes: [change('src/a.js', ['f(a, b) // console.log(a, b)'])] }, RULES, saidLog)).toEqual({ skip: 'no-line' })
+    expect(ruleFixPlan({ changes: [change('src/a.js', ['console.log(s) // show it'])] }, RULES, saidLog)).toMatchObject({ fix: { example: 'log.info(s) // show it' } })
+    // A reply that changes the comment only, whatever lines it was given, is not taken.
+    const fault = (file: string, rule: number, text: string, example: string, hint?: number, isAnchored = false) => {
+      const got = ruleFixFault({ rule, line: 0, example }, [{ change: 0, file, text, ...(hint !== undefined ? { hint } : {}), isAnchored }], SIDES, [0, 1, 2, 3])
+      return 'fault' in got ? got.fault : `fix:${got.fix.use}`
+    }
+    expect(fault('src/a.js', 1, 'f(a, b) // console.log(a, b)', 'f(a, b) // log.info(a, b)', 1)).toBe('line-keeps-rule')
+    expect(fault('app/a.py', 1, 's = 1  # print(s)', 's = 1  # log.info(s)', 1)).toBe('line-keeps-rule')
+    expect(fault('src/a.js', 2, 'const s = fmt(d) // d', 'const s = fmt(d) // toDateText(d)', undefined, true)).toBe('no-use-name')
+    expect(fault('src/a.js', 1, 'console.log(a, b) // keep', 'log.info(a, b) // keep', 1)).toBe('fix:log.info')
+  })
+
+  test('ruleFixLines: a line another change holds first is not listed; at most RULE_FIX_LINES_MAX, hint lines first; a rule\'s name quoted alone anchors no line (review 1.12.0)', () => {
+    const twice = { changes: [change('tests/a.test.js', ['const res = await fetch(url)']), change('src/a.js', ['const res = await fetch(url)'])] }
+    expect(ruleFixLines(twice, RULES, SAID_FETCH).cands).toEqual([])
+    expect(ruleFixPlan(twice, RULES, SAID_FETCH)).toEqual({ skip: 'no-line' })
+    const many = ['const a = 1', 'const b = 2', ...Array.from({ length: 13 }, (_, i) => `console.log(v${i}, w)`)]
+    const said = '기록은 `log.info`로 남기고 날짜는 `toDateText`로 보이라는 규칙과 달리 직접 씁니다'
+    const { cands } = ruleFixLines({ changes: [change('src/a.js', many)] }, RULES, said)
+    expect(cands.length).toBe(RULE_FIX_LINES_MAX)
+    expect(cands.map(one => one.text)).toEqual(many.slice(2, 2 + RULE_FIX_LINES_MAX))
+    const date = { changes: [change('src/a.js', ['const s = toDateText(a) + b.toJSON()'])] }
+    const saidName = '날짜는 `toDateText`로 보이라는 규칙과 달리 직접 만듭니다'
+    expect(ruleFixLines(date, RULES, saidName).cands.map(one => one.isAnchored)).toEqual([false])
+    expect(ruleFixPlan(date, RULES, saidName)).toEqual({ skip: 'no-hint' })
   })
 
   test('ruleFixLines lists app lines only: no test, rule module (by name or by what it defines), build or config file, long line, comment, import or masked line, each once', () => {

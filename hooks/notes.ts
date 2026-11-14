@@ -2721,8 +2721,8 @@ export const RULE_FIX_LINES_MAX = 12
  * lines the changes added, their indent apart, of 1 to DRILL_LINE_MAX characters, code (NOT_FIX_LINE), no secret
  * masked (REDACTED), in an app file (not a test or a rule's module, isRuleModuleFile; not NOT_APP_PATH; not a file that
  * makes a use name for other files, definesName), each line once by lineKey, in the order a practice finds them (drillSpot), and only
- * where drillSpot finds it. When every rule the note points at (saidRules) says what not to use, only lines holding one
- * of those names (hint lines). Hint lines first, then the ones the note quotes (anchored), then the rest;
+ * where drillSpot finds it. When every rule the note points at (saidRules) says what not to use, only lines whose code
+ * (codeOf: a comment at the line's end apart) holds one of those names (hint lines). Hint lines first, then the ones the note quotes (anchored), then the rest;
  * RULE_FIX_LINES_MAX at most.
  */
 export function ruleFixLines(
@@ -2752,7 +2752,8 @@ export function ruleFixLines(
         seen.add(key)
         if (isOut || NOT_FIX_LINE.test(text) || [...text].length > DRILL_LINE_MAX || text.includes(REDACTED)) continue
         if (drillSpot(text, note.changes)?.change !== c) continue
-        const hint = pointed.find(i => sides[i]!.avoid.some(name => holdsName(text, name)))
+        const code = codeOf(text, pairLangOf(change.file))
+        const hint = pointed.find(i => sides[i]!.avoid.some(name => holdsName(code, name)))
         if (isAllAvoid && hint === undefined) continue
         found.push({ change: c, file: change.file, text, ...(hint !== undefined ? { hint } : {}), isAnchored: quotes.some(q => key.includes(q)), known })
       }
@@ -2777,6 +2778,38 @@ function isInString(code: string, at: number): boolean {
     } else if (ch === '"' || ch === "'" || ch === '`') quote = ch
   }
   return quote !== undefined
+}
+
+/**
+ * Where a line's comment starts outside its strings (1.12.0 G6): JavaScript's `//` or `/*`, Python's `#`; for a file of
+ * neither language, any of them (fewer lines taken, never more). The line's length when it has none. A block comment
+ * closed on the line still ends the line's code where it opens.
+ */
+function commentStart(code: string, lang: 'js' | 'py' | undefined): number {
+  let quote: string | undefined
+  for (let i = 0; i < code.length; i += 1) {
+    const ch = code[i]!
+    if (quote !== undefined) {
+      if (ch === '\\') i += 1
+      else if (ch === quote) quote = undefined
+    } else if (ch === '"' || ch === "'" || ch === '`') quote = ch
+    else if (lang !== 'js' && ch === '#') return i
+    else if (lang !== 'py' && ch === '/' && (code[i + 1] === '/' || code[i + 1] === '*')) return i
+  }
+  return code.length
+}
+
+/** A line's code (1.12.0 G6): the line up to its comment (commentStart), so a name a comment holds is no use of it. */
+function codeOf(line: string, lang: 'js' | 'py' | undefined): string {
+  return line.slice(0, commentStart(line, lang))
+}
+
+/**
+ * Whether the name at `at` is JSX text (1.12.0 G6): a tag (`<p>`, `</b>`, `<br/>`, `<>`) before it on the line and,
+ * between them, only words: no brace, bracket, quote, `=`, `;` or `+` that would make it code again.
+ */
+function isJsxText(line: string, at: number): boolean {
+  return /<(?:\/?[\p{L}][^<>]*)?>[^<>{}()=;'"`+]*$/u.test(line.slice(0, at))
 }
 
 /** The top-level arguments of the call whose `(` is at `open`: undefined when it does not close on the line. */
@@ -2806,7 +2839,10 @@ function argCount(code: string, open: number): number | undefined {
 /**
  * `line` with a pair's name swapped for the one the rule asks for, every other byte kept (1.12.0 G6, tier 1); undefined
  * unless the line is code, holds the name exactly once outside a string, as a call of exactly one argument, not spread (or, for an
- * object, as a `.NAME` read, not a call), and holds no other name a rule says not to use (`avoids`).
+ * object, as a `.NAME` read, not a call), and holds no other name a rule says not to use (`avoids`). Only where the
+ * line's code uses it: not in a comment at its end (commentStart), not JSX text, not a definition (`function NAME(`,
+ * `def NAME(`, `class NAME(`, a method `NAME(…) {` or `NAME(…):`), not an object's member written or deleted
+ * (`NAME.KEY = …`, `NAME.KEY++`, `delete NAME.KEY`, `del NAME.KEY`).
  */
 export function renamedLine(line: string, pair: RulePair, avoids: readonly string[]): string | undefined {
   if (NOT_FIX_LINE.test(line.trim())) return undefined
@@ -2814,16 +2850,28 @@ export function renamedLine(line: string, pair: RulePair, avoids: readonly strin
   const hits = [...line.matchAll(new RegExp(`(?<![\\p{L}\\p{N}_$.])${escaped}(?![\\p{L}\\p{N}_$])`, 'gu'))]
   if (hits.length !== 1) return undefined
   const at = hits[0]!.index!
-  if (isInString(line, at)) return undefined
+  if (isInString(line, at) || at >= commentStart(line, pair.lang) || (pair.lang === 'js' && isJsxText(line, at))) return undefined
+  const head = line.slice(0, at)
   const after = line.slice(at + pair.away.length)
   if (pair.isObject) {
-    if (!/^\.[\p{L}_$][\p{L}\p{N}_$]*(?![\p{L}\p{N}_$]|\s*\()/u.test(after)) return undefined
+    const member = /^\.[\p{L}_$][\p{L}\p{N}_$]*(?![\p{L}\p{N}_$]|\s*\()/u.exec(after)
+    if (!member) return undefined
+    // Written or deleted, not read: the rule's object is where a value is read from.
+    const rest = after.slice(member[0].length)
+    if (/^\s*(?:(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^@])?=(?![=>])|\+\+|--)/.test(rest)) return undefined
+    if (/(?:^|[^\p{L}\p{N}_$])(?:delete|del)\s+$|(?:\+\+|--)\s*$/u.test(head)) return undefined
   } else {
     const open = /^\s*\(/.exec(after)
     if (!open) return undefined
-    const count = argCount(line, at + pair.away.length + open[0].length - 1)
+    const paren = at + pair.away.length + open[0].length - 1
+    const count = argCount(line, paren)
     // One argument, never spread (`...args`, `*rows`): the call the rule asks for takes it as the old one did.
     if (count !== 1 || /^\s*(?:\.\.\.|\*)/.test(after.slice(open[0].length))) return undefined
+    // A definition of the name, not a call of it: after `function`, `def` or `class`, or a method's head (only
+    // modifiers before it, its body or return type after it).
+    if (/(?:^|[^\p{L}\p{N}_$])(?:function\s*\*?|def|class)\s*$/u.test(head)) return undefined
+    const tail = line.slice((closeOf(line, paren) ?? line.length - 1) + 1)
+    if (/^(?:(?:async|static|get|set|public|private|protected|override)\s+)*\*?\s*$/.test(head) && /^\s*[{:]/.test(tail)) return undefined
   }
   const swapped = line.slice(0, at) + pair.use + after
   if (avoids.some(name => name !== pair.away && holdsName(swapped, name))) return undefined
@@ -3032,9 +3080,9 @@ export type RuleFixFault =
 /**
  * Why a reply's practice is not taken (1.12.0 G6), or the practice, each a check of one part against another or
  * against the rule's own words, in this order: a line or rule number out of range; a rule the note did not point at; a
- * line that holds none of the names a rule with such names says not to use (it keeps that rule); for a rule with no
- * such names, a line the note does not quote (`isAnchorNeeded`); an example that is the line; one that brings in no
- * name of that rule the line lacks; one that keeps a name it says not to use; one that is not the line changed in one
+ * line whose code (codeOf: a comment at its end apart) holds none of the names a rule with such names says not to use
+ * (it keeps that rule); for a rule with no such names, a line the note does not quote (`isAnchorNeeded`); an example
+ * that is the line; one whose code brings in no name of that rule the line lacks; one that keeps a name it says not to use; one that is not the line changed in one
  * place into a call of a use name (isOneSpanFix: the old way kept inside or beside it, a new value, another line);
  * one whose brackets or strings close otherwise than the line's.
  */
@@ -3052,10 +3100,11 @@ export function ruleFixFault(
   if (!pointed.includes(got.rule)) return { fault: 'rule-not-pointed' }
   const line = cand.text
   const { example } = got
-  if (side.avoid.length > 0 && !side.avoid.some(name => holdsName(line, name))) return { fault: 'line-keeps-rule' }
+  const lang = pairLangOf(cand.file)
+  if (side.avoid.length > 0 && !side.avoid.some(name => holdsName(codeOf(line, lang), name))) return { fault: 'line-keeps-rule' }
   if (side.avoid.length === 0 && isAnchorNeeded && !cand.isAnchored) return { fault: 'not-anchored' }
   if (lineKey(example) === lineKey(line)) return { fault: 'same-as-line' }
-  const brought = side.use.filter(name => holdsName(example, name) && !holdsName(line, name))
+  const brought = side.use.filter(name => holdsName(codeOf(example, lang), name) && !holdsName(line, name))
   if (brought.length === 0) return { fault: 'no-use-name' }
   if (side.avoid.some(name => holdsName(example, name))) return { fault: 'avoid-left' }
   if (!isOneSpanFix(line, example, side, cand.known)) return { fault: 'not-one-span' }
