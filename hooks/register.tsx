@@ -2977,22 +2977,25 @@ async function makeQuiz(
   // only as far as it is used.
   const isLong = picks.some(one => one.rung === 'changed' || one.rung === 'new' || one.rung === 'worked')
   const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: isLong ? QUIZ_TRACE_TOKENS : QUIZ_TOKENS })
-  const missChanged = (keys: readonly string[]) =>
-    keys.length > 0 ? update($, quizRun, run => ({ ...run, changedMissed: [...new Set([...(run.changedMissed ?? []), ...keys])].slice(-50) })) : Promise.resolve()
+  const miss = (list: 'changedMissed' | 'newMissed', keys: readonly string[]) =>
+    keys.length > 0 ? update($, quizRun, run => ({ ...run, [list]: [...new Set([...(run[list] ?? []), ...keys])].slice(-50) })) : Promise.resolve()
+  const keysOf = (among: readonly QuizPick[], rung: QuizRung) => among.filter(one => one.rung === rung).map(one => one.key)
   if ('error' in asked) {
-    // A reply with no text (how a refusal arrives) or a call past its time limit, code changed asked (1.12.0 review): the
-    // same request would go again, so those concepts are asked another way for the rest of the session, as a reply that
-    // could not be checked. A call cut at once (a reload, escape) or an API error says nothing of the request.
-    if (asked.fail?.reason === 'empty-reply' || asked.fail?.isTimeout === true) await missChanged(picks.filter(one => one.rung === 'changed').map(one => one.key))
+    // A reply with no text (how a refusal arrives) or a call past its time limit, code changed (1.12.0 review) or code
+    // never seen (1.12.0 batch 3) asked: the same request would go again, so those concepts are asked another way for the
+    // rest of the session, as a reply that could not be checked. A call cut at once (a reload, escape) or an API error
+    // says nothing of the request.
+    if (asked.fail?.reason === 'empty-reply' || asked.fail?.isTimeout === true) {
+      await miss('changedMissed', keysOf(picks, 'changed'))
+      await miss('newMissed', keysOf(picks, 'new'))
+    }
     return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
   }
   const items = parseQuiz(asked.text, picks)
   const gone = picks.filter(one => (one.rung === 'changed' || one.rung === 'new') && !items.some(item => item.key === one.key))
   // A question in code changed or code never seen the plugin could not check is asked another way for the rest of the session.
-  const goneChanged = gone.filter(one => one.rung === 'changed').map(one => one.key)
-  const goneNew = gone.filter(one => one.rung === 'new').map(one => one.key)
-  await missChanged(goneChanged)
-  if (goneNew.length > 0) await update($, quizRun, run => ({ ...run, newMissed: [...new Set([...(run.newMissed ?? []), ...goneNew])].slice(-50) }))
+  await miss('changedMissed', keysOf(gone, 'changed'))
+  await miss('newMissed', keysOf(gone, 'new'))
   if (items.length === 0 && picks.every(one => one.rung === 'new')) {
     // Counted in /learn 진단 like an unreadable quiz (a code and a time; no concept, no text).
     void fault($, 'quiz', 'new-unchecked', '처음 보는 코드 문제를 확인하지 못했습니다')

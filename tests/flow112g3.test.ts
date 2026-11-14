@@ -87,6 +87,13 @@ describe('1.12.0 G3: the quiz (K · L · A, scenes, the session\'s missed list)'
   const FILE = ['const items = [3, 4]', 'let total = 0', 'for (const item of items) total += item', 'console.log(total)', ''].join('\n')
   /** `names` due at their fifth step, met in a.js written whole; `fillers` not due. The quiz this world sends with `reply`. */
   async function quizOf($: Engine, on: On, names: string[], fillers: string[], reply: string) {
+    const { w, store, calls } = await worldOf($, on, names, fillers)
+    w.answer = reply
+    const said = await learn($, '퀴즈 새로')
+    return { w, store, calls, said }
+  }
+  /** The world quizOf makes, before its quiz. */
+  async function worldOf($: Engine, on: On, names: string[], fillers: string[]) {
     const calls = routeCalls(on)
     const concepts = Object.fromEntries([
       ...names.map(name => [conceptKey(name), { name, count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${name} 설명 — \`for (const item of items)\``, files: [], step: 4, reviewedAt: NOW - 31 * DAY }]),
@@ -100,9 +107,7 @@ describe('1.12.0 G3: the quiz (K · L · A, scenes, the session\'s missed list)'
     w.answer = CONCEPT_NOTE(names)
     await turn($, () => $.tool.call({ tool: 'Write', tool_use_id: 'w1', file_path: '/proj/src/a.js', content: FILE }))
     await finish(w)
-    w.answer = reply
-    const said = await learn($, '퀴즈 새로')
-    return { w, store, calls, said }
+    return { w, store, calls }
   }
   const BAD_K = (n: number) => [`K${n}:`, '```js', 'const cup = [1, 2]', 'for (const x of cup) {', '  console.log(x)', '}', '```', `L${n}: const cup = [1, 2]`, `A${n}:`, '1', '2'].join('\n')
   const WHY = (n: number) => [`T${n}: 왜`, `Q${n}: 이 개념은 왜 쓸까요?`, `H${n}: 쓰임을 떠올려 보세요`, `A${n}: 값을 하나씩 꺼내 쓰려고 씁니다.`].join('\n')
@@ -162,5 +167,40 @@ describe('1.12.0 G3: the quiz (K · L · A, scenes, the session\'s missed list)'
     w.answer = [WHY(1), WHY(2), WHY(3)].join('\n')
     await learn($, '퀴즈 새로')
     expect(calls.filter(call => call.system === QUIZ_SYSTEM).at(-1)!.prompt).not.toContain('처음 보는 코드')
+  })
+
+  for (const failure of ['empty', 'timeout'] as const) {
+    test(`(1.12.0 batch 3) a quiz with code never seen whose call came back ${failure === 'empty' ? 'empty (as a refusal arrives)' : 'past its time limit'}: the next quiz asks that concept in its own code (quizRun.newMissed)`, { options: { model: 'haiku' } }, async ($, on) => {
+      const { w, store, calls } = await worldOf($, on, [NAME], ['채움 하나', '채움 둘'])
+      w.replies.push(failure)
+      const asking = learn($, '퀴즈 새로')
+      if (failure === 'timeout') {
+        await w.clock.settle()
+        await w.clock.advance(90_000)
+      }
+      const said = (await asking).text ?? ''
+      expect(said).toContain('퀴즈를 내지 못했습니다')
+      expect(calls.filter(call => call.system === QUIZ_SYSTEM).at(-1)!.prompt).toContain('   칸: 처음 보는 코드 (js로)\n')
+      expect(store.get('quiz')).toBeUndefined()
+      await w.clock.advance(60_000)
+      w.answer = [WHY(1), WHY(2), WHY(3)].join('\n')
+      await learn($, '퀴즈 새로')
+      const again = calls.filter(call => call.system === QUIZ_SYSTEM).at(-1)!
+      expect(again.prompt).not.toContain('처음 보는 코드')
+      // haiku's shipped row: its own code, a file written whole, asked as code changed (1.12.0 G2).
+      expect(again.prompt).toContain('   칸: 비슷한 코드\n   학습자가 만든 코드 (a.js):')
+    })
+  }
+
+  test('(1.12.0 batch 3) a quiz with code never seen cut at once (a reload or escape, not its time limit): the next quiz asks it in code never seen again', { options: { model: 'haiku' } }, async ($, on) => {
+    const { w, calls } = await worldOf($, on, [NAME], ['채움 하나', '채움 둘'])
+    w.replies.push('cut')
+    await learn($, '퀴즈 새로')
+    const first = calls.filter(call => call.system === QUIZ_SYSTEM).at(-1)!
+    expect(first.prompt).toContain('   칸: 처음 보는 코드 (js로)\n')
+    await w.clock.advance(60_000)
+    w.answer = [WHY(1), WHY(2), WHY(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(calls.filter(call => call.system === QUIZ_SYSTEM).at(-1)!.prompt).toContain('   칸: 처음 보는 코드 (js로)\n')
   })
 })
