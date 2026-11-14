@@ -7482,7 +7482,7 @@ function siteValue(site: ChangeSite, raw: string, prev: string | undefined): str
   return site.alts.includes(v) ? v : undefined
 }
 
-export type ChangedRead = { item: LearnQuizItem } | { reason: 'missing' | 'grammar' | 'other-slot' | 'site' | 'value' | 'echo' | 'O-form' | 'N-form' | 'N-lines' | 'count' | 'same' | 'subset' | 'long' }
+export type ChangedRead = { item: LearnQuizItem } | { reason: 'missing' | 'grammar' | 'other-slot' | 'site' | 'value' | 'echo' | 'O-form' | 'N-form' | 'N-lines' | 'N-blank' | 'count' | 'same' | 'subset' | 'long' }
 
 /**
  * An output line as the judging stance compares lines (its clause 6): ends trimmed, spaces one, no space beside a mark,
@@ -7502,7 +7502,7 @@ export function outputSame(line: string): string {
  * A question in code changed as the plugin makes it from the model's C, O and N for slot `n` (1.12.0 G2): the site and
  * new value named on C's first line, checked against the sites (changeSites) and applied by the plugin, the changed line
  * echoed on C's next line, O and N each an output the plugin keeps (outputLines), as many lines as the prints give where
- * that is known (flatPrints), and N not O. The item holds the plugin's own question over the changed code, its hint by
+ * that is known (flatPrints), no empty line in N, and N not O. The item holds the plugin's own question over the changed code, its hint by
  * the line, N as its answer; C and O are never kept. Anything else is no item at all (`reason`, for a test).
  */
 export function changedItem(parts: Map<string, string[]>, n: number, pick: QuizPick): ChangedRead {
@@ -7542,6 +7542,9 @@ export function changedItem(parts: Map<string, string[]>, n: number, pick: QuizP
   const N = outputLines(part('N')!.join('\n'), changed, lang)
   if (!N) return { reason: 'N-form' }
   if (N.length > 4) return { reason: 'N-lines' }
+  // An empty line printed (written (빈 줄)) is no answer kept (cross-review 1): CHANGED_LEAD does not say how a learner
+  // writes one, and the question bank and its Anki card would keep the answer without it (cut's trim).
+  if (N.includes('')) return { reason: 'N-blank' }
   const flat = flatPrints(code.text, lang)
   const isErr = (out: readonly string[]) => ERROR_NAMES[lang].includes(out.at(-1)!)
   if (flat !== undefined && !isErr(O) && (O.length < flat || (!isErr(N) && N.length !== O.length))) return { reason: 'count' }

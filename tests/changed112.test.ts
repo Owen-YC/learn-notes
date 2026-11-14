@@ -215,4 +215,16 @@ describe('1.12.0 (G2): 비슷한 코드 made by the plugin', () => {
     expect(changedShown('아래 코드는 무엇을 찍을까요?\n```js\nconsole.log(1)\n```')).toBeUndefined()
     expect(changedShown(`${CHANGED_LEAD}\n\`\`\`ts\nconsole.log(1)\n\`\`\``)).toBeUndefined()
   })
+
+  test('cross-review 1: an N with an empty line ((빈 줄)) makes no question; the same N without one does', () => {
+    const code = ['const stars = 3', 'const limit = 2', "const line = '*'.repeat(stars)", 'console.log(line)', 'console.log(stars > limit)'].join('\n')
+    const p = pickOf(code, 'a.js', "반복 문자열을 만듭니다 — `const line = '*'.repeat(stars)`")
+    expect(rung(p)).toBe('changed')
+    // '*'.repeat(0) prints an empty line: an answer the learner is not told how to write, and the bank and Anki card
+    // would keep without it (cut's trim).
+    expect(changedItem(parts({ C1: '1a 0\nconst stars = 0', O1: '***\ntrue', N1: '(빈 줄)\nfalse' }), 1, p)).toEqual({ reason: 'N-blank' })
+    expect(changedItem(parts({ C1: '1a 1\nconst stars = 1', O1: '***\ntrue', N1: '*\nfalse' }), 1, p)).toMatchObject({ item: { answer: '*\nfalse', rung: 'changed' } })
+    // An empty line in O alone is no answer's: kept as before.
+    expect('item' in changedItem(parts({ C1: '1a 1\nconst stars = 1', O1: '(빈 줄)\ntrue', N1: '*\nfalse' }), 1, p)).toBe(true)
+  })
 })
