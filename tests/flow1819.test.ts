@@ -589,7 +589,7 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     w.answer = [REFUSED_CON(1), REFUSED_CON(2), REFUSED_CON(3)].join('\n')
     const said = (await learn($, '퀴즈 새로')).text ?? ''
     expect(w.models.at(-1)!.split('\n   칸: 비슷한 코드\n')).toHaveLength(4)
-    expect(said).toBe('퀴즈를 내지 못했습니다: 바꾼 코드 문제를 확인하지 못했습니다. 이 창에서 다시 해 보면 그 개념은 내 코드로 냅니다.')
+    expect(said).toBe('퀴즈를 내지 못했습니다: 비슷한 코드 문제를 확인하지 못했습니다. 이 창에서 다시 해 보면 그 개념은 내 코드로 냅니다.')
     await w.clock.advance(60_000)
     expect(JSON.stringify(store.get('faults') ?? null)).not.toContain('unreadable')
     expect(await diagText($)).not.toContain('답을 읽지 못함')

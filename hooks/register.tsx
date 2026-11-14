@@ -3009,7 +3009,7 @@ async function makeQuiz(
   if (items.length === 0) {
     // Every pick a changed one the plugin could not check: no fault, and the next try asks them from the learner's code.
     // Said for this window alone (1.12.0 review): the session's list is empty in a new one (-p, a new conversation).
-    if (gone.length === picks.length) return { error: '퀴즈를 내지 못했습니다: 바꾼 코드 문제를 확인하지 못했습니다. 이 창에서 다시 해 보면 그 개념은 내 코드로 냅니다.' }
+    if (gone.length === picks.length) return { error: '퀴즈를 내지 못했습니다: 비슷한 코드 문제를 확인하지 못했습니다. 이 창에서 다시 해 보면 그 개념은 내 코드로 냅니다.' }
     void fault($, 'quiz', 'unreadable', '모델의 답을 문제로 읽지 못했습니다')
     return { error: '퀴즈를 내지 못했습니다: 모델의 답을 문제로 읽지 못했습니다. 다시 해 보세요.' }
   }
