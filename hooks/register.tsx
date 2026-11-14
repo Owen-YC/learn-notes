@@ -39,8 +39,15 @@ import {
   marksOf,
   bankQuestion,
   isChangedAskable,
+  isWholeShown,
+  answerShown,
   isImportingChange,
   isExactGrade,
+  localRight,
+  NEW_LOCAL_RIGHT,
+  NEW_NONE_TEXT,
+  sceneDay,
+  withScenes,
   isNewAskable,
   isNewLibraryChange,
   isOldGraderOpen,
@@ -402,6 +409,14 @@ const paneRoot = atom({ plugin: 'learn-notes', key: 'root' } as const, null)
 const aliases = atom({ plugin: 'learn-notes', key: 'aliases' } as const, {})
 const quiz = atom({ plugin: 'learn-notes', key: 'quiz' } as const, null)
 const quizRun = atom({ plugin: 'learn-notes', key: 'quizRun' } as const, { isMaking: false, error: null })
+/**
+ * What a reset of quizRun keeps (1.12.0 G2 · G3): the session's lists of concepts whose question in code changed
+ * (changedMissed) or in code never seen (newMissed) could not be checked, so a new quiz or a reload does not ask them
+ * that way again. Each absent when empty: quizRun is as 1.11.0 left it.
+ */
+function missedKept(run: LearnQuizRun): Pick<LearnQuizRun, 'changedMissed' | 'newMissed'> {
+  return { ...(run.changedMissed ? { changedMissed: run.changedMissed } : {}), ...(run.newMissed ? { newMissed: run.newMissed } : {}) }
+}
 const askRun = atom({ plugin: 'learn-notes', key: 'askRun' } as const, {})
 const activity = atom({ plugin: 'learn-notes', key: 'activity' } as const, {})
 const submitted = atom({ plugin: 'learn-notes', key: 'submitted' } as const, { list: [], lastRequest: null })
@@ -2662,6 +2677,7 @@ async function withCode(
   newStep: number,
   now: number,
   changedStep: number,
+  missed: ReadonlySet<string> = new Set(),
 ): Promise<QuizPick[]> {
   const written = (await allNotes($)).filter(note => note.status === 'ready').sort((a, b) => b.at - a.at)
   const found: QuizPick[] = []
@@ -2678,7 +2694,8 @@ async function withCode(
     for (const change of changes) {
       const text = codeFor(change, one.blurb)
       if (text) {
-        const isChanged = isChangedAskable(one, change.file, changedStep)
+        // 1.12.0 (G2): code changed only for a file written whole (isWholeShown), so its file is never read for it.
+        const isChanged = change.kind === 'create' && !missed.has(one.key) && isChangedAskable(one, change.file, changedStep)
         const isNew = isNewAskable(one, change.file, isDue(one, now), newStep)
         const isAskable = isNew || isChanged
         const file = isAskable && change.kind !== 'create' ? await importsText($, change.path) : undefined
@@ -2686,12 +2703,16 @@ async function withCode(
         const isImporting = isChanged && isImportingChange(change, file)
         // What code never seen alone leaves out (1.10.0 G3, D29): read only where that rung could ask it.
         const isNewLibrary = isNew && isNewLibraryChange(change)
+        const isWhole = isChanged && isWholeShown(change, text)
         code = {
           file: baseName(change.file),
           text,
           ...(isLibrary ? { isLibrary: true as const } : {}),
           ...(isImporting ? { isImporting: true as const } : {}),
           ...(isNewLibrary ? { isNewLibrary: true as const } : {}),
+          ...(isWhole ? { isWhole: true as const } : {}),
+          // The file already read, for code never seen's setting and clause-3 check (1.12.0 G3): on this device only.
+          ...(isNew && file !== undefined ? { around: file } : {}),
         }
         break
       }
@@ -2868,10 +2889,19 @@ async function makeQuiz(
   // day: that window reads this quiz too, and would put a concept missed there back to its first step (before 1.8.0) or
   // grade it by the stock grade its sample showed short (1.8, 1.9; 1.10.0 G3). The stamps are read once a quiz, and only
   // with the rung on; a store that cannot be read keeps it off for this quiz.
+  // Code changed is on only in a row of MODEL_SWITCHES (1.12.0 G2), and so is code never seen (1.12.0 G3): the alias is
+  // asked again where either acts, before any switch of the quiz is read (recheckRemap's rule).
+  if (Number.isFinite(build.rungChangedStep) || Number.isFinite(build.rungNewStep)) await recheckRemap($)
   const newStep = build.rungNewStep === Infinity ? Infinity : await newStepNow($, now)
+  // The concepts whose question in code never seen this session could not check (quizRun.newMissed, session state
+  // only, never in the store): each is asked another way for the rest of the session. Read only with the rung on.
+  const newMissed = new Set(Number.isFinite(build.rungNewStep) ? ((await read($, quizRun)).newMissed ?? []) : [])
   // A review quiz goes over more than one note where it can (three concepts from one note make one lesson
   // again), the slips to ask again and the concepts due before any other, then the team terms not met yet.
-  const found = await withCode($, cfg, chosen, map, newStep, now, build.rungChangedStep)
+  // A concept whose code changed gave no question in this window is asked from its own code until the window closes
+  // (1.12.0 review): the plugin keeps no other record of it, and the same reply would come again.
+  const missed = new Set(Number.isFinite(build.rungChangedStep) ? ((await read($, quizRun)).changedMissed ?? []) : [])
+  const found = await withCode($, cfg, chosen, map, newStep, now, build.rungChangedStep, missed)
   // A concept that came in as a team term: of this repository (any of its terms, in a team quiz) asked as one, by the
   // team's words; of another, its words are the team's all the same.
   const marks = await storedTeamTerms($, map)
@@ -2921,6 +2951,7 @@ async function makeQuiz(
             isAsking: asking.has(one.key),
             isTeam: one.team === true,
             isDue: isDue(one, now),
+            ...(newMissed.has(one.key) ? { isNewMissed: true } : {}),
           },
           newStep,
           ladderSteps(),
@@ -2934,15 +2965,33 @@ async function makeQuiz(
   const laidOut = await layOut(ordered)
   // A base only before the worked example it was picked for, as the quiz asks it (1.10.0 G4, D33 (4)): where ladderMixed
   // asks that one again, the quiz as it was made before the base, X asked again.
-  const { laid, asIs } = isBaseKept(laidOut.asIs, laidOut.laid) ? laidOut : await layOut(spread)
-  const picks = laid.map((one, i) => pickForRung(one, asIs[i]))
+  const { laid, asIs: kept } = isBaseKept(laidOut.asIs, laidOut.laid) ? laidOut : await layOut(spread)
+  // Each pick in code never seen in a setting of the plugin's (1.12.0 G3); one with none left in its own code.
+  const { asIs, scenes } = kept.includes('new') ? withScenes(laid, kept, sceneDay(now)) : { asIs: kept, scenes: [] as (number | undefined)[] }
+  const picks = laid.map((one, i) => {
+    const pick = pickForRung(one, asIs[i])
+    return scenes[i] !== undefined ? { ...pick, scene: scenes[i] } : pick
+  })
   // Code changed traces its code, code never seen and a worked example write code of their own: room for it, spent
   // only as far as it is used.
   const isLong = picks.some(one => one.rung === 'changed' || one.rung === 'new' || one.rung === 'worked')
   const asked = await askModel($, cfg, 'quiz', { system: QUIZ_SYSTEM, prompt: quizPrompt(picks, cfg.level), maxTokens: isLong ? QUIZ_TRACE_TOKENS : QUIZ_TOKENS })
   if ('error' in asked) return { error: `퀴즈를 내지 못했습니다: ${asked.error}` }
   const items = parseQuiz(asked.text, picks)
+  const gone = picks.filter(one => (one.rung === 'changed' || one.rung === 'new') && !items.some(item => item.key === one.key))
+  // A question in code changed or code never seen the plugin could not check is asked another way for the rest of the session.
+  const goneChanged = gone.filter(one => one.rung === 'changed').map(one => one.key)
+  const goneNew = gone.filter(one => one.rung === 'new').map(one => one.key)
+  if (goneChanged.length > 0) await update($, quizRun, run => ({ ...run, changedMissed: [...new Set([...(run.changedMissed ?? []), ...goneChanged])].slice(-50) }))
+  if (goneNew.length > 0) await update($, quizRun, run => ({ ...run, newMissed: [...new Set([...(run.newMissed ?? []), ...goneNew])].slice(-50) }))
+  if (items.length === 0 && picks.every(one => one.rung === 'new')) {
+    // Counted in /learn 진단 like an unreadable quiz (a code and a time; no concept, no text).
+    void fault($, 'quiz', 'new-unchecked', '처음 보는 코드 문제를 확인하지 못했습니다')
+    return { error: NEW_NONE_TEXT }
+  }
   if (items.length === 0) {
+    // Every pick a changed one the plugin could not check: no fault, and the next try asks them from the learner's code.
+    if (gone.length === picks.length) return { error: '퀴즈를 내지 못했습니다: 바꾼 코드 문제를 확인하지 못했습니다. 다시 해 보면 다른 문제로 냅니다.' }
     void fault($, 'quiz', 'unreadable', '모델의 답을 문제로 읽지 못했습니다')
     return { error: '퀴즈를 내지 못했습니다: 모델의 답을 문제로 읽지 못했습니다. 다시 해 보세요.' }
   }
@@ -2967,14 +3016,14 @@ async function startQuiz($: EngineInterface, cfg: Config): Promise<void> {
   }
   isQuizMaking = true
   try {
-    await update($, quizRun, () => ({ isMaking: true, error: null }))
+    await update($, quizRun, run => ({ isMaking: true, error: null, ...missedKept(run) }))
     const made = await makeQuiz($, cfg, await $.clock.now())
-    await update($, quizRun, () => ({ isMaking: false, error: 'error' in made ? made.error : null }))
+    await update($, quizRun, run => ({ isMaking: false, error: 'error' in made ? made.error : null, ...missedKept(run) }))
     // A surface with no text field (the mobile app) draws none to focus: the engine says no, and nothing else happens.
     if (!('error' in made)) focusInPane($, quizFieldKey(made.at, 0))
   } catch (error) {
     void fault($, 'quiz', faultCode(error), '퀴즈를 내지 못했습니다')
-    await update($, quizRun, () => ({ isMaking: false, error: '퀴즈를 내지 못했습니다. 잠시 뒤 다시 해 보세요.' }))
+    await update($, quizRun, run => ({ isMaking: false, error: '퀴즈를 내지 못했습니다. 잠시 뒤 다시 해 보세요.', ...missedKept(run) }))
   } finally {
     isQuizMaking = false
   }
@@ -3247,7 +3296,16 @@ async function gradeTyped(
   // NEW_CHECK), by a window whose code never seen is on alone (this model's at level beginner, the route; D28): any other
   // window (another model's, a model or level no sample measured) grades it as 1.9.0 did, 거의 kept as 거의. A try again
   // here of a first try such a window graded 거의 is graded line by line, that first try said 틀림 (checkPrompt).
+  // A quiz switch turned on asks the alias first where it acts (recheckRemap's rule): a window remapped since the quiz
+  // was made grades as 1.9.0 did.
+  if (Number.isFinite(build.rungNewStep) && isExactGrade(item)) await recheckRemap($)
   const isExact = build.rungNewStep !== Infinity && isExactGrade(item)
+  // A prediction in code never seen read right by the plugin alone (1.12.0 G3, localRight): every value the model answer
+  // has, in order, nothing else; no model call. Anything short of that goes to the grade below, read by values.
+  if (isExact && localRight(mine, item.answer)) {
+    const verdict = first && !isBlankAnswer(first.mine) ? secondVerdict(first.verdict, 'right') : 'right'
+    return keptGrade($, cfg, current, i, 'right', { mine: said, verdict, feedback: NEW_LOCAL_RIGHT })
+  }
   const prompt = checkPrompt(item, mine, cfg.level, first, past ? { what: past.what, mine: past.mine } : undefined, {
     ...(bases.length > 0 ? { bases: bases.map(one => one.name) } : {}),
     ...(isExact ? { exact: true as const } : {}),
@@ -3255,7 +3313,7 @@ async function gradeTyped(
   // Room for the marks and the code (BASE_GRADE_TOKENS) only where the bases are listed; else 1.9.0's.
   const asked = await askModel($, cfg, 'grade', { system: CHECK_SYSTEM, prompt, maxTokens: bases.length > 0 ? BASE_GRADE_TOKENS : 480, timeoutMs: 60_000 })
   if ('error' in asked) return { error: `채점하지 못했습니다: ${asked.error}` }
-  const graded = parseCheck(asked.text, { ...(bases.length > 0 ? { base: true as const } : {}), ...(isExact ? { exact: true as const } : {}) })
+  const graded = parseCheck(asked.text, { ...(bases.length > 0 ? { base: true as const } : {}), ...(isExact ? { exact: item.answer, mine } : {}) })
   if (!graded) {
     void fault($, 'grade', 'unreadable', '채점 결과를 읽지 못했습니다')
     return { error: '채점 결과를 읽지 못했습니다. 다시 보내 보세요.' }
@@ -4932,7 +4990,7 @@ async function typedAnswer($: EngineInterface, cfg: Config, current: Quiz, n: nu
       ...(slipLine ? [slipLine] : []),
       '',
       '정답',
-      done.answer,
+      answerShown(done),
       '',
       `채점이 이상하면 바꾸세요: /learn 퀴즈 ${done.result === 'right' ? '틀림' : '맞음'} ${n}`,
       ...(graduated.length > 0 ? ['', graduatedText(graduated)] : []),
@@ -4954,7 +5012,7 @@ async function answerText($: EngineInterface, cfg: Config, current: Quiz, said: 
   const n = said ?? firstOpen(current, checking) + 1
   if (said === undefined && n === 0) {
     // Nothing left to recall: every answer at once, and how to grade the ones seen and not graded.
-    const lines = current.items.map((item, i) => listItem(i + 1, `${item.answer}\n(개념: ${item.name}${item.result !== undefined ? ` · ${resultMark(item)}` : ''})`))
+    const lines = current.items.map((item, i) => listItem(i + 1, `${answerShown(item)}\n(개념: ${item.name}${item.result !== undefined ? ` · ${resultMark(item)}` : ''})`))
     const seen = current.items.flatMap((item, i) => (item.result === undefined && i !== checking ? [i + 1] : []))
     // Seeing the answers grades nothing: only what the learner says counts toward the record and the review steps.
     const how =
@@ -4983,7 +5041,7 @@ async function answerText($: EngineInterface, cfg: Config, current: Quiz, said: 
   const slipLine = isGradedNow ? await slipLineText($, cfg, shown) : undefined
   const teamLine = isGradedNow ? await teamLineText($, shown, slipLine !== undefined) : undefined
   const below = [teamLine, slipLine].filter(line => line !== undefined).map(line => `\n${line}`).join('')
-  return `${n}번 정답\n\n${item.answer}\n(개념: ${item.name}${mark})${below}${steps.length > 0 ? `\n\n${steps.join(' · ')}` : ''}`
+  return `${n}번 정답\n\n${answerShown(item)}\n(개념: ${item.name}${mark})${below}${steps.length > 0 ? `\n\n${steps.join(' · ')}` : ''}`
 }
 
 /**
@@ -5269,7 +5327,7 @@ export const register: Register = (on, options) => {
     // A newer build open in another window, or a store it wrote in a newer layout: said once a session.
     await lookNewer($)
     // A quiz request a reload cut off is not coming back; the last quiz is there for the pane to draw.
-    if (!isQuizMaking && !isQuizChecking) await update($, quizRun, () => ({ isMaking: false, error: null, checking: null }))
+    if (!isQuizMaking && !isQuizChecking) await update($, quizRun, run => ({ isMaking: false, error: null, checking: null, ...missedKept(run) }))
     // A question a reload cut off is not coming back: its field is there again.
     await update($, askRun, all => Object.fromEntries(Object.entries(all).filter(([id]) => !asking.has(id)).map(([id, one]) => [id, { ...one, isAsking: false }])))
     // Nor a practice's line a reload cut off mid-check (1.7.0): its field is there again.
@@ -7568,7 +7626,7 @@ function quizView(
                 </Text>
               )}
               <Text color="green">정답</Text>
-              <Markdown text={item.answer} />
+              <Markdown text={answerShown(item)} />
               <Box flexWrap="wrap" columnGap={2}>
                 {taught && <Button key="quiz-note" hotkey="n" plain label="이 개념을 배운 노트" onPress={() => openTaughtNote($, taught)} />}
                 <Button
@@ -7621,7 +7679,7 @@ function quizView(
             {isAnswerShown(current, item) ? (
               <Box flexDirection="column" marginTop={1}>
                 <Text color="green">정답</Text>
-                <Markdown text={item.answer} />
+                <Markdown text={answerShown(item)} />
                 <Text dimColor>개념: {item.name}</Text>
                 <Box flexWrap="wrap" columnGap={2} marginTop={1}>
                   <Button key="quiz-right" hotkey="o" plain label="맞혔어요" onPress={() => gradeQuiz($, cfg, i, 'right')} />

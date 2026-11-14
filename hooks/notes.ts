@@ -5896,7 +5896,7 @@ export type QuizPick = RankedConcept & {
    * what code never seen alone looks for (isNewLibraryChange, NEW_UNRUNNABLE): set only where code never seen could.
    * None is kept or sent.
    */
-  code?: { file: string; text: string; isLibrary?: true; isImporting?: true; isNewLibrary?: true }
+  code?: { file: string; text: string; isLibrary?: true; isImporting?: true; isNewLibrary?: true; isWhole?: true; around?: string }
   noteId?: string
   slip?: Pick<LearnSlip, 'what' | 'question' | 'mine'>
   team?: true
@@ -5910,6 +5910,10 @@ export type QuizPick = RankedConcept & {
   lang?: string
   /** A base concept asked right before the worked example that rests on it (1.9.0 F5, baseFor · withBase). */
   isBase?: true
+  /** The code the learner saw (its lines, its file where read and its words, seenOf) of a pick in code never seen (1.12.0 G3): read on this device for its setting and the reader's clause-3 check; never sent or kept. */
+  seen?: string
+  /** The setting (an index into NEW_SCENES) a pick in code never seen is asked in (1.12.0 G3, withScenes): run time only; only its place and names are sent. */
+  scene?: number
 }
 
 /** What a quiz question asks: the output or value of some code, why a line is there, or how to change it. */
@@ -5984,11 +5988,11 @@ const RUNG_NEW_EXTS: readonly string[] = ['js', 'mjs', 'cjs', 'ts', 'py']
 /** What each rung asks of the quiz, said only for the rungs the quiz has, in this order. */
 const RUNG_ASK: readonly [QuizRung, string][] = [
   ['mine', '내 코드: 학습자가 만든 코드를 그대로 보여 주고 묻는다.'],
-  // 1.10.0 (G2): a prediction only, in one block that runs alone, its trace on an R line (CHANGED_TRACE_LINE). 1.9.0's
-  // sentence, which let it be a question to change too, is gone: every miss its sample had was one of those.
+  // 1.12.0 (G2): no question written for it at all: the model picks one of the places the plugin lists and says what
+  // the code prints before and after (C · O · N); the plugin changes the code and writes the question (changedItem).
   [
     'changed',
-    '비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 코드 블록 하나로 보여 주고, 그 코드가 찍는 것을 예측으로 묻는다. 다른 문제와 유형이 겹쳐도 이 칸은 예측으로 낸다. 원래 코드의 답으로는 맞힐 수 없게 바꾼다. 그 블록만 따로 돌려도 그대로 실행되게 쓴다: 쓰는 변수·함수·클래스는 모두 블록 안에서 정의하고(학습자 코드에 정의가 보이지 않으면 짧게 새로 쓴다), 찍는 줄이 없으면 결과를 console.log나 print로 찍는 줄을 더한다. 출력은 3줄 이하로 둔다. A 바로 앞에 같은 번호의 R 줄(예: R2:)을 두어 그 코드를 한 줄씩 따라간 과정을 쓰고, A에는 찍히는 글자만 줄마다 그대로 쓴다(설명을 붙이지 않는다). 오류로 멈추는 코드면 A에 그 앞까지 찍힌 글자와 오류 이름(예: TypeError)을 쓴다. 문제(Q)와 힌트(H)에는 출력값이나 따라간 과정을 쓰지 않는다.',
+    '비슷한 코드: 이 칸은 문제 글을 쓰지 않는다. 문제와 바꾼 코드는 플러그인이 만든다. 그 개념 아래 "바꿀 수 있는 곳" 가운데 그 개념이 쓰이고 찍히는 글자가 원래와 달라지는 한 곳을 골라, 괄호 안에 적힌 대로 새 값을 정한다. 바꾼 뒤 찍히는 글자를 확실히 알 수 있는 곳과 값을 고른다. 이 번호에는 T·Q·H·A를 쓰지 않고 C·O·N만 쓴다. C 줄에는 고른 곳의 이름과 새 값을 쓰고(예: C2: 2b >=), 다음 줄에 그 값으로 바꾼 줄 하나를 통째로 쓴다. O 아래에는 원래 코드가, N 아래에는 그 한 곳만 바꾼 코드가 찍는 글자를 한 줄에 하나씩 그대로 쓴다(설명을 붙이지 않는다. 빈 줄은 (빈 줄)로 쓴다). 오류로 멈추면 그때까지 찍힌 줄 다음 줄에 오류 이름(예: TypeError)만 쓴다. N이 O와 같거나, O의 줄 가운데 일부만 남거나, 4줄을 넘게 되는 곳은 고르지 않는다. 다 쓴 C·O·N은 다시 쓰거나 고쳐 쓰지 않는다.',
   ],
   [
     'new',
@@ -6036,11 +6040,6 @@ export const WORKED_PLAN_LINE = 'P1: (칸이 "풀이 보고 풀기"인 문제만
  * marker of its own and dropped (parseQuiz), so the answer kept is what the code prints and the hint holds no trace.
  */
 const NEW_TRACE_LINE = 'R1: (칸이 "처음 보는 코드"인 문제만: 코드를 한 줄씩 따라간 과정)'
-/**
- * The format's line for the trace a question in code changed writes before its answer (1.10.0 G2, R{n}), in a quiz
- * with no code never seen (ladderMixed keeps the two apart): a marker too, dropped (parseQuiz), never kept.
- */
-export const CHANGED_TRACE_LINE = 'R1: (칸이 "비슷한 코드"인 문제만: 보인 코드를 한 줄씩 따라간 과정)'
 
 /** Said when a quiz has a rung whose code the quiz writes itself, over QUIZ_SYSTEM's "only in the words and code given". */
 const RUNG_WRITES = "'처음 보는 코드'·'풀이 보고 풀기' 칸은 그 개념을 쓰는 짧은 코드를 새로 쓴다. 그 밖에는 주어진 설명과 코드 안에서만 묻는다."
@@ -6077,11 +6076,13 @@ export function extOf(file: string): string | undefined {
 export function rungOf(
   one: LearnConcept,
   how: {
-    code?: { file: string; text?: string; isLibrary?: boolean; isImporting?: boolean; isNewLibrary?: boolean }
+    code?: { file: string; text?: string; isLibrary?: boolean; isImporting?: boolean; isNewLibrary?: boolean; isWhole?: boolean }
     slip?: Pick<LearnSlip, 'times' | 'isRight'>
     isAsking: boolean
     isTeam: boolean
     isDue: boolean
+    /** This window could not check its question in code never seen before (1.12.0 G3, makeQuiz's newMissed): session only. */
+    isNewMissed?: boolean
   },
   newStep = RUNG_NEW_STEP,
   { changedStep = RUNG_CHANGED_STEP, workedAfter = WORKED_AFTER_TIMES, workedPlainAfter = WORKED_PLAIN_AFTER_TIMES }: Partial<LadderSteps> = {},
@@ -6096,8 +6097,9 @@ export function rungOf(
   // Code never seen also leaves out what its quiz forbids (1.10.0 G3, D29): read for that rung alone, so code changed
   // and a worked example go by the code check they were measured with.
   const isNewRunnable = isRunnable && how.code.isNewLibrary !== true && (how.code.text === undefined || !isNewOnlyUnrunnable(how.code.text))
-  if (isNewAskable(one, how.code.file, how.isDue, newStep) && isNewRunnable) return 'new'
-  return stepOf(one) >= changedStep && isRunnable && isChangedRunnable(how.code) ? 'changed' : 'mine'
+  if (isNewAskable(one, how.code.file, how.isDue, newStep) && isNewRunnable && isNewInScope(how.code.file, one.blurb, how.code.text, how.isNewMissed === true)) return 'new'
+  // 1.12.0 (G2): only a JavaScript or Python file shown whole, in the shape the plugin can change one token of (isChangedShaped).
+  return stepOf(one) >= changedStep && isRunnable && isChangedRunnable(how.code) && isChangedShaped(how.code, one.blurb) ? 'changed' : 'mine'
 }
 
 /**
@@ -6252,6 +6254,476 @@ export function isChangedAskable(one: LearnConcept, file: string, changedStep = 
   return stepOf(one) >= changedStep && ext !== undefined && RUNG_NEW_EXTS.includes(ext)
 }
 
+/**
+ * The languages a question in code changed is asked in from 1.12.0 (G2): JavaScript run as a script and Python, the
+ * ones the plugin can change one token of and still know the code runs as a whole (no type check to pass).
+ */
+const RUNG_CHANGED_EXTS: readonly string[] = ['js', 'py']
+
+/**
+ * True when the lines a quiz shows for a concept are the whole file a change made (1.12.0 G2): a file written whole,
+ * not cut or masked, its diff one hunk of added lines only, and codeFor's lines that hunk's lines to the end (trailing
+ * blank lines and CRLF aside). Then every name the code uses is defined in what the model and the learner see.
+ */
+export function isWholeShown(change: Pick<LearnChange, 'kind' | 'diff' | 'isCut' | 'redacted'>, text: string): boolean {
+  if (change.kind !== 'create' || change.isCut || (change.redacted ?? 0) > 0) return false
+  const hunks = parseDiff(change.diff)
+  if (hunks.length !== 1 || hunks[0]!.oldLines !== 0 || !hunks[0]!.lines.every(line => line.startsWith('+') || line.startsWith('\\'))) return false
+  const lines = (raw: string) => {
+    const all = raw.replace(/\r\n?/g, '\n').split('\n')
+    while (all.length > 0 && all.at(-1)!.trim() === '') all.pop()
+    return all.join('\n')
+  }
+  return lines(text) === lines(beforeAfter(hunks[0]!).after)
+}
+
+/** A line that prints, by its start: `console.log(` in JavaScript, `print(` in Python. */
+const CHANGED_PRINT: Readonly<Record<'js' | 'py', RegExp>> = { js: /^\s*console\.log\s*\(/, py: /^\s*print\s*\(/ }
+const CHANGED_SIGNS = ['===', '!==', '**=', '//=', '&&=', '||=', '??=', '...', '=>', '==', '!=', '<=', '>=', '+=', '-=', '*=', '/=', '%=', '**', '//', '&&', '||', '??', '?.', '++', '--', '->', ':=']
+const CHANGED_COMPARE: Readonly<Record<'js' | 'py', readonly string[]>> = { js: ['<', '<=', '>', '>=', '==', '!=', '===', '!=='], py: ['<', '<=', '>', '>=', '==', '!='] }
+const CHANGED_LOGIC: Readonly<Record<'js' | 'py', readonly string[]>> = { js: ['&&', '||'], py: ['and', 'or'] }
+const CHANGED_BOOL: Readonly<Record<'js' | 'py', readonly string[]>> = { js: ['true', 'false'], py: ['True', 'False'] }
+/** Methods of one type that take the same arguments and give the same kind of value: one may stand for another. */
+const CHANGED_METHODS: Readonly<Record<'js' | 'jsMath' | 'py' | 'pyBuiltin', readonly (readonly string[])[]>> = {
+  js: [['some', 'every'], ['toUpperCase', 'toLowerCase'], ['startsWith', 'endsWith'], ['padStart', 'padEnd'], ['trimStart', 'trimEnd'], ['indexOf', 'lastIndexOf'], ['push', 'unshift'], ['pop', 'shift']],
+  jsMath: [['floor', 'ceil', 'round', 'trunc'], ['min', 'max']],
+  py: [['upper', 'lower'], ['startswith', 'endswith'], ['ljust', 'rjust'], ['lstrip', 'rstrip'], ['find', 'rfind']],
+  pyBuiltin: [['min', 'max'], ['any', 'all']],
+}
+/** The error names a changed question's answer may end in: the name alone is kept (its message is never graded). */
+export const ERROR_NAMES: Readonly<Record<'js' | 'py', readonly string[]>> = {
+  js: ['TypeError', 'ReferenceError', 'RangeError', 'SyntaxError', 'Error'],
+  py: ['TypeError', 'ValueError', 'KeyError', 'IndexError', 'ZeroDivisionError', 'AttributeError', 'NameError', 'RecursionError', 'AssertionError', 'UnboundLocalError', 'Exception'],
+}
+
+type CodeSpan = { text: string; at: number; end: number }
+export type ChangeSite = { line: number; at: number; end: number; token: string; kind: 'number' | 'string' | 'compare' | 'logic' | 'bool' | 'method'; alts: readonly string[] }
+
+const changedLang = (file: string): 'js' | 'py' | undefined => {
+  const ext = extOf(file)
+  return ext === 'py' ? 'py' : ext === 'js' ? 'js' : undefined
+}
+
+/** One line's tokens with their offsets: a comment ends the line (`#` in Python, `//` in JavaScript), a string is one token. */
+export function codeSpans(line: string, lang: 'js' | 'py'): CodeSpan[] {
+  const out: CodeSpan[] = []
+  for (let i = 0; i < line.length; ) {
+    const ch = line[i]!
+    if (/\s/.test(ch)) {
+      i += 1
+      continue
+    }
+    if ((lang === 'py' && ch === '#') || (lang === 'js' && line.startsWith('//', i))) break
+    let end = i + 1
+    if (ch === '"' || ch === "'" || ch === '`') {
+      while (end < line.length && line[end] !== ch) end += line[end] === '\\' ? 2 : 1
+      end = Math.min(end + 1, line.length)
+    } else if (/\d/.test(ch)) {
+      while (end < line.length && (/\w/.test(line[end]!) || (line[end] === '.' && /\d/.test(line[end + 1] ?? '')))) end += 1
+    } else if (/[\p{L}_$]/u.test(ch)) {
+      while (end < line.length && /[\p{L}\p{N}_$]/u.test(line[end]!)) end += 1
+    } else {
+      end = i + (CHANGED_SIGNS.find(sign => line.startsWith(sign, i))?.length ?? 1)
+    }
+    out.push({ text: line.slice(i, end), at: i, end })
+    i = end
+  }
+  return out
+}
+
+/**
+ * A line as an echo of it is compared (changedItem, changeSites): the same names, values and signs in order, quotes alike,
+ * with the marks a tutor drops or adds when it copies a line across languages left out (`;`, brackets of a condition
+ * and a block, `:`, const · let · var).
+ */
+const ECHO_MARKS: ReadonlySet<string> = new Set([';', '(', ')', '{', '}', ':', 'const', 'let', 'var'])
+function echoed(line: string, lang: 'js' | 'py'): string {
+  return codeSpans(line, lang).map(t => t.text.replace(/'/g, '"')).filter(t => !ECHO_MARKS.has(t)).join(' ')
+}
+
+/** The lines of a print call, its first line to the line its brackets close on. */
+function printLines(lines: readonly string[], lang: 'js' | 'py'): Set<number> {
+  const inPrint = new Set<number>()
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!CHANGED_PRINT[lang].test(lines[i]!)) continue
+    let depth = 0
+    for (let j = i; j < lines.length; j += 1) {
+      inPrint.add(j)
+      for (const t of codeSpans(lines[j]!, lang)) depth += '([{'.includes(t.text) ? 1 : ')]}'.includes(t.text) ? -1 : 0
+      if (depth <= 0) {
+        i = j
+        break
+      }
+    }
+  }
+  return inPrint
+}
+
+/**
+ * The places the plugin lets a quiz change in a concept's code (1.12.0 G2): one token each, a number, a short string, a
+ * comparison, an and/or, a true/false or a method of a same-type pair, never on a print call, in a comment or in a
+ * `for (…;…;…)` header; the six nearest to the line its words quote (codeFor's match), in the code's order.
+ */
+export function changeSites(text: string, file: string, blurb: string): ChangeSite[] {
+  const lang = changedLang(file)
+  if (!lang) return []
+  const lines = text.split('\n')
+  const quotes = quotesOf(blurb)
+  const hit = Math.max(0, lines.findIndex(line => isQuotedLine(line, quotes)))
+  const inPrint = printLines(lines, lang)
+  const found: ChangeSite[] = []
+  lines.forEach((line, li) => {
+    if (inPrint.has(li) || /^\s*for\s*\([^)]*;/.test(line)) return
+    const toks = codeSpans(line, lang)
+    toks.forEach((t, k) => {
+      const prev = toks[k - 1]?.text
+      const next = toks[k + 1]?.text
+      const prev2 = toks[k - 2]?.text
+      if (/^\d+(?:\.\d+)?$/.test(t.text)) {
+        if (prev === '.') return
+        found.push({ line: li, at: t.at, end: t.end, token: t.text, kind: 'number', alts: [] })
+      } else if ((t.text[0] === '"' || t.text[0] === "'") && t.text.length >= 2 && t.text.at(-1) === t.text[0]) {
+        if (t.text.includes('\\') || t.text.length > 22) return
+        if (t.at > 0 && /[\p{L}\p{N}_]/u.test(line[t.at - 1]!)) return
+        if (next === ':' && (prev === '{' || prev === ',')) return
+        found.push({ line: li, at: t.at, end: t.end, token: t.text, kind: 'string', alts: [] })
+      } else if (CHANGED_COMPARE[lang].includes(t.text)) {
+        found.push({ line: li, at: t.at, end: t.end, token: t.text, kind: 'compare', alts: CHANGED_COMPARE[lang].filter(x => x !== t.text) })
+      } else if (CHANGED_LOGIC[lang].includes(t.text)) {
+        found.push({ line: li, at: t.at, end: t.end, token: t.text, kind: 'logic', alts: CHANGED_LOGIC[lang].filter(x => x !== t.text) })
+      } else if (CHANGED_BOOL[lang].includes(t.text) && prev !== '.') {
+        found.push({ line: li, at: t.at, end: t.end, token: t.text, kind: 'bool', alts: CHANGED_BOOL[lang].filter(x => x !== t.text) })
+      } else if (next === '(') {
+        const groups =
+          lang === 'js' ? (prev === '.' ? (prev2 === 'Math' ? CHANGED_METHODS.jsMath : CHANGED_METHODS.js) : []) : prev === '.' ? CHANGED_METHODS.py : CHANGED_METHODS.pyBuiltin
+        const group = groups.find(g => g.includes(t.text))
+        if (group) found.push({ line: li, at: t.at, end: t.end, token: t.text, kind: 'method', alts: group.filter(x => x !== t.text) })
+      }
+    })
+  })
+  // A place whose line, its token held out, reads as another place's line (two lines alike) could not be told apart by the
+  // line echoed (changedItem): neither is listed.
+  const shape = (one: ChangeSite) => echoed(lines[one.line]!.slice(0, one.at) + '\u0000' + lines[one.line]!.slice(one.end), lang)
+  const shapes = found.map(shape)
+  const plain = found.filter((one, i) => !found.some((other, j) => j !== i && other.line !== one.line && shapes[j] === shapes[i]))
+  const near = [...plain].sort((a, b) => Math.abs(a.line - hit) - Math.abs(b.line - hit) || a.line - b.line || a.at - b.at).slice(0, 6)
+  // Shown in the code's own order, so the letters run down the code as the learner reads it.
+  return near.sort((a, b) => a.line - b.line || a.at - b.at)
+}
+
+/**
+ * Whether code may be asked changed by its shape (1.12.0 G2), past isChangedRunnable: a JavaScript or Python file shown
+ * whole (`isWhole`, isWholeShown), one to four print calls each on a line of its own and no other console call, no
+ * export line, no while or do loop, no string over lines, no secret masked, and three places to change at least.
+ */
+export function isChangedShaped(code: { file: string; text?: string; isWhole?: boolean }, blurb: string): boolean {
+  const lang = changedLang(code.file)
+  const text = code.text
+  if (!lang || code.isWhole !== true || text === undefined) return false
+  const lines = text.split('\n')
+  const prints = lines.filter(line => CHANGED_PRINT[lang].test(line)).length
+  const calls = lang === 'js' ? (text.match(/\bconsole\s*\./g) ?? []).length : (text.match(/(?<![\w$.])print\s*\(/g) ?? []).length
+  if (prints < 1 || prints > 4 || calls !== prints) return false
+  if (lang === 'js' && /^[ \t]*export\b/m.test(text)) return false
+  if (/"""|'''/.test(text) || lines.some(line => (line.match(/`/g) ?? []).length % 2 === 1)) return false
+  const words = lines.flatMap(line => codeSpans(line, lang).map(t => t.text))
+  if (words.includes('while') || (lang === 'js' && words.includes('do'))) return false
+  // A run that ends whatever one token becomes (1.12.0 review): no counted for loop, no loop over a list the code also
+  // grows; a print of nothing or a string with an escape, whose blank line an answer cannot show; no set in Python,
+  // whose printed order may follow the run's hash seed once a value changes.
+  if (lang === 'js' && lines.some(line => /^\s*for\s*\([^)]*;/.test(line) || /\bfor\s*\(\s*;/.test(line))) return false
+  for (const m of text.matchAll(lang === 'js' ? /\bfor\s*\(\s*(?:const|let|var)?\s*[\w$]+\s+(?:of|in)\s+([\w$]+)\s*\)/g : /^\s*for\s+[\w, ]+\s+in\s+([A-Za-z_]\w*)\s*:/gm)) {
+    const grows = lang === 'js' ? new RegExp(`\\b${m[1]}\\s*\\.\\s*(?:push|unshift|splice)\\s*\\(`) : new RegExp(`\\b${m[1]}\\s*(?:\\.\\s*(?:append|insert|extend)\\s*\\(|\\+=)`)
+    if (grows.test(text)) return false
+  }
+  if (/\\/.test(text)) return false
+  if (lines.some(line => (lang === 'js' ? /^\s*console\.log\s*\(\s*(?:''|""|``)?\s*\)/ : /^\s*print\s*\(\s*(?:''|"")?\s*\)/).test(line))) return false
+  if (lang === 'py' && (/\b(?:frozen)?set\s*\(/.test(text) || lines.some(line => isSetLiteral(codeSpans(line, lang))))) return false
+  if (redactText(text).hits > 0) return false
+  // A place that is not a string at least: a list of strings alone may hold no place whose change is printed (counts only).
+  const sites = changeSites(text, code.file, blurb)
+  return sites.length >= 3 && sites.some(site => site.kind !== 'string')
+}
+
+/** A brace on one line with no colon inside it (Python): a set, not a dict. */
+function isSetLiteral(toks: readonly CodeSpan[]): boolean {
+  const open = toks.findIndex(t => t.text === '{')
+  if (open === -1) return false
+  let depth = 0
+  for (let k = open; k < toks.length; k += 1) {
+    depth += toks[k]!.text === '{' ? 1 : toks[k]!.text === '}' ? -1 : 0
+    if (toks[k]!.text === ':' && depth === 1) return false
+    if (depth === 0) return k > open + 1
+  }
+  return false
+}
+
+/** How far a number may move (1.12.0 review): ten, or five times the old one's size, so a count changed stays a small count. */
+const numberBound = (token: string) => Math.max(10, 5 * Math.abs(Number(token)))
+
+const SITE_ORDINAL = ['첫', '두', '세', '네', '다섯', '여섯', '일곱', '여덟', '아홉', '열']
+const SITE_WHAT: Readonly<Record<ChangeSite['kind'], (site: ChangeSite) => string>> = {
+  number: site => `-${numberBound(site.token)}부터 ${numberBound(site.token)} 사이의 다른 숫자로`,
+  string: site => `${site.token[0]}로 감싼 다른 문자열로`,
+  compare: site => `${site.alts.join(' ')} 가운데 하나로`,
+  logic: site => `${site.alts[0]}로`,
+  bool: site => `${site.alts[0]}로`,
+  method: site => (site.alts.length === 1 ? `${site.alts[0]}로` : `${site.alts.join(' ')} 가운데 하나로`),
+}
+
+/** The lines under a changed concept's code that name its places to change, labelled by its number and a letter (2a, 2b, …). */
+export function siteLines(n: number, text: string, file: string, sites: readonly ChangeSite[]): string[] {
+  const lang = changedLang(file) ?? 'js'
+  const lines = text.split('\n')
+  return [
+    '   바꿀 수 있는 곳 (줄은 위 코드의 첫 줄을 1로 셈):',
+    ...sites.map((site, i) => {
+      const same = codeSpans(lines[site.line]!, lang).filter(t => t.text === site.token)
+      const nth = same.length > 1 ? `${SITE_ORDINAL[same.findIndex(t => t.at === site.at)] ?? ''} 번째 ` : ''
+      return `   ${n}${'abcdef'[i]}: ${site.line + 1}번째 줄의 ${nth}\`${site.token}\` (${SITE_WHAT[site.kind](site)})`
+    }),
+  ]
+}
+
+/** Said, in place of RUNG_ASK's general kinds line, in a quiz with code changed and other questions too (1.12.0 G2). */
+export const CHANGED_KINDS_LINE =
+  '칸이 "비슷한 코드"가 아닌 개념은, 코드가 붙었거나 칸이 붙었으면 예측(코드만으로 출력이나 값이 하나로 정해질 때만) 또는 바꿔 보기로, 칸도 코드도 없으면 왜로 낸다. 그 문제들끼리는 되도록 서로 다른 유형으로 낸다.'
+/** The question the plugin writes over the code it changed (1.12.0 G2), and its hint by the line changed. */
+export const CHANGED_LEAD =
+  '전에 만든 코드에서 한 곳을 바꿨습니다. 이 코드를 실행하면 무엇이 출력될까요? 오류로 멈추면 그때까지 찍힌 것과 오류 이름을 쓰세요. 여러 줄이면 쉼표로 이어 한 줄에 써도 됩니다.'
+/** The hint names the line changed by its number and, when it is short, its text too: a line wrapped on a narrow pane is hard to count. */
+export const CHANGED_HINT = (line: number, text: string) => {
+  const shown = text.trim()
+  const quote = shown.length === 0 || shown.length > 60 ? '' : shown.includes('`') ? ` \`\` ${shown} \`\`` : ` \`${shown}\``
+  return `바뀐 곳은 ${line}번째 줄${quote}입니다. 그 줄 때문에 달라지는 값부터 보세요.`
+}
+/**
+ * A question's answer as it is shown: a changed question's (1.12.0 G2 review) and a prediction in code never seen the
+ * plugin made (1.12.0 G3) in a code block, so an output such as `***` or `- 1` is not read as Markdown. Stored text is
+ * unchanged.
+ */
+export function answerShown(item: Pick<LearnQuizItem, 'answer' | 'question' | 'rung' | 'kind'>): string {
+  if (item.rung === 'new' && (item.question.startsWith(NEW_LEAD) || item.question.startsWith(NEW_LEAD_LINES))) return `\`\`\`text\n${item.answer}\n\`\`\``
+  if (item.rung !== 'changed' || item.kind !== 'predict' || !item.question.startsWith(CHANGED_LEAD.slice(0, 20))) return item.answer
+  const fence = fenceFor(item.answer)
+  return `${fence}\n${item.answer}\n${fence}`
+}
+
+/** Words a run prints of itself, not from the code's own text. */
+const OUTPUT_WORDS: ReadonlySet<string> = new Set([
+  'true', 'false', 'undefined', 'null', 'NaN', 'Infinity', 'None', 'True', 'False', 'inf', 'nan', 'Object', 'Array', 'object', 'function', 'Function',
+  // typeof's words, and the type names Python prints (`<class 'int'>`, `dict_keys([...])`).
+  'number', 'string', 'boolean', 'bigint', 'symbol', 'class', 'int', 'str', 'float', 'list', 'dict', 'tuple', 'bool', 'NoneType', 'keys', 'values', 'items',
+])
+/**
+ * A JavaScript value printed whole that node spreads over several lines (1.12.0 review): an array or object of more
+ * than six entries, a line past 70 characters, or brackets three deep. An answer that writes it on one line is not
+ * the run's output, so such a line is not kept.
+ */
+function isSpreadByNode(line: string): boolean {
+  if (!/^(?:[\w$]+(?:\(\d+\))?\s+)?[[{]/.test(line)) return false
+  let depth = 0
+  let most = 0
+  let entries = 1
+  let quote = ''
+  for (const ch of line) {
+    if (quote) {
+      if (ch === quote) quote = ''
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') quote = ch
+    else if ('[{('.includes(ch)) most = Math.max(most, (depth += 1))
+    else if (')]}'.includes(ch)) depth -= 1
+    else if (ch === ',' && depth === 1) entries += 1
+  }
+  return entries > 6 || line.length > 70 || most >= 3
+}
+
+/** The output lines under an O or N marker, or why they cannot be an output the plugin keeps. */
+export function outputLines(raw: string | undefined, code: string, lang: 'js' | 'py'): string[] | undefined {
+  if (raw === undefined) return undefined
+  let lines = raw
+    .split('\n')
+    .filter(line => !BARE_FENCE.test(line))
+    .map(line => line.trim())
+    .filter(line => line !== '')
+    .map(line => (line === '(빈 줄)' ? '' : line))
+  if (lines.length === 0 || lines.length > 8 || lines.some(line => line.length > 160)) return undefined
+  if (!/[ㄱ-힝]/.test(code) && lines.some(line => /[ㄱ-힝]/.test(line))) return undefined
+  const ending = /(?:니다|이다|한다|된다|진다|난다|나요|까요)[.!?]?$/
+  if (lines.some(line => ending.test(line)) && !code.split('\n').some(line => ending.test(line.replace(/['"`);,\s]+$/, '')))) return undefined
+  if (lines.some(line => /^(?:\.\.\.|…)$/.test(line) || (line.includes('…') && !code.includes('…')))) return undefined
+  if (lines.some(line => /^Traceback\b|^at\s|^File\s+"/.test(line))) return undefined
+  // Every word an output line shows is one the code holds (any case, any part of it) or a value a run prints of itself:
+  // a line of words about the output is none of its lines.
+  // A word may be pieces the code joins (`'안녕하세요, ' + name + '님'`, `'img_' + 'cat'`): Hangul syllable by syllable, other
+  // letters three at a time at least.
+  const known = code.toLowerCase()
+  const isWordKnown = (word: string) => {
+    if (OUTPUT_WORDS.has(word)) return true
+    const w = word.toLowerCase()
+    const min = /[가-힣]/.test(w) ? 1 : Math.min(3, w.length)
+    const ok: boolean[] = [true]
+    for (let end = 1; end <= w.length; end += 1) {
+      ok[end] = false
+      for (let start = 0; start <= end - min && !ok[end]; start += 1) ok[end] = ok[start]! && known.includes(w.slice(start, end))
+    }
+    return ok[w.length]!
+  }
+  const error = /^(?:Uncaught\s+)?([A-Z]\w*(?:Error|Exception))\b/
+  if (lines.some((line, i) => !(i === lines.length - 1 && error.test(line)) && !(line.match(/[A-Za-z]{2,}|[가-힣]+/g) ?? []).every(isWordKnown))) return undefined
+  if (lang === 'js' && lines.some(isSpreadByNode)) return undefined
+  const errAt = lines.findIndex(line => error.test(line))
+  if (errAt !== -1) {
+    if (errAt !== lines.length - 1) return undefined
+    const name = error.exec(lines[errAt]!)![1]!
+    if (!ERROR_NAMES[lang].includes(name)) return undefined
+    lines = [...lines.slice(0, -1), name]
+  }
+  return lines
+}
+
+/** The number of print calls when every one is a one-line call at the top level that prints one line; undefined otherwise. */
+export function flatPrints(code: string, lang: 'js' | 'py'): number | undefined {
+  let depth = 0
+  let all = 0
+  let flat = 0
+  for (const line of code.split('\n')) {
+    if (CHANGED_PRINT[lang].test(line)) {
+      all += 1
+      const top = lang === 'py' ? /^print\s*\(/.test(line) : depth === 0 && /^console\.log\s*\(/.test(line)
+      const toks = codeSpans(line, lang)
+      let d = 0
+      for (const t of toks) d += '([{'.includes(t.text) ? 1 : ')]}'.includes(t.text) ? -1 : 0
+      if (top && d === 0 && !/\\n|\bsep\s*=|\bend\s*=|\.join\s*\(/.test(line)) flat += 1
+    }
+    for (const t of codeSpans(line, lang)) depth += t.text === '{' ? 1 : t.text === '}' ? -1 : 0
+  }
+  return all > 0 && all === flat ? all : undefined
+}
+
+/** Whether a line echoed is the line meant (echoed). The plugin changes the code itself: the echo only says which line and value were meant. */
+const tokensSame = (a: string, b: string, lang: 'js' | 'py') => echoed(a, lang) === echoed(b, lang)
+
+/**
+ * The new value in what C's first line says after the place's name, as a learner's tutor writes it in Korean: the value
+ * alone (`20`), after a colon or a comma, after 새 값, after an arrow from the old value (`4000 → 4500`), or as "the old
+ * one to the new one" (`'우유'를 '계란'으로`, `4번째 줄의 \`1\`을 \`0\`으로`).
+ */
+export function saidValue(raw: string): string {
+  let v = raw.trim().replace(/^[:：,，]\s*/, '')
+  const arrow = v.split(/\s*(?:→|->|=>)\s*/)
+  if (arrow.length > 1) v = arrow.at(-1)!
+  const toNew = /(?:을|를)\s*(\S.*?)\s*(?:으로|로)\s*(?:바꾼다|바꿈|바꿉니다|변경)?\s*[.。]?$/.exec(v)
+  if (toNew) v = toNew[1]!
+  v = v.replace(/^(?:새\s*값|값)\s*[:：]?\s*/, '').replace(/(?<=[`'"\d\w])(?:으로|로)$/, '')
+  return v.trim()
+}
+
+/** A new value for a site as the model wrote it, made to fit its class (backticks off, a bare string quoted); undefined when it does not. */
+function siteValue(site: ChangeSite, raw: string, prev: string | undefined): string | undefined {
+  let v = saidValue(raw).replace(/^`+|`+$/g, '').trim()
+  if (site.kind === 'string' && !/^['"]/.test(v) && !/['"\\\n`]/.test(v)) v = `${site.token[0]}${v}${site.token[0]}`
+  if (v === site.token) return undefined
+  if (site.kind === 'number') {
+    // Within numberBound of zero, one decimal more than the old value's at most (two at least).
+    const decimals = Math.max(2, (site.token.split('.')[1]?.length ?? 0) + 1)
+    if (!new RegExp(`^-?\\d+(?:\\.\\d{1,${decimals}})?$`).test(v) || Number(v) === Number(site.token) || Math.abs(Number(v)) > numberBound(site.token)) return undefined
+    return v.startsWith('-') && (prev === '-' || prev === '+') ? undefined : v
+  }
+  if (site.kind === 'string') {
+    const q = site.token[0]!
+    return v.length >= 3 && v.length <= 22 && v[0] === q && v.at(-1) === q && !v.slice(1, -1).includes(q) && !v.includes('\\') ? v : undefined
+  }
+  return site.alts.includes(v) ? v : undefined
+}
+
+export type ChangedRead = { item: LearnQuizItem } | { reason: 'missing' | 'grammar' | 'other-slot' | 'site' | 'value' | 'echo' | 'O-form' | 'N-form' | 'N-lines' | 'count' | 'same' | 'subset' | 'long' }
+
+/**
+ * An output line as the judging stance compares lines (its clause 6): ends trimmed, spaces one, no space beside a mark,
+ * quotes alike, one end period and the case of true · false · none · null · undefined · nan left out.
+ */
+export function outputSame(line: string): string {
+  return line
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/\s*([^\p{L}\p{N}\s])\s*/gu, '$1')
+    .replace(/['"`]/g, '"')
+    .replace(/\.$/, '')
+    .replace(/\b(?:true|false|none|null|undefined|nan)\b/gi, word => word.toLowerCase())
+}
+
+/**
+ * A question in code changed as the plugin makes it from the model's C, O and N for slot `n` (1.12.0 G2): the site and
+ * new value named on C's first line, checked against the sites (changeSites) and applied by the plugin, the changed line
+ * echoed on C's next line, O and N each an output the plugin keeps (outputLines), as many lines as the prints give where
+ * that is known (flatPrints), and N not O. The item holds the plugin's own question over the changed code, its hint by
+ * the line, N as its answer; C and O are never kept. Anything else is no item at all (`reason`, for a test).
+ */
+export function changedItem(parts: Map<string, string[]>, n: number, pick: QuizPick): ChangedRead {
+  const code = pick.code
+  const lang = code ? changedLang(code.file) : undefined
+  if (!code || !lang) return { reason: 'missing' }
+  // A C, O or N written twice is read by its last text (quizParts' lastWins, kept under `~`): a model that corrects
+  // itself writes it again.
+  const part = (k: 'C' | 'O' | 'N') => parts.get(`~${k}${n}`) ?? parts.get(`${k}${n}`)
+  for (const k of ['C', 'O', 'N'] as const) if (!part(k)) return { reason: 'missing' }
+  const sites = changeSites(code.text, code.file, pick.blurb)
+  const cLines = part('C')!.filter(line => !BARE_FENCE.test(line))
+  const [head, ...rest] = cLines
+  const m = /^\s*`?(\d+)([a-f])`?\s*[:：]?\s*(?:→|->|=>)?\s*(.+?)\s*$/.exec(head ?? '')
+  if (!m) return { reason: 'grammar' }
+  if (Number(m[1]) !== n) return { reason: 'other-slot' }
+  const lines = code.text.split('\n')
+  const echo = rest.map(line => line.trim().replace(/^`+|`+$/g, '')).find(line => line !== '')
+  const applied = (one: ChangeSite) => {
+    const toks = codeSpans(lines[one.line]!, lang)
+    const value = siteValue(one, m[3]!, toks[toks.findIndex(t => t.at === one.at) - 1]?.text)
+    return value === undefined ? undefined : lines[one.line]!.slice(0, one.at) + value + lines[one.line]!.slice(one.end)
+  }
+  const named = sites['abcdef'.indexOf(m[2]!)]
+  const namedLine = named ? applied(named) : undefined
+  // The place is the one whose line, changed to the value said, is the line echoed: one place alone (two that give the
+  // same line cannot be told apart), the one named where its letter agrees, else the one the line gives. The line echoed
+  // as it was names the line of the place named too.
+  const byEcho = echo === undefined ? [] : sites.filter(one => { const line = applied(one); return line !== undefined && tokensSame(echo, line, lang) })
+  const asItWas = named !== undefined && namedLine !== undefined && echo !== undefined && tokensSame(echo, lines[named.line]!, lang) && sites.filter(one => one.line === named.line).length === 1
+  const site = byEcho.length === 1 ? byEcho[0] : byEcho.length === 0 && asItWas ? named : undefined
+  if (!site) return { reason: !named ? 'site' : namedLine === undefined && byEcho.length === 0 ? 'value' : 'echo' }
+  const changedLine = applied(site)!
+  const changed = [...lines.slice(0, site.line), changedLine, ...lines.slice(site.line + 1)].join('\n')
+  const O = outputLines(part('O')!.join('\n'), code.text, lang)
+  if (!O) return { reason: 'O-form' }
+  const N = outputLines(part('N')!.join('\n'), changed, lang)
+  if (!N) return { reason: 'N-form' }
+  if (N.length > 4) return { reason: 'N-lines' }
+  const flat = flatPrints(code.text, lang)
+  const isErr = (out: readonly string[]) => ERROR_NAMES[lang].includes(out.at(-1)!)
+  if (flat !== undefined && !isErr(O) && (O.length < flat || (!isErr(N) && N.length !== O.length))) return { reason: 'count' }
+  // N must not be what the learner's own code prints, nor lines of it in a row (the stance's 8 (a) · (b) · (c), the whole
+  // file being what was sent): an error N ends in is a line of no output of the learner's.
+  const o = O.map(outputSame)
+  const nn = N.map((line, i) => (i === N.length - 1 && isErr(N) ? undefined : outputSame(line)))
+  if (nn.length === o.length && nn.every((line, i) => line === o[i])) return { reason: 'same' }
+  if (o.some((_, at) => at + nn.length <= o.length && nn.every((line, i) => line === o[at + i]))) return { reason: 'subset' }
+  const fence = fenceFor(changed)
+  const question = `${CHANGED_LEAD}\n${fence}${lang === 'py' ? 'python' : 'js'}\n${changed}\n${fence}`
+  if (question.length > 1200) return { reason: 'long' }
+  return {
+    item: {
+      key: pick.key,
+      name: pick.name,
+      question,
+      hint: CHANGED_HINT(site.line + 1, changedLine),
+      answer: N.join('\n'),
+      kind: 'predict',
+      ...(pick.noteId ? { noteId: pick.noteId } : {}),
+      rung: 'changed',
+    },
+  }
+}
+
 /** A module named by its bare name (`'react'`, `"lodash/debounce"`), not by a path (`./`, `../`, `/`) or `node:`. */
 const BARE_MODULE = String.raw`(['"\x60])(?!\.{0,2}\/|node:)[^'"\x60\s]+\1`
 /**
@@ -6350,7 +6822,8 @@ export function pickForRung<T extends QuizPick>(pick: T, rung: QuizRung | undefi
   const { code, ...rest } = pick
   const lang = code ? extOf(code.file) : undefined
   const blurb = rung === 'new' ? unquoted(pick.blurb) : pick.blurb
-  return { ...rest, blurb, rung, ...(lang !== undefined ? { lang } : {}) } as T
+  const seen = rung === 'new' ? seenOf(code, pick.blurb) : undefined
+  return { ...rest, blurb, rung, ...(lang !== undefined ? { lang } : {}), ...(seen !== undefined ? { seen } : {}) } as T
 }
 
 /**
@@ -6801,7 +7274,10 @@ export function quizPrompt(
   picks: readonly (LearnConcept & Pick<QuizPick, 'code' | 'slip' | 'team' | 'teamCode' | 'isTeamMarked' | 'rung' | 'lang'>)[],
   level: Level,
 ): string {
+  // Code never seen (1.12.0 G3) is asked by its own prompt: K · L · A, no trace.
+  if (picks.some(one => one.rung === 'new')) return newQuizPrompt(picks as Parameters<typeof newQuizPrompt>[0], level)
   const rungs = new Set(picks.flatMap(one => (one.rung ? [one.rung] : [])))
+  if (rungs.has('changed')) return changedQuizPrompt(picks, level, rungs)
   const hasWorked = rungs.has('worked')
   const hasSlip = picks.some(one => one.slip !== undefined && one.rung !== 'worked')
   const isTeam = (one: Pick<QuizPick, 'team' | 'isTeamMarked'>) => one.team === true || one.isTeamMarked === true
@@ -6844,12 +7320,66 @@ export function quizPrompt(
     ...(hasWorked ? [WORKED_PLAN_LINE] : []),
     'Q1: (문제 한두 문장)',
     'H1: (힌트 한 문장)',
-    ...(rungs.has('new') ? [NEW_TRACE_LINE] : rungs.has('changed') ? [CHANGED_TRACE_LINE] : []),
+    ...(rungs.has('new') ? [NEW_TRACE_LINE] : []),
     'A1: (답 한두 문장)',
     'T2: …',
     'Q2: …',
     'H2: …',
     'A2: …',
+  ].join('\n')
+}
+
+/**
+ * The quiz message of a quiz with code changed (1.12.0 G2; ladderMixed keeps it apart from code never seen and a worked
+ * example): each changed concept's code with the places the plugin may change under it (changeSites, siteLines), the
+ * count said per number, the kinds and hint lines only for the other questions (CHANGED_KINDS_LINE), and the format
+ * written out per number: C · O · N for a changed one, T · Q · H · A for any other.
+ */
+function changedQuizPrompt(
+  picks: readonly (LearnConcept & Pick<QuizPick, 'code' | 'slip' | 'team' | 'teamCode' | 'isTeamMarked' | 'rung' | 'lang'>)[],
+  level: Level,
+  rungs: ReadonlySet<QuizRung>,
+): string {
+  const hasOther = picks.some(one => one.rung !== 'changed')
+  const hasSlip = picks.some(one => one.slip !== undefined)
+  const isTeam = (one: Pick<QuizPick, 'team' | 'isTeamMarked'>) => one.team === true || one.isTeamMarked === true
+  const n = picks.length
+  return [
+    LEVEL_TEXT[level],
+    '',
+    '## 개념',
+    ...picks.flatMap((one, i) => {
+      const head = `${i + 1}. ${isTeam(one) ? '(팀 용어) ' : ''}${one.name} — ${one.blurb || '(설명 없음)'}`
+      const last = one.slip ? [`   ${slipAskedLine(one.slip)}`] : []
+      const rung = one.rung ? [`   칸: ${RUNG_LABEL[one.rung]}${one.lang ? ` (${one.lang}로)` : ''}`] : []
+      if (one.teamCode) {
+        const fence = fenceFor(one.teamCode.text)
+        return [head, ...last, ...rung, `   ${teamCodeHead(one.teamCode)}:`, fence, one.teamCode.text, fence]
+      }
+      if (!one.code) return [head, ...last, ...rung]
+      const fence = fenceFor(one.code.text)
+      const sites = one.rung === 'changed' ? siteLines(i + 1, one.code.text, one.code.file, changeSites(one.code.text, one.code.file, one.blurb)) : []
+      return [head, ...last, ...rung, `   학습자가 만든 코드 (${one.code.file}):`, fence, one.code.text, fence, ...sites]
+    }),
+    '',
+    `개념마다 하나씩, 위 순서대로 ${n}개를 낸다. 번호는 1부터 ${n}까지만 쓰고, 번호마다 그 번호의 개념만 다룬다.${hasOther ? ' 문제에 개념 이름을 그대로 쓰지 말고, 코드나 상황을 보여 주고 묻는다.' : ''}`,
+    ...RUNG_ASK.filter(([rung]) => rungs.has(rung)).map(([, ask]) => ask),
+    ...(hasSlip ? ['"지난번" 줄이 붙은 개념은 같은 헷갈림이 드러나는 다른 코드나 값으로 묻는다. 지난 문제를 되풀이하지 않는다. 헷갈린 점을 문제나 힌트에 쓰지 않는다.'] : []),
+    ...(picks.some(isTeam) ? [TEAM_FOR_QUIZ] : []),
+    ...(hasOther
+      ? [
+          '문제 유형: 예측은 코드를 보여 주고 출력이나 값을 맞히게 한다. 바꿔 보기는 바라는 동작을 말하고 어느 줄을 어떻게 바꿀지 묻는다. 왜는 어떤 줄을 빼거나 바꾸면 어떻게 되는지, 왜 그렇게 썼는지 묻는다.',
+          CHANGED_KINDS_LINE,
+          '답은 예측이면 출력이나 값을, 바꿔 보기면 바꾼 코드와 그 까닭을, 왜면 무엇이 달라지는지를 쓴다.',
+          '힌트는 막힌 학습자가 답을 떠올리게 돕는 실마리 한 문장이다. 답이나 개념 이름을 그대로 말하지 않는다.',
+        ]
+      : []),
+    '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다. 아래에 없는 번호나 줄은 쓰지 않는다.',
+    ...picks.flatMap((one, i) =>
+      one.rung === 'changed'
+        ? [`C${i + 1}: (고른 곳 이름, 한 칸 띄우고 새 값만. 예: ${i + 1}b 20)`, '(그 값으로 바꾼 줄 통째로)', `O${i + 1}:`, '(원래 코드가 찍는 줄들)', `N${i + 1}:`, '(바꾼 코드가 찍는 줄들)']
+        : [`T${i + 1}: (예측 · 왜 · 바꿔 보기 중 하나)`, `Q${i + 1}: (문제 한두 문장)`, `H${i + 1}: (힌트 한 문장)`, `A${i + 1}: (답 한두 문장)`],
+    ),
   ].join('\n')
 }
 
@@ -6956,8 +7486,9 @@ export function checkPrompt(
   // A question in code never seen asked as a prediction, in a window that asks it (1.10.0 G3): right or wrong only.
   const isExact = rule === undefined && extra.exact === true && isExactGrade(item)
   // Short of right, as the lines below say it: 틀림 alone for a grade with no 거의.
-  const shortOf = isExact ? '틀림' : '거의나 틀림'
-  const shortTag = isExact ? '틀림' : '거의·틀림'
+  const shortOf = isExact ? '학습자의 값이 모범 답과 하나라도 다를' : '거의나 틀림'
+  const shortTag = isExact ? '값이 다를' : '거의·틀림'
+  const lineCount = item.answer.split('\n').length
   return [
     LEVEL_TEXT[level],
     '',
@@ -6975,28 +7506,28 @@ export function checkPrompt(
     cut(mine, 1500),
     '',
     isExact
-      ? NEW_VERDICTS
+      ? NEW_READ_RULE
       : '판정은 셋 중 하나다. 맞음: 핵심을 맞게 이해했다. 거의: 방향은 맞지만 중요한 부분이 빠졌거나 일부가 틀렸다. 틀림: 틀렸거나 관계없는 답이다("모르겠다"도 틀림).',
-    ...(rule !== undefined ? [RULE_CHECK] : isExact ? [NEW_CHECK] : item.kind ? [KIND_CHECK[item.kind]] : []),
+    ...(rule !== undefined ? [RULE_CHECK] : isExact ? [newRead(lineCount)] : item.kind ? [KIND_CHECK[item.kind]] : []),
     '피드백은 한두 문장이다. 학습자의 답대로라면 무엇이 되는지(값이나 동작)를 먼저 짚고, 맞은 점 하나를 인정한다. 모범 답을 그대로 옮기지 않는다.',
     ...(past ? ['이번 답이 지난번에 헷갈린 점을 바로잡았으면 피드백에서 한 마디로 짚는다.'] : []),
     first
       ? '마지막 시도다. 되묻기는 쓰지 않는다.'
-      : `되묻기는 판정이 ${shortOf}일 때만 쓰는 질문 한 문장이다. 학습자가 자기 답의 어디가 어긋났는지 스스로 알아차리게 묻는다. 답·고칠 코드·개념 이름은 말하지 않는다.`,
+      : `되묻기는 ${isExact ? shortOf : `판정이 ${shortOf}일`} 때만 쓰는 질문 한 문장이다. 학습자가 자기 답의 어디가 어긋났는지 스스로 알아차리게 묻는다. 답·고칠 코드·개념 이름은 말하지 않는다.`,
     ...(asksSlip
       ? [
-          `헷갈린 점은 판정이 ${shortOf}일 때만 쓴다. 학습자의 답에 드러난 잘못된 생각을 "~라고 봄"처럼 40자 안팎 한 문장으로 쓴다. 답에서 근거를 찾을 수 없으면 없음이라고 쓴다.`,
+          `헷갈린 점은 ${isExact ? shortOf : `판정이 ${shortOf}일`} 때만 쓴다. 학습자의 답에 드러난 잘못된 생각을 "~라고 봄"처럼 40자 안팎 한 문장으로 쓴다. 답에서 근거를 찾을 수 없으면 없음이라고 쓴다.`,
           `유형은 그 헷갈린 점의 갈래다. ${SLIP_TYPE_WORDS.join(', ')} 중 하나를 그대로 쓴다.`,
           ...(bases.length > 0 ? [BASE_CHECK] : []),
         ]
       : []),
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.',
     ...(rule !== undefined ? ['규칙: (지킴 · 안 지킴 중 하나)'] : []),
-    ...(isExact ? [NEW_COMPARE_LINE, '판정: (맞음 · 틀림 중 하나)'] : ['판정: (맞음 · 거의 · 틀림 중 하나)']),
+    ...(isExact ? newValueLines(lineCount) : ['판정: (맞음 · 거의 · 틀림 중 하나)']),
     '피드백: (한두 문장)',
-    ...(first ? [] : [`되묻기: (${shortTag}일 때만 질문 한 문장. 맞음이면 이 줄을 쓰지 않는다)`]),
+    ...(first ? [] : [`되묻기: (${shortTag}${isExact ? ' 때만 질문 한 문장. 모두 같으면' : '일 때만 질문 한 문장. 맞음이면'} 이 줄을 쓰지 않는다)`]),
     ...(asksSlip
-      ? [`헷갈린 점: (${shortTag}일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)`, ...(bases.length > 0 ? BASE_FORMAT : []), `유형: (${shortTag}일 때만 위 갈래 중 하나)`]
+      ? [`헷갈린 점: (${shortTag}${isExact ? ' 때만 한 문장. 모두 같으면' : '일 때만 한 문장. 맞음이면'} 이 줄을 쓰지 않는다)`, ...(bases.length > 0 ? BASE_FORMAT : []), `유형: (${shortTag}${isExact ? ' 때만' : '일 때만'} 위 갈래 중 하나)`]
       : []),
   ].join('\n')
 }
@@ -7009,6 +7540,8 @@ export function checkPrompt(
  */
 function firstTryLines(first: Pick<LearnQuizFirstTry, 'mine' | 'verdict' | 'feedback' | 'nudge'>, isExact = false): string[] {
   if (isBlankAnswer(first.mine)) return ['첫 답: (모르겠다고 했다)', `받은 힌트: ${first.nudge}`]
+  // Read by values (1.12.0 G3): the first try's values are not shown, so none is copied for this answer's.
+  if (isExact) return ['첫 답: (틀렸다. 이번 답의 값을 옮길 때 보지 않는다)', `받은 되묻기: ${first.nudge}`]
   return [
     `첫 답: ${cut(first.mine, 1500)}`,
     `첫 판정: ${first.verdict === 'partial' && !isExact ? '거의' : '틀림'}`,
@@ -7029,9 +7562,9 @@ const CHECK_LABEL = /^\s*(?:\*\*)?(판정|피드백|되묻기|헷갈린\s*점|�
  * read so it is dropped: nothing reads its part). Only then are they labels: else a line that starts so is the
  * feedback's, as in 1.8.0.
  */
-function checkLabel(asked: { rule?: true; base?: true; exact?: true }): RegExp {
+function checkLabel(asked: { rule?: true; base?: true; exact?: unknown }): RegExp {
   if (!asked.rule && !asked.base && !asked.exact) return CHECK_LABEL
-  const more = [...(asked.rule ? ['규칙'] : []), ...(asked.base ? ['(?:바탕\\s*)?점검', '바탕\\s*근거', '바탕'] : []), ...(asked.exact ? ['대조'] : [])].join('|')
+  const more = [...(asked.rule ? ['규칙'] : []), ...(asked.base ? ['(?:바탕\\s*)?점검', '바탕\\s*근거', '바탕'] : []), ...(asked.exact ? ['대조', '값\\s*(?:\\d+|더)'] : [])].join('|')
   return new RegExp(`^\\s*(?:\\*\\*)?(판정|피드백|되묻기|헷갈린\\s*점|유형|${more})(?:\\*\\*)?\\s*[:：]\\s*(?:\\*\\*)?\\s*(.*)$`)
 }
 
@@ -7123,7 +7656,7 @@ function baseSaid(raw: unknown): string | undefined {
  * stand, and 거의, which its prompt does not offer, read as wrong (the learner never sees a 거의 the grade did not
  * allow); what the 대조 line says never changes the verdict.
  */
-export function parseCheck(text: string, asked: { rule?: true; base?: true; exact?: true } = {}): CheckReply | undefined {
+export function parseCheck(text: string, asked: { rule?: true; base?: true; exact?: string; mine?: string } = {}): CheckReply | undefined {
   const words: Record<string, 'right' | 'partial' | 'wrong'> = {
     맞음: 'right', 정답: 'right', right: 'right', correct: 'right',
     거의: 'partial', 부분: 'partial', 부분정답: 'partial', partial: 'partial',
@@ -7156,7 +7689,7 @@ export function parseCheck(text: string, asked: { rule?: true; base?: true; exac
       ...(verdict !== 'right' && asked.base && typeof more.baseAudit === 'string' && more.baseAudit.trim() !== '' ? { baseAudit: more.baseAudit.trim() } : {}),
     }
   }
-  const json = /\{[\s\S]*\}/.exec(text)?.[0]
+  const json = asked.exact === undefined ? /\{[\s\S]*\}/.exec(text)?.[0] : undefined
   if (json) {
     try {
       const raw: unknown = JSON.parse(json)
@@ -7177,6 +7710,14 @@ export function parseCheck(text: string, asked: { rule?: true; base?: true; exac
     }
   }
   const parts = checkParts(text, checkLabel(asked))
+  // Read by values (1.12.0 G3, `exact` the model answer): the plugin's verdict from the 값 lines, never a word written.
+  if (asked.exact !== undefined) {
+    const values = new Map<number, string>()
+    for (const [name, said] of parts) if (/^값\d+$/.test(name)) values.set(Number(name.slice(1)), said.split('\n')[0]!.trim())
+    const read = valuesVerdict(values, parts.get('값더')?.split('\n')[0], asked.exact, asked.mine)
+    if (!read) return undefined
+    return graded(read, parts.get('피드백') ?? '', nudgeOf(parts.get('되묻기')), slipOf(parts.get('헷갈린점')), parts.get('유형'), { base: parts.get('바탕'), baseWhy: parts.get('바탕근거'), baseAudit: parts.get('바탕점검') ?? parts.get('점검') })
+  }
   const verdictWord = /^([^\s*·,.(]+)/.exec(parts.get('판정') ?? '')?.[1]?.toLowerCase()
   const verdict = verdictWord === undefined ? undefined : words[verdictWord]
   if (!verdict) return undefined
@@ -7956,10 +8497,17 @@ export function listItem(n: number, text: string): string {
 export function parseQuiz(text: string, picks: readonly QuizPick[]): LearnQuizItem[] {
   // A question in code never seen (1.9.0 F3) or code changed (1.10.0 G2) traces its code on an R line before its
   // answer, and a worked example (1.10.0 G1) plans its answer on a P line: each a marker too, then dropped.
-  const markers = `QHAT${picks.some(one => one.rung === 'new' || one.rung === 'changed') ? 'R' : ''}${picks.some(one => one.rung === 'worked') ? 'P' : ''}`
-  const aware = quizItems(quizParts(text, true, markers), picks)
+  // Code changed (1.12.0 G2) is read from its C, O and N (changedItem), each a marker too; code never seen (1.12.0 G3) from
+  // its K, L and A (newItem). Each of these written twice counts by its last text (quizParts' lastWins); the two never
+  // share a quiz (ladderMixed).
+  const isChanged = picks.some(one => one.rung === 'changed')
+  const isNew = picks.some(one => one.rung === 'new')
+  const markers = `QHAT${isNew || isChanged ? 'R' : ''}${isNew ? 'KL' : ''}${isChanged ? 'CON' : ''}${picks.some(one => one.rung === 'worked') ? 'P' : ''}`
+  const late = isNew ? 'KLA' : isChanged ? 'CON' : ''
+  const read = (isFenceAware: boolean) => quizItems(quizParts(text, isFenceAware, markers, late), picks)
+  const aware = read(true)
   // A fence the model left open would hide every marker after it: then read it as if there were no code.
-  const items = aware.length >= picks.length ? aware : [aware, quizItems(quizParts(text, false, markers), picks)].reduce((a, b) => (b.length > a.length ? b : a))
+  const items = aware.length >= picks.length ? aware : [aware, read(false)].reduce((a, b) => (b.length > a.length ? b : a))
   return items.some(item => item.isBase) ? basesKept(items, picks) : items
 }
 
@@ -7985,8 +8533,11 @@ const BARE_FENCE = /^\s*(`{3,}|~{3,})[\w+.-]*\s*$/
  * `isFenceAware`, a capital marker inside a code block is the code's own line
  * (`h1.textContent`, `T1.textContent`, `a1.`); a marker seen twice keeps its first text.
  */
-function quizParts(text: string, isFenceAware: boolean, markers = 'QHAT'): Map<string, string[]> {
+function quizParts(text: string, isFenceAware: boolean, markers = 'QHAT', lastWins = ''): Map<string, string[]> {
   const parts = new Map<string, string[]>()
+  // Markers (1.12.0: C · O · N of a quiz with code changed, G2; K · L · A of one with code never seen, G3) whose later
+  // text replaces the first, kept apart by key: a marker written again is the model's own correction.
+  const late = new Map<string, string[]>()
   const marker = new RegExp(`^\\s*(?:\\*\\*)?([${markers}])\\s*(\\d+)\\s*(?:\\*\\*)?\\s*[:.)：]\\s*(?:\\*\\*)?\\s*(.*)$`)
   let current: string[] | undefined
   let fence: string | null = null
@@ -7996,6 +8547,10 @@ function quizParts(text: string, isFenceAware: boolean, markers = 'QHAT'): Map<s
     if (m && key && !parts.has(key)) {
       current = [m[3]!.replace(/\*\*$/, '')]
       parts.set(key, current)
+      if (lastWins.includes(m[1]!)) late.set(key, current)
+    } else if (m && key && lastWins.includes(m[1]!)) {
+      current = [m[3]!.replace(/\*\*$/, '')]
+      late.set(key, current)
     } else if (current) {
       current.push(raw)
     }
@@ -8003,6 +8558,10 @@ function quizParts(text: string, isFenceAware: boolean, markers = 'QHAT'): Map<s
     if (bare && fence === null) fence = bare[1]!
     else if (bare && fence !== null && bare[1]!.startsWith(fence[0]!) && bare[1]!.length >= fence.length) fence = null
   }
+  if (lastWins === '') return parts
+  // Only the slots of code changed and code never seen are read from `late` (changedItem's C, O, N; newItem's K, L, A);
+  // every other slot reads `parts` as before.
+  for (const [key, lines] of late) parts.set(`~${key}`, lines)
   return parts
 }
 
@@ -8034,6 +8593,12 @@ function quizItems(parts: Map<string, string[]>, picks: readonly QuizPick[]): Le
   }
   const items: LearnQuizItem[] = []
   picks.forEach((one, i) => {
+    // Code changed (1.12.0 G2) and code never seen (1.12.0 G3): only the plugin's own item from C · O · N or K · L · A, or none.
+    if (one.rung === 'changed' || one.rung === 'new') {
+      const made = one.rung === 'changed' ? changedItem(parts, i + 1, one) : newItem(parts, i + 1, one)
+      if ('item' in made) items.push(made.item)
+      return
+    }
     const question = read(`Q${i + 1}`)
     const answer = read(`A${i + 1}`)
     const hint = parts.has(`H${i + 1}`) ? closeFence(cut(parts.get(`H${i + 1}`)!.join('\n').replace(/\n{2,}/g, '\n'), 300)) : ''
@@ -9300,7 +9865,7 @@ export function newerBuild(stamps: Readonly<Record<string, SessionStamp>>, id: s
  * by line, right or wrong only, isExactGrade). A window of a build before it grades such a question by 1.9.0's stock
  * grade, which fell short of the bar on it (거의 for one value of several wrong); one before 1.8.0 knows no rung at all.
  */
-export const NEW_GRADER_SINCE = '1.10.0'
+export const NEW_GRADER_SINCE = '1.12.0'
 
 /**
  * True when another session (not `id`) of a build before NEW_GRADER_SINCE stamped within STAMP_KEPT_MS: that window
@@ -9524,4 +10089,764 @@ export function shareText(
     '**묻고 싶은 것**: ',
   ]
   return redactText(withoutPaths(parts.join('\n\n'), note.root)).text
+}
+
+// ───────────────────────────── 1.12.0 G3 (synthesis prototype G3-KLA, design phase) ─────────────────────────────
+// Appended to a copy of hooks/notes.ts (proto/synth/tree). Code never seen asked differently: the model writes only the
+// code (K), one line of it to look at (L) and what it prints, one line per print call (A); the plugin checks all three
+// and composes the question, the fence, the kind and the hint itself. No written trace on any route either model reaches.
+
+/** The languages code never seen is asked in (1.12.0 G3): RUNG_NEW_EXTS but ts, whose concepts are mostly its types. */
+export const NEW_EXTS: readonly string[] = ['js', 'mjs', 'cjs', 'py']
+
+/** The family (how it prints) and the fence label of a question in code never seen, by the learner's file's language. */
+export function newLang(lang: string | undefined): { family: 'js' | 'py'; fence: 'js' | 'python' } | undefined {
+  if (lang === 'py') return { family: 'py', fence: 'python' }
+  return lang === 'js' || lang === 'mjs' || lang === 'cjs' ? { family: 'js', fence: 'js' } : undefined
+}
+/** Fence names a reply may put on its block for each fence the plugin shows. */
+const NEW_FENCE_NAMES: Readonly<Record<'js' | 'python', readonly string[]>> = {
+  js: ['', 'js', 'javascript', 'mjs', 'cjs', 'node'],
+  python: ['', 'py', 'python', 'python3'],
+}
+
+/**
+ * A concept whose behaviour lives in types alone (1.12.0 G3): a run's output cannot ask it (1.10.0's N11: a type alias,
+ * a return type, run with types stripped and never checked). Its words name a type construct, or a line it quotes is
+ * one (a Python annotation too). `typeof` and converting types (타입 변환) do run, and stay askable.
+ */
+const TYPE_LEVEL_WORDS = /타입\s*(?:별칭|표기|주석|힌트|선언|가드|추론|매개변수|단언)|반환\s*타입|인터페이스|제네릭|유니온\s*타입|type\s*(?:alias|annotation|hint|guard)|\binterface\b|\bgenerics?\b|\bsatisfies\b|\bas\s+const\b|\btyping\b|어노테이션|애너테이션/i
+const TYPE_LEVEL_CODE = /^\s*(?:export\s+)?(?:type\s+\w+\s*(?:<[^>]*>)?\s*=|interface\s+\w+|declare\s)|\)\s*:\s*[A-Za-z_][\w<>[\]|, ]*\s*(?:=>|\{)|\)\s*->\s*\w|\b\w+\s*\??:\s*(?:string|number|boolean|int|str|float|bool|list|dict|tuple|any|unknown|void|never|List|Dict|Optional)\b/
+export function isTypeLevel(blurb: string): boolean {
+  return TYPE_LEVEL_WORDS.test(blurb) || quotesOf(blurb).some(q => TYPE_LEVEL_CODE.test(q))
+}
+
+/**
+ * A concept about run order (1.12.0 G3): what it does shows only in prints made from inside callbacks, timers or tasks,
+ * which a question in code never seen may not hold (its prints are all at the top), so asked so it could only be missed
+ * (1.10.0's N03). Read in its words and in its lines (codeFor's), on this device.
+ */
+const RUN_ORDER = /비동기|이벤트\s*루프|콜백\s*큐|마이크로\s*태스크|실행\s*순서|\bsetTimeout\b|\bsetInterval\b|\bsetImmediate\b|\bqueueMicrotask\b|\bPromise\b|\basync\b|\bawait\b|\.then\s*\(|\basyncio\b|\bthreading\b|스레드/
+export function isRunOrder(blurb: string, codeText: string | undefined): boolean {
+  return RUN_ORDER.test(blurb) || (codeText !== undefined && RUN_ORDER.test(codeText))
+}
+
+/**
+ * A concept about the letters or the spaces of a string (1.12.0 G3): slicing, reversing, padding to a width. What it
+ * does is a reordered or cut word, or spaces, which the reader keeps no output of (newOutput spells every word from the
+ * code; a value's spaces are trimmed when it is graded), so asked so it could only be dropped or graded without what it
+ * shows (1.12.0 design review: reversed and sliced words were the dev pilot's output drops). Read in its words (a
+ * string's letters cut, reversed or padded; a palindrome) and in calls only a string has, in the lines it quotes and in
+ * codeFor's lines, on this device. Counting down (`range(10, 0, -4)`) or an array reversed is not one.
+ */
+const STRING_SHAPE_WORDS =
+  /(?:문자열|글자|단어|철자)[^.。\n]{0,20}?(?:거꾸로|뒤집|역순|자르|잘라|슬라이스|슬라이싱)|(?:거꾸로|뒤집|역순|자르|잘라|슬라이스|슬라이싱)[^.。\n]{0,20}?(?:문자열|글자|단어|철자)|회문|패딩|자릿수\s*맞추|폭\s*맞추|앞자리\s*채우|\bpalindrome\b|\bpad(?:Start|End|ding)\b|\b[rl]just\b|\bzfill\b/i
+/** Calls only a string has that cut, pad or reverse its letters (an array's slice or reverse is not one). */
+const STRING_SHAPE_CODE =
+  /\.(?:charAt|substring|substr|padStart|padEnd|rjust|ljust|center|zfill)\s*\(|\.split\(\s*(['"`])\1\s*\)\s*\.reverse|\[\s*\.\.\.\s*\w+\s*\]\s*\.reverse|(['"])\2\s*\.join\(\s*reversed/
+export function isStringShape(blurb: string, codeText: string | undefined): boolean {
+  return STRING_SHAPE_WORDS.test(blurb) || quotesOf(blurb).some(q => STRING_SHAPE_CODE.test(q)) || (codeText !== undefined && STRING_SHAPE_CODE.test(codeText))
+}
+
+/**
+ * Whether a concept may be asked in code never seen beyond 1.10.0's conditions (1.12.0 G3): a language it is asked in
+ * (NEW_EXTS), not about types alone (isTypeLevel), not about run order (isRunOrder), not about a string's letters or
+ * spaces (isStringShape), and not one whose question this window could not check before (`isMissed`, the session's
+ * newMissed). Local and deterministic; nothing is sent.
+ */
+export function isNewInScope(file: string, blurb: string, codeText: string | undefined, isMissed = false): boolean {
+  const ext = extOf(file)
+  return (
+    ext !== undefined &&
+    NEW_EXTS.includes(ext) &&
+    !isTypeLevel(blurb) &&
+    !isRunOrder(blurb, codeText) &&
+    !isStringShape(blurb, codeText) &&
+    !isMissed
+  )
+}
+
+/**
+ * Settings a question in code never seen is written in (1.12.0 G3): a place and three names, one picked per concept and
+ * day by the plugin (newScenes), so the model writes the concept away from the textbook example it would pick otherwise,
+ * which is the learner's own code as often as not (1.9.0 · 1.10.0 clause 3 misses). Plugin text, nothing of the learner's;
+ * no name is a word a question may not use.
+ */
+export const NEW_SCENES: readonly { place: string; names: readonly [string, string, string] }[] = [
+  { place: '카페 주문', names: ['cup', 'order', 'price'] },
+  { place: '도서관 대출', names: ['book', 'shelf', 'loan'] },
+  { place: '버스 노선', names: ['bus', 'stop', 'route'] },
+  { place: '텃밭 가꾸기', names: ['seed', 'crop', 'water'] },
+  { place: '택배 상자', names: ['box', 'parcel', 'weight'] },
+  { place: '게임 점수', names: ['level', 'score', 'life'] },
+  { place: '반려동물 돌봄', names: ['pet', 'meal', 'age'] },
+  { place: '영화관 좌석', names: ['seat', 'row', 'ticket'] },
+  { place: '달리기 기록', names: ['lap', 'pace', 'km'] },
+  { place: '날씨 관측', names: ['temp', 'rain', 'city'] },
+  { place: '우편 보내기', names: ['letter', 'stamp', 'mail'] },
+  { place: '냉장고 정리', names: ['fridge', 'egg', 'milk'] },
+  { place: '빵집 진열', names: ['bread', 'tray', 'oven'] },
+  { place: '수영장 레인', names: ['lane', 'swimmer', 'pool'] },
+  { place: '꽃집 꽃다발', names: ['flower', 'bunch', 'vase'] },
+  { place: '주차장 자리', names: ['car', 'spot', 'gate'] },
+  { place: '캠핑 준비', names: ['tent', 'pack', 'fire'] },
+  { place: '음악 재생 목록', names: ['song', 'track', 'volume'] },
+  { place: '미술 수업', names: ['paint', 'brush', 'color'] },
+  { place: '동물원 먹이', names: ['zoo', 'animal', 'feed'] },
+  { place: '자전거 대여', names: ['bike', 'rent', 'dock'] },
+  { place: '시험 채점', names: ['quiz', 'mark', 'grade'] },
+  { place: '호텔 객실', names: ['room', 'guest', 'night'] },
+  { place: '과일 가게', names: ['fruit', 'basket', 'stock'] },
+]
+
+/** FNV-1a of a concept's key and the day: where its walk over NEW_SCENES starts. */
+function sceneStart(key: string, day: string): number {
+  let h = 0x811c9dc5
+  for (const ch of `${key}:${day}`) h = Math.imul(h ^ ch.codePointAt(0)!, 0x01000193) >>> 0
+  return h % NEW_SCENES.length
+}
+
+/** Whether `seen` (lower case) holds `name` as a name of its own (not inside a longer word: `row` is not in `arrow`). */
+function holdsSceneName(seen: string, name: string): boolean {
+  return new RegExp(`(?<![a-z0-9_$])${name}(?![a-z0-9_$])`).test(seen) || new RegExp(`(?<![a-z0-9_$])${name}(?=[A-Z_])`).test(seen)
+}
+
+/**
+ * The setting of each pick in code never seen (index into NEW_SCENES): from its key and day's own start, the first not
+ * taken by another pick of the quiz and whose place and names the learner's code, file or words (`seen`, read here only)
+ * do not hold, so the setting is never the learner's own; null when none is left (that pick is then asked as its own
+ * code); undefined for a pick of another rung. Deterministic: the same picks on the same day give the same prompt.
+ */
+export function newScenes(picks: readonly { key: string; rung: QuizRung | undefined; seen?: string }[], day: string): (number | null | undefined)[] {
+  const used = new Set<number>()
+  return picks.map(one => {
+    if (one.rung !== 'new') return undefined
+    const raw = one.seen ?? ''
+    const low = raw.toLowerCase()
+    const start = sceneStart(one.key, day)
+    for (let k = 0; k < NEW_SCENES.length; k += 1) {
+      const i = (start + k) % NEW_SCENES.length
+      const scene = NEW_SCENES[i]!
+      if (used.has(i) || raw.includes(scene.place) || scene.names.some(name => holdsSceneName(low, name) || holdsSceneName(raw, name))) continue
+      used.add(i)
+      return i
+    }
+    return null
+  })
+}
+
+/**
+ * The rungs and settings of a quiz once ladderMixed has kept its rungs (1.12.0 G3): each pick in code never seen gets a
+ * setting (newScenes); one with none left is asked in its own code (mine). `laid` are the picks with their code still on.
+ */
+export function withScenes(
+  laid: readonly Pick<QuizPick, 'key' | 'code' | 'blurb'>[],
+  asIs: readonly (QuizRung | undefined)[],
+  day: string,
+): { asIs: (QuizRung | undefined)[]; scenes: (number | undefined)[] } {
+  const found = newScenes(laid.map((one, i) => ({ key: one.key, rung: asIs[i], seen: seenOf(one.code, one.blurb) })), day)
+  return {
+    asIs: asIs.map((rung, i) => (rung === 'new' && found[i] === null ? 'mine' : rung)),
+    scenes: found.map(at => (typeof at === 'number' ? at : undefined)),
+  }
+}
+
+/** The day a quiz's settings are picked by (UTC, `YYYY-MM-DD`). */
+export function sceneDay(now: number): string {
+  return new Date(now).toISOString().slice(0, 10)
+}
+
+/** What the quiz is asked of a pick in code never seen (1.12.0 G3), RUNG_ASK's 'new' line: no trace, no question written. */
+export const NEW_ASK =
+  '처음 보는 코드: 이 칸은 문제 글·힌트·유형을 쓰지 않는다. 문제 글과 힌트는 플러그인이 만든다. 이 번호에는 T·Q·H·A 대신 K·L·A만 쓴다. K 아래에는 그 개념 밑 "상황"의 이름과 값으로, 그 개념이 하는 일이 찍히는 값을 정하는 코드를 괄호 안 언어의 코드 블록 하나로 쓴다. 그 동작을 모르면 맞힐 수 없는 값이 적어도 한 줄 찍히게 쓴다. 코드는 빈 줄을 빼고 찍는 줄까지 모두 세어 8줄 이하다(6줄 안팎이 알맞다). 8줄을 넘길 것 같으면 찍는 값의 수를 줄인다. 학습자가 이 개념을 배운 코드는 여기 보이지 않으니, 그 개념의 가장 흔한 예를 옮기지 말고 그 상황에 맞춰 새로 짠다. 그 언어에 기본으로 든 기능만 쓰고, 라이브러리의 동작을 흉내 낸 코드는 쓰지 않는다. 파일·네트워크·입력·시간·난수·타이머·Promise·async, 브라우저 화면(document·window·localStorage·alert), Node 모듈(fs·process), import·require, Python의 set, 주석은 쓰지 않는다. 오류로 멈추지 않게 쓴다. 찍는 것은 console.log나 print 호출 1~3개뿐이다. 찍는 호출은 모두 맨 바깥에 들여쓰기 없이 한 줄에 하나씩 두고(함수·반복문·조건문·콜백 안에 두지 않는다), 되풀이가 필요하면 값을 변수에 모아 두었다가 맨 바깥에서 찍는다. 호출마다 값 하나만 넘긴다(쉼표로 여러 값을 넘기지 않고 sep·end를 쓰지 않는다). 그 값은 숫자·문자열·참거짓·undefined·null·None 하나이고 40자 이하 한 줄로 찍힌다(배열·객체를 통째로 찍지 않고, 줄바꿈 문자를 쓰지 않는다). 찍히는 글자를 확실히 알 수 있게 짧고 곧게 쓴다. L에는 K 가운데 학습자가 눈여겨볼 줄 하나(찍는 줄이 아닌 것)를 그대로 옮긴다. A 아래에는 찍히는 글자를 호출 차례대로 호출마다 한 줄에 그대로 쓴다. A의 줄 수는 찍는 호출 수와 같고, 설명을 붙이거나 따옴표를 덧붙이지 않는다.'
+
+/** In a quiz with code never seen, said for the other picks in the kinds line's place (it asks no kind of a 'new' pick). */
+export const NEW_KINDS_LINE =
+  '칸이 "처음 보는 코드"가 아닌 개념은, 코드가 붙었거나 칸이 붙었으면 예측(코드만으로 출력이나 값이 하나로 정해질 때만) 또는 바꿔 보기로, 칸도 코드도 없으면 왜로 낸다. 그 문제들끼리는 되도록 서로 다른 유형으로 낸다.'
+
+/** The question a pick in code never seen is shown, over the plugin's own fence of the model's code. */
+export const NEW_LEAD = '처음 보는 코드입니다. 이 코드를 실행하면 무엇이 출력될까요? 찍히는 줄마다 차례로 쓰세요. 여러 줄이면 쉼표로 이어 한 줄에 써도 됩니다.'
+/** The question when a printed line itself holds a comma: joining lines with commas would read two ways, so it is not offered. */
+export const NEW_LEAD_LINES = '처음 보는 코드입니다. 이 코드를 실행하면 무엇이 출력될까요? 찍히는 줄마다 줄을 바꿔 차례로 쓰세요.'
+/** Its hint: the line the model named (L), quoted, when it is a line of the code and no print; else a plain one. */
+export const newHint = (line: string | undefined): string =>
+  line === undefined ? NEW_HINT_PLAIN : line.includes('`') ? `\`\` ${line} \`\` 줄에서 무슨 일이 일어나는지부터 보세요.` : `\`${line}\` 줄에서 무슨 일이 일어나는지부터 보세요.`
+export const NEW_HINT_PLAIN = '맨 위 줄부터 이름마다 어떤 값이 들어가는지 적어 가며 보세요.'
+/** The feedback of a prediction the plugin found right by itself (localRight), with no model call. */
+export const NEW_LOCAL_RIGHT = '찍히는 값을 줄마다 모두 맞혔습니다.'
+/** Said when every pick of a quiz was in code never seen and the plugin kept none of them (makeQuiz). */
+export const NEW_NONE_TEXT = '퀴즈를 내지 못했습니다: 처음 보는 코드 문제를 확인하지 못했습니다. 다시 해 보면 그 개념은 다른 방식으로 냅니다.'
+
+/** The format of slot `k` in code never seen. */
+function newFormat(k: number, fence: string): string[] {
+  return [`K${k}:`, '```' + fence, '(코드)', '```', `L${k}: (K${k} 코드에서 눈여겨볼 줄 하나를 그대로. 찍는 줄은 빼고)`, `A${k}:`, '(찍히는 글자. 찍는 호출마다 한 줄)']
+}
+
+/**
+ * The quiz prompt when a pick is in code never seen (1.12.0 G3; quizPrompt sends here, so a quiz with none is 1.9.0's
+ * to the byte). ladderMixed keeps code changed, worked examples and team terms out of such a quiz: its other picks are
+ * the learner's own code (mine), a slip asked again (다시 도전) or a concept with no code (why). Each slot's format is
+ * written out (K·L·A for code never seen, T·Q·H·A for the rest); a quiz all in code never seen says no kinds at all.
+ */
+export function newQuizPrompt(
+  picks: readonly (LearnConcept & Pick<QuizPick, 'code' | 'slip' | 'team' | 'teamCode' | 'isTeamMarked' | 'rung' | 'lang' | 'scene' | 'key'>)[],
+  level: Level,
+): string {
+  const rungs = new Set(picks.flatMap(one => (one.rung ? [one.rung] : [])))
+  const hasOther = picks.some(one => one.rung !== 'new')
+  const hasSlip = picks.some(one => one.slip !== undefined)
+  const isTeam = (one: Pick<QuizPick, 'team' | 'isTeamMarked'>) => one.team === true || one.isTeamMarked === true
+  const n = picks.length
+  return [
+    LEVEL_TEXT[level],
+    '',
+    '## 개념',
+    ...picks.flatMap((one, i) => {
+      const head = `${i + 1}. ${isTeam(one) ? '(팀 용어) ' : ''}${one.name} — ${one.blurb || '(설명 없음)'}`
+      const last = one.slip ? [`   ${slipAskedLine(one.slip)}`] : []
+      const rung = one.rung ? [`   칸: ${RUNG_LABEL[one.rung]}${one.lang ? ` (${one.lang}로)` : ''}`] : []
+      const at = one.rung === 'new' ? one.scene : undefined
+      const scene = at !== undefined && NEW_SCENES[at] ? [`   상황: ${NEW_SCENES[at]!.place} (이름은 ${NEW_SCENES[at]!.names.join(' · ')} 쪽으로)`] : []
+      if (!one.code) return [head, ...last, ...rung, ...scene]
+      const fence = fenceFor(one.code.text)
+      return [head, ...last, ...rung, `   학습자가 만든 코드 (${one.code.file}):`, fence, one.code.text, fence]
+    }),
+    '',
+    `개념마다 하나씩, 위 순서대로 ${n}개를 낸다. 번호는 1부터 ${n}까지만 쓰고, 번호마다 그 번호의 개념만 다룬다.${hasOther ? ' 문제에 개념 이름을 그대로 쓰지 말고, 코드나 상황을 보여 주고 묻는다.' : ''}`,
+    ...RUNG_ASK.filter(([rung]) => rungs.has(rung) && rung !== 'new').map(([, ask]) => ask),
+    NEW_ASK,
+    RUNG_WRITES,
+    ...(hasSlip ? ['"지난번" 줄이 붙은 개념은 같은 헷갈림이 드러나는 다른 코드나 값으로 묻는다. 지난 문제를 되풀이하지 않는다. 헷갈린 점을 문제나 힌트에 쓰지 않는다.'] : []),
+    ...(picks.some(isTeam) ? [TEAM_FOR_QUIZ] : []),
+    ...(hasOther
+      ? [
+          '문제 유형: 예측은 코드를 보여 주고 출력이나 값을 맞히게 한다. 바꿔 보기는 바라는 동작을 말하고 어느 줄을 어떻게 바꿀지 묻는다. 왜는 어떤 줄을 빼거나 바꾸면 어떻게 되는지, 왜 그렇게 썼는지 묻는다.',
+          NEW_KINDS_LINE,
+          '답은 예측이면 출력이나 값을, 바꿔 보기면 바꾼 코드와 그 까닭을, 왜면 무엇이 달라지는지를 쓴다.',
+          '힌트는 막힌 학습자가 답을 떠올리게 돕는 실마리 한 문장이다. 답이나 개념 이름을 그대로 말하지 않는다.',
+        ]
+      : []),
+    '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다. 아래에 없는 번호나 줄은 쓰지 않는다.',
+    ...picks.flatMap((one, i) =>
+      one.rung === 'new'
+        ? newFormat(i + 1, newLang(one.lang)?.fence ?? 'js')
+        : [`T${i + 1}: (예측 · 왜 · 바꿔 보기 중 하나)`, `Q${i + 1}: (문제 한두 문장)`, `H${i + 1}: (힌트 한 문장)`, `A${i + 1}: (답 한두 문장)`],
+    ),
+  ].join('\n')
+}
+
+type NewTok = { text: string; kind: 'word' | 'number' | 'string' | 'sign'; at: number }
+type NewLine = { toks: NewTok[]; comment?: 'line' | 'block'; open: boolean; cut: string }
+/**
+ * One line's tokens (a string is one token, its prefix the word before it), and how it ends: a line comment outside a
+ * string (`cut` is the line before it), a block comment or a Python triple-quoted string (`block`), a string left open.
+ */
+function newTokens(line: string, family: 'js' | 'py'): NewLine {
+  const toks: NewTok[] = []
+  for (let i = 0; i < line.length; ) {
+    const ch = line[i]!
+    if (/\s/.test(ch)) {
+      i += 1
+      continue
+    }
+    if ((family === 'py' && ch === '#') || (family === 'js' && line.startsWith('//', i))) return { toks, comment: 'line', open: false, cut: line.slice(0, i).replace(/\s+$/, '') }
+    if (family === 'js' && line.startsWith('/*', i)) return { toks, comment: 'block', open: false, cut: line }
+    let end = i + 1
+    if (ch === '"' || ch === "'" || (family === 'js' && ch === '`')) {
+      if (family === 'py' && line.startsWith(ch.repeat(3), i)) return { toks, comment: 'block', open: false, cut: line }
+      while (end < line.length && line[end] !== ch) end += line[end] === '\\' ? 2 : 1
+      if (end >= line.length) return { toks, open: true, cut: line }
+      end += 1
+      toks.push({ text: line.slice(i, end), kind: 'string', at: i })
+    } else if (/\d/.test(ch)) {
+      while (end < line.length && (/\w/.test(line[end]!) || (line[end] === '.' && /\d/.test(line[end + 1] ?? '')))) end += 1
+      toks.push({ text: line.slice(i, end), kind: 'number', at: i })
+    } else if (/[\p{L}_$]/u.test(ch)) {
+      while (end < line.length && /[\p{L}\p{N}_$]/u.test(line[end]!)) end += 1
+      toks.push({ text: line.slice(i, end), kind: 'word', at: i })
+    } else {
+      toks.push({ text: ch, kind: 'sign', at: i })
+    }
+    i = end
+  }
+  return { toks, open: false, cut: line.replace(/\s+$/, '') }
+}
+
+/**
+ * What a question in code never seen may not use (1.12.0 G3): the judging stance's clause 5 list word for word, plus
+ * what leaves a run unsettled or prints past one value (a Python set's order, an address, a salted hash, a timer, a
+ * task, a locale) and what brings code in. Read on the code's tokens outside strings, so a word in a string is no use.
+ */
+const NEW_FORBIDDEN: Readonly<Record<'js' | 'py', ReadonlySet<string>>> = {
+  js: new Set([
+    'Date', 'performance', 'fetch', 'XMLHttpRequest', 'WebSocket', 'require', 'import', 'process', 'fs', 'document', 'window', 'localStorage', 'sessionStorage',
+    'alert', 'prompt', 'readline', 'setTimeout', 'setInterval', 'setImmediate', 'queueMicrotask', 'Promise', 'async', 'await', 'Intl', 'globalThis', 'eval',
+  ]),
+  py: new Set([
+    'random', 'time', 'datetime', 'input', 'open', 'os', 'sys', 'subprocess', 'socket', 'urllib', 'requests', 'pathlib', 'import', 'set', 'frozenset', 'id',
+    'hash', 'asyncio', 'threading', 'async', 'await', 'eval', 'exec', 'globals', 'locals', 'vars',
+  ]),
+}
+
+/** A Python set written out (`{1, 2}`, `{x for x in y}`): a brace pair outside strings with something in it and no colon at its own depth. */
+function hasSetLiteral(lines: readonly NewTok[][]): boolean {
+  const toks = lines.flat()
+  for (let i = 0; i < toks.length; i += 1) {
+    if (toks[i]!.text !== '{') continue
+    let depth = 0
+    let colon = false
+    let inner = 0
+    for (let j = i; j < toks.length; j += 1) {
+      const t = toks[j]!.text
+      if ('([{'.includes(t)) depth += 1
+      else if (')]}'.includes(t)) {
+        depth -= 1
+        if (depth === 0) break
+      } else if (depth === 1) {
+        if (t === ':') colon = true
+        inner += 1
+      } else inner += 1
+    }
+    if (inner > 0 && !colon) return true
+  }
+  return false
+}
+
+/**
+ * The print calls of `lines` (comment-free, 1.12.0 G3) and whether each is where the plugin can count it: every print the
+ * first thing on its line, the line at no indent and at no bracket depth, after no line opening a body it would belong to
+ * (`if (x)` alone, `else`), so it runs once, in order (the code may not stop, clause 5); each of exactly one argument,
+ * on its one line, `;` alone after it; console's log alone; no newline written in any string. `place` and `form` say why not.
+ */
+export function newPrints(lines: readonly string[], family: 'js' | 'py'): { count: number; place: boolean; form: boolean } {
+  let count = 0
+  let place = false
+  let form = false
+  let depth = 0
+  let prev: NewTok[] = []
+  for (const line of lines) {
+    if (line.trim() === '') continue
+    const { toks } = newTokens(line, family)
+    if (toks.some(t => t.kind === 'string' && /\\n|\\r/.test(t.text))) form = true
+    const atStart = depth
+    const indent = line.length - line.trimStart().length
+    toks.forEach((t, j) => {
+      const isPrint =
+        family === 'py'
+          ? t.kind === 'word' && t.text === 'print' && toks[j + 1]?.text === '(' && toks[j - 1]?.text !== '.' && toks[j - 1]?.text !== 'def'
+          : t.kind === 'word' && t.text === 'console' && toks[j + 1]?.text === '.'
+      if (!isPrint) return
+      if (family === 'js' && toks[j + 2]?.text !== 'log') {
+        form = true
+        return
+      }
+      count += 1
+      const open = family === 'py' ? j + 1 : j + 3
+      // A line that leaves its body to the next one: Python's ending in `:`; in JavaScript a head ending at its `)`
+      // (`if (x)`, `} else if (x)`, `for (…)`), a bare `else` or `do`, or `=>`. A head with its body on its own line
+      // (`for (const x of xs) s += x`) runs that body there, so a print below it runs once.
+      const opensBody = (ts: readonly NewTok[]) => {
+        const last = ts.at(-1)?.text
+        if (family === 'py') return last === ':'
+        if (last === '=>' || last === 'else' || last === 'do') return true
+        return last === ')' && ts.slice(0, 3).some(t => t.text === 'if' || t.text === 'for' || t.text === 'while')
+      }
+      if (j !== 0 || indent !== 0 || atStart !== 0 || opensBody(prev)) place = true
+      if (toks[open]?.text !== '(') {
+        form = true
+        return
+      }
+      let d = 0
+      let commas = 0
+      let close = -1
+      // A keyword argument (`end='x'`, `sep=`) or a spread (`*xs`, `...xs`) at the call's own depth prints past one value
+      // as written (1.12.0 design review): `print(end='x')` and `print(3)` print one line, not two.
+      let isMany = false
+      for (let k = open; k < toks.length; k += 1) {
+        const x = toks[k]!.text
+        if (x === '(' || x === '[' || x === '{') d += 1
+        else if (x === ')' || x === ']' || x === '}') {
+          d -= 1
+          if (d === 0) {
+            close = k
+            break
+          }
+        } else if (x === ',' && d === 1) commas += 1
+        else if (d === 1 && x === '=' && !'=<>!:'.includes(toks[k - 1]?.text ?? '') && toks[k + 1]?.text !== '=' && toks[k + 1]?.text !== '>') isMany = true
+        else if (d === 1 && (x === '*' || x === '.') && (toks[k - 1]?.text === '(' || toks[k - 1]?.text === ',') && (x === '*' || toks[k + 1]?.text === '.')) isMany = true
+      }
+      if (close === -1 || close === open + 1 || commas > 0 || isMany) form = true
+      else if (toks.slice(close + 1).some(x => x.text !== ';')) form = true
+    })
+    for (const t of toks) depth += t.text === '{' || t.text === '(' || t.text === '[' ? 1 : t.text === '}' || t.text === ')' || t.text === ']' ? -1 : 0
+    prev = toks
+  }
+  return { count, place, form }
+}
+
+/** Code the learner saw: codeFor's lines, the file's text where withCode read it, and the concept's words (QuizPick.seen, run time only). */
+export function seenOf(code: { text: string; around?: string } | undefined, blurb: string): string | undefined {
+  return code ? [code.text, ...(code.around !== undefined ? [code.around] : []), blurb].join('\n') : undefined
+}
+
+const NEW_KEYWORDS = new Set([
+  'const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'do', 'of', 'in', 'new', 'class', 'this', 'true', 'false', 'null', 'undefined',
+  'async', 'await', 'typeof', 'instanceof', 'try', 'catch', 'finally', 'throw', 'break', 'continue', 'switch', 'case', 'default', 'extends', 'super', 'static',
+  'def', 'lambda', 'None', 'True', 'False', 'and', 'or', 'not', 'is', 'elif', 'except', 'raise', 'with', 'as', 'pass', 'global', 'nonlocal', 'yield', 'from',
+  'console', 'log', 'print', 'len', 'range', 'str', 'int', 'float', 'list', 'dict', 'Math', 'Object', 'Array', 'JSON', 'String', 'Number', 'Promise', 'setTimeout',
+])
+const trivial = (line: string) => /^[\s\])}{(;,:]*$/.test(line)
+
+/**
+ * The learner's own code under another coat (the judging stance's clause 3 (가) · (나) · (다), read mechanically): the
+ * same text spaces aside; half or more of its lines with more than brackets on them equal to lines the learner saw; or
+ * the same tokens with only names renamed, or all but one literal the same, against the learner's lines as a whole or
+ * any run of them as long. (라), the same situation in other words, is the judge's alone.
+ */
+export function isLikeMine(code: string, seen: string | undefined, family: 'js' | 'py'): boolean {
+  if (seen === undefined) return false
+  const squashAll = (text: string) => text.replace(/\s+/g, '')
+  if (squashAll(code) === squashAll(seen)) return true
+  const seenLines = seen.split('\n').filter(line => !trivial(line))
+  if (seenLines.some(line => squashAll(line) === squashAll(code))) return true
+  const mine = new Set(seenLines.map(squashAll))
+  const own = code.split('\n').filter(line => !trivial(line))
+  if (own.length > 0 && 2 * own.filter(line => mine.has(squashAll(line))).length >= own.length) return true
+  const toks = (text: string) => text.split('\n').flatMap(line => newTokens(line, family).toks)
+  const shape = (ts: readonly NewTok[]) => {
+    const names = new Map<string, number>()
+    return ts.map(t => (t.kind === 'word' && !NEW_KEYWORDS.has(t.text) ? `#${names.get(t.text) ?? names.set(t.text, names.size).get(t.text)}` : t.text)).join(' ')
+  }
+  const a = toks(own.join('\n'))
+  const ownCount = own.length
+  for (let from = 0; from + ownCount <= seenLines.length; from += 1) {
+    const b = toks(seenLines.slice(from, from + ownCount).join('\n'))
+    if (a.length !== b.length) continue
+    if (shape(a) === shape(b)) return true
+    const diff = a.filter((t, i) => t.text !== b[i]!.text)
+    if (diff.length === 1 && (diff[0]!.kind === 'number' || diff[0]!.kind === 'string')) return true
+  }
+  return false
+}
+
+/** Words a run prints of itself: an output line's word is from the code or from these. */
+const NEW_OUTPUT_WORDS: ReadonlySet<string> = new Set([
+  'true', 'false', 'undefined', 'null', 'NaN', 'Infinity', 'None', 'True', 'False', 'inf', 'nan',
+  'number', 'string', 'boolean', 'bigint', 'symbol', 'object', 'function',
+])
+/** A Korean sentence's ending, which no printed value of code without it has. */
+const SENTENCE_END = /(?:니다|어요|아요|에요|예요|해요|돼요|되요|네요|군요|이다|이요)[.!]?$/
+
+/**
+ * The lines under A as an output the plugin keeps, or undefined (1.12.0 G3): 1–3 lines of at most 40 code points; no
+ * Hangul unless the code holds some, and no Korean sentence ending the code does not hold; no line opening with a
+ * bracket (a list, an object or a tuple printed whole) and no error (a run that stops fails clause 5); every word one the
+ * code holds (in pieces: Hangul by syllable, other letters three at a time) or one a run prints of itself; and every mark
+ * one a string of the code holds or a number's own (`70 / 85 / 2` from three prints and no `/` is no output). A line of
+ * words about the output, or several outputs joined on one line, is so never kept (1.9.0's prose answers, 1.10.0's N05).
+ */
+export function newOutput(raw: string | undefined, code: string, family: 'js' | 'py'): string[] | undefined {
+  if (raw === undefined) return undefined
+  const lines = raw
+    .split('\n')
+    .filter(line => !BARE_FENCE.test(line))
+    .map(line => line.trim())
+    .filter(line => line !== '')
+  if (lines.length < 1 || lines.length > 3 || lines.some(line => [...line].length > 40)) return undefined
+  if (!/[ㄱ-힝]/.test(code) && lines.some(line => /[ㄱ-힝]/.test(line))) return undefined
+  if (lines.some(line => SENTENCE_END.test(line) && !code.includes(SENTENCE_END.exec(line)![0].replace(/[.!]$/, '')))) return undefined
+  if (lines.some(line => /^(?:Uncaught\s+)?[A-Z]\w*(?:Error|Exception)\b|^Traceback\b/.test(line))) return undefined
+  // Every mark a string of the code holds (its quotes and prefix aside), or a number's own (sign, point, exponent).
+  const inStrings = new Set(
+    code
+      .split('\n')
+      .flatMap(line => newTokens(line, family).toks.filter(t => t.kind === 'string'))
+      .flatMap(t => [...t.text.slice(1, -1)]),
+  )
+  // A line opening with a bracket no string holds is a list, an object or a tuple printed whole.
+  if (lines.some(line => /^[[{(]/.test(line) && !inStrings.has(line[0]!))) return undefined
+  // A line of spaces doubled inside, or the grade's own mark for a value not said (newRead), is no printed value kept:
+  // a value's spaces are trimmed and made one when it is graded, so such an answer would be graded without them.
+  if (lines.some(line => /\s{2,}/.test(line) || line === NEW_NOT_SAID)) return undefined
+  // A line of one mark alone (`-`, `*`, `.`) reads as punctuation in a typed answer: the grade does not see it as a
+  // value (the final pilot's probe: "- 하고 true요" copied as not said).
+  if (lines.some(line => /^[^\p{L}\p{N}]$/u.test(line))) return undefined
+  const known = code.toLowerCase()
+  // Spelled in pieces the code holds: Hangul by syllable, other letters three at a time. This is a check of form (no
+  // words about the output, no prose): a Hangul syllable is a word's piece of its own, a Latin letter is not, so
+  // prose in Latin letters is caught only by pieces of three. That it also refuses Latin words string work makes up
+  // (the dev pilot's reversed 'elop') is a side effect; concepts that reorder or cut a string are kept out of code
+  // never seen by their scope (isStringShape), in either alphabet.
+  const isSpelled = (w: string): boolean => {
+    const min = /[가-힣]/.test(w) ? 1 : Math.min(3, w.length)
+    const ok: boolean[] = [true]
+    for (let end = 1; end <= w.length; end += 1) {
+      ok[end] = false
+      for (let start = 0; start <= end - min && !ok[end]; start += 1) ok[end] = ok[start]! && known.includes(w.slice(start, end))
+    }
+    return ok[w.length]!
+  }
+  const isWordKnown = (word: string): boolean => {
+    if (NEW_OUTPUT_WORDS.has(word)) return true
+    const w = word.toLowerCase()
+    if (isSpelled(w)) return true
+    // A word the code's own piece makes repeated (`'ha' * 3`, `'*'.repeat(4)`, padding): that piece over and over.
+    for (let size = 1; size <= w.length / 2; size += 1) {
+      if (w.length % size !== 0 || w.slice(0, size).repeat(w.length / size) !== w) continue
+      if (known.includes(w.slice(0, size))) return true
+    }
+    return false
+  }
+  if (!lines.every(line => (line.match(/[A-Za-z]{2,}|[가-힣]+/g) ?? []).every(isWordKnown))) return undefined
+  const marks = (line: string) =>
+    [...line.replace(/-?Infinity/g, ' ').replace(/[-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?/gi, ' ')].filter(ch => !/[\p{L}\p{N}\s]/u.test(ch))
+  return lines.every(line => marks(line).every(ch => inStrings.has(ch))) ? lines : undefined
+}
+
+/**
+ * The lines under A that are the output (1.12.0 G3): from its first line with text on it up to the first blank line
+ * after it. A print call prints one value of text, never a blank line (NEW_ASK), so what follows a blank line under A
+ * is no output (a model's note to itself, 1.12.0 dev pilot).
+ */
+function answerLines(lines: readonly string[] | undefined): string | undefined {
+  if (lines === undefined) return undefined
+  const from = lines.findIndex(line => line.trim() !== '' && !BARE_FENCE.test(line))
+  if (from === -1) return lines.join('\n')
+  const to = lines.findIndex((line, i) => i > from && line.trim() === '')
+  return lines.slice(from, to === -1 ? undefined : to).join('\n')
+}
+
+/**
+ * Code whose output's spaces carry what it shows (1.12.0 G3): a pad to a width (padStart · padEnd · rjust · ljust ·
+ * center), a width in a format (`{x:5}`, `{:>8}`, `%5d`), a string of spaces alone repeated (`' ' * 3`,
+ * `' '.repeat(3)`) or a string with two spaces or a tab between its words. One space between words (`', '.join`)
+ * carries nothing; spaces at a string's ends (what strip takes off) are graded trimmed like any printed line's.
+ */
+function isSpacing(toks: readonly NewTok[][], family: 'js' | 'py'): boolean {
+  const flat = toks.flat()
+  if (flat.some(t => t.kind === 'word' && /^(?:padStart|padEnd|rjust|ljust|center)$/.test(t.text))) return true
+  const strings = flat.filter(t => t.kind === 'string')
+  if (strings.some(t => /\S\s{2,}\S|\t|\\t/.test(t.text.slice(1, -1)))) return true
+  // A width in a format spec (fill and align, then digits before any point) or in a %-format.
+  if (family === 'py' && strings.some(t => /\{[^{}:]*:(?:.?[<>^=])?[+\- ]?#?0?[1-9]|%-?[1-9]\d*[sdifr]/.test(t.text))) return true
+  return flat.some((t, i) => {
+    if (t.kind !== 'string' || !/^[^'"`]*['"`] +['"`]$/.test(t.text)) return false
+    const next = flat[i + 1]?.text
+    const prev = flat[i - 1]?.text
+    return next === '*' || prev === '*' || (next === '.' && flat[i + 2]?.text === 'repeat')
+  })
+}
+
+/** A line that only gives a name a plain value (`level = 0`, `const rain = [0, 12, 40]`, `seat = "F12"`): nothing happens on it to look at. */
+function isPlainValueLine(toks: readonly NewTok[]): boolean {
+  let from = 0
+  if (['const', 'let', 'var'].includes(toks[0]?.text ?? '')) from = 1
+  if (toks[from]?.kind !== 'word' || toks[from + 1]?.text !== '=' || toks[from + 2]?.text === '=') return false
+  const value = toks.slice(from + 2).filter(t => t.text !== ';')
+  return value.length > 0 && value.every(t => t.kind === 'number' || t.kind === 'string' || /^[[\]{}(),:\-+.]$/.test(t.text) || ['true', 'false', 'null', 'undefined', 'None', 'True', 'False'].includes(t.text))
+}
+
+export type NewRead =
+  | { item: LearnQuizItem }
+  | { reason: 'missing' | 'blocks' | 'lang' | 'long' | 'comment' | 'string' | 'forbidden' | 'spacing' | 'print-form' | 'print-place' | 'print-count' | 'output' | 'count' | 'mine' | 'question-long' }
+
+/**
+ * A question in code never seen as the plugin makes it from slot `n`'s K, L and A (1.12.0 G3): one fenced block under
+ * K in the slot's language; its line comments taken off (a block comment or a Python triple-quoted string, no item);
+ * 1–8 lines; nothing forbidden (NEW_FORBIDDEN, Math.random, toLocale…, a Python set); 1–3 print calls each where the
+ * plugin can count it (newPrints); A an output the plugin keeps (newOutput) with as many lines as print calls; the code
+ * not the learner's (isLikeMine, against `seen`). The item holds the plugin's own question (NEW_LEAD over its fence of
+ * the code), its hint (newHint: L when L is a line of the code that prints nothing), A's lines as its answer, kind predict
+ * and rung new. Anything else is no item.
+ */
+export function newItem(parts: Map<string, string[]>, n: number, pick: Pick<QuizPick, 'key' | 'name' | 'noteId' | 'lang' | 'seen'>): NewRead {
+  const lang = newLang(pick.lang)
+  const k = parts.get(`~K${n}`) ?? parts.get(`K${n}`)
+  if (!lang || !k) return { reason: 'missing' }
+  const blocks: { name: string; lines: string[] }[] = []
+  let open: { name: string; lines: string[] } | undefined
+  let fence = ''
+  for (const raw of k) {
+    const bare = /^\s*(`{3,}|~{3,})([\w+.-]*)\s*$/.exec(raw)
+    if (!open && bare) {
+      open = { name: bare[2]!.toLowerCase(), lines: [] }
+      fence = bare[1]!
+    } else if (open && bare && bare[2] === '' && bare[1]!.startsWith(fence[0]!) && bare[1]!.length >= fence.length) {
+      blocks.push(open)
+      open = undefined
+    } else if (open) open.lines.push(raw)
+  }
+  if (blocks.length !== 1 || open) return { reason: 'blocks' }
+  const block = blocks[0]!
+  if (!NEW_FENCE_NAMES[lang.fence].includes(block.name)) return { reason: 'lang' }
+  const read = block.lines.map(line => newTokens(line, lang.family))
+  if (read.some(r => r.comment === 'block')) return { reason: 'comment' }
+  if (read.some(r => r.open)) return { reason: 'string' }
+  // A line comment is taken off; a line that was one alone goes.
+  const kept = read.filter((r, i) => !(r.comment === 'line' && r.cut.trim() === '' && block.lines[i]!.trim() !== '')).map(r => r.cut)
+  while (kept.length > 0 && kept[0]!.trim() === '') kept.shift()
+  while (kept.length > 0 && kept.at(-1)!.trim() === '') kept.pop()
+  const code = kept.join('\n')
+  const filled = kept.filter(line => line.trim() !== '')
+  if (filled.length < 1 || filled.length > 8) return { reason: 'long' }
+  const toks = kept.map(line => newTokens(line, lang.family).toks)
+  const words = toks.flat().filter(t => t.kind === 'word').map(t => t.text)
+  if (
+    words.some(w => NEW_FORBIDDEN[lang.family].has(w) || /^toLocale/.test(w)) ||
+    (lang.family === 'js' && /\bMath\s*\.\s*random\b/.test(code)) ||
+    (lang.family === 'py' && (/^\s*(?:from|import)\b/m.test(code) || hasSetLiteral(toks)))
+  ) {
+    return { reason: 'forbidden' }
+  }
+  // Output whose spaces carry what it shows (a pad to a width, spaces repeated, two spaces in a string): a value's
+  // spaces are trimmed and made one when graded, so the stored answer would not be what the code prints.
+  if (isSpacing(toks, lang.family)) return { reason: 'spacing' }
+  const prints = newPrints(kept, lang.family)
+  if (prints.form) return { reason: 'print-form' }
+  if (prints.place) return { reason: 'print-place' }
+  if (prints.count < 1 || prints.count > 3) return { reason: 'print-count' }
+  const out = newOutput(answerLines(parts.get(`~A${n}`) ?? parts.get(`A${n}`)), code, lang.family)
+  if (!out) return { reason: 'output' }
+  if (out.length !== prints.count) return { reason: 'count' }
+  if (isLikeMine(code, pick.seen, lang.family)) return { reason: 'mine' }
+  const said = (parts.get(`~L${n}`) ?? parts.get(`L${n}`) ?? []).join('\n').replace(/^`+|`+$/g, '').trim()
+  const looked = filled.find(line => squash(line) === squash(said) && said !== '')
+  const lookedToks = looked === undefined ? [] : newTokens(looked, lang.family).toks
+  // L is quoted only where something happens on it (not a name given a plain value: `level = 0`), and only short
+  // enough for the docked pane (40 cells); else the plain hint.
+  const isQuotable =
+    looked !== undefined &&
+    !lookedToks.some(t => t.text === 'print' || t.text === 'console') &&
+    !isPlainValueLine(lookedToks) &&
+    cellWidth(looked.trim()) <= 40
+  const lead = out.some(line => line.includes(',')) ? NEW_LEAD_LINES : NEW_LEAD
+  const question = `${lead}\n\`\`\`${lang.fence}\n${code}\n\`\`\``
+  if (question.length > 1200) return { reason: 'question-long' }
+  return {
+    item: {
+      key: pick.key,
+      name: pick.name,
+      question,
+      hint: newHint(isQuotable ? looked!.trim() : undefined),
+      answer: out.join('\n'),
+      kind: 'predict',
+      ...(pick.noteId ? { noteId: pick.noteId } : {}),
+      rung: 'new',
+    },
+  }
+}
+
+/**
+ * A printed value as compared (1.12.0 G3): ends trimmed, spaces one, quote kinds alike, one end period dropped. Case
+ * is kept, and so is a pair of quotes around it: a value printed with its quotes is not the same value without them.
+ */
+export function gradeSame(text: string): string {
+  return text
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/[“”‘’`]/g, "'")
+    .replace(/"/g, "'")
+    .replace(/\.$/, '')
+    .trim()
+}
+
+/**
+ * Whether the learner's value `said` is the printed line `printed` (1.12.0 G3, the judging stance's one rule for a
+ * learner's value): the same after gradeSame, or, only where the printed line has no quotes around it, the same once
+ * the pair of quotes the learner put around it is taken off (a beginner writes "abc" for the string abc). Never the
+ * other way: the printed `'abc'` is not said by abc.
+ */
+export function isSameValue(said: string, printed: string): boolean {
+  const want = gradeSame(printed)
+  const mine = gradeSame(said)
+  if (mine === want) return true
+  return !/^'.*'$/.test(want) && /^'.*'$/.test(mine) && mine.slice(1, -1).trim() === want
+}
+
+/** Endings a beginner puts after a value ("3 나와요", "True요", "B랑"), taken off a piece only when its value has none. */
+const SAID_TAIL = /\s*(?:(?:이|가|은|는|이라고|라고)\s*)?(?:나와요|나옵니다|나온다|나와|나옴|찍힘|나올\s*거예요|나올\s*것\s*같아요|찍혀요|찍힙니다|찍힌다|찍힐\s*거예요|출력돼요|출력됩니다|출력|이에요|예요|이요|입니다|이죠|죠|순서요|순서로|순서|요)[.!~。]*$/
+const SAID_HEAD = /^\s*(?:[-*•]\s+|\d+\s*[).:]\s+|\d+\s*(?:번째\s*)?줄\s*(?:은|는|에|:|：)?\s*|(?:첫|둘|셋|두|세)\s*(?:번)?째\s*(?:줄)?\s*(?:은|는|에|:|：)?\s*|(?:첫|두|세|마지막)\s*줄\s*(?:은|는|에|:|：)?\s*|(?:그)?다음\s*줄\s*(?:은|는|에|도)?\s*|(?:그)?다음(?:에|은)?\s+|마지막(?:은|엔|에는)?\s+|처음(?:엔|에는|은)?\s+)/
+const SAID_SPLIT = /\s*(?:,|，|、|\/|·|→|->|;)\s*|(?:이랑|랑|하고)\s+|\s+(?:그리고|다음에?|그다음에?)\s+|\s+(?:이\s+|가\s+)?(?:나오고|찍히고|나오구)\s+|\s+(?=(?:(?:그)?다음|둘째|셋째|두\s*번째|세\s*번째|마지막)\s*줄)/
+/** Words before an answer that say nothing of its values (closed list), taken off once at its start. */
+const SAID_FILLER = /^\s*(?:(?:정답은|답은|출력은|결과는|순서대로|차례로|차례대로|다시\s*보니|다시\s*생각해\s*보니|아마|음)\s*[:：,]?\s*)+/
+
+/**
+ * Whether a typed answer to a prediction in code never seen is right by the plugin alone (1.12.0 G3): some way of
+ * reading it — its lines, or one line split at commas, slashes, dots, arrows or 랑 · 하고 · 그리고 — gives exactly the
+ * model answer's values in order and in case, each after its list mark and one beginner's ending are taken off (never an
+ * ending its value ends in), a closed list of opening words aside. Never true for an answer with a value different,
+ * missing or added, a question mark or a no: every value is compared whole. Anything else is the model's to read; this
+ * never says wrong.
+ */
+export function localRight(mine: string, answer: string): boolean {
+  if (isBlankAnswer(mine)) return false
+  const want = answer.split('\n').map(gradeSame)
+  const text = mine.replace(/^\s*`{3,}[\w+.-]*\s*$/gm, '').replace(SAID_FILLER, '').trim()
+  if (text === '') return false
+  const said = want.join('\n')
+  if (/[?？]/.test(text) && !said.includes('?')) return false
+  if (/(?:아니|않|안\s|못\s|모르)/.test(text) && !/(?:아니|않|안\s|못\s|모르)/.test(said)) return false
+  const lines = text.split('\n').map(line => line.trim()).filter(line => line !== '')
+  const ways: string[][] = [lines]
+  if (lines.length === 1) ways.push(lines[0]!.split(SAID_SPLIT))
+  if (lines.length === 1 && want.every(w => !/\s/.test(w))) ways.push(lines[0]!.replace(SAID_TAIL, '').split(/\s+/))
+  const printed = answer.split('\n')
+  const fits = (piece: string, i: number) => {
+    const bare = piece.replace(SAID_HEAD, '')
+    const cut = bare.replace(SAID_TAIL, '')
+    return isSameValue(bare, printed[i]!) || (cut !== '' && isSameValue(cut, printed[i]!) && want[i]!.replace(SAID_TAIL, '') === want[i]!)
+  }
+  return ways.some(way => way.length === want.length && way.every((piece, i) => fits(piece, i)))
+}
+
+/** The rule line of a prediction in code never seen read by values (1.12.0 G3), in the three-way verdict line's place. */
+export const NEW_READ_RULE = '이 문제는 판정을 쓰지 않는다. 값 줄에 옮긴 값을 플러그인이 모범 답과 줄마다 견주어 맞음과 틀림을 정한다. 값이 하나라도 다르거나 없거나 더 있으면 틀림이다.'
+/** What a value line says of a line whose value the learner did not say: no printed value is ever this (newOutput refuses it). */
+export const NEW_NOT_SAID = '(말하지 않음)'
+/** How it is read, in KIND_CHECK's predict place: the learner's values copied out per line as written, never judged here. */
+export const newRead = (lines: number) =>
+  `처음 보는 코드의 예측 문제다. 모범 답은 코드가 찍는 글자를 줄마다 적은 것이다(모두 ${lines}줄). 학습자의 답에서, 모범 답의 줄마다 학습자가 그 줄에 찍힌다고 말한 값을 찾아 그 값만 학습자가 쓴 글자 그대로 값 줄에 옮긴다. 조사·말투("3 나와요", "B랑 합격")는 빼고, 값을 감싼 따옴표는 학습자가 쓴 대로 둔다. 여러 값을 한 줄에 이어 썼으면 차례대로 나눠 옮긴다. 덧붙인 까닭 속의 말과 값은 옮기지 않는다. 학습자가 말한 값을 고치거나 모범 답의 값으로 바꿔 쓰지 않는다. 그 줄의 값을 말하지 않았으면 ${NEW_NOT_SAID}이라고 쓴다.`
+/** Its format lines, one per line of the model answer, and one for values said past them. */
+export const newValueLines = (lines: number): string[] => [
+  ...Array.from({ length: lines }, (_, i) => `값 ${i + 1}: (학습자가 ${i + 1}줄에 찍힌다고 말한 값만. 말하지 않았으면 ${NEW_NOT_SAID})`),
+  '값 더: (모범 답의 줄보다 더 말한 값. 없으면 이 줄을 쓰지 않는다)',
+]
+
+/** Where `value` stands in `text` as a value of its own (no letter, digit or point-digit runs on into it: `0` is not in `10` or `3.0`). */
+function placeOf(text: string, value: string): { from: number; size: number } | undefined {
+  const at = new RegExp(`(?<![A-Za-z0-9_.])${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_]|\\.\\d)`).exec(text)
+  return at ? { from: at.index, size: value.length } : undefined
+}
+/** The text a value is looked for in: quote kinds alike, spaces one. */
+const sayText = (text: string) => text.replace(/[“”‘’`"]/g, "'").replace(/\s+/g, ' ').trim()
+
+/**
+ * The verdict of a prediction in code never seen from the values the grade copied (1.12.0 G3): right only when every
+ * line's value is there, is the printed line's (isSameValue, compared before anything else so a printed 없음 is a
+ * value like any), is found in what the learner wrote, each at a place of its own (`mine`: a value the grade wrote that
+ * the learner never did, or wrote once for two lines, is the model answer copied in), and nothing more was said; wrong when one is not, or is NEW_NOT_SAID,
+ * or more was said; undefined (unreadable) when a line's value is not given at all.
+ */
+export function valuesVerdict(values: ReadonlyMap<number, string>, more: string | undefined, answer: string, mine?: string): 'right' | 'wrong' | undefined {
+  const want = answer.split('\n')
+  for (let i = 1; i <= want.length; i += 1) if (!values.has(i)) return undefined
+  const isNoneMore = (text: string) => /^(?:없음|없다|\(?없음\)?|-|\(?말하지\s*않음\)?)$/.test(text.trim())
+  if (more !== undefined && more.trim() !== '' && !isNoneMore(more)) return 'wrong'
+  if (!want.every((w, i) => isSameValue(values.get(i + 1)!, w))) return 'wrong'
+  if (mine === undefined) return 'right'
+  // Each value found in what the learner wrote, each at a place of its own (the longest first, so `4` is not read in
+  // `40`): a value the learner wrote once is not two lines' values.
+  let left = sayText(mine)
+  const found = [...values.entries()]
+    .filter(([i]) => i <= want.length)
+    .map(([, said]) => sayText(said).replace(/\.$/, ''))
+    .sort((a, b) => b.length - a.length)
+    .every(v => {
+      const inner = /^'.+'$/.test(v) ? v.slice(1, -1).trim() : undefined
+      const at = placeOf(left, v) ?? (inner !== undefined ? placeOf(left, inner) : undefined)
+      if (!at) return false
+      left = left.slice(0, at.from) + '\u0000'.repeat(at.size) + left.slice(at.from + at.size)
+      return true
+    })
+  return found ? 'right' : 'wrong'
 }

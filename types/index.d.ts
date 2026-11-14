@@ -349,6 +349,13 @@ export type LearnQuizRun = {
   draft?: { at: number; i: number; text: string; isFailed?: boolean } | null
   /** The quiz (by when it was asked) whose s was pressed once with questions still to grade: the next s makes a new one. */
   armedNew?: number | null
+  /**
+   * The concepts whose question in code changed this window's reply gave none (1.12.0 G2): asked from the learner's own
+   * code for the rest of the session. Session state only, never stored.
+   */
+  changedMissed?: string[]
+  /** The concepts whose question in code never seen this session could not check (1.12.0 G3): asked another way for the rest of the session. Session state only; never in the store. */
+  newMissed?: string[]
 }
 
 /** What the pane shows: the selected note or its code before and after, every concept, or the quiz. */

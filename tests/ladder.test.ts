@@ -2,8 +2,10 @@ import type { LearnConcept, LearnSlip } from '../types'
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
-  CHANGED_TRACE_LINE,
+  CHANGED_HINT,
+  CHANGED_LEAD,
   NEW_GRADER_SINCE,
+  NEW_LEAD,
   QUIZ_SYSTEM,
   RUNG_CHANGED_STEP,
   RUNG_NEW_STEP,
@@ -72,6 +74,8 @@ const DAY = 86_400_000
 /** A concept at `step`, its words quoting a line of CODE (1.10.0 G1: a worked example of it is the code branch's). */
 const at = (step: number): LearnConcept => ({ name: 'A', count: 2, firstAt: 0, lastAt: 0, blurb: 'A 설명 — `total += n`', files: [], step })
 const CODE = { file: 'src/cart.js', text: 'let total = 0\nfor (const n of [1, 2]) total += n\nconsole.log(total)' }
+/** CODE as a file written whole (1.12.0 G2: code changed only for a JavaScript or Python file shown whole, isChangedShaped). */
+const CODE_W = { ...CODE, isWhole: true as const }
 const plain = { isAsking: false, isTeam: false, isDue: true }
 const SLIP: LearnSlip = { what: '반복이 끝나면 total이 0으로 돌아간다고 봄', type: 'state', question: '`total`은?', mine: '0', at: NOW, times: 1 }
 const pick = (name: string, more: Partial<QuizPick> = {}): QuizPick => ({ key: `c:${name}`, name, count: 1, firstAt: 0, lastAt: 0, blurb: `${name} 설명`, files: [], ...more })
@@ -89,22 +93,24 @@ describe('1.8.0: the question ladder, which code a question asks in (E3)', () =>
     expect([2, Infinity]).toContain(WORKED_AFTER_TIMES)
     const byDefault = (step: number) => (step >= RUNG_NEW_STEP ? 'new' : step >= RUNG_CHANGED_STEP ? 'changed' : 'mine')
     for (const step of [0, 1, 2, 3, 4, 5]) expect(rungOf(at(step), { ...plain, code: CODE })).toBe(byDefault(step))
-    expect(rungOf(at(0), { ...plain, code: CODE }, Infinity, ON)).toBe('mine')
-    expect(rungOf(at(1), { ...plain, code: CODE }, Infinity, ON)).toBe('mine')
-    expect(rungOf(at(2), { ...plain, code: CODE }, Infinity, ON)).toBe('changed')
-    expect(rungOf(at(3), { ...plain, code: CODE }, Infinity, ON)).toBe('changed')
+    expect(rungOf(at(0), { ...plain, code: CODE_W }, Infinity, ON)).toBe('mine')
+    expect(rungOf(at(1), { ...plain, code: CODE_W }, Infinity, ON)).toBe('mine')
+    expect(rungOf(at(2), { ...plain, code: CODE_W }, Infinity, ON)).toBe('changed')
+    expect(rungOf(at(3), { ...plain, code: CODE_W }, Infinity, ON)).toBe('changed')
+    // 1.12.0 (G2, re-pinned on purpose): code changed only for a file shown whole; the same lines from an edit, its own code.
+    expect(rungOf(at(3), { ...plain, code: CODE }, Infinity, ON)).toBe('mine')
     // Code never seen off: step 5 in code a sample could run is asked in its code changed.
-    expect(rungOf(at(5), { ...plain, code: CODE }, Infinity, ON)).toBe('changed')
+    expect(rungOf(at(5), { ...plain, code: CODE_W }, Infinity, ON)).toBe('changed')
     // Switched on (4): due, in a language a sample ran.
     expect(rungOf(at(4), { ...plain, code: CODE }, 4, ON)).toBe('new')
     // 1.10.0 (G2): code changed only in a language its samples ran: a stylesheet is asked in its own code.
     expect(rungOf(at(4), { ...plain, code: { file: 'app.css' } }, 4, ON)).toBe('mine')
     expect(rungOf(at(4), plain, 4, ON)).toBeUndefined()
     // A concept filling the quiz before it is due is no gate to graduate by: its code changed.
-    expect(rungOf(at(4), { ...plain, isDue: false, code: CODE }, 4, ON)).toBe('changed')
+    expect(rungOf(at(4), { ...plain, isDue: false, code: CODE_W }, 4, ON)).toBe('changed')
     // A team term of this repository is asked by the team's words and lines, as in 1.7; one of another (isTeamMarked) as any concept.
-    expect(rungOf(at(2), { ...plain, isTeam: true, code: CODE }, Infinity, ON)).toBeUndefined()
-    expect(rungOf({ ...at(2), name: '다른 저장소 팀 용어' }, { ...plain, code: CODE }, Infinity, ON)).toBe('changed')
+    expect(rungOf(at(2), { ...plain, isTeam: true, code: CODE_W }, Infinity, ON)).toBeUndefined()
+    expect(rungOf({ ...at(2), name: '다른 저장소 팀 용어' }, { ...plain, code: CODE_W }, Infinity, ON)).toBe('changed')
   })
 
   test('an open slip asked again: 다시 도전 (no rung) at first; missed twice running, a worked example, with or without code', () => {
@@ -159,16 +165,21 @@ describe('1.8.0: the quiz prompt names each rung and says what the quiz has of t
     expect(prompt).toContain('2. B — B 설명\n   칸: 내 코드\n   학습자가 만든 코드')
     expect(prompt).toContain('3. C — C 설명\n\n')
     const mine = prompt.indexOf('내 코드: 학습자가 만든 코드를 그대로 보여 주고 묻는다.')
-    // 1.10.0 (G2): its sentence asks a prediction in one block of code.
-    const changed = prompt.indexOf('비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 코드 블록 하나로 보여 주고, 그 코드가 찍는 것을 예측으로 묻는다.')
+    // 1.12.0 (G2, re-pinned on purpose): code changed is made by the plugin from the model's C · O · N; its sentence
+    // follows 내 코드's, and 1.10.0's (a prediction in one block the model wrote) is nowhere.
+    const changed = prompt.indexOf('비슷한 코드: 이 칸은 문제 글을 쓰지 않는다. 문제와 바꾼 코드는 플러그인이 만든다.')
     expect(mine).toBeGreaterThan(-1)
     expect(changed).toBeGreaterThan(mine)
+    expect(prompt).not.toContain('비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 코드 블록 하나로 보여 주고')
     expect(prompt).not.toContain('풀이 보고 풀기:')
     expect(prompt).not.toContain('처음 보는 코드:')
     expect(prompt).not.toContain(WRITES)
     expect(prompt).not.toContain('그대로, 또는 조금 바꿔')
-    expect(prompt).toContain('코드가 붙었거나 칸이 붙은 개념은 예측(코드만으로 출력이나 값이 하나로 정해질 때만) 또는 바꿔 보기로, 칸도 코드도 없는 개념은 왜로 낸다.')
-    expect(prompt).toContain('T1: (예측 · 왜 · 바꿔 보기 중 하나)\nQ1: (문제 한두 문장)')
+    expect(prompt).toContain('칸이 "비슷한 코드"가 아닌 개념은, 코드가 붙었거나 칸이 붙었으면 예측(코드만으로 출력이나 값이 하나로 정해질 때만) 또는 바꿔 보기로, 칸도 코드도 없으면 왜로 낸다.')
+    expect(prompt).toContain('C1: (고른 곳 이름, 한 칸 띄우고 새 값만. 예: 1b 20)\n(그 값으로 바꾼 줄 통째로)\nO1:')
+    expect(prompt).toContain('T2: (예측 · 왜 · 바꿔 보기 중 하나)\nQ2: (문제 한두 문장)')
+    // A quiz of own code alone keeps 1.9.0's sentence for the rest.
+    expect(quizPrompt([pickForRung(pick('B', { code: CODE }), 'mine'), pick('C')], 'beginner')).toContain('코드가 붙었거나 칸이 붙은 개념은 예측(코드만으로 출력이나 값이 하나로 정해질 때만) 또는 바꿔 보기로, 칸도 코드도 없는 개념은 왜로 낸다.')
     // No rung at all (a quiz of 1.7's picks): no 칸 line, no rung's ask.
     const none = quizPrompt([pick('A', { code: CODE }), pick('B')], 'beginner')
     expect(none).not.toContain('칸:')
@@ -222,113 +233,119 @@ describe('1.8.0: a question keeps its rung as the model kept to it (E3)', () => 
     expect(items[0]!.isRetry).toBeUndefined()
   })
 
+  // 1.12.0 (G2, re-pinned on purpose): a pick asked in code changed takes no T · Q · H · A item at all; the plugin makes its
+  // question from C · O · N (changedItem), so neither code shown as it was nor code changed in Q makes one.
   test('code meant changed shown as it was keeps no rung (spaces aside); changed code keeps it', () => {
     const changed = [pickForRung(pick('A', { code: CODE }), 'changed')]
     const same = parseQuiz(`Q1: 아래 코드는 무엇을 찍을까요?\n\`\`\`js\nlet total  = 0\nfor (const n of [1, 2]) total += n\nconsole.log(total)\n\`\`\`\nA1: 3`, changed)
-    expect(same[0]!.rung).toBeUndefined()
+    expect(same).toEqual([])
     const other = parseQuiz(`Q1: 아래 코드는 무엇을 찍을까요?\n\`\`\`js\nlet total = 10\nfor (const n of [1, 2]) total += n\nconsole.log(total)\n\`\`\`\nA1: 13`, changed)
-    expect(other[0]!.rung).toBe('changed')
+    expect(other).toEqual([])
     // One line shown in backticks, as it was.
     const line = [pickForRung(pick('A', { code: { file: 'a.ts', text: 'const b = 2' } }), 'changed')]
-    expect(parseQuiz('Q1: `const b = 2` 다음 줄에서 b = 3이면?\nA1: 오류', line)[0]!.rung).toBeUndefined()
-    expect(parseQuiz('Q1: `const b = 5` 다음 줄에서 b = 3이면?\nA1: 오류', line)[0]!.rung).toBe('changed')
+    expect(parseQuiz('Q1: `const b = 2` 다음 줄에서 b = 3이면?\nA1: 오류', line)).toEqual([])
+    expect(parseQuiz('Q1: `const b = 5` 다음 줄에서 b = 3이면?\nA1: 오류', line)).toEqual([])
   })
 
+  // 1.12.0 (G2, re-pinned on purpose): every question below, model-written for a pick in code changed, makes no item
+  // (the plugin makes it from C · O · N); 1.8.0's reading of it (keptRung) is not reached for that rung.
   test('code meant changed shown as a part of it, its return left off, or with `;`, other quotes or fewer lines, keeps no rung; one changed number, operator or order keeps it (교차 검토 5)', () => {
     const cart = { file: 'cartView.js', text: '// 장바구니 화면에 보여 줄 상품만 고른다\nfunction visibleItems(items) {\n  return items.filter(item => item.qty > 0)\n}' }
     const changed = [pickForRung(pick('화살표 함수', { code: cart }), 'changed')]
-    const rung = (question: string, picks = changed) => parseQuiz(`T1: 바꿔 보기\nQ1: ${question}\nA1: 답`, picks)[0]!.rung
+    const rung = (question: string, picks = changed) => parseQuiz(`T1: 바꿔 보기\nQ1: ${question}\nA1: 답`, picks).length
     // What haiku wrote for a concept at its third step: the line of the learner's code, its return left off.
-    expect(rung('아래 화살표 함수를 `function` 키워드를 쓴 일반 함수 형태로 바꾸면 어떻게 써야 할까요? 같은 동작을 해야 합니다. `items.filter(item => item.qty > 0)`')).toBeUndefined()
-    expect(rung('`item => item.qty > 0`을 `return`이 있는 함수로 바꿔 쓰면?')).toBeUndefined()
+    expect(rung('아래 화살표 함수를 `function` 키워드를 쓴 일반 함수 형태로 바꾸면 어떻게 써야 할까요? 같은 동작을 해야 합니다. `items.filter(item => item.qty > 0)`')).toBe(0)
+    expect(rung('`item => item.qty > 0`을 `return`이 있는 함수로 바꿔 쓰면?')).toBe(0)
     const arrow = [pickForRung(pick('화살표 함수', { code: { file: 'a.js', text: 'const shown = items.filter(item => item.qty > 0)' } }), 'changed')]
-    expect(rung('`item => item.qty > 0`을 `function`으로 바꿔 쓰면?', arrow)).toBeUndefined()
+    expect(rung('`item => item.qty > 0`을 `function`으로 바꿔 쓰면?', arrow)).toBe(0)
     // The whole of it with `;` at its lines' ends, or on fewer lines, its comment left out; or with a call that runs it.
-    expect(rung('아래 코드는?\n```js\nfunction visibleItems(items) {\n    return items.filter(item => item.qty > 0);\n};\n```')).toBeUndefined()
-    expect(rung('아래 코드는?\n```js\nfunction visibleItems(items) { return items.filter(item => item.qty > 0) }\n```')).toBeUndefined()
-    expect(rung('아래 코드는?\n```js\nfunction visibleItems(items) {\n  return items.filter(item => item.qty > 0)\n}\nconsole.log(visibleItems([{ qty: 0 }]).length)\n```')).toBeUndefined()
+    expect(rung('아래 코드는?\n```js\nfunction visibleItems(items) {\n    return items.filter(item => item.qty > 0);\n};\n```')).toBe(0)
+    expect(rung('아래 코드는?\n```js\nfunction visibleItems(items) { return items.filter(item => item.qty > 0) }\n```')).toBe(0)
+    expect(rung('아래 코드는?\n```js\nfunction visibleItems(items) {\n  return items.filter(item => item.qty > 0)\n}\nconsole.log(visibleItems([{ qty: 0 }]).length)\n```')).toBe(0)
     // A string's quotes made one kind only where the language reads them so (quotesAlike).
     const unit = (file: string) => [pickForRung(pick('A', { code: { file, text: "unit = '원'\nprint(unit)" } }), 'changed')]
-    expect(rung('```\nunit = "원";\nprint(unit)\n```', unit('a.py'))).toBeUndefined()
-    expect(rung('```\nunit = "원"\nprint(unit)\n```', unit('a.rb'))).toBe('changed')
+    expect(rung('```\nunit = "원";\nprint(unit)\n```', unit('a.py'))).toBe(0)
+    expect(rung('```\nunit = "원"\nprint(unit)\n```', unit('a.rb'))).toBe(0)
     // One place changed: a number, an operator, the order, a return taken out; or said changed beside the part it was.
-    expect(rung('`items.filter(item => item.qty > 10)`의 결과는?')).toBe('changed')
-    expect(rung('`items.filter(item => item.qty >= 0)`의 결과는?')).toBe('changed')
-    expect(rung('`item.qty > 0`을 `item.qty >= 2`로 바꾸면 무엇이 남을까요?')).toBe('changed')
-    expect(rung('원래 코드:\n```js\nfunction visibleItems(items) {\n  return items.filter(item => item.qty > 0)\n}\n```\n바꾼 코드:\n```js\nfunction visibleItems(items) {\n  return items.filter(item => item.qty > 1)\n}\n```')).toBe('changed')
-    expect(rung('```js\nlet total = 0\nconsole.log(total)\nfor (const n of [1, 2]) total += n\n```', [pickForRung(pick('A', { code: CODE }), 'changed')])).toBe('changed')
+    expect(rung('`items.filter(item => item.qty > 10)`의 결과는?')).toBe(0)
+    expect(rung('`items.filter(item => item.qty >= 0)`의 결과는?')).toBe(0)
+    expect(rung('`item.qty > 0`을 `item.qty >= 2`로 바꾸면 무엇이 남을까요?')).toBe(0)
+    expect(rung('원래 코드:\n```js\nfunction visibleItems(items) {\n  return items.filter(item => item.qty > 0)\n}\n```\n바꾼 코드:\n```js\nfunction visibleItems(items) {\n  return items.filter(item => item.qty > 1)\n}\n```')).toBe(0)
+    expect(rung('```js\nlet total = 0\nconsole.log(total)\nfor (const n of [1, 2]) total += n\n```', [pickForRung(pick('A', { code: CODE }), 'changed')])).toBe(0)
     const callback = [pickForRung(pick('A', { code: { file: 'a.js', text: 'items.filter(function (item) {\n  return item.qty > 0\n})' } }), 'changed')]
-    expect(rung('```js\nitems.filter(function (item) {\n  item.qty > 0\n})\n```', callback)).toBe('changed')
+    expect(rung('```js\nitems.filter(function (item) {\n  item.qty > 0\n})\n```', callback)).toBe(0)
     // A number cut short is another number, either way round: 10 is not 1.
     const code = (text: string) => [pickForRung(pick('A', { code: { file: 'a.js', text } }), 'changed')]
-    expect(rung('`const limit = 1` 뒤 limit은?', code('const limit = 10'))).toBe('changed')
-    expect(rung('`const limit = 10` 뒤 limit은?', code('const limit = 1'))).toBe('changed')
-    expect(rung('`const a = 2` 뒤 a는?', code('const a = 1\nconst b = 2'))).toBe('changed')
+    expect(rung('`const limit = 1` 뒤 limit은?', code('const limit = 10'))).toBe(0)
+    expect(rung('`const limit = 10` 뒤 limit은?', code('const limit = 1'))).toBe(0)
+    expect(rung('`const a = 2` 뒤 a는?', code('const a = 1\nconst b = 2'))).toBe(0)
     // Names alone in backticks show no code as it was: the code changed, as in 1.8.0. A question with no code at all
     // keeps no rung (1.10.0 G2): a why with no code is no 비슷한 코드.
-    expect(rung('`filter`와 `return`을 써서 다시 쓰면?')).toBe('changed')
-    expect(rung('조건을 반대로 바꾸면 무엇이 남을까요?')).toBeUndefined()
+    expect(rung('`filter`와 `return`을 써서 다시 쓰면?')).toBe(0)
+    expect(rung('조건을 반대로 바꾸면 무엇이 남을까요?')).toBe(0)
   })
 
+  // 1.12.0 (G2, re-pinned on purpose): every question below, model-written for a pick in code changed, makes no item
+  // (the plugin makes it from C · O · N); 1.8.0's reading of it (keptRung) is not reached for that rung.
   test('a sign, number or name the code is said to become keeps the rung though it reads as a part of the code; a line with more on it, cut short, or lines beside it doing more are not the code as it was (교차 검토 6)', () => {
     const code = (text: string, file = 'a.js') => [pickForRung(pick('A', { code: { file, text } }), 'changed')]
-    const rung = (question: string, picks: QuizPick[]) => parseQuiz(`T1: 바꿔 보기\nQ1: ${question}\nA1: 답`, picks)[0]!.rung
+    const rung = (question: string, picks: QuizPick[]) => parseQuiz(`T1: 바꿔 보기\nQ1: ${question}\nA1: 답`, picks).length
     // A sign that is a part of the sign it stands for is another sign: `>` is not in `>=`, nor `==` in `===`.
     const qty = code('items.filter(item => item.qty >= 0)')
-    expect(rung('`>=`를 `>`로 바꾸면 무엇이 남을까요?', qty)).toBe('changed')
-    expect(rung('`items.filter(item => item.qty >= 0)`에서 `>=`를 `>`로 바꾸면 무엇이 남을까요?', qty)).toBe('changed')
-    expect(rung('아래 코드에서 `>=`를 `>`로 바꾸면?\n```js\nitems.filter(item => item.qty >= 0)\n```', qty)).toBe('changed')
-    expect(rung('`items.filter(item => item.qty >= 0)`에서 `>=`는 무엇을 뜻할까요?', qty)).toBeUndefined()
-    expect(rung('`===` 대신 `==`를 쓰면 출력은?', code('if (a === b) console.log("same")'))).toBe('changed')
-    expect(rung('`!==`를 `!=`로 바꾸면 `x`가 `undefined`일 때는?', code('if (x !== null) use(x)'))).toBe('changed')
-    expect(rung('`if (x !== null)`에서 `!==`를 `!=`로 바꾸면?', code('if (x !== null) use(x)'))).toBe('changed')
-    expect(rung('`+=`를 `=`로 바꾸면 출력은?', [pickForRung(pick('A', { code: CODE }), 'changed')])).toBe('changed')
-    expect(rung('`**`를 `*`로 바꾸면 출력은?', code('print(3 ** 2)', 'a.py'))).toBe('changed')
+    expect(rung('`>=`를 `>`로 바꾸면 무엇이 남을까요?', qty)).toBe(0)
+    expect(rung('`items.filter(item => item.qty >= 0)`에서 `>=`를 `>`로 바꾸면 무엇이 남을까요?', qty)).toBe(0)
+    expect(rung('아래 코드에서 `>=`를 `>`로 바꾸면?\n```js\nitems.filter(item => item.qty >= 0)\n```', qty)).toBe(0)
+    expect(rung('`items.filter(item => item.qty >= 0)`에서 `>=`는 무엇을 뜻할까요?', qty)).toBe(0)
+    expect(rung('`===` 대신 `==`를 쓰면 출력은?', code('if (a === b) console.log("same")'))).toBe(0)
+    expect(rung('`!==`를 `!=`로 바꾸면 `x`가 `undefined`일 때는?', code('if (x !== null) use(x)'))).toBe(0)
+    expect(rung('`if (x !== null)`에서 `!==`를 `!=`로 바꾸면?', code('if (x !== null) use(x)'))).toBe(0)
+    expect(rung('`+=`를 `=`로 바꾸면 출력은?', [pickForRung(pick('A', { code: CODE }), 'changed')])).toBe(0)
+    expect(rung('`**`를 `*`로 바꾸면 출력은?', code('print(3 ** 2)', 'a.py'))).toBe(0)
     // A number is read with its decimal point and its sign: 1 is not in 1.5, nor 5 in -5.
     const price = code('const total = price * 1.5')
-    expect(rung('`const total = price * 1` 이면 total은?', price)).toBe('changed')
-    expect(rung('`price * 1.5`는 무엇을 계산할까요?', price)).toBeUndefined()
-    expect(rung('`const limit = 1.5` 뒤 limit은?', code('const limit = 1'))).toBe('changed')
-    expect(rung('`price = 2.5`를 `price = 2`로 바꾸면 출력은?', code('price = 2.5\nprint(price * 2)', 'a.py'))).toBe('changed')
-    expect(rung('`-5`를 `5`로 바꾸면 출력은?', code('const x = -5\nconsole.log(Math.abs(x))'))).toBe('changed')
-    expect(rung('`const total = price * 1.5`에서 배율이 `1`일 때 total은?', price)).toBe('changed')
-    expect(rung('`const x = -5`에서 `x`가 `5`일 때 출력은?', code('const x = -5\nconsole.log(Math.abs(x))'))).toBe('changed')
+    expect(rung('`const total = price * 1` 이면 total은?', price)).toBe(0)
+    expect(rung('`price * 1.5`는 무엇을 계산할까요?', price)).toBe(0)
+    expect(rung('`const limit = 1.5` 뒤 limit은?', code('const limit = 1'))).toBe(0)
+    expect(rung('`price = 2.5`를 `price = 2`로 바꾸면 출력은?', code('price = 2.5\nprint(price * 2)', 'a.py'))).toBe(0)
+    expect(rung('`-5`를 `5`로 바꾸면 출력은?', code('const x = -5\nconsole.log(Math.abs(x))'))).toBe(0)
+    expect(rung('`const total = price * 1.5`에서 배율이 `1`일 때 total은?', price)).toBe(0)
+    expect(rung('`const x = -5`에서 `x`가 `5`일 때 출력은?', code('const x = -5\nconsole.log(Math.abs(x))'))).toBe(0)
     // A name, or a value the code holds elsewhere, said to be what a part becomes is the code changed.
     const filter = code('items.filter(item => item.qty > 0)')
-    expect(rung('`item.qty > 0`에서 `qty`를 `price`로 바꾸면 무엇이 남을까요?', filter)).toBe('changed')
-    expect(rung('`0`을 `limit`으로 바꾸면 무엇이 남을까요?', filter)).toBe('changed')
-    expect(rung('`let total = 0`에서 `0`을 `1`로 바꾸면 출력은?', [pickForRung(pick('A', { code: CODE }), 'changed')])).toBe('changed')
-    expect(rung('`items.filter(item => item.qty > 0)`에서 `item`은 무엇을 가리킬까요?', filter)).toBeUndefined()
-    expect(rung('`items.filter(item => item.qty > 0)`에서 `item.qty`가 0이면?', filter)).toBeUndefined()
+    expect(rung('`item.qty > 0`에서 `qty`를 `price`로 바꾸면 무엇이 남을까요?', filter)).toBe(0)
+    expect(rung('`0`을 `limit`으로 바꾸면 무엇이 남을까요?', filter)).toBe(0)
+    expect(rung('`let total = 0`에서 `0`을 `1`로 바꾸면 출력은?', [pickForRung(pick('A', { code: CODE }), 'changed')])).toBe(0)
+    expect(rung('`items.filter(item => item.qty > 0)`에서 `item`은 무엇을 가리킬까요?', filter)).toBe(0)
+    expect(rung('`items.filter(item => item.qty > 0)`에서 `item.qty`가 0이면?', filter)).toBe(0)
     // The code with more on its line, or a line of it cut short, is another line; so are lines beside it doing more
     // than call a function it defines (a line that runs it, kept as it was by 교차 검토 5's test above).
-    expect(rung('`const b = 2 * 3` 다음 줄에서 b는?', code('const b = 2'))).toBe('changed')
-    expect(rung('`const name = user.name.toUpperCase()` 뒤 name은?', code('const name = user.name'))).toBe('changed')
-    expect(rung('`const b = 2` 다음 줄에서 b는?', code('const b = 2 * 3'))).toBe('changed')
-    expect(rung('`const total = price`이면 total은?', code('const total = price * qty'))).toBe('changed')
-    expect(rung('`item => item.qty`를 넘기면?', filter)).toBe('changed')
-    expect(rung('아래 코드는?\n```js\nconst b = 2\nconsole.log(b)\n```', code('const b = 2'))).toBe('changed')
+    expect(rung('`const b = 2 * 3` 다음 줄에서 b는?', code('const b = 2'))).toBe(0)
+    expect(rung('`const name = user.name.toUpperCase()` 뒤 name은?', code('const name = user.name'))).toBe(0)
+    expect(rung('`const b = 2` 다음 줄에서 b는?', code('const b = 2 * 3'))).toBe(0)
+    expect(rung('`const total = price`이면 total은?', code('const total = price * qty'))).toBe(0)
+    expect(rung('`item => item.qty`를 넘기면?', filter)).toBe(0)
+    expect(rung('아래 코드는?\n```js\nconst b = 2\nconsole.log(b)\n```', code('const b = 2'))).toBe(0)
     const shout = code('const shout = text => text.toUpperCase()')
-    expect(rung('아래 코드는?\n```js\nconst shout = text => text.toUpperCase()\nconsole.log(shout("hi"))\n```', shout)).toBeUndefined()
-    expect(rung('```js\nreturn items.filter(item => item.qty > 0);\n```\n결과는?', filter)).toBeUndefined()
-    expect(rung('`console.log(items.filter(item => item.qty > 0))`의 출력은?', filter)).toBeUndefined()
-    expect(rung('`items.filter(item => item.qty > 0) + 1`은?', filter)).toBe('changed')
-    expect(rung('`items.filter(item => item.qty > 0).length`는?', filter)).toBe('changed')
+    expect(rung('아래 코드는?\n```js\nconst shout = text => text.toUpperCase()\nconsole.log(shout("hi"))\n```', shout)).toBe(0)
+    expect(rung('```js\nreturn items.filter(item => item.qty > 0);\n```\n결과는?', filter)).toBe(0)
+    expect(rung('`console.log(items.filter(item => item.qty > 0))`의 출력은?', filter)).toBe(0)
+    expect(rung('`items.filter(item => item.qty > 0) + 1`은?', filter)).toBe(0)
+    expect(rung('`items.filter(item => item.qty > 0).length`는?', filter)).toBe(0)
     // A member named as a keyword is a value (`map.delete`); a keyword the code is said to become is the code changed.
-    expect(rung('`map.delete("a")`는 무엇을 돌려줄까요?', code('const isGone = map.delete("a") && map.size === 0'))).toBeUndefined()
-    expect(rung('`if i == 2:` 아래 `break`를 `continue`로 바꾸면 출력은?', code('for i in range(5):\n    if i == 2:\n        break\n    print(i)', 'a.py'))).toBe('changed')
+    expect(rung('`map.delete("a")`는 무엇을 돌려줄까요?', code('const isGone = map.delete("a") && map.size === 0'))).toBe(0)
+    expect(rung('`if i == 2:` 아래 `break`를 `continue`로 바꾸면 출력은?', code('for i in range(5):\n    if i == 2:\n        break\n    print(i)', 'a.py'))).toBe(0)
     // A comment at a line's end is left out as a whole-line one is; `//` in Python and `#` in a string are code.
-    expect(rung('```python\ntotal = 1 + 2  # 더하기\nprint(total)\n```', code('# 합\ntotal = 1 + 2\nprint(total)', 'a.py'))).toBeUndefined()
-    expect(rung('`const total = 1 + 2`의 total은?', code('const total = 1 + 2 // 합'))).toBeUndefined()
-    expect(rung('`print(7 // 3)`의 출력은?', code('print(7 // 2)', 'a.py'))).toBe('changed')
-    expect(rung('`print("# 2")`의 출력은?', code('print("# 1")', 'a.py'))).toBe('changed')
+    expect(rung('```python\ntotal = 1 + 2  # 더하기\nprint(total)\n```', code('# 합\ntotal = 1 + 2\nprint(total)', 'a.py'))).toBe(0)
+    expect(rung('`const total = 1 + 2`의 total은?', code('const total = 1 + 2 // 합'))).toBe(0)
+    expect(rung('`print(7 // 3)`의 출력은?', code('print(7 // 2)', 'a.py'))).toBe(0)
+    expect(rung('`print("# 2")`의 출력은?', code('print("# 1")', 'a.py'))).toBe(0)
     // What haiku wrote (docs/qa/견본.md, r1): the code as it was beside braces named in words keeps none; the code with
     // two lines more that change what it prints keeps the rung, as 0183a13 and the hand count had them.
     const block = code('let x = 1\nif (true) {\n  let x = 2\n}\nconsole.log(x)')
-    expect(rung('아래 코드에서 마지막 `console.log(x)`가 2를 출력하게 하려면 안쪽 블록(중괄호 `{ }`로 묶은 부분)의 어느 줄을 어떻게 바꿔야 할까요?\n```\nlet x = 1\nif (true) {\n  let x = 2\n}\nconsole.log(x)\n```', block)).toBeUndefined()
+    expect(rung('아래 코드에서 마지막 `console.log(x)`가 2를 출력하게 하려면 안쪽 블록(중괄호 `{ }`로 묶은 부분)의 어느 줄을 어떻게 바꿔야 할까요?\n```\nlet x = 1\nif (true) {\n  let x = 2\n}\nconsole.log(x)\n```', block)).toBe(0)
     const order = code("console.log('A')\nPromise.resolve().then(() => console.log('B'))\nconsole.log('C')")
-    expect(rung("아래 코드를 실행하면 출력되는 글자가 어떤 순서로 나올까요? 순서대로 한 줄에 쓰면 됩니다.\n```\nconsole.log('A')\nPromise.resolve().then(() => console.log('B'))\nconsole.log('C')\nPromise.resolve().then(() => console.log('D'))\nconsole.log('E')\n```", order)).toBe('changed')
-    expect(rung('`{ }`를 `[ ]`로 바꾸면?', block)).toBe('changed')
+    expect(rung("아래 코드를 실행하면 출력되는 글자가 어떤 순서로 나올까요? 순서대로 한 줄에 쓰면 됩니다.\n```\nconsole.log('A')\nPromise.resolve().then(() => console.log('B'))\nconsole.log('C')\nPromise.resolve().then(() => console.log('D'))\nconsole.log('E')\n```", order)).toBe(0)
+    expect(rung('`{ }`를 `[ ]`로 바꾸면?', block)).toBe(0)
   })
 
   test('a T line that names the rung before the kind is read for its kind; one naming the rung alone has none, as in 1.7', () => {
@@ -378,11 +395,13 @@ describe('1.8.0: a question keeps its rung as the model kept to it (E3)', () => 
     // No example shown (no rung kept), no marker, or no worked example at all: code alone stays code alone.
     expect(parseQuiz(`Q1: 이제 풀어 보세요:\n${code}\nA1: 11`, picks)[0]!.question).toBe(`이제 풀어 보세요:\n${code}`)
     expect(parseQuiz(`Q1: 풀이: 예.\n${code}\nA1: 11`, picks)[0]!.question).toBe(`풀이: 예.\n${code}`)
-    for (const rung of ['mine', 'changed'] as const) {
+    for (const rung of ['mine'] as const) {
       const [item] = parseQuiz(`Q1: 이제 풀어 보세요:\n${code}\nA1: 11`, [pickForRung(pick('B', { code: CODE }), rung)])
       expect(item!.question).toBe(`이제 풀어 보세요:\n${code}`)
       expect(item!.kind).toBeUndefined()
     }
+    // 1.12.0 (G2, re-pinned on purpose): a pick in code changed takes no Q · A item; the plugin makes it from C · O · N.
+    expect(parseQuiz(`Q1: 이제 풀어 보세요:\n${code}\nA1: 11`, [pickForRung(pick('B', { code: CODE }), 'changed')])).toEqual([])
   })
 })
 
@@ -461,17 +480,21 @@ describe('1.9.0: 처음 보는 코드 from the fifth step, for concepts due met 
   test('switched on at 4: due steps 4 and 5 in js, mjs, cjs, ts or py; not due, other languages, no code, step 3, slips and team terms as before', () => {
     expect(rungOf(at(4), { ...plain, code: CODE }, 4, ON)).toBe('new')
     expect(rungOf(at(5), { ...plain, code: PY }, 4, ON)).toBe('new')
-    for (const file of ['a.mjs', 'a.cjs', 'src/A.TS']) expect(rungOf(at(5), { ...plain, code: { file, text: 'console.log(1)' } }, 4, ON)).toBe('new')
-    expect(rungOf(at(4), { ...plain, isDue: false, code: CODE }, 4, ON)).toBe('changed')
+    for (const file of ['a.mjs', 'a.cjs']) expect(rungOf(at(5), { ...plain, code: { file, text: 'console.log(1)' } }, 4, ON)).toBe('new')
+    // 1.12.0 (G3, re-pinned on purpose): TypeScript is out of code never seen's scope (isNewInScope): its own code.
+    expect(rungOf(at(5), { ...plain, code: { file: 'src/A.TS', text: 'console.log(1)' } }, 4, ON)).toBe('mine')
+    // 1.12.0 (G2): code changed only for a file shown whole (CODE_W).
+    expect(rungOf(at(4), { ...plain, isDue: false, code: CODE_W }, 4, ON)).toBe('changed')
     // Not in a language a sample ran: its own code (1.10.0 G2; 1.9.0 asked it changed).
     for (const file of ['app.css', 'App.tsx', 'App.jsx', 'main.go']) expect(rungOf(at(4), { ...plain, code: { file, text: 'x' } }, 4, ON)).toBe('mine')
     expect(rungOf(at(4), plain, 4, ON)).toBeUndefined()
-    expect(rungOf(at(3), { ...plain, code: CODE }, 4, ON)).toBe('changed')
+    expect(rungOf(at(3), { ...plain, code: CODE_W }, 4, ON)).toBe('changed')
     expect(rungOf(at(5), { ...asking, code: CODE, slip: { times: 1 } }, 4, ON)).toBeUndefined()
     expect(rungOf(at(5), { ...asking, code: CODE, slip: { times: 2 } }, 4, ON)).toBe('worked')
     expect(rungOf(at(5), { ...plain, isTeam: true, code: CODE }, 4, ON)).toBeUndefined()
     // Off (Infinity), as 1.8.0 shipped it: the same concept in its code changed; with 비슷한 코드 off too, its own.
-    expect(rungOf(at(5), { ...plain, code: PY }, Infinity, ON)).toBe('changed')
+    expect(rungOf(at(5), { ...plain, code: { ...PY, isWhole: true } }, Infinity, ON)).toBe('changed')
+    expect(rungOf(at(5), { ...plain, code: PY }, Infinity, ON)).toBe('mine')
     expect(rungOf(at(5), { ...plain, code: PY }, Infinity, { changedStep: Infinity })).toBe('mine')
     expect(rungOf(at(4), { ...plain, code: PY }, 4, { changedStep: Infinity })).toBe('new')
   })
@@ -523,17 +546,24 @@ describe('1.9.0: 처음 보는 코드 from the fifth step, for concepts due met 
     const one = pickForRung(pick('리스트 컴프리헨션', { blurb: '조건에 맞는 것만 골라 새 리스트를 만듭니다 — `[n for n in nums if n % 2 == 0]`', code: PY }), 'new')
     const prompt = quizPrompt([one, pickForRung(pick('B', { code: CODE }), 'mine')], 'beginner')
     expect(prompt).toContain('1. 리스트 컴프리헨션 — 조건에 맞는 것만 골라 새 리스트를 만듭니다\n   칸: 처음 보는 코드 (py로)\n2. B — B 설명\n   칸: 내 코드\n   학습자가 만든 코드 (src/cart.js):')
-    expect(prompt).toContain(`\n${NEW_ASK}\n${WRITES}\n`)
-    expect(prompt).toContain(`\nH1: (힌트 한 문장)\n${TRACE}\nA1: (답 한두 문장)\n`)
+    // 1.12.0 (G3, re-pinned on purpose): its own sentence and K · L · A in place of 1.9.0's sentence and R line; the
+    // sentence that lets it write code stays; no trace asked anywhere.
+    expect(prompt).not.toContain(NEW_ASK)
+    expect(prompt).toContain('\n처음 보는 코드: 이 칸은 문제 글·힌트·유형을 쓰지 않는다. 문제 글과 힌트는 플러그인이 만든다. 이 번호에는 T·Q·H·A 대신 K·L·A만 쓴다.')
+    expect(prompt).toContain(`\n${WRITES}\n`)
+    expect(prompt).toContain('\nK1:\n```python\n(코드)\n```\nL1: (K1 코드에서 눈여겨볼 줄 하나를 그대로. 찍는 줄은 빼고)\nA1:\n(찍히는 글자. 찍는 호출마다 한 줄)\nT2:')
+    expect(prompt).not.toContain(TRACE)
+    expect(prompt).not.toContain('따라간 과정')
     expect(prompt).not.toContain('nums = [1, 2, 3, 4]')
     expect(prompt).not.toContain('n % 2 == 0')
     expect(prompt).not.toContain('app/evens.py')
-    // A quiz with none of it says none of it: code changed has an R line of its own (1.10.0 G2), a quiz of its own code none.
+    // A quiz with none of it says none of it: code changed has C · O · N of its own (1.12.0 G2), a quiz of its own code none.
     const none = quizPrompt([pickForRung(pick('A', { code: CODE }), 'changed'), pickForRung(pick('B', { code: CODE }), 'mine')], 'beginner')
     expect(none).not.toContain('처음 보는 코드:')
     expect(none).not.toContain(WRITES)
     expect(none).not.toContain(TRACE)
-    expect(none).toContain('\nH1: (힌트 한 문장)\nR1: (칸이 "비슷한 코드"인 문제만: 보인 코드를 한 줄씩 따라간 과정)\nA1: (답 한두 문장)\n')
+    expect(none).not.toContain('R1:')
+    expect(none).toContain('\nC1: (고른 곳 이름, 한 칸 띄우고 새 값만. 예: 1b 20)\n')
     const own = quizPrompt([pickForRung(pick('A', { code: CODE }), 'mine'), pickForRung(pick('B', { code: CODE }), 'mine')], 'beginner')
     expect(own).not.toContain('R1:')
     expect(own).toContain('\nH1: (힌트 한 문장)\nA1: (답 한두 문장)\n')
@@ -541,14 +571,16 @@ describe('1.9.0: 처음 보는 코드 from the fifth step, for concepts due met 
   })
 
   test('a question in code never seen keeps its rung when it shows code, of whatever kind; one with none is a why as in 1.7; its R line is dropped', () => {
-    const picks = [pickForRung(pick('A', { code: CODE }), 'new'), pickForRung(pick('B', { code: CODE }), 'changed'), pick('C')]
+    // 1.12.0 (G3, re-pinned on purpose): its question is the plugin's own from K · L · A (always a prediction, the code
+    // the model wrote under K); T · Q · H · A or an R line written for it make none; a miss still steps it back one.
+    const picks = [pickForRung(pick('A', { code: CODE }), 'new'), pickForRung(pick('B', { code: CODE }), 'mine'), pick('C')]
     const code = '```js\nconst xs = [3, 4]\nlet s = 0\nfor (const x of xs) s += x\nconsole.log(s)\n```'
     const text = [
-      'T1: 예측',
-      `Q1: 아래 코드는 무엇을 찍을까요?\n${code}`,
-      'H1: 하나씩 더해 보세요',
-      'R1: s는 0에서 3, 다시 7이 된다',
-      'A1: 7',
+      'K1:',
+      code,
+      'L1: for (const x of xs) s += x',
+      'A1:',
+      '7',
       'T2: 예측',
       'Q2: `let total = 5`이면?',
       'A2: 8',
@@ -557,18 +589,16 @@ describe('1.9.0: 처음 보는 코드 from the fifth step, for concepts due met 
       'A3: 그래서',
     ].join('\n')
     const items = parseQuiz(text, picks)
-    expect(items.map(one => [one.rung, one.kind])).toEqual([['new', 'predict'], ['changed', 'predict'], [undefined, 'why']])
-    expect(items[0]).toMatchObject({ question: `아래 코드는 무엇을 찍을까요?\n${code}`, hint: '하나씩 더해 보세요', answer: '7' })
-    expect(JSON.stringify(items)).not.toContain('0에서 3')
-    // Shown code asked why or how to change it keeps the rung, so a miss steps it back one only (markFor).
-    const why = parseQuiz(`T1: 왜\nQ1: 아래 코드에서 let을 빼면?\n${code}\nA1: 오류`, picks.slice(0, 1))[0]!
-    expect(why).toMatchObject({ rung: 'new', kind: 'why' })
-    expect(markFor('wrong', 'wrong', false, why.rung)).toBe(markPartial)
-    // No code at all (the model found a library needed): no rung, a why marked as in 1.7, its title `· 왜`.
-    const bare = parseQuiz('T1: 왜\nQ1: 화면을 다시 그리는 까닭은?\nH1: 실마리\nA1: 값이 바뀌어서', picks.slice(0, 1))[0]!
-    expect(bare.rung).toBeUndefined()
-    expect(markFor('wrong', 'wrong', false, bare.rung)).toBe(markWrong)
-    expect(parseQuiz('T1: 왜\nQ1: 무엇이 다를까요?\n```js\n```\nA1: 없음', picks.slice(0, 1))[0]!.rung).toBeUndefined()
+    expect(items.map(one => [one.rung, one.kind])).toEqual([['new', 'predict'], ['mine', 'predict'], [undefined, 'why']])
+    expect(items[0]).toMatchObject({ question: `${NEW_LEAD}\n${code}`, answer: '7' })
+    expect(markFor('wrong', 'wrong', false, items[0]!.rung)).toBe(markPartial)
+    // Written as 1.9.0 asked it (T · Q · H · R · A): no item; with no code under K: no item either.
+    const old = ['T1: 예측', `Q1: 아래 코드는 무엇을 찍을까요?\n${code}`, 'H1: 하나씩 더해 보세요', 'R1: s는 0에서 3, 다시 7이 된다', 'A1: 7'].join('\n')
+    expect(parseQuiz(old, picks.slice(0, 1))).toEqual([])
+    expect(parseQuiz('K1:\n```js\n```\nL1: x\nA1:\n7', picks.slice(0, 1))).toEqual([])
+    expect(JSON.stringify(parseQuiz(old, picks.slice(0, 1)))).not.toContain('0에서 3')
+    // A plain miss in a quiz of 1.7's picks is marked as in 1.7.
+    expect(markFor('wrong', 'wrong', false, undefined)).toBe(markWrong)
     // The R line a quiz with no code never seen gets is the line it was in 1.8.0: part of the hint before it.
     const plainPicks = [pickForRung(pick('B', { code: CODE }), 'mine')]
     expect(parseQuiz('Q1: 문제\nH1: 실마리\nR1: 따라가기\nA1: 답', plainPicks)[0]!.hint).toBe('실마리\nR1: 따라가기')
@@ -589,13 +619,17 @@ describe('1.9.0: 처음 보는 코드 from the fifth step, for concepts due met 
     expect(isOldGraderOpen({ other: at('1.7.1', STAMP_KEPT_MS) }, 'mine', now)).toBe(false)
     // 1.10.0 (G3): 1.8 and 1.9 too, which grade a question in code never seen by the stock grade its sample showed
     // short (a matter of the grade, not of steps lost). Changed on purpose: in 1.9.0 these two were false.
-    expect(NEW_GRADER_SINCE).toBe('1.10.0')
+    // 1.12.0 (G3, re-pinned on purpose): 1.10 and 1.11 too, which grade a K · L · A question by their own grade.
+    expect(NEW_GRADER_SINCE).toBe('1.12.0')
     expect(open({ other: at('1.8.0', 60_000) })).toBe(true)
     expect(open({ other: at('1.9.0', 60 * 60_000) })).toBe(true)
     expect(open({ other: at('1.9.0', STAMP_KEPT_MS - 60_000) })).toBe(true)
     expect(open({ other: at('1.9.0', 25 * 60 * 60_000) })).toBe(false)
     expect(isOldGraderOpen({ other: at('1.9.0', 25 * 60 * 60_000) }, 'mine', now)).toBe(false)
-    expect(open({ other: at('1.10.0', 60_000), third: at('1.11.0', 60_000), fourth: at('2.0.0', 60_000) })).toBe(false)
+    expect(open({ other: at('1.12.0', 60_000), fourth: at('2.0.0', 60_000) })).toBe(false)
+    expect(open({ other: at('1.10.0', 60_000) })).toBe(true)
+    expect(open({ other: at('1.11.0', 60_000) })).toBe(true)
+    expect(open({ other: at('1.11.0', 25 * 60 * 60_000) })).toBe(false)
     expect(open({ other: at('1.10.0', 60_000), third: at('1.9.0', 60_000) })).toBe(true)
     expect(open({ mine: at('1.9.0', 60_000) })).toBe(false)
     expect(open({ mine: at('1.7.1', 60_000) })).toBe(false)
@@ -660,33 +694,34 @@ describe('1.9.0: 처음 보는 코드 from the fifth step, for concepts due met 
   })
 
   test('(3/5 검토) a reply whose first fence the model left open is read again markers and all: the R line is a marker there too, its trace in no hint', () => {
+    // 1.12.0 (G3, re-pinned on purpose): read again with no fences, the slot whose K block the model left open has no
+    // code the plugin can take (no item); the slot after it is read; no R line is asked or kept.
     const picks = [pickForRung(pick('A', { code: CODE }), 'new'), pickForRung(pick('B', { code: CODE }), 'new')]
     const text = [
-      'T1: 예측',
-      'Q1: 아래 코드는 무엇을 찍을까요?',
+      'K1:',
       '```js',
       'const xs = [3, 4]',
       'let s = 0',
       'for (const x of xs) s += x',
       'console.log(s)',
-      'H1: 하나씩 더해 보세요',
-      'R1: s는 0에서 3, 다시 7이 된다',
-      'A1: 7',
-      'T2: 왜',
-      'Q2: 왜 let으로 썼을까요?',
-      'H2: 바뀌는 값',
-      'R2: s가 두 번 바뀐다',
-      'A2: 다시 대입하므로',
+      'L1: for (const x of xs) s += x',
+      'A1:',
+      '7',
+      'K2:',
+      '```js',
+      'const word = "ab"',
+      'console.log(word.length)',
+      '```',
+      'L2: const word = "ab"',
+      'A2:',
+      '2',
     ].join('\n')
     const items = parseQuiz(text, picks)
-    expect(items.map(one => [one.name, one.hint, one.answer])).toEqual([
-      ['A', '하나씩 더해 보세요', '7'],
-      ['B', '바뀌는 값', '다시 대입하므로'],
-    ])
-    expect(items[0]!.question).toBe('아래 코드는 무엇을 찍을까요?\n```js\nconst xs = [3, 4]\nlet s = 0\nfor (const x of xs) s += x\nconsole.log(s)\n```')
-    expect(JSON.stringify(items)).not.toContain('0에서 3')
-    expect(JSON.stringify(items)).not.toContain('두 번 바뀐다')
+    expect(items.map(one => [one.name, one.answer, one.rung])).toEqual([['B', '2', 'new']])
+    expect(items[0]!.question).toBe(`${NEW_LEAD}\n\`\`\`js\nconst word = "ab"\nconsole.log(word.length)\n\`\`\``)
+    expect(JSON.stringify(items)).not.toContain('xs')
   })
+
 })
 
 /** 1.9.0's line for a worked example of a concept no code met (교차 검토 2), never sent: gone from 1.10.0 (G1). */
@@ -757,12 +792,24 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
   test('every quiz of worked110.ts: the rungs, the prompt and the questions read back as the design\'s preview made them; with no worked example left, 1.9.0\'s (fca5988) to the byte', () => {
     let worked = 0
     let off = 0
+    let redone = 0
     for (const one of WORKED_CASES_110) {
       for (const [workedAfter, workedPlainAfter] of COMBOS_110) {
         const key = `${one.id} ${tag110(workedAfter)} ${tag110(workedPlainAfter)}`
         const want = WORKED_OUTPUT_110[asOneWorked(key)]!
         const picks = workedQuiz(one, workedAfter, workedPlainAfter)
         expect([key, picks.map(p => p.rung ?? null)]).toEqual([key, want.rungs])
+        // 1.12.0 (G2 · G3, re-pinned on purpose): a quiz holding code never seen or code changed is asked by its own
+        // prompt (K · L · A or C · O · N) and reads no T · Q · H · A for that slot; the fixture's 1.9.0/1.10.0 bytes
+        // for it are not this tree's. Every other quiz is pinned as before.
+        if (picks.some(p => p.rung === 'new' || p.rung === 'changed')) {
+          redone += 1
+          const prompt = quizPrompt(picks, 'beginner')
+          expect(prompt).not.toBe(want.prompt)
+          expect(prompt).toContain(picks.some(p => p.rung === 'new') ? '이 번호에는 T·Q·H·A 대신 K·L·A만 쓴다.' : '이 번호에는 T·Q·H·A를 쓰지 않고 C·O·N만 쓴다.')
+          expect(parseQuiz(one.reply, picks).some(item => item.rung === 'new' || item.rung === 'changed')).toBe(false)
+          continue
+        }
         expect(quizPrompt(picks, 'beginner')).toBe(want.prompt)
         const items = JSON.parse(JSON.stringify(parseQuiz(one.reply, picks)))
         expect([key, items]).toEqual([key, JSON.parse(JSON.stringify(want.items))])
@@ -773,7 +820,7 @@ describe('1.10.0 (G1): 풀이 보고 풀기 by branch: its sentences and P line,
         } else worked += 1
       }
     }
-    expect([worked, off]).toEqual([21, 35])
+    expect([worked, off, redone]).toEqual([21, 33, 2])
   })
 
   test('where its sentences go: after RUNG_ASK\'s lines, before RUNG_WRITES; TURN for either branch, CODE for one with a language, PLAIN for one with none, each once; the P line between T1 and Q1', () => {
@@ -1074,7 +1121,9 @@ describe('1.10.0 (G2): 비슷한 코드 on (a harness\'s 2): a prediction in one
       for (const newStep of [Infinity, 4]) {
         for (const workedAfter of [Infinity, 2]) {
           const key = asWorkedOff(one.id, newStep, workedAfter)
-          const want = QUIZ_OUTPUT_110_ON[key] ?? QUIZ_OUTPUT_19_OFF[key]!
+          // 1.12.0 (G2, re-pinned on purpose): code changed only for a file shown whole (isChangedShaped); quiz18.ts's
+          // code is no such file, so every quiz is as with it off, and 1.10.0's preview (QUIZ_OUTPUT_110_ON) is no quiz's.
+          const want = QUIZ_OUTPUT_19_OFF[key]!
           if (QUIZ_OUTPUT_110_ON[key]) kept.push(keyOf(one.id, newStep, workedAfter))
           const picks = quizOf(one, newStep, { changedStep: 2, workedAfter, workedPlainAfter: workedAfter })
           expect([key, picks.map(p => p.rung ?? null)]).toEqual([key, want.rungs])
@@ -1083,16 +1132,17 @@ describe('1.10.0 (G2): 비슷한 코드 on (a harness\'s 2): a prediction in one
         }
       }
     }
-    // Two picks (retry) or a team term (blank) take it off. 1.10.0 (G1): worked's worked example is off with worked
-    // examples on (its code holds no line its words quote), so code changed stays beside it (1.9.0 F4 took it off there).
+    // The keys 1.10.0 asked in code changed, each now asked as with it off.
     expect(kept).toEqual(['mixed off off', 'mixed off 2', 'mixed 4 off', 'mixed 4 2', 'worked off off', 'worked off 2', 'worked 4 off', 'worked 4 2'])
   })
 
   test('its sentence is the design\'s, 458 characters, and 1.9.0\'s is nowhere; a quiz of it alone is not told it may write code', () => {
     expect(CHANGED_110.length).toBe(458)
     const prompt = quizPrompt([pickForRung(pick('A', { code: CODE }), 'changed'), pickForRung(pick('B', { code: PY }), 'changed'), pickForRung(pick('C', { code: CODE }), 'mine')], 'beginner')
-    expect(prompt.split('\n').filter(line => line.startsWith('비슷한 코드:'))).toEqual([CHANGED_110])
-    expect(prompt).toContain(`\n내 코드: 학습자가 만든 코드를 그대로 보여 주고 묻는다.\n${CHANGED_110}\n`)
+    // 1.12.0 (G2, re-pinned on purpose): its sentence is 1.12.0's, after 내 코드's; 1.10.0's (CHANGED_110) is nowhere.
+    expect(prompt.split('\n').filter(line => line.startsWith('비슷한 코드:')).map(line => line.slice(0, 44))).toEqual(['비슷한 코드: 이 칸은 문제 글을 쓰지 않는다. 문제와 바꾼 코드는 플러그인이 만든다.'.slice(0, 44)])
+    expect(prompt).toContain('\n내 코드: 학습자가 만든 코드를 그대로 보여 주고 묻는다.\n비슷한 코드: 이 칸은 문제 글을 쓰지 않는다.')
+    expect(prompt).not.toContain(CHANGED_110)
     expect(prompt).not.toContain(CHANGED_19)
     expect(prompt).not.toContain(CHANGED_18)
     expect(prompt).not.toContain("'처음 보는 코드'·'풀이 보고 풀기' 칸은")
@@ -1107,25 +1157,34 @@ describe('1.10.0 (G2): 비슷한 코드 on (a harness\'s 2): a prediction in one
 
   test('its R line stands right after H1 and right before A1 in a quiz with code changed; a quiz with code never seen has its own alone; a quiz with neither, none', () => {
     const changed = quizPrompt([pickForRung(pick('A', { code: CODE }), 'changed'), pick('B'), pick('C')], 'beginner')
-    expect(CHANGED_TRACE_LINE).toBe(CHANGED_TRACE)
-    expect(changed).toContain(`\nT1: (예측 · 왜 · 바꿔 보기 중 하나)\nQ1: (문제 한두 문장)\nH1: (힌트 한 문장)\n${CHANGED_TRACE}\nA1: (답 한두 문장)\nT2: …`)
+    // 1.12.0 (G2): no R line; the format per number, C · O · N for the changed one.
+    expect(changed).not.toContain('R1:')
+    expect(changed).toContain('\nC1: (고른 곳 이름, 한 칸 띄우고 새 값만. 예: 1b 20)\n(그 값으로 바꾼 줄 통째로)\nO1:\n(원래 코드가 찍는 줄들)\nN1:\n(바꾼 코드가 찍는 줄들)\nT2: (예측 · 왜 · 바꿔 보기 중 하나)\nQ2: (문제 한두 문장)\nH2: (힌트 한 문장)\nA2: (답 한두 문장)\nT3:')
     expect(changed).not.toContain(NEW_TRACE)
+    // 1.12.0 (G3, re-pinned on purpose): code never seen has no R line either; K · L · A per number.
     const fresh = quizPrompt([pickForRung(pick('A', { code: CODE }), 'new'), pickForRung(pick('B', { code: CODE }), 'mine'), pick('C')], 'beginner')
-    expect(fresh).toContain(`\nH1: (힌트 한 문장)\n${NEW_TRACE}\nA1: (답 한두 문장)\n`)
+    expect(fresh).not.toContain('R1:')
+    expect(fresh).toContain('\nK1:\n```js\n(코드)\n```\nL1: (K1 코드에서 눈여겨볼 줄 하나를 그대로. 찍는 줄은 빼고)\nA1:\n(찍히는 글자. 찍는 호출마다 한 줄)\nT2:')
     expect(fresh).not.toContain(CHANGED_TRACE)
     // Both (never sent: ladderMixed asks code changed in its own code beside code never seen): code never seen's alone.
     const both = quizPrompt([pickForRung(pick('A', { code: CODE }), 'new'), pickForRung(pick('B', { code: CODE }), 'changed'), pick('C')], 'beginner')
-    expect(both.split('\nR1:').length).toBe(2)
-    expect(both).toContain(NEW_TRACE)
+    expect(both).not.toContain('R1:')
     const own = quizPrompt([pickForRung(pick('A', { code: CODE }), 'mine'), pick('B'), pick('C')], 'beginner')
     expect(own).toContain('\nH1: (힌트 한 문장)\nA1: (답 한두 문장)\n')
     expect(own).not.toContain('R1:')
   })
 
   test('its scope: code that runs alone in js, mjs, cjs, ts or py whose run settles one output, from its step; any other, its own code', () => {
-    const rung = (file: string, text: string, step = 2, more: { isLibrary?: boolean; isImporting?: boolean } = {}) => rungOf(at(step), { ...plain, code: { file, text, ...more } }, Infinity, ON2)
+    // 1.12.0 (G2, re-pinned on purpose): code changed is asked only of a JavaScript or Python file shown whole with
+    // places the plugin can change (isChangedShaped): each text here is that file with two lines more giving it three
+    // places (TAIL), so what decides is the 1.10.0 scope below, kept as it was.
+    const TAIL = (file: string) => (/\.py$/i.test(file) ? 'p = [3, 4, 5]\nprint(p[0] * 2)' : 'const p = [3, 4, 5]\nconsole.log(p[0] * 2)')
+    const rung = (file: string, text: string, step = 2, more: { isLibrary?: boolean; isImporting?: boolean } = {}) =>
+      rungOf(at(step), { ...plain, code: { file, text: `${text}\n${TAIL(file)}`, isWhole: true, ...more } }, Infinity, ON2)
     const plainCode = 'let a = 1\nconsole.log(a + 1)'
-    for (const file of ['a.js', 'a.mjs', 'a.cjs', 'src/a.ts', 'A.JS']) expect([file, rung(file, plainCode)]).toEqual([file, 'changed'])
+    for (const file of ['a.js', 'A.JS']) expect([file, rung(file, plainCode)]).toEqual([file, 'changed'])
+    // 1.12.0 (G2): .mjs, .cjs and TypeScript are no longer asked in code changed (its samples were js and py).
+    for (const file of ['a.mjs', 'a.cjs', 'src/a.ts']) expect([file, rung(file, plainCode)]).toEqual([file, 'mine'])
     expect(rung('app/a.py', 'a = 1\nprint(a + 1)')).toBe('changed')
     for (const file of ['a.jsx', 'a.tsx', 'a.css', 'Makefile', 'main.go', 'a.rb']) expect([file, rung(file, plainCode)]).toEqual([file, 'mine'])
     const unsettled: [string, string][] = [
@@ -1272,14 +1331,18 @@ describe('1.10.0 (G2): 비슷한 코드 on (a harness\'s 2): a prediction in one
   })
 
   test('its R line is a marker, dropped: none of it in the question, the hint or the answer; an R1: line in a code block is the code\'s own', () => {
-    const picks = [pickForRung(pick('A', { code: CODE }), 'changed'), pickForRung(pick('B', { code: CODE }), 'mine'), pick('C')]
+    // 1.12.0 (G2, re-pinned on purpose): the slot in code changed is read from C · O · N; an R line written there is a
+    // marker dropped, the item the plugin's own (the changed code, its hint by the line, N as the answer).
+    const picks = [pickForRung(pick('A', { blurb: 'A 설명 — `total += n`', code: CODE_W }), 'changed'), pickForRung(pick('B', { code: CODE }), 'mine'), pick('C')]
     const code = '```js\nlet total = 10\nfor (const n of [1, 2]) total += n\nconsole.log(total)\n```'
     const text = [
-      'T1: 예측',
-      `Q1: 아래 코드는 무엇을 찍을까요?\n${code}`,
-      'H1: 처음 값을 보세요',
+      'C1: 1a 10',
+      'let total = 10',
       'R1: total은 10에서 11, 다시 13이 된다',
-      'A1: 13',
+      'O1:',
+      '3',
+      'N1:',
+      '13',
       'T2: 왜',
       'Q2: 아래 코드에서 let을 const로 바꾸면?\n```js\nlet total = 0\nfor (const n of [1, 2]) total += n\nconsole.log(total)\n```',
       'H2: 다시 대입',
@@ -1290,27 +1353,24 @@ describe('1.10.0 (G2): 비슷한 코드 on (a harness\'s 2): a prediction in one
     ].join('\n')
     const items = parseQuiz(text, picks)
     expect(items.map(one => [one.rung, one.kind])).toEqual([['changed', 'predict'], ['mine', 'why'], [undefined, 'why']])
-    expect(items[0]).toMatchObject({ question: `아래 코드는 무엇을 찍을까요?\n${code}`, hint: '처음 값을 보세요', answer: '13' })
+    expect(items[0]).toMatchObject({ question: `${CHANGED_LEAD}\n${code}`, hint: CHANGED_HINT(1, 'let total = 10'), answer: '13' })
     expect(JSON.stringify(items)).not.toContain('10에서 11')
     expect(JSON.stringify(items)).not.toContain('R1')
-    // An R1: line inside the code shown is the code's line, not a marker.
-    const inCode = parseQuiz(['T1: 예측', 'Q1: 아래 코드는?', '```py', 'R1: int = 3', 'print(R1 + 1)', '```', 'H1: 더하기', 'R1: 3에 1을 더한다', 'A1: 4'].join('\n'), picks.slice(0, 1))[0]!
-    expect(inCode.question).toBe('아래 코드는?\n```py\nR1: int = 3\nprint(R1 + 1)\n```')
-    expect(inCode).toMatchObject({ hint: '더하기', answer: '4', rung: 'changed' })
     // With it off (no pick on the rung), an R line is the hint's, as in 1.9.0.
     const off = parseQuiz('Q1: 문제\nH1: 실마리\nR1: 따라가기\nA1: 답', [pickForRung(pick('A', { code: CODE }), 'mine')])[0]!
     expect(off.hint).toBe('실마리\nR1: 따라가기')
   })
 
   test('a question with no code shown keeps no rung, nor one showing the learner\'s code as it was; code changed in its block, or said changed beside it, keeps it', () => {
+    // 1.12.0 (G2, re-pinned on purpose): a pick in code changed takes no T · Q · A item, whatever its code shows; the
+    // plugin makes the question from C · O · N.
     const picks = [pickForRung(pick('A', { code: { file: 'a.js', text: 'const limit = 3\nconsole.log(limit * 2)' } }), 'changed')]
-    const rung = (question: string) => parseQuiz(`T1: 예측\nQ1: ${question}\nA1: 답`, picks)[0]!.rung
-    expect(rung('제한을 늘리면 무엇이 달라질까요?')).toBeUndefined()
-    expect(rung('아래 코드는?\n```js\n```')).toBeUndefined()
-    expect(rung('아래 코드는?\n```js\nconst limit = 3\nconsole.log(limit * 2)\n```')).toBeUndefined()
-    expect(rung('아래 코드는?\n```js\nconst limit = 5\nconsole.log(limit * 2)\n```')).toBe('changed')
-    // The block as it was with the change said in words (1.8.0's way): still code changed.
-    expect(rung('아래 코드에서 `3`을 `4`로 바꾸면 무엇이 찍힐까요?\n```js\nconst limit = 3\nconsole.log(limit * 2)\n```')).toBe('changed')
+    const asked = (question: string) => parseQuiz(`T1: 예측\nQ1: ${question}\nA1: 답`, picks)
+    expect(asked('제한을 늘리면 무엇이 달라질까요?')).toEqual([])
+    expect(asked('아래 코드는?\n```js\n```')).toEqual([])
+    expect(asked('아래 코드는?\n```js\nconst limit = 3\nconsole.log(limit * 2)\n```')).toEqual([])
+    expect(asked('아래 코드는?\n```js\nconst limit = 5\nconsole.log(limit * 2)\n```')).toEqual([])
+    expect(asked('아래 코드에서 `3`을 `4`로 바꾸면 무엇이 찍힐까요?\n```js\nconst limit = 3\nconsole.log(limit * 2)\n```')).toEqual([])
     // The grade marks it as 1.8.0 did: wrong to the first step, 거의 one step back.
     expect(markFor('wrong', undefined, false, 'changed')).toBe(markWrong)
     expect(markFor('wrong', 'partial', false, 'changed')).toBe(markPartial)
@@ -1378,48 +1438,48 @@ describe('1.10.0 (G3): 처음 보는 코드 graded line by line (right or wrong)
   })
 
   test('with `exact`: the design\'s preview to the byte at every level; the two verdicts, NEW_CHECK whole and the 대조 line right before the verdict; 거의 said once, the lines short of right saying 틀림', () => {
+    // 1.12.0 (G3, re-pinned on purpose): with `exact` a prediction in code never seen is graded by copying the learner's
+    // values line by line, the plugin deciding; 1.10.0's exact bytes (NEW_EXACT_110) are no request's.
     for (const level of ['beginner', 'intermediate', 'advanced'] as const) {
       for (const f of ['none', 'wrong', 'hint'] as const) {
-        expect(checkPrompt(NEW, CHECK_MINE_110, level, CHECK_FIRSTS_110[f], undefined, { exact: true })).toBe(NEW_EXACT_110[`${f} · ${level}`]!)
+        const got = checkPrompt(NEW, CHECK_MINE_110, level, CHECK_FIRSTS_110[f], undefined, { exact: true })
+        expect(got).not.toBe(NEW_EXACT_110[`${f} · ${level}`]!)
+        expect(got).toContain('\n이 문제는 판정을 쓰지 않는다.')
+        expect(got).not.toBe(checkPrompt(NEW, CHECK_MINE_110, level, CHECK_FIRSTS_110[f], undefined))
       }
     }
-    const first = checkPrompt(NEW, CHECK_MINE_110, 'beginner', undefined, undefined, { exact: true })
-    expect(first).toContain(`\n\n${NEW_VERDICTS}\n${NEW_CHECK}\n피드백은 한두 문장이다.`)
+    // The plugin's own question: its values copied line by line, no verdict asked, 거의 nowhere.
+    const KLA = { ...NEW, question: `${NEW_LEAD}\n${NEW.question.slice(NEW.question.indexOf('```'))}` }
+    const first = checkPrompt(KLA, CHECK_MINE_110, 'beginner', undefined, undefined, { exact: true })
+    expect(first).toContain('\n이 문제는 판정을 쓰지 않는다. 값 줄에 옮긴 값을 플러그인이 모범 답과 줄마다 견주어 맞음과 틀림을 정한다.')
+    expect(first).toContain('\n값 1: (학습자가 1줄에 찍힌다고 말한 값만. 말하지 않았으면 (말하지 않음))\n값 2: (')
     expect(first).not.toContain(THREE_WAY)
     expect(first).not.toContain(PREDICT_CHECK)
-    expect(first).toContain('덧붙인 까닭 속의 말과 값은 견주지 않는다.')
-    expect(first).toContain('모범 답에 없는 줄이 찍힌다고 더 말했어도 틀림이다.')
-    expect(first.match(/거의/g)).toHaveLength(1)
-    expect(first).toContain('\n되묻기는 판정이 틀림일 때만 쓰는 질문 한 문장이다.')
-    expect(first).toContain('\n헷갈린 점은 판정이 틀림일 때만 쓴다.')
-    expect(first.endsWith(`\n정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다.\n${COMPARE}\n판정: (맞음 · 틀림 중 하나)\n피드백: (한두 문장)\n되묻기: (틀림일 때만 질문 한 문장. 맞음이면 이 줄을 쓰지 않는다)\n헷갈린 점: (틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)\n유형: (틀림일 때만 위 갈래 중 하나)`)).toBe(true)
-    // The try again: the last, no question asked back; its first try's verdict 틀림, as an exact grade keeps it.
-    const again = checkPrompt(NEW, CHECK_MINE_110, 'beginner', CHECK_FIRSTS_110.wrong, undefined, { exact: true })
+    expect(first).not.toContain('판정: (')
+    expect(first.match(/거의/g)).toBeNull()
+    const again = checkPrompt(KLA, CHECK_MINE_110, 'beginner', CHECK_FIRSTS_110.wrong, undefined, { exact: true })
     expect(again).toContain('\n마지막 시도다. 되묻기는 쓰지 않는다.\n')
-    expect(again).toContain('\n첫 판정: 틀림\n')
     expect(again).not.toContain('\n되묻기: (')
-    expect(again.match(/거의/g)).toHaveLength(1)
-    expect(again.endsWith(`\n${COMPARE}\n판정: (맞음 · 틀림 중 하나)\n피드백: (한두 문장)`)).toBe(true)
-    // After 모르겠어요 and the hint: the hint said, no question asked back, the slip asked for.
-    const hinted = checkPrompt(NEW, CHECK_MINE_110, 'beginner', CHECK_FIRSTS_110.hint, undefined, { exact: true })
-    expect(hinted).toContain('\n첫 답: (모르겠다고 했다)\n받은 힌트: 하나씩 더해 보세요\n')
-    expect(hinted).toContain(NEW_CHECK)
-    expect(hinted).not.toContain('\n되묻기: (')
-    expect(hinted.match(/거의/g)).toHaveLength(1)
-    expect(hinted.endsWith(`\n${COMPARE}\n판정: (맞음 · 틀림 중 하나)\n피드백: (한두 문장)\n헷갈린 점: (틀림일 때만 한 문장. 맞음이면 이 줄을 쓰지 않는다)\n유형: (틀림일 때만 위 갈래 중 하나)`)).toBe(true)
+    expect(again.match(/거의/g)).toBeNull()
+    expect(again.endsWith('\n피드백: (한두 문장)')).toBe(true)
   })
 
   test('(6/7 검토) with `exact`, a try again whose first try a window with it off graded 거의 (D28): that first try said 틀림, as an exact grade reads 거의; the measured try again\'s bytes at every level, 거의 said once. Without it, 1.9.0\'s 첫 판정: 거의', () => {
-    // The first try of the measured try again (NEW_EXACT_110 `wrong`), but graded 거의: as a window with it off keeps it.
+    // 1.12.0 (G3, re-pinned on purpose): on the plugin's own question the first try's verdict is not said at all (its
+    // answer only, said wrong), so 거의 is nowhere; a 1.10.0 question in code never seen (NEW) the same way.
+    const KLA = { ...NEW, question: `${NEW_LEAD}\n${NEW.question.slice(NEW.question.indexOf('```'))}` }
     const partial = { ...CHECK_FIRSTS_110.wrong!, verdict: 'partial' as const }
     for (const level of ['beginner', 'intermediate', 'advanced'] as const) {
-      expect(checkPrompt(NEW, CHECK_MINE_110, level, partial, undefined, { exact: true })).toBe(NEW_EXACT_110[`wrong · ${level}`]!)
+      const got = checkPrompt(KLA, CHECK_MINE_110, level, partial, undefined, { exact: true })
+      expect(got).toContain('\n첫 답: (틀렸다. 이번 답의 값을 옮길 때 보지 않는다)\n')
+      expect(got).not.toContain('첫 판정')
+      expect(got.match(/거의/g)).toBeNull()
+      expect(checkPrompt(NEW, CHECK_MINE_110, level, partial, undefined, { exact: true })).toBe(got.replace(KLA.question, NEW.question))
     }
     for (const past of Object.values(CHECK_PASTS_110)) {
-      const again = checkPrompt(NEW, CHECK_MINE_110, 'beginner', CHECK_FIRSTS_110.partial, past, { exact: true })
-      expect(again).toContain('\n첫 판정: 틀림\n')
+      const again = checkPrompt(KLA, CHECK_MINE_110, 'beginner', CHECK_FIRSTS_110.partial, past, { exact: true })
       expect(again).not.toContain('첫 판정: 거의')
-      expect(again.match(/거의/g)).toHaveLength(1)
+      expect(again.match(/거의/g)).toBeNull()
     }
     // A window with it off (no `exact`), or a question it does not take: the first try's 거의 said as 1.9.0 says it.
     expect(checkPrompt(NEW, CHECK_MINE_110, 'beginner', CHECK_FIRSTS_110.partial, undefined)).toBe(CHECK_19['predict · partial · none · beginner']!)
@@ -1436,25 +1496,8 @@ describe('1.10.0 (G3): 처음 보는 코드 graded line by line (right or wrong)
     expect(checkPrompt(NEW, CHECK_MINE_110, 'beginner', undefined, undefined, { rule })).not.toContain('대조')
   })
 
-  test('parseCheck with `exact`: 거의 read as wrong, lines and JSON alike; 맞음 and 틀림 as they are; the 대조 line and the lines under it dropped wherever it stands; what it says changes nothing', () => {
-    const lines = '대조: 1줄 같음, 2줄 다름\n판정: 거의\n피드백: 첫 줄은 맞습니다.\n되묻기: xs에는 값이 몇 개 있나요?\n헷갈린 점: 배열 길이를 마지막 값으로 봄\n유형: 경계값'
-    expect(parseCheck(lines)!.verdict).toBe('partial')
-    expect(parseCheck(lines, { exact: true })).toEqual({ verdict: 'wrong', feedback: '첫 줄은 맞습니다.', nudge: 'xs에는 값이 몇 개 있나요?', slip: '배열 길이를 마지막 값으로 봄', slipType: parseCheck(lines)!.slipType })
-    expect(parseCheck('{"verdict": "거의", "feedback": "첫 줄은 맞습니다.", "nudge": "몇 개?"}', { exact: true })).toMatchObject({ verdict: 'wrong', nudge: '몇 개?' })
-    expect(parseCheck('{"verdict": "partial", "feedback": "f"}', { exact: true })!.verdict).toBe('wrong')
-    expect(parseCheck('{"verdict": "맞음", "feedback": "f"}', { exact: true })!.verdict).toBe('right')
-    expect(parseCheck('판정: 맞음\n피드백: 정확합니다.', { exact: true })).toEqual({ verdict: 'right', feedback: '정확합니다.' })
-    expect(parseCheck('판정: 틀림\n피드백: 아닙니다.', { exact: true })).toEqual({ verdict: 'wrong', feedback: '아닙니다.' })
-    // After the feedback, with a line under it: dropped, the feedback its own. Without `exact`, 1.9.0's: the feedback's.
-    const after = '판정: 틀림\n피드백: 둘째 줄이 다릅니다.\n대조: 1줄 같음, 2줄 다름\n  (따옴표 없음)\n되묻기: 몇 개일까요?'
-    expect(parseCheck(after, { exact: true })).toMatchObject({ verdict: 'wrong', feedback: '둘째 줄이 다릅니다.', nudge: '몇 개일까요?' })
-    expect(parseCheck(after)!.feedback).toBe('둘째 줄이 다릅니다.\n대조: 1줄 같음, 2줄 다름\n  (따옴표 없음)')
-    // Bold, and words in it that say every line is the same: the verdict stands as written.
-    expect(parseCheck('**대조**: 1줄 같음 (따옴표 없음), 2줄 같음\n**판정**: 틀림\n**피드백**: 둘째 줄을 보세요.', { exact: true })).toEqual({ verdict: 'wrong', feedback: '둘째 줄을 보세요.' })
-    expect(parseCheck('대조: 1줄 다름\n판정: 맞음\n피드백: 좋습니다.', { exact: true })).toEqual({ verdict: 'right', feedback: '좋습니다.' })
-    // With a base asked too (never with code never seen in a build, but read so): both labels read.
-    expect(parseCheck('대조: 1줄 다름\n판정: 거의\n피드백: f\n바탕 점검: 1 틀림\n바탕 근거: 없음\n바탕: 0', { base: true, exact: true })).toMatchObject({ verdict: 'wrong', feedback: 'f', baseAudit: '1 틀림' })
-  })
+  // 1.12.0 G3 (synthesis prototype): `exact` now carries the model answer and reads 값 lines (tests/new112.test.ts).
+  // (the 1.10.0 exact-read test is superseded in this prototype: `exact` carries the model answer, 값 lines; tests/new112.test.ts)
 
   test('the code check of code never seen alone (NEW_UNRUNNABLE, on top of isUnrunnableCode): jQuery, a framework\'s decorator, the network, the process, Node\'s I/O by `node:`', () => {
     const caught = [
@@ -1516,12 +1559,15 @@ describe('1.10.0 (G3): 처음 보는 코드 graded line by line (right or wrong)
         workedBranch: workedBranch(code, row.blurb, [row.file]) ?? null,
         rungOf: rungOf(one, { ...plain, code }, Infinity, { changedStep: 2 }) ?? null,
       }
+      // 1.12.0 (G2, re-pinned on purpose): none of these is a file shown whole, so where the tree before G3 asked it in
+      // code changed it is asked in its own code; every other reading as it was.
+      const rung110 = row.rungOf === 'changed' ? 'mine' : row.rungOf
       expect([row.id, got]).toEqual([
         row.id,
-        { isUnrunnableCode: row.isUnrunnableCode, isUnrunnableChangeCreate: row.isUnrunnableChangeCreate, isUnrunnableChangeEdit: row.isUnrunnableChangeEdit, workedBranch: row.workedBranch, rungOf: row.rungOf },
+        { isUnrunnableCode: row.isUnrunnableCode, isUnrunnableChangeCreate: row.isUnrunnableChangeCreate, isUnrunnableChangeEdit: row.isUnrunnableChangeEdit, workedBranch: row.workedBranch, rungOf: rung110 },
       ])
       // Code never seen on (4): none of them is asked so; each is asked as it would be with that rung off.
-      expect([row.id, rungOf(one, { ...plain, code }, 4, { changedStep: 2 })]).toEqual([row.id, row.rungOf])
+      expect([row.id, rungOf(one, { ...plain, code }, 4, { changedStep: 2 })]).toEqual([row.id, rung110])
       expect(isNewUnrunnableCode(row.text)).toBe(true)
     }
   })
@@ -1542,7 +1588,8 @@ describe('1.10.0 (G3): 처음 보는 코드 graded line by line (right or wrong)
     const quoted = { file: 'src/a.js', text: 'const total = items.length\nconsole.log(total)' }
     expect(rungOf(at(4), { ...plain, code: quoted }, 4, ON)).toBe('new')
     expect(rungOf(at(4), { ...plain, code: { ...quoted, isNewLibrary: true } }, 4, ON)).toBe(rungOf(at(4), { ...plain, code: quoted }, Infinity, ON))
-    expect(rungOf(at(4), { ...plain, code: { ...quoted, isNewLibrary: true } }, 4, ON)).toBe('changed')
+    // 1.12.0 (G2, re-pinned on purpose): lines of an edit are no file shown whole: its own code, not code changed.
+    expect(rungOf(at(4), { ...plain, code: { ...quoted, isNewLibrary: true } }, 4, ON)).toBe('mine')
     // A line taken away is not the change's: fetch( in a removed line alone, none.
     expect(isNewLibraryChange({ diff: '@@ -1,2 +1,2 @@\n-const r = await fetch("/a")\n+const r = await get("/a")\n console.log(r)' })).toBe(false)
     // An edit whose file brings in `node:fs` far above the lines: its file is read for a library alone, as in 1.9.0.

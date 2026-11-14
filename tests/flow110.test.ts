@@ -5,6 +5,8 @@ import type { On } from 'claude-code'
 import type { LearnNote } from '../types'
 import {
   BASE_LEAD,
+  CHANGED_HINT,
+  CHANGED_LEAD,
   DRILL_RULE_AFTER,
   IS_BASE_ASKED,
   IS_RULE_DRILL,
@@ -224,8 +226,9 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     expect(calls.filter(call => call.maxTokens === 3600)).toHaveLength(0)
     expect(calls.every(call => call.model === 'sonnet' && call.effort === 'low')).toBe(true)
     // Read at session start, again by each of the day's three questions while 생각해 보기 is on (r, e and /learn 질문:
-    // askNote, 1.11.0 review) and by /learn 진단.
-    expect(reads).toEqual(Array.from({ length: 5 }, () => SONNET_ALIAS))
+    // askNote, 1.11.0 review), by each of its two quizzes while code changed or code never seen is on (makeQuiz's
+    // recheckRemap, 1.12.0 G2 · G3; re-pinned on purpose) and by /learn 진단.
+    expect(reads).toEqual(Array.from({ length: 7 }, () => SONNET_ALIAS))
     // The route's own table turns 팀 규칙 표지 넓힘 on (1.10.0 G6): the harness's row is named as a test switch where
     // it differs from that table, each one; a cell the shipped row has on already is none.
     expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)${SETTINGS_TAIL} beginner`)
@@ -812,9 +815,28 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     `- 확인: ${ruleFixCheck('fetcher')}`,
   )
   const ROUTE_RULE_ASK = '- 할 일 (팀 규칙): 그 규칙대로 고치는 일 한 문장'
-  /** A question in code of its own for question `n`, with the trace of an R line where code never seen is asked. */
-  const routeCode = (n: number, isTraced: boolean) =>
-    [`T${n}: 예측`, `Q${n}: 아래 코드는 무엇을 찍을까요?`, '```ts', 'const xs = [3, 4]', 'let s = 0', 'for (const x of xs) s += x', 'console.log(s)', '```', `H${n}: 하나씩 더해 보세요`, ...(isTraced ? [`R${n}: s는 3, 다시 7이 됩니다`] : []), `A${n}: 7`].join('\n')
+  /**
+   * A question in code of its own for question `n`; where code never seen is asked (1.12.0 G3), also its K · L lines
+   * (the code and a line of it), read for that pick alone, so one reply serves either route whatever its order.
+   */
+  const routeCode = (n: number, isNew: boolean, isChanged = false) =>
+    [
+      // Where code changed is asked (1.12.0 G2), its C · O · N lines over ROUTE_WHOLE, read for that pick alone.
+      ...(isChanged ? [`C${n}: ${n}a 10`, 'const items = [10, 4]', `O${n}:`, '7', `N${n}:`, '14'] : []),
+      `T${n}: 예측`,
+      `Q${n}: 아래 코드는 무엇을 찍을까요?`,
+      '```ts',
+      'const xs = [3, 4]',
+      'let s = 0',
+      'for (const x of xs) s += x',
+      'console.log(s)',
+      '```',
+      `H${n}: 하나씩 더해 보세요`,
+      ...(isNew ? [`K${n}:`, '```js', 'const xs = [3, 4]', 'let s = 0', 'for (const x of xs) s += x', 'console.log(s)', '```', `L${n}: for (const x of xs) s += x`] : []),
+      `A${n}: 7`,
+    ].join('\n')
+  /** A file written whole in code changed's scope (1.12.0 G2): three places to change, one print. */
+  const ROUTE_WHOLE = ['const items = [3, 4]', 'let total = 0', 'for (const item of items) total += item', 'console.log(total)', ''].join('\n')
   type RouteNote = { id: string; text: string }
   const notesOf = (store: Map<string, unknown>) => (store.get('history') as Record<string, { notes: RouteNote[] }>)['/proj']!.notes
   for (const [rung, step, label] of [
@@ -834,9 +856,14 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         const store = new Map<string, unknown>([['stepsFrom', 0], ['concepts', concepts], ['steps', ownSteps(concepts as never)]])
         const w = world(on, 'ok', null, true, store)
         w.files.set('/proj/.claude/learn-notes.md', ROUTE_RULES)
+        // Code never seen is asked of js and py alone (1.12.0 G3): its concepts are met in a.js. Code changed only of a
+        // JavaScript or Python file written whole (1.12.0 G2): its concepts are met in a.js written so (ROUTE_WHOLE).
+        const editA = rung === 'new' ? { ...EDIT_A, file_path: '/proj/src/a.js' } : ({ tool: 'Write', tool_use_id: 'u1', file_path: '/proj/src/a.js', content: ROUTE_WHOLE } as const)
+        if (rung === 'new') w.files.set('/proj/src/a.js', 'const a = 1\nconst b = 2\n')
+        else w.files.set('/proj/src/a.js', ROUTE_WHOLE)
         const onRow = { models: { sonnet: { ...ON } } }
-        const isTraced = rung === 'new'
-        const quizReply = () => [routeCode(1, isTraced), routeCode(2, isTraced), routeCode(3, isTraced)].join('\n')
+        const isNew = rung === 'new'
+        const quizReply = () => [routeCode(1, isNew, !isNew), routeCode(2, isNew, !isNew), routeCode(3, isNew, !isNew)].join('\n')
         const asked = (store: Map<string, unknown>) => itemsOf(store).map(one => [one.name, one.rung, one.kind, one.question])
         const drillShown = async () => {
           const ui = await pane($)
@@ -849,7 +876,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         w.harness = isOnFirst ? onRow : undefined
         await start($)
         w.answer = CONCEPT_NOTE(Object.keys(steps))
-        await turn($, () => $.tool.call(EDIT_A))
+        await turn($, () => $.tool.call(editA))
         await finish(w)
         w.answer = ROUTE_RULE_NOTE
         const before = w.models.length
@@ -885,7 +912,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         expect(asked(store)).toEqual(written)
         // It writes a note of its own (its route's prompt); the note with the practice kept as written.
         w.answer = CONCEPT_NOTE(['배열'])
-        await turn($, () => $.tool.call({ ...EDIT_A, tool_use_id: 'u2' }), 't3')
+        await turn($, () => $.tool.call({ ...editA, tool_use_id: 'u2' }), 't3')
         await finish(w)
         expect(w.models.at(-1)).not.toContain(ROUTE_RULE_ASK)
         expect(w.systems.at(-1)).toBe(SYSTEM)
@@ -1469,6 +1496,25 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
     'R1: sum은 10에서 시작해 6을 더해 16',
     'A1: 16',
   ].join('\n')
+  /**
+   * 1.12.0 (G2): REPLY with COMP's C · O · N for its first number (the plugin makes its question from them: the code
+   * changed at 1e, `!=`, and what it prints); the other two numbers read as before.
+   */
+  const REPLY_CON = [
+    'C1: 1e !=',
+    'evens = [n for n in nums if n % 2 != 0]',
+    'O1:',
+    '[2, 4]',
+    'N1:',
+    '[1, 3]',
+    'T2: 예측',
+    'Q2: 아래 코드는 무엇을 찍을까요?\n```js\nconsole.log([1, 2].length)\n```',
+    'H2: 길이를 세어 보세요',
+    'A2: 2',
+    'T3: 왜',
+    'Q3: 왜 화살표 함수로 썼을까요?',
+    'A3: 짧게 쓰려고',
+  ].join('\n')
   const CHANGED_TRACE = 'R1: (칸이 "비슷한 코드"인 문제만: 보인 코드를 한 줄씩 따라간 과정)'
   const NEW_TRACE = 'R1: (칸이 "처음 보는 코드"인 문제만: 코드를 한 줄씩 따라간 과정)'
   /** The three concepts at their steps (the third by default), a week and a day after their last review, `more` over each. */
@@ -1486,7 +1532,7 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
    * with `harness` (none: as shipped); `setup` before it starts. Its quiz's model calls, and the reads of CART and
    * EVENS from the quiz on.
    */
-  async function quizWorld($: Engine, on: On, harness: Record<string, unknown> | null, store = storeOf(), setup: (w: World) => void = () => {}) {
+  async function quizWorld($: Engine, on: On, harness: Record<string, unknown> | null, store = storeOf(), setup: (w: World) => void = () => {}, reply = REPLY) {
     const calls = routeCalls(on)
     const reads = { cart: 0, evens: 0, isArmed: false }
     on('fs.read', { path: /\/proj\/(src\/cart\.js|app\/evens\.py)$/ }, (_$, e, next) => {
@@ -1518,45 +1564,40 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
     w.files.set(EVENS, EVENS_TEXT)
     reads.isArmed = true
     const before = calls.length
-    w.answer = REPLY
+    w.answer = reply
     const listed = (await learn($, '퀴즈 새로')).text ?? ''
     return { w, store, calls: calls.slice(before), reads, listed }
   }
   const itemsOf = (store: Map<string, unknown>) => (store.get('quiz') as { items: Record<string, unknown>[] }).items
 
   test('on (a harness\'s 2): the request pinned, made outside the plugin as the design\'s preview makes it; the trace dropped; the edited file read for its imports, the one written whole not; /learn 진단 names the switch', async ($, on) => {
-    const { w, store, calls, reads, listed } = await quizWorld($, on, { rungChangedStep: 2 })
-    expect(calls).toEqual([CHANGED_QUIZ_ON])
-    expect(CHANGED_QUIZ_ON.maxTokens).toBe(4600)
-    expect(CHANGED_QUIZ_ON.prompt).toContain(`\nH1: (힌트 한 문장)\n${CHANGED_TRACE}\nA1: (답 한두 문장)\n`)
-    expect(CHANGED_QUIZ_ON.prompt.split('   칸: 비슷한 코드\n').length).toBe(4)
-    // Read on this device for its imports, once a concept met in it (two here); a file written whole never (its diff
-    // has every line from the top). Nothing of it is sent: the code sent is the note's.
-    expect(reads).toMatchObject({ cart: 2, evens: 0 })
-    expect(CHANGED_QUIZ_ON.prompt).not.toContain('console.log(total([{ price: 3, qty: 2 }]))')
-    expect(itemsOf(store)[0]).toMatchObject({ name: COMP, rung: 'changed', kind: 'predict', hint: '처음 값을 보세요', answer: '16' })
-    expect(JSON.stringify(store.get('quiz'))).not.toContain('6을 더해')
-    expect(listed).toContain('\n1. (비슷한 코드) 아래 코드는 무엇을 찍을까요?')
+    // 1.12.0 (G2, re-pinned on purpose): code changed asks only of a JavaScript or Python file written whole (COMP in
+    // EVENS; REDUCE and ARROW, met in an edit to CART, in their own code), by the plugin's own sentence and C · O · N,
+    // its question made by the plugin; no file is read for it (1.10.0 read CART for its imports). The request's bytes
+    // are pinned by d34g2 and changed112; 1.10.0's (CHANGED_QUIZ_ON) is sent no more.
+    const { w, store, calls, reads, listed } = await quizWorld($, on, { rungChangedStep: 2 }, storeOf(), () => {}, REPLY_CON)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ model: 'haiku', effort: 'low', system: QUIZ_SYSTEM, maxTokens: 4600, timeoutMs: 90_000 })
+    expect(calls[0]!.prompt).not.toBe(CHANGED_QUIZ_ON.prompt)
+    expect(calls[0]!.prompt).toContain(`1. ${COMP} — 조건에 맞는 것만 모아 새 리스트를 만듭니다 — \`[n for n in nums if n % 2 == 0]\`\n   칸: 비슷한 코드\n   학습자가 만든 코드 (evens.py):\n\`\`\`\n${EVENS_TEXT}\`\`\`\n   바꿀 수 있는 곳 (줄은 위 코드의 첫 줄을 1로 셈):\n   1a: 1번째 줄의 \`1\` (`)
+    expect(calls[0]!.prompt.split('   칸: 비슷한 코드\n').length).toBe(2)
+    expect(calls[0]!.prompt.split('   칸: 내 코드\n   학습자가 만든 코드 (cart.js)').length).toBe(3)
+    expect(calls[0]!.prompt).toContain('\nC1: (고른 곳 이름, 한 칸 띄우고 새 값만. 예: 1b 20)\n')
+    expect(calls[0]!.prompt).not.toContain('R1:')
+    expect(reads).toMatchObject({ cart: 0, evens: 0 })
+    expect(calls[0]!.prompt).not.toContain('console.log(total([{ price: 3, qty: 2 }]))')
+    expect(itemsOf(store)[0]).toMatchObject({ name: COMP, rung: 'changed', kind: 'predict', answer: '[1, 3]', hint: CHANGED_HINT(2, 'evens = [n for n in nums if n % 2 != 0]') })
+    expect(String(itemsOf(store)[0]!.question)).toBe(`${CHANGED_LEAD}\n\`\`\`python\n${EVENS_TEXT.replace('== 0', '!= 0')}\`\`\``)
+    expect(JSON.stringify(store.get('quiz'))).not.toContain('[2, 4]')
+    expect(listed).toContain(`\n1. (비슷한 코드) ${CHANGED_LEAD}`)
     const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
     await ui.press({ key: 'view-quiz' })
-    expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 비슷한 코드 · 예측$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^문제 1\/3 · 비슷한 코드 · 예측$/ })).toBeDefined()
     await ui.unmount()
     const version = ((await learn($, '진단')).text ?? '').split('\n').find(line => line.startsWith('- 버전: '))
     expect(version).toContain('시험 스위치: 비슷한 코드 단계 2')
     expect(w.budgets.at(-1)).toBe(4600)
   })
-
-  for (const harness of [{ rungChangedStep: null }, null]) {
-    test(`off (${harness ? 'a harness\'s null' : 'as shipped, no harness'}): 1.9.0's request to the byte, made outside the plugin by fca5988's own notes.ts; no file read; the R line the hint's as in 1.9.0`, async ($, on) => {
-      const { store, calls, reads } = await quizWorld($, on, harness)
-      expect(calls).toEqual([CHANGED_QUIZ_OFF])
-      expect(CHANGED_QUIZ_OFF.maxTokens).toBe(3400)
-      expect(CHANGED_QUIZ_OFF.prompt).not.toContain('비슷한 코드')
-      expect(CHANGED_QUIZ_OFF.prompt).not.toContain('R1:')
-      expect(reads).toMatchObject({ cart: 0, evens: 0 })
-      expect(itemsOf(store)[0]).toMatchObject({ rung: 'mine', hint: '처음 값을 보세요\nR1: sum은 10에서 시작해 6을 더해 16' })
-    })
-  }
 
   test('before its step (the second review): each in its own code, no file read, 1.9.0\'s request', async ($, on) => {
     const { calls, reads } = await quizWorld($, on, { rungChangedStep: 2 }, storeOf({ [REDUCE]: 1, [ARROW]: 1, [COMP]: 1 }))
@@ -1567,8 +1608,16 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
   for (const model of ['haiku', 'sonnet'] as const) {
     test(`(G7) ${model} with only sonnet's row turning it on: ${model === 'haiku' ? '1.9.0\'s request and no file read' : 'the request pinned, sent as sonnet'}`, { options: { model } }, async ($, on) => {
       const { calls, reads } = await quizWorld($, on, { models: { sonnet: { rungChangedStep: 2 } } })
-      expect(calls).toEqual([{ ...(model === 'haiku' ? CHANGED_QUIZ_OFF : CHANGED_QUIZ_ON), model }])
-      expect(reads.cart).toBe(model === 'haiku' ? 0 : 2)
+      // 1.12.0 (G2, re-pinned on purpose): on, the plugin's own sentence and C · O · N (1.10.0's CHANGED_QUIZ_ON no
+      // more), sent as sonnet; no file read either way.
+      if (model === 'haiku') expect(calls).toEqual([{ ...CHANGED_QUIZ_OFF, model }])
+      else {
+        expect(calls).toHaveLength(1)
+        expect(calls[0]).toMatchObject({ model, effort: 'low', system: QUIZ_SYSTEM, maxTokens: 4600, timeoutMs: 90_000 })
+        expect(calls[0]!.prompt).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (evens.py):')
+        expect(calls[0]!.prompt).toContain('\nC1: (고른 곳 이름, 한 칸 띄우고 새 값만. 예: 1b 20)\n')
+      }
+      expect(reads.cart).toBe(0)
     })
   }
 
@@ -1579,7 +1628,9 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
     expect(prompt).toContain(`1. ${COMP} — 조건에 맞는 것만 모아 새 리스트를 만듭니다\n   칸: 처음 보는 코드 (py로)\n`)
     expect(prompt.split('   칸: 내 코드\n').length).toBe(3)
     expect(prompt).not.toContain('비슷한 코드')
-    expect(prompt).toContain(NEW_TRACE)
+    // 1.12.0 (G3, re-pinned on purpose): code never seen's K · L · A, no R line.
+    expect(prompt).toContain('\nK1:\n```python\n(코드)\n```\nL1: ')
+    expect(prompt).not.toContain('R1:')
     expect(prompt).not.toContain(CHANGED_TRACE)
     expect(fresh.calls[0]!.maxTokens).toBe(4600)
   })
@@ -1607,7 +1658,8 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
     expect(prompt.split('   칸: 내 코드\n   학습자가 만든 코드 (cart.js)').length - 1).toBe(2)
     expect(prompt).toContain('   칸: 비슷한 코드\n   학습자가 만든 코드 (evens.py)')
     expect(prompt).not.toContain("from './math'")
-    expect(reads).toMatchObject({ cart: 2, evens: 0 })
+    // 1.12.0 (G2, re-pinned on purpose): code changed asks only of a file written whole, so the edited file is not read.
+    expect(reads).toMatchObject({ cart: 0, evens: 0 })
     expect(calls[0]!.maxTokens).toBe(4600)
   })
 
@@ -1618,7 +1670,8 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
     const prompt = calls[0]!.prompt
     expect(prompt.split(/^\d+\. /m).length - 1).toBe(3)
     expect(prompt).toContain(`${REDUCE} — `)
-    expect([reads.cart, prompt.includes('   칸: 비슷한 코드\n   학습자가 만든 코드 (cart.js)')]).toEqual([2, false])
+    // 1.12.0 (G2, re-pinned on purpose): an edited file is never read for code changed (it asks of files written whole).
+    expect([reads.cart, prompt.includes('   칸: 비슷한 코드\n   학습자가 만든 코드 (cart.js)')]).toEqual([0, false])
     expect(prompt).toContain('   칸: 비슷한 코드\n   학습자가 만든 코드 (evens.py)')
   })
 
@@ -1646,7 +1699,8 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
     expect(place(X)).toBeGreaterThan(base)
     expect(prompt).toContain('   칸: 풀이 보고 풀기')
     expect(prompt).not.toContain('비슷한 코드')
-    expect(reads).toMatchObject({ cart: 1, evens: 0 })
+    // 1.12.0 (G2, re-pinned on purpose): its file not read either (code changed asks of files written whole alone).
+    expect(reads).toMatchObject({ cart: 0, evens: 0 })
   })
 
   /** The quiz this world sends with code changed on, then (the harness turned off, a minute on) off: each request. */
@@ -2590,6 +2644,14 @@ describe('1.10.0: 처음 보는 코드 (G3) behind its switch: its prediction gr
   /** A grade of the prediction as an exact grade is asked for it: its 대조 line, then 거의 (which it does not offer) and a question back. */
   const NUDGED = ['대조: 1줄 같음, 2줄 다름', '판정: 거의', `피드백: ${WRONG_FIRST.feedback}`, `되묻기: ${WRONG_FIRST.nudge}`, '헷갈린 점: 배열 길이를 마지막 값으로 봄', '유형: 경계값'].join('\n')
   const OTHER_Q = '아래 코드의 b는 무엇일까요?\n```js\nconst { a, b } = { a: 1, b: 2 }\nconsole.log(b)\n```'
+  /**
+   * 1.12.0 (G3): a grade of the prediction as the exact grade now asks it, the learner's values copied line by line (the
+   * second one 3, so the plugin reads it wrong), with a question back; and the same with no question back.
+   */
+  const VALUES = ['값 1: 7', '값 2: 3', `피드백: ${WRONG_FIRST.feedback}`, `되묻기: ${WRONG_FIRST.nudge}`, '헷갈린 점: 배열 길이를 마지막 값으로 봄', '유형: 경계값'].join('\n')
+  const VALUES_AGAIN = '값 1: 7\n값 2: 3\n피드백: 둘째 줄이 아직 다릅니다.'
+  /** The stored item as the grade reads it. */
+  const ITEM = { name: NAME, question: CHECK_ITEM_110.question, answer: CHECK_ITEM_110.answer, kind: 'predict' as const, rung: 'new' as const }
   const conceptOf = (store: Map<string, unknown>, name: string) => (store.get('concepts') as Record<string, { step?: number; missedAt?: number }>)[conceptKey(name)]!
   const itemsOf = (store: Map<string, unknown>) => (store.get('quiz') as { items: Record<string, unknown>[] }).items
   /**
@@ -2622,42 +2684,49 @@ describe('1.10.0: 처음 보는 코드 (G3) behind its switch: its prediction gr
   }
 
   test('on (a harness\'s 4): the prediction graded line by line, the design\'s preview to the byte at 480 and 60000; 거의 with a question back read 틀림: the head red ✗, not △; the 대조 line kept nowhere; the same quiz\'s 내 코드 question 1.9.0\'s', async ($, on) => {
+    // 1.12.0 (G3, re-pinned on purpose): graded by copying the learner's values line by line, the plugin deciding
+    // right or wrong (1.10.0's preview, NEW_EXACT_110, is sent no more); its try again right from the values alone, no call.
     const { w, store, calls } = await opened($, on, { rungNewStep: 4 })
     const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
     await ui.press({ key: 'view-quiz' })
-    w.answer = NUDGED
+    w.answer = VALUES
     await ui.input({ key: mineKey(store, 0), text: MINE })
     await w.clock.settle()
-    expect(calls.at(-1)).toEqual({ model: 'haiku', effort: 'low', system: CHECK_SYSTEM, prompt: NEW_EXACT_110['none · beginner'], maxTokens: 480, timeoutMs: 60_000 })
+    expect(calls.at(-1)).toEqual({ model: 'haiku', effort: 'low', system: CHECK_SYSTEM, prompt: checkPrompt(ITEM, MINE, 'beginner', undefined, undefined, { exact: true }), maxTokens: 480, timeoutMs: 60_000 })
+    expect(calls.at(-1)!.prompt).not.toBe(NEW_EXACT_110['none · beginner'])
     expect((await ui.find({ type: 'Text', text: '✗ 아직입니다 · 한 번 더 떠올려 보세요' }))?.props.color).toBe('red')
     expect(await ui.find({ type: 'Text', text: '△ 아직입니다 · 방향은 맞습니다' })).toBeUndefined()
     expect(itemsOf(store)[0]!.firstTry).toMatchObject({ mine: MINE, verdict: 'wrong', feedback: WRONG_FIRST.feedback, nudge: WRONG_FIRST.nudge })
-    expect(JSON.stringify(store.get('quiz'))).not.toContain('2줄 다름')
-    // Its try again, right: the preview's prompt with the first try 틀림; right, its step as it was.
-    w.answer = RIGHT
-    await ui.input({ key: `${mineKey(store, 0)}-again`, text: MINE })
+    expect(JSON.stringify(store.get('quiz'))).not.toContain('값 2')
+    // Its try again, right: every value in order, the plugin's own grade; right, its step as it was.
+    const count = calls.length
+    await ui.input({ key: `${mineKey(store, 0)}-again`, text: '7, 2' })
     await w.clock.settle()
-    expect(calls.at(-1)!.prompt).toBe(NEW_EXACT_110['wrong · beginner'])
+    expect(calls).toHaveLength(count)
     expect(itemsOf(store)[0]).toMatchObject({ result: 'right', rung: 'new' })
     expect(conceptOf(store, NAME).step).toBe(4)
-    // The 내 코드 question of the same quiz: 1.9.0's grade, no 대조.
+    // The 내 코드 question of the same quiz: 1.9.0's grade, no 값 lines.
     w.answer = RIGHT
     await ui.input({ key: mineKey(store, 1), text: '2요' })
     await w.clock.settle()
     const other = itemsOf(store)[1]! as { name: string; question: string; answer: string; kind: 'predict' }
     expect(calls.at(-1)).toEqual({ model: 'haiku', effort: 'low', system: CHECK_SYSTEM, prompt: checkPrompt(other, '2요', 'beginner'), maxTokens: 480, timeoutMs: 60_000 })
-    expect(calls.at(-1)!.prompt).not.toContain('대조')
+    expect(calls.at(-1)!.prompt).not.toContain('값 1:')
     expect(calls.at(-1)!.prompt).toContain('판정은 셋 중 하나다.')
     await ui.unmount()
   })
 
   test('on: 거의 both times, read 틀림 each time: one step back, no missedAt, the sentence for code never seen; the try again\'s prompt the preview\'s', async ($, on) => {
+    // 1.12.0 (G3, re-pinned on purpose): no verdict is asked at all (거의 neither); the learner's values copied, short of
+    // right both times: one step back, no missedAt, the sentence for code never seen.
     const { w, store, calls } = await opened($, on, { rungNewStep: 4 })
-    w.answer = NUDGED
+    w.answer = VALUES
     expect((await learn($, `퀴즈 1 ${MINE}`)).text).toContain('1번 ✗ 아직입니다 · 한 번 더 떠올려 보세요 · ')
-    w.answer = '대조: 1줄 같음, 2줄 다름\n판정: 거의\n피드백: 둘째 줄이 아직 다릅니다.'
+    const first = itemsOf(store)[0]!.firstTry as never
+    w.answer = VALUES_AGAIN
     await learn($, `퀴즈 1 ${MINE}`)
-    expect(calls.at(-1)!.prompt).toBe(NEW_EXACT_110['wrong · beginner'])
+    expect(calls.at(-1)!.prompt).toBe(checkPrompt(ITEM, MINE, 'beginner', first, undefined, { exact: true }))
+    expect(calls.at(-1)!.prompt).not.toContain('거의')
     expect(itemsOf(store)[0]).toMatchObject({ result: 'wrong', verdict: 'wrong', rung: 'new' })
     expect(conceptOf(store, NAME).step).toBe(3)
     expect(conceptOf(store, NAME).missedAt).toBeUndefined()
@@ -2670,9 +2739,13 @@ describe('1.10.0: 처음 보는 코드 (G3) behind its switch: its prediction gr
     const count = calls.length
     expect((await learn($, '퀴즈 1 모르겠어요')).text).toContain(`힌트: ${HINT}`)
     expect(calls).toHaveLength(count)
-    w.answer = '대조: 1줄 같음, 2줄 다름\n판정: 틀림\n피드백: 둘째 줄이 다릅니다.\n헷갈린 점: 배열 길이를 마지막 값으로 봄\n유형: 경계값'
+    // 1.12.0 (G3, re-pinned on purpose): the values copied, the hint said, no question back (1.10.0's preview no more).
+    w.answer = '값 1: 7\n값 2: 3\n피드백: 둘째 줄이 다릅니다.\n헷갈린 점: 배열 길이를 마지막 값으로 봄\n유형: 경계값'
     await learn($, `퀴즈 1 ${MINE}`)
-    expect(calls.at(-1)!.prompt).toBe(NEW_EXACT_110['hint · beginner'])
+    expect(calls.at(-1)!.prompt).toBe(checkPrompt(ITEM, MINE, 'beginner', { mine: '모르겠어요', verdict: 'wrong', feedback: '', nudge: HINT }, undefined, { exact: true }))
+    expect(calls.at(-1)!.prompt).not.toBe(NEW_EXACT_110['hint · beginner'])
+    expect(calls.at(-1)!.prompt).toContain(`\n받은 힌트: ${HINT}\n`)
+    expect(calls.at(-1)!.prompt).not.toContain('\n되묻기: (')
     expect(itemsOf(store)[0]).toMatchObject({ result: 'wrong', rung: 'new' })
   })
 
@@ -2707,12 +2780,15 @@ describe('1.10.0: 처음 보는 코드 (G3) behind its switch: its prediction gr
     // The same store in a window whose code never seen is on (another model's, or after /config): the try again.
     w.harness = { rungNewStep: 4 }
     await start($)
-    w.answer = '대조: 1줄 같음, 2줄 다름\n판정: 거의\n피드백: 둘째 줄이 아직 다릅니다.'
+    // 1.12.0 (G3, re-pinned on purpose): the try again copies the learner's values; its first try's 거의 is not said at
+    // all (its answer only, said wrong), so 거의 is nowhere; short of right again: one step back.
+    w.answer = VALUES_AGAIN
     await learn($, `퀴즈 1 ${MINE}`)
-    expect(calls.at(-1)).toEqual({ model: 'haiku', effort: 'low', system: CHECK_SYSTEM, prompt: NEW_EXACT_110['wrong · beginner'], maxTokens: 480, timeoutMs: 60_000 })
-    expect(calls.at(-1)!.prompt.match(/거의/g)).toHaveLength(1)
+    expect(calls.at(-1)).toEqual({ model: 'haiku', effort: 'low', system: CHECK_SYSTEM, prompt: checkPrompt(ITEM, MINE, 'beginner', itemsOf(store)[0]!.firstTry as never, undefined, { exact: true }), maxTokens: 480, timeoutMs: 60_000 })
+    expect(calls.at(-1)!.prompt).not.toBe(NEW_EXACT_110['wrong · beginner'])
+    expect(calls.at(-1)!.prompt.match(/거의/g)).toBeNull()
     expect(itemsOf(store)[0]).toMatchObject({ result: 'wrong', verdict: 'wrong', rung: 'new' })
-    expect(JSON.stringify(store.get('quiz'))).not.toContain('2줄 다름')
+    expect(JSON.stringify(store.get('quiz'))).not.toContain('값 2')
     expect(conceptOf(store, NAME).step).toBe(3)
     expect(conceptOf(store, NAME).missedAt).toBeUndefined()
   })
@@ -2737,10 +2813,36 @@ describe('1.10.0: 처음 보는 코드 (G3) behind its switch: its prediction gr
 
   /** A quiz reply whose first question shows code: its rung kept as asked (one with no code is a why, as in 1.9.0). */
   const QUIZ_REPLY = ['T1: 예측', 'Q1: 아래 코드는 무엇을 찍을까요?', '```js', 'let s = 0', 'for (const x of [3, 4]) s += x', 'console.log(s)', '```', 'H1: 하나씩 더해 보세요', 'R1: s는 3, 다시 7', 'A1: 7'].join('\n')
+  /**
+   * 1.12.0 (G3): a reply whose first number is code never seen's K · L · A (code not the learner's, printing 10) and a
+   * prediction in code too (for a pick in its own code), the two after it plain.
+   */
+  const KLA_REPLY = [
+    'K1:',
+    '```js',
+    'const scores = [5, 1, 4]',
+    'let best = 0',
+    'for (const s of scores) best += s',
+    'console.log(best)',
+    '```',
+    'L1: for (const s of scores) best += s',
+    'T1: 예측',
+    'Q1: 아래 코드는 무엇을 찍을까요?\n```js\nconsole.log(1 + 9)\n```',
+    'A1:',
+    '10',
+    'T2: 왜',
+    'Q2: 문제 2',
+    'A2: 답 2',
+    'T3: 왜',
+    'Q3: 문제 3',
+    'A3: 답 3',
+  ].join('\n')
   /** Two concepts met in no note and not due for weeks: they fill a quiz to three picks (D33). */
   const FILLERS = ['채움 하나', '채움 둘']
+  /** A file written whole, its loop the line NAME's words quote (`for (const n of nums)`). */
+  const LINES = ['const nums = [1, 2]', 'for (const n of nums) console.log(n)', ...Array.from({ length: 14 }, (_, i) => `// line ${i + 1}`)]
   /** NAME due at its fifth step, met in a note's code (a.ts by EDIT_A, or `write` a file of its own), with `fillers`; the quiz this world sends. */
-  async function quizOf($: Engine, on: On, harness: Record<string, unknown> | null, setup: (w: World, store: Map<string, unknown>) => void = () => {}, fillers = FILLERS, write?: { path: string; content: string }) {
+  async function quizOf($: Engine, on: On, harness: Record<string, unknown> | null, setup: (w: World, store: Map<string, unknown>) => void = () => {}, fillers = FILLERS, write?: { path: string; content: string }, reply = QUIZ_REPLY) {
     const concepts = Object.fromEntries([
       [conceptKey(NAME), { name: NAME, count: 2, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${NAME} 설명 — \`for (const n of nums)\``, files: [], step: 4, reviewedAt: NOW - 31 * DAY }],
       ...fillers.map(name => [conceptKey(name), { name, count: 1, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${name} 설명`, files: [], step: 3, reviewedAt: NOW }]),
@@ -2753,22 +2855,26 @@ describe('1.10.0: 처음 보는 코드 (G3) behind its switch: its prediction gr
     w.answer = CONCEPT_NOTE([NAME])
     await turn($, () => (write ? $.tool.call({ tool: 'Write', tool_use_id: 'w1', file_path: write.path, content: write.content }) : $.tool.call(EDIT_A)))
     await finish(w)
-    w.answer = QUIZ_REPLY
+    w.answer = reply
     await learn($, '퀴즈 새로')
     return { w, store, prompt: w.models.at(-1)!, maxTokens: w.budgets.at(-1)! }
   }
 
+  // 1.12.0 (G3, re-pinned on purpose): NEW_GRADER_SINCE is 1.12.0, so a 1.10 or 1.11 window keeps it off too; its
+  // concept met in a.js written whole (TypeScript is out of its scope), with KLA_REPLY.
   for (const [v, isOpen] of [
     ['1.9.0', true],
     ['1.8.0', true],
-    ['1.10.0', false],
+    ['1.10.0', true],
+    ['1.11.0', true],
+    ['1.12.0', false],
   ] as const) {
     test(`on, a ${v} window stamped 20 minutes ago: ${isOpen ? 'asked in its own code, no sentence for code never seen (NEW_GRADER_SINCE)' : 'nothing kept off, asked in code never seen'}`, async ($, on) => {
-      const { prompt, maxTokens } = await quizOf($, on, { rungNewStep: 4 }, (_w, store) => store.set('sessions', { 'session-other': { v, at: NOW - 20 * 60_000 } }))
-      expect(prompt.includes('   칸: 처음 보는 코드 (ts로)')).toBe(!isOpen)
+      const { prompt, maxTokens } = await quizOf($, on, { rungNewStep: 4 }, (_w, store) => store.set('sessions', { 'session-other': { v, at: NOW - 20 * 60_000 } }), FILLERS, { path: '/proj/src/a.js', content: [...LINES, ''].join('\n') }, KLA_REPLY)
+      expect(prompt.includes('   칸: 처음 보는 코드 (js로)')).toBe(!isOpen)
       expect(prompt.includes('처음 보는 코드:')).toBe(!isOpen)
       expect(prompt.includes(`1. ${NAME} — `)).toBe(true)
-      expect(prompt.includes('\n   칸: 내 코드\n   학습자가 만든 코드 (a.ts):')).toBe(isOpen)
+      expect(prompt.includes('\n   칸: 내 코드\n   학습자가 만든 코드 (a.js):')).toBe(isOpen)
       expect(maxTokens).toBe(isOpen ? 3400 : 4600)
     })
   }
@@ -2802,11 +2908,11 @@ describe('1.10.0: 처음 보는 코드 (G3) behind its switch: its prediction gr
     })
   }
 
-  const LINES = ['const nums = [1, 2]', 'for (const n of nums) console.log(n)', ...Array.from({ length: 14 }, (_, i) => `// line ${i + 1}`)]
   for (const isFetched of [true, false]) {
     test(`on: a concept due at its fifth step met in a file written whole ${isFetched ? 'whose lines call fetch( far from the lines quoted: asked in its own code (NEW_UNRUNNABLE, the change read whole)' : 'with no such call: asked in code never seen'}`, async ($, on) => {
       const last = isFetched ? "fetch('/log')" : "console.log('/log')"
-      const { store, prompt } = await quizOf($, on, { rungNewStep: 4 }, () => {}, FILLERS, { path: '/proj/src/a.js', content: [...LINES, last, ''].join('\n') })
+      // 1.12.0 (G3, re-pinned on purpose): read from K · L · A (KLA_REPLY).
+      const { store, prompt } = await quizOf($, on, { rungNewStep: 4 }, () => {}, FILLERS, { path: '/proj/src/a.js', content: [...LINES, last, ''].join('\n') }, KLA_REPLY)
       expect(prompt.includes('\n   칸: 내 코드\n   학습자가 만든 코드 (a.js):')).toBe(isFetched)
       expect(prompt.includes('   칸: 처음 보는 코드 (js로)')).toBe(!isFetched)
       expect(prompt).not.toContain(last)

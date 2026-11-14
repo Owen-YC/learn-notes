@@ -32,6 +32,9 @@ import {
   WORKED_PLAN_LINE,
   WORKED_TURN_ASK,
   WRITER_MARK,
+  CHANGED_HINT,
+  CHANGED_LEAD,
+  NEW_LEAD,
   checkPrompt,
   cleanConcepts,
   cleanMarkedConcepts,
@@ -92,6 +95,22 @@ import {
   world,
 } from './flowkit'
 
+
+/**
+ * 1.12.0 (G2 · G3): the file code changed and code never seen ask of now, a.js written whole (a JavaScript file shown
+ * whole, in their scope), its line `for (const item of items)` the one CONCEPT_NOTE's words quote; the Write that makes it.
+ */
+const FILE_JS = ['const items = [3, 4]', 'let total = 0', 'for (const item of items) total += item', 'console.log(total)', ''].join('\n')
+const WRITE_JS = { tool: 'Write', tool_use_id: 'w1', file_path: '/proj/src/a.js', content: FILE_JS } as const
+/** A reply's slot `n` for code never seen (K · L · A, 1.12.0 G3), its code not the learner's (isLikeMine); it prints 10. */
+const KLA = (n: number) => [`K${n}:`, '```js', 'const scores = [5, 1, 4]', 'let best = 0', 'for (const s of scores) best += s', 'console.log(best)', '```', `L${n}: for (const s of scores) best += s`, `A${n}:`, '10'].join('\n')
+/** A reply's slot `n` for code changed in FILE_JS (C · O · N, 1.12.0 G2): its first place (`3`) made 10. */
+const CON = (n: number) => [`C${n}: ${n}a 10`, 'const items = [10, 4]', `O${n}:`, '7', `N${n}:`, '14'].join('\n')
+/**
+ * A reply's slot `n` read either way (1.12.0 G3): K · L · A where its pick is in code never seen, T · Q · A where it is
+ * not; A the same printed value, so a test need not know which number each concept took.
+ */
+const EITHER = (n: number) => [KLA(n).replace(`A${n}:\n10`, ''), `T${n}: 예측`, `Q${n}: 아래 코드는 무엇을 찍을까요?`, '```js', 'console.log(1 + 9)', '```', `A${n}:`, '10'].join('\n')
 
 describe('1.8.0: the store\'s own words for a full store, and the known and step copies written when they differ (E1)', () => {
   const DAY = 86_400_000
@@ -382,59 +401,73 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     const w = world(on, 'ok', null, true, store)
     // On as 1.8.0 shipped it, whatever its constant (1.9.0 F4 turned it off by its sample): a harness's step.
     w.harness = { rungChangedStep: 2 }
+    // 1.12.0 (G2, re-pinned on purpose): code changed is made by the plugin from the model's C · O · N, only for a
+    // JavaScript or Python file written whole (a.js here); its question the plugin's own, over the code it changed.
+    w.files.set('/proj/src/a.js', FILE_JS)
     await start($)
     w.answer = CONCEPT_NOTE([name])
-    await turn($, () => $.tool.call(EDIT_A))
+    await turn($, () => $.tool.call(WRITE_JS))
     await finish(w)
     expect(conceptOf(store, name).step).toBe(2)
-    const changed = ['T1: 예측', 'Q1: 아래 코드는 b를 무엇으로 찍을까요?', '```', 'const a = 10', 'const b = a * 2', 'console.log(b)', '```', 'H1: a를 먼저 보세요', 'A1: 20'].join('\n')
-    const ui = await quizIn($, w, changed)
+    const ui = await quizIn($, w, CON(1))
     const prompt = w.models.at(-1)!
-    expect(prompt).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (a.ts):\n```\nconst a = 1\nconst b = 2\n```\n2. 채움 하나 — 채움 하나 설명\n3. 채움 둘 — 채움 둘 설명\n')
-    // 1.10.0 (G2): its sentence asks a prediction in one block that runs alone, traced on an R line; room for the trace.
-    expect(prompt).toContain('비슷한 코드: 학습자 코드에서 값·조건·순서 중 한 곳을 바꾼 코드를 코드 블록 하나로 보여 주고, 그 코드가 찍는 것을 예측으로 묻는다.')
-    expect(prompt).toContain('\nH1: (힌트 한 문장)\nR1: (칸이 "비슷한 코드"인 문제만: 보인 코드를 한 줄씩 따라간 과정)\nA1:')
+    expect(prompt).toContain(`\n   칸: 비슷한 코드\n   학습자가 만든 코드 (a.js):\n\`\`\`\n${FILE_JS.trimEnd()}\n\`\`\`\n   바꿀 수 있는 곳 (줄은 위 코드의 첫 줄을 1로 셈):\n   1a: `)
+    expect(prompt).toContain('\n2. 채움 하나 — 채움 하나 설명\n3. 채움 둘 — 채움 둘 설명\n')
+    expect(prompt).toContain('비슷한 코드: 이 칸은 문제 글을 쓰지 않는다. 문제와 바꾼 코드는 플러그인이 만든다.')
+    expect(prompt).toContain('\nC1: (고른 곳 이름, 한 칸 띄우고 새 값만. 예: 1b 20)\n')
+    expect(prompt).not.toContain('R1:')
     expect(prompt).not.toContain('내 코드:')
     expect(prompt).not.toContain("'처음 보는 코드'·'풀이 보고 풀기' 칸은")
     expect(w.budgets.at(-1)).toBe(4600)
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 비슷한 코드 · 예측$/ })).toBeDefined()
-    expect(quizItems(store)[0]).toMatchObject({ rung: 'changed' })
-    expect((await learn($, '퀴즈')).text).toContain('\n1. (비슷한 코드) 아래 코드는 b를 무엇으로 찍을까요?')
+    expect(quizItems(store)[0]).toMatchObject({ rung: 'changed', kind: 'predict', answer: '14', hint: CHANGED_HINT(1, 'const items = [10, 4]') })
+    expect(String(quizItems(store)[0]!.question)).toBe(`${CHANGED_LEAD}\n\`\`\`js\n${FILE_JS.trimEnd().replace('[3, 4]', '[10, 4]')}\n\`\`\``)
+    expect((await learn($, '퀴즈')).text).toContain(`\n1. (비슷한 코드) ${CHANGED_LEAD}`)
     await ui.unmount()
 
-    // The model showed the learner's code as it was: no tag, as 1.7 drew it.
+    // Written as 1.8.0 asked it (T · Q · A, the model's own changed code): no question for it, and it is asked from the
+    // learner's own code until the window closes (quizRun.changedMissed).
     await w.clock.advance(60_000)
-    w.answer = ['T1: 예측', 'Q1: 아래 코드의 b는?', '```', 'const a = 1', 'const b = 2', '```', 'A1: 2'].join('\n')
-    const listed = (await learn($, '퀴즈 새로')).text
-    expect(listed).toContain('\n1. 아래 코드의 b는?')
-    expect(quizItems(store)[0]!.rung).toBeUndefined()
-    // The pane opens on the quiz it was left on.
-    const again = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
-    expect(await again.find({ type: 'Text', text: /^문제 1\/1 · 예측$/ })).toBeDefined()
-    await again.unmount()
+    w.answer = ['T1: 예측', 'Q1: 아래 코드는 b를 무엇으로 찍을까요?', '```', 'const a = 10', 'const b = a * 2', 'console.log(b)', '```', 'A1: 20', 'T2: 왜', 'Q2: 문제 2', 'A2: 답 2', 'T3: 왜', 'Q3: 문제 3', 'A3: 답 3'].join('\n')
+    const listed = (await learn($, '퀴즈 새로')).text ?? ''
+    expect(quizItems(store).map(one => one.name)).not.toContain(name)
+    expect(listed).not.toContain('b를 무엇으로')
+    await w.clock.advance(60_000)
+    w.answer = ['T1: 예측', 'Q1: 아래 코드의 total은?', 'A1: 7'].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(w.models.at(-1)).toContain('\n   칸: 내 코드\n   학습자가 만든 코드 (a.js):')
+    expect(w.models.at(-1)).not.toContain('비슷한 코드')
+  })
 
-    // A line of it alone, in backticks and with a `;`, is the learner's code as it was too (교차 검토 5); a value
-    // changed in that line is not.
+  test('(1.12.0 G2) a question in code changed the plugin could not check, from the pane: the next quiz the pane makes asks it in its own code (quizRun.changedMissed kept through the pane\'s quiz)', async ($, on) => {
+    const name = 'for...of 반복문'
+    const store = storeOf([name], 2, 8 * DAY, false)
+    const concepts = store.get('concepts') as Record<string, unknown>
+    for (const filler of ['채움 하나', '채움 둘']) concepts[conceptKey(filler)] = { name: filler, count: 1, firstAt: NOW - 200 * DAY, lastAt: NOW - 200 * DAY, blurb: `${filler} 설명`, files: [], step: 3, reviewedAt: NOW }
+    store.set('steps', ownSteps(concepts as never))
+    const w = world(on, 'ok', null, true, store)
+    w.harness = { rungChangedStep: 2 }
+    w.files.set('/proj/src/a.js', FILE_JS)
+    await start($)
+    w.answer = CONCEPT_NOTE([name])
+    await turn($, () => $.tool.call(WRITE_JS))
+    await finish(w)
+    // N the same as O (its change printing nothing new): no question for it; the other two read.
+    const refused = ['C1: 1a 10', 'const items = [10, 4]', 'O1:', '7', 'N1:', '7', 'T2: 왜', 'Q2: 문제 2', 'A2: 답 2', 'T3: 왜', 'Q3: 문제 3', 'A3: 답 3'].join('\n')
+    const ui = await quizIn($, w, refused)
+    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n')
+    expect(quizItems(store).map(one => one.name)).not.toContain(name)
     await w.clock.advance(60_000)
-    w.answer = ['T1: 바꿔 보기', 'Q1: `const b = 2;`를 `let`으로 바꿔 쓰면?', 'A1: let b = 2'].join('\n')
-    expect((await learn($, '퀴즈 새로')).text).toContain('\n1. `const b = 2;`를 `let`으로 바꿔 쓰면?')
-    expect(quizItems(store)[0]!.rung).toBeUndefined()
-    const line = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
-    expect(await line.find({ type: 'Text', text: /^문제 1\/1 · 바꿔 보기$/ })).toBeDefined()
-    await line.unmount()
-    await w.clock.advance(60_000)
-    w.answer = ['T1: 예측', 'Q1: `const b = 3;` 다음 줄에서 b는?', 'A1: 3'].join('\n')
-    expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (비슷한 코드) `const b = 3;` 다음 줄에서 b는?')
-    expect(quizItems(store)[0]).toMatchObject({ rung: 'changed' })
-    // The line as it was beside the value it is said to become, though the code holds that value elsewhere, is the
-    // code changed (교차 검토 6).
-    await w.clock.advance(60_000)
-    w.answer = ['T1: 예측', 'Q1: `const b = 2`에서 `2`를 `1`로 바꾸면 b는?', 'A1: 1'].join('\n')
-    expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (비슷한 코드) `const b = 2`에서 `2`를 `1`로 바꾸면 b는?')
-    expect(quizItems(store)[0]).toMatchObject({ rung: 'changed' })
-    const told = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
-    expect(await told.find({ type: 'Text', text: /^문제 1\/1 · 비슷한 코드 · 예측$/ })).toBeDefined()
-    await told.unmount()
+    w.answer = ['T1: 예측', 'Q1: 아래 코드의 total은?', 'A1: 7', 'T2: 왜', 'Q2: 문제 2', 'A2: 답 2', 'T3: 왜', 'Q3: 문제 3', 'A3: 답 3'].join('\n')
+    const count = w.models.length
+    // Its questions not all graded: the first press arms a new quiz, the second makes it.
+    await ui.press({ key: 'quiz-new' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(w.models).toHaveLength(count + 1)
+    expect(w.models.at(-1)).toContain('\n   칸: 내 코드\n   학습자가 만든 코드 (a.js):')
+    expect(w.models.at(-1)).not.toContain('비슷한 코드')
+    await ui.unmount()
   })
 
   test('a concept met once is asked in the learner\'s own code with no tag, as in 1.7; the rung is kept on the question', async ($, on) => {
@@ -3023,6 +3056,22 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     await finish(w)
     return w
   }
+  /**
+   * 1.12.0 (G2 · G3): as `opened`, the concepts met in a.js written whole (FILE_JS), the file code never seen and code
+   * changed now ask of; the 1.9.0/1.10.0 tests that asked them of a.ts are re-pinned on purpose to this world.
+   */
+  async function openedJs($: Engine, on: On, store: Map<string, unknown>, names: string[], harness: Record<string, unknown> | null = { rungNewStep: 4 }) {
+    const w = world(on, 'ok', null, true, store)
+    if (harness) w.harness = harness
+    w.files.set('/proj/src/a.js', FILE_JS)
+    await start($)
+    w.answer = CONCEPT_NOTE(names)
+    await turn($, () => $.tool.call(WRITE_JS))
+    await finish(w)
+    return w
+  }
+  /** A grade of a prediction in code never seen (1.12.0 G3): the learner's value copied, the plugin's verdict wrong. */
+  const VALUE_WRONG = '값 1: 9\n피드백: 아닙니다.'
   async function quizIn($: Engine, w: World, reply: string) {
     w.answer = reply
     const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
@@ -3039,24 +3088,27 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
 
   test('on: a concept due at its fifth step met in a .ts file is asked in code never seen; its title, the conversation, the room for it, and no code of the learner\'s or quote sent', async ($, on) => {
     const store = storeOf({ [NAME]: 4 }, 31 * DAY)
-    const w = await opened($, on, store, [NAME])
+    // 1.12.0 (G3, re-pinned on purpose): met in a.js written whole (TypeScript is out of its scope); asked by K · L · A,
+    // its question the plugin's own; a scene of names under its head, none of the learner's code or quotes sent.
+    const w = await openedJs($, on, store, [NAME])
     expect(conceptOf(store, NAME).step).toBe(4)
-    const ui = await quizIn($, w, fresh(1))
+    const ui = await quizIn($, w, KLA(1))
     const prompt = w.models.at(-1)!
-    expect(prompt).toContain(`\n   칸: 처음 보는 코드 (ts로)\n2. 채움 하나 — 채움 하나 설명\n3. 채움 둘 — 채움 둘 설명\n\n개념마다 문제 하나씩`)
-    expect(prompt).toContain('처음 보는 코드: 학습자 코드와 다른 상황(다른 이름·값·쓰임)에서')
-    expect(prompt).toContain('\nH1: (힌트 한 문장)\nR1: (칸이 "처음 보는 코드"인 문제만: 코드를 한 줄씩 따라간 과정)\nA1:')
+    expect(prompt).toContain('\n   칸: 처음 보는 코드 (js로)\n   상황: ')
+    expect(prompt).toContain('\n2. 채움 하나 — 채움 하나 설명\n3. 채움 둘 — 채움 둘 설명\n\n개념마다 하나씩')
+    expect(prompt).toContain('처음 보는 코드: 이 칸은 문제 글·힌트·유형을 쓰지 않는다.')
+    expect(prompt).toContain('\nK1:\n```js\n(코드)\n```\nL1: ')
+    expect(prompt).not.toMatch(/R1:|따라간 과정/)
     expect(prompt).not.toContain('학습자가 만든 코드')
-    expect(prompt).not.toContain('const a = 1')
+    expect(prompt).not.toContain('const items = [3, 4]')
     expect(prompt).not.toContain('for (const n of nums)')
     expect(prompt).not.toContain('for (const item of items)')
-    // One budget for every quiz that writes code of its own or a trace (1.10.0 G2, D12; 3600 in 1.9.0).
+    // One budget for every quiz that writes code of its own (1.10.0 G2, D12; 3600 in 1.9.0).
     expect(w.budgets.at(-1)).toBe(4600)
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 처음 보는 코드 · 예측$/ })).toBeDefined()
-    expect(quizItems(store)[0]).toMatchObject({ rung: 'new', kind: 'predict', hint: '하나씩 더해 보세요', answer: '7' })
-    // The trace is dropped: in no window's quiz, the hint and the answer neither.
-    expect(JSON.stringify(store.get('quiz'))).not.toContain('다시 7이')
-    expect((await learn($, '퀴즈')).text).toContain('\n1. (처음 보는 코드) 아래 코드는 무엇을 찍을까요?')
+    expect(quizItems(store)[0]).toMatchObject({ rung: 'new', kind: 'predict', answer: '10' })
+    expect(String(quizItems(store)[0]!.question).startsWith(NEW_LEAD)).toBe(true)
+    expect((await learn($, '퀴즈')).text).toContain(`\n1. (처음 보는 코드) ${NEW_LEAD}`)
     await ui.unmount()
     // A new session reads the rung back from the store.
     await start($)
@@ -3068,15 +3120,16 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
   test('off while a window before 1.10.0 (1.8.0 in 1.9.0) stamped within the day: asked in its code changed, the sentence for code never seen not sent; past the half hour still (3/5 검토), past the day in code never seen', async ($, on) => {
     const store = storeOf({ [NAME]: 4 }, 31 * DAY)
     // The newer window a 1.10.0 one (1.10.0 G3: 1.8.0 here in 1.9.0, a window that now keeps it off as well).
-    store.set('sessions', { 'session-old': { v: '1.7.1', at: NOW - 20 * 60_000 }, 'session-new': { v: '1.10.0', at: NOW - 60_000 } })
-    const w = await opened($, on, store, [NAME], { rungNewStep: 4, rungChangedStep: 2 })
-    const changed = ['T1: 예측', 'Q1: 아래 코드는 b를 무엇으로 찍을까요?', '```', 'const a = 10', 'const b = a * 2', 'console.log(b)', '```', 'A1: 20'].join('\n')
-    const ui = await quizIn($, w, changed)
-    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (a.ts):')
+    // The newer window a 1.12.0 one (1.12.0 G3: 1.10 and 1.11 windows now keep it off as well, NEW_GRADER_SINCE).
+    store.set('sessions', { 'session-old': { v: '1.7.1', at: NOW - 20 * 60_000 }, 'session-new': { v: '1.12.0', at: NOW - 60_000 } })
+    // 1.12.0 (G2 · G3, re-pinned on purpose): met in a.js written whole, the file both ask of now.
+    const w = await openedJs($, on, store, [NAME], { rungNewStep: 4, rungChangedStep: 2 })
+    const ui = await quizIn($, w, CON(1))
+    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (a.js):')
     expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
-    // Code changed's own R line and room (1.10.0 G2), none of code never seen's.
-    expect(w.models.at(-1)).not.toContain('"처음 보는 코드"인 문제만')
-    expect(w.models.at(-1)).toContain('\nR1: (칸이 "비슷한 코드"인 문제만: 보인 코드를 한 줄씩 따라간 과정)\n')
+    // Code changed's own C · O · N (1.12.0 G2), none of code never seen's.
+    expect(w.models.at(-1)).not.toContain('K1:')
+    expect(w.models.at(-1)).toContain('\nC1: (고른 곳 이름, 한 칸 띄우고 새 값만. 예: 1b 20)\n')
     expect(w.budgets.at(-1)).toBe(4600)
     expect(quizItems(store)[0]).toMatchObject({ rung: 'changed' })
     expect(await ui.find({ type: 'Text', text: /^문제 1\/1 · 비슷한 코드 · 예측$/ })).toBeDefined()
@@ -3084,15 +3137,15 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     // Past the half hour (3/5 검토): a 1.7 window stamps only as it starts and as it keeps a note, so one left open
     // grading this quiz may have written none since. Still in its code changed.
     await w.clock.advance(11 * 60_000)
-    w.answer = changed
+    w.answer = CON(1)
     await learn($, '퀴즈 새로')
     expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n')
     expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
     // Past the day its stamp is gone: the next quiz asks it in code never seen.
     await w.clock.advance(STAMP_KEPT_MS - 31 * 60_000 + 60_000)
-    w.answer = fresh(1)
-    expect((await learn($, '퀴즈 새로')).text).toContain('\n1. (처음 보는 코드) 아래 코드는')
-    expect(w.models.at(-1)).toContain('   칸: 처음 보는 코드 (ts로)')
+    w.answer = KLA(1)
+    expect((await learn($, '퀴즈 새로')).text).toContain(`\n1. (처음 보는 코드) ${NEW_LEAD}`)
+    expect(w.models.at(-1)).toContain('   칸: 처음 보는 코드 (js로)')
   })
 
   test('with no harness the build\'s constants decide, as a release runs: code never seen and 비슷한 코드 each by its own', async ($, on) => {
@@ -3114,9 +3167,10 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
 
   test('a miss in code never seen steps the concept back one, not missed; the pane says so in place of the sentence for misses', async ($, on) => {
     const store = storeOf({ [NAME]: 4 }, 31 * DAY)
-    const w = await opened($, on, store, [NAME])
-    const ui = await quizIn($, w, fresh(1))
-    await answer(ui, w, mineKey(store, 0), '9요', WRONG)
+    const w = await openedJs($, on, store, [NAME])
+    const ui = await quizIn($, w, EITHER(1))
+    // 1.12.0 (G3, re-pinned on purpose): a.js written whole and K · L · A; its grade copies the value (VALUE_WRONG).
+    await answer(ui, w, mineKey(store, 0), '9요', VALUE_WRONG)
     expect(conceptOf(store, NAME).step).toBe(3)
     expect(conceptOf(store, NAME).reviewedAt).toBeGreaterThan(NOW - DAY)
     expect(conceptOf(store, NAME).missedAt).toBeUndefined()
@@ -3127,13 +3181,14 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
 
   test('beside a miss in the learner\'s own code, both sentences in the pane', async ($, on) => {
     const store = storeOf({ [NAME]: 4, [OTHER]: 0 }, 31 * DAY)
-    const w = await opened($, on, store, [NAME, OTHER])
+    const w = await openedJs($, on, store, [NAME, OTHER])
     // Both questions show code, so each keeps its pick's rung whichever place the quiz gave it.
-    const ui = await quizIn($, w, [fresh(1), fresh(2)].join('\n'))
+    const ui = await quizIn($, w, [EITHER(1), EITHER(2)].join('\n'))
     const at = { new: indexOf(store, NAME), mine: indexOf(store, OTHER) }
     expect([quizItems(store)[at.new]!.rung, quizItems(store)[at.mine]!.rung]).toEqual(['new', 'mine'])
-    await answer(ui, w, mineKey(store, 0), '9요', WRONG)
-    await answer(ui, w, mineKey(store, 1), '몰라서 아무거나', WRONG)
+    // 1.12.0 (G3, re-pinned on purpose): a.js written whole and K · L · A; each slot's grade as its rung takes it.
+    await answer(ui, w, mineKey(store, 0), at.new === 0 ? '9요' : '몰라서 아무거나', at.new === 0 ? VALUE_WRONG : WRONG)
+    await answer(ui, w, mineKey(store, 1), at.new === 1 ? '9요' : '몰라서 아무거나', at.new === 1 ? VALUE_WRONG : WRONG)
     expect(await ui.find({ type: 'Text', text: new RegExp(`^2문제 중 0개 맞혔습니다 · 틀린 개념은 다음 퀴즈에 먼저 나옵니다 · ${NEW_MISS} · `) })).toBeDefined()
     expect(conceptOf(store, OTHER).missedAt).toBeDefined()
     expect(conceptOf(store, NAME).missedAt).toBeUndefined()
@@ -3142,23 +3197,25 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
 
   test('beside one almost right, that one\'s sentence then this; the conversation\'s ends each with a period', async ($, on) => {
     const store = storeOf({ [NAME]: 4, [OTHER]: 0 }, 31 * DAY)
-    const w = await opened($, on, store, [NAME, OTHER])
-    w.answer = [fresh(1), fresh(2)].join('\n')
+    const w = await openedJs($, on, store, [NAME, OTHER])
+    w.answer = [EITHER(1), EITHER(2)].join('\n')
     await learn($, '퀴즈 새로')
     const next = { new: indexOf(store, NAME) + 1, mine: indexOf(store, OTHER) + 1 }
     expect(quizItems(store)[next.new - 1]!.rung).toBe('new')
     w.answer = PARTLY
     await learn($, `퀴즈 ${next.mine} 거의 맞는 답`)
-    w.answer = WRONG
+    // 1.12.0 (G3, re-pinned on purpose): a.js written whole and K · L · A; its grade copies the value.
+    w.answer = VALUE_WRONG
     expect((await learn($, `퀴즈 ${next.new} 9요`)).text).toContain(`다 풀었습니다: 2문제 중 0개 맞힘. 거의 맞힌 개념은 조금 일찍 다시 나옵니다. ${NEW_MISS}.`)
   })
 
   test('in the conversation, a miss in code never seen alone ends on its sentence and a period, with none for misses', async ($, on) => {
     const store = storeOf({ [NAME]: 4 }, 31 * DAY)
-    const w = await opened($, on, store, [NAME])
-    w.answer = fresh(1)
+    const w = await openedJs($, on, store, [NAME])
+    w.answer = EITHER(1)
     await learn($, '퀴즈 새로')
-    w.answer = WRONG
+    // 1.12.0 (G3, re-pinned on purpose): a.js written whole and K · L · A; its grade copies the value.
+    w.answer = VALUE_WRONG
     const text = (await learn($, '퀴즈 1 9요')).text ?? ''
     expect(text).toContain(`다 풀었습니다: 1문제 중 0개 맞힘. ${NEW_MISS}.`)
     expect(text).not.toContain('틀린 개념은 다음 퀴즈에 먼저 나옵니다')
@@ -3167,18 +3224,21 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
 
   test('in the conversation, beside a plain miss: that one\'s sentence, then this', async ($, on) => {
     const store = storeOf({ [NAME]: 4, [OTHER]: 0 }, 31 * DAY)
-    const w = await opened($, on, store, [NAME, OTHER])
-    w.answer = [fresh(1), fresh(2)].join('\n')
+    const w = await openedJs($, on, store, [NAME, OTHER])
+    w.answer = [EITHER(1), EITHER(2)].join('\n')
     await learn($, '퀴즈 새로')
     w.answer = WRONG
     await learn($, `퀴즈 ${indexOf(store, OTHER) + 1} 몰라서 아무거나`)
+    // 1.12.0 (G3, re-pinned on purpose): a.js written whole and K · L · A; its grade copies the value.
+    w.answer = VALUE_WRONG
     expect((await learn($, `퀴즈 ${indexOf(store, NAME) + 1} 9요`)).text).toContain(`다 풀었습니다: 2문제 중 0개 맞힘. 틀린 개념은 다음 퀴즈에 먼저 나옵니다. ${NEW_MISS}.`)
   })
 
+  // 1.12.0 (G3, re-pinned on purpose): met in a.js written whole, asked by K · L · A.
   test('/learn 퀴즈 틀림 on code never seen alone says it steps back one', async ($, on) => {
     const store = storeOf({ [NAME]: 4, [OTHER]: 0 }, 31 * DAY)
-    const w = await opened($, on, store, [NAME, OTHER])
-    w.answer = [fresh(1), fresh(2)].join('\n')
+    const w = await openedJs($, on, store, [NAME, OTHER])
+    w.answer = [EITHER(1), EITHER(2)].join('\n')
     await learn($, '퀴즈 새로')
     const n = indexOf(store, NAME) + 1
     expect(quizItems(store)[n - 1]!.rung).toBe('new')
@@ -3188,10 +3248,11 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(conceptOf(store, NAME).missedAt).toBeUndefined()
   })
 
+  // 1.12.0 (G3, re-pinned on purpose): met in a.js written whole, asked by K · L · A.
   test('/learn 퀴즈 틀림 on code never seen and another question: the sentence for that one, then this', async ($, on) => {
     const store = storeOf({ [NAME]: 4, [OTHER]: 0 }, 31 * DAY)
-    const w = await opened($, on, store, [NAME, OTHER])
-    w.answer = [fresh(1), fresh(2)].join('\n')
+    const w = await openedJs($, on, store, [NAME, OTHER])
+    w.answer = [EITHER(1), EITHER(2)].join('\n')
     await learn($, '퀴즈 새로')
     await learn($, '퀴즈 정답 1')
     await learn($, '퀴즈 정답 2')
@@ -3201,12 +3262,14 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(conceptOf(store, OTHER).missedAt).toBeDefined()
   })
 
+  // 1.12.0 (G3, re-pinned on purpose): met in a.js written whole, asked by K · L · A.
   test('right at the last step graduates the concept', async ($, on) => {
     const store = storeOf({ [NAME]: 5 }, 61 * DAY)
-    const w = await opened($, on, store, [NAME])
-    const ui = await quizIn($, w, fresh(1))
+    const w = await openedJs($, on, store, [NAME])
+    const ui = await quizIn($, w, EITHER(1))
     expect(quizItems(store)[0]).toMatchObject({ rung: 'new' })
-    await answer(ui, w, mineKey(store, 0), '7', RIGHT)
+    // Its printed value, graded right by the plugin alone (localRight).
+    await answer(ui, w, mineKey(store, 0), '10', RIGHT)
     expect(conceptOf(store, NAME).knownAt).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^졸업: for\.\.\.of 반복문/ })).toBeDefined()
     await ui.unmount()
@@ -3214,17 +3277,19 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
 
   test('a miss turned right with f is a step on from where it was; right after the hint keeps the step', async ($, on) => {
     const store = storeOf({ [NAME]: 4, [OTHER]: 4 }, 31 * DAY)
-    const w = await opened($, on, store, [NAME, OTHER])
-    const ui = await quizIn($, w, [fresh(1), fresh(2)].join('\n'))
+    const w = await openedJs($, on, store, [NAME, OTHER])
+    const ui = await quizIn($, w, [EITHER(1), EITHER(2)].join('\n'))
     const [first, second] = quizItems(store).map(one => String(one.name))
     expect(quizItems(store).map(one => one.rung)).toEqual(['new', 'new'])
-    await answer(ui, w, mineKey(store, 0), '7이요 아마', WRONG)
+    // 1.12.0 (G3, re-pinned on purpose): a.js written whole and K · L · A; a miss's grade copies the value, a right
+    // answer the plugin grades alone.
+    await answer(ui, w, mineKey(store, 0), '7이요 아마', '값 1: 7\n피드백: 아닙니다.')
     expect(conceptOf(store, first!).step).toBe(3)
     await ui.press({ key: 'quiz-flip' })
     await w.clock.settle()
     expect(conceptOf(store, first!).step).toBe(5)
     await ui.press({ key: 'quiz-hint' })
-    await answer(ui, w, mineKey(store, 1), '7', RIGHT)
+    await answer(ui, w, mineKey(store, 1), '10', RIGHT)
     expect(quizItems(store)[1]).toMatchObject({ result: 'right', isHinted: true, rung: 'new' })
     expect(conceptOf(store, second!).step).toBe(4)
     expect(indexOf(store, second!)).toBe(1)
@@ -3369,13 +3434,15 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
     expect(w.models.at(-1)).not.toContain('비슷한 코드')
     expect(quizItems(store)[0]!.rung).toBe('mine')
-    // The same edit in a file that imports nothing from a package: code never seen.
+    // The same edit in a file that imports nothing from a package: 1.12.0 (G3, re-pinned on purpose) its lines await, a
+    // run-order use code never seen leaves out (isNewInScope), so its own code there too.
     w.files.set(POSTS, "import { axios } from './http.js'\n\nexport async function fetchPosts() {}\n")
     await w.clock.advance(60_000)
     w.answer = fresh(1)
     await learn($, '퀴즈 새로')
-    expect(w.models.at(-1)).toContain('   칸: 처음 보는 코드 (js로)')
-    expect(quizItems(store)[0]!.rung).toBe('new')
+    expect(w.models.at(-1)).toContain('\n   칸: 내 코드\n   학습자가 만든 코드 (posts.js):')
+    expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
+    expect(quizItems(store)[0]!.rung).toBe('mine')
     // The file gone (or kept from Read): its imports unknown, so its own code, never code never seen nor changed.
     w.statFails = new Map([[POSTS, 'ENOENT']])
     await w.clock.advance(60_000)
@@ -3406,21 +3473,22 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     await learn($, '퀴즈 새로')
     expect(quizItems(store)[0]!.rung).toBe('mine')
     expect(reads).toBe(before)
-    // Code changed on (1.10.0 G2), code never seen off: read once a quiz for its imports; a library, so its own code.
+    // Code changed on, code never seen off: 1.12.0 (G2, re-pinned on purpose) code changed asks only of a file written
+    // whole, so an edit's file is never read for it; its own code.
     w.harness = { rungNewStep: null, rungChangedStep: 2 }
     await start($)
     await w.clock.advance(60_000)
     w.answer = fresh(1)
     await learn($, '퀴즈 새로')
-    expect(reads).toBe(before + 1)
+    expect(reads).toBe(before)
     expect(quizItems(store)[0]!.rung).toBe('mine')
-    // Both on: still once a quiz.
+    // Both on: read once a quiz, for code never seen.
     w.harness = { rungNewStep: 4, rungChangedStep: 2 }
     await start($)
     await w.clock.advance(60_000)
     w.answer = fresh(1)
     await learn($, '퀴즈 새로')
-    expect(reads).toBe(before + 2)
+    expect(reads).toBe(before + 1)
     expect(quizItems(store)[0]!.rung).toBe('mine')
   })
 
@@ -3480,8 +3548,9 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     w.answer = fresh(1)
     await learn($, '퀴즈 새로')
     expect(count.reads).toBe(1)
-    expect(w.models.at(-1)).toContain('   칸: 처음 보는 코드 (js로)')
-    expect(quizItems(store)[0]!.rung).toBe('new')
+    // 1.12.0 (G3, re-pinned on purpose): its lines await, a run-order use code never seen leaves out (isNewInScope).
+    expect(w.models.at(-1)).toContain('\n   칸: 내 코드\n')
+    expect(quizItems(store)[0]!.rung).toBe('mine')
   })
 
   test('(교차 검토 2) the file read for its imports as it stands: one past 1,000,000 bytes is not read, its imports unknown, asked in its own code (1.10.0 G2; 1.9.0 asked it changed)', async ($, on) => {
@@ -3528,7 +3597,8 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     const before = w.gets.filter(key => key === 'sessions').length
     w.answer = fresh(1)
     await learn($, '퀴즈 새로')
-    expect(quizItems(store)[0]!.rung).toBe('changed')
+    // 1.12.0 (G2, re-pinned on purpose): an edit is no file written whole, so its own code; the stamps unread all the same.
+    expect(quizItems(store)[0]!.rung).toBe('mine')
     expect(w.gets.filter(key => key === 'sessions').length).toBe(before)
   })
 
@@ -3536,17 +3606,18 @@ describe('1.9.0: 처음 보는 코드 behind its switch, and the ladder\'s rungs
     let isUnread = false
     on('store.get', { key: 'sessions' }, (_$, e, next) => (isUnread ? { deny: 'learn-notes: $.store.get: the store could not be read' } : next(e)))
     const store = storeOf({ [NAME]: 4 }, 31 * DAY)
-    const w = await opened($, on, store, [NAME], { rungNewStep: 4, rungChangedStep: 2 })
+    // 1.12.0 (G2 · G3, re-pinned on purpose): met in a.js written whole, the file both ask of now.
+    const w = await openedJs($, on, store, [NAME], { rungNewStep: 4, rungChangedStep: 2 })
     isUnread = true
-    w.answer = fresh(1)
+    w.answer = CON(1)
     await learn($, '퀴즈 새로')
-    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (a.ts):')
+    expect(w.models.at(-1)).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (a.js):')
     expect(w.models.at(-1)).not.toContain('처음 보는 코드:')
     isUnread = false
     await w.clock.advance(60_000)
-    w.answer = fresh(1)
+    w.answer = KLA(1)
     await learn($, '퀴즈 새로')
-    expect(w.models.at(-1)).toContain('   칸: 처음 보는 코드 (ts로)')
+    expect(w.models.at(-1)).toContain('   칸: 처음 보는 코드 (js로)')
   })
 
   test('(3/5 검토) /learn 퀴즈 틀림 while another window\'s quiz takes this one\'s place: the sentence for misses as 1.8.0 said it, none for code never seen', async ($, on) => {
@@ -4496,11 +4567,13 @@ describe('1.9.0: the note and quiz calls\' output caps, raised by their sample (
       store.set('steps', ownSteps(store.get('concepts') as never))
       const w = world(on, 'ok', null, true, store)
       w.harness = { rungNewStep: isOn ? 4 : null, rungChangedStep: null }
+      // 1.12.0 (G3, re-pinned on purpose): on, met in a.js written whole and asked by K · L · A; off as before.
+      if (isOn) w.files.set('/proj/src/a.js', FILE_JS)
       await start($)
       w.answer = CONCEPT_NOTE(['for...of 반복문'])
-      await turn($, () => $.tool.call(EDIT_A))
+      await turn($, () => $.tool.call(isOn ? WRITE_JS : EDIT_A))
       await finish(w)
-      w.answer = isOn ? fresh(1) : plainQ(1)
+      w.answer = isOn ? KLA(1) : plainQ(1)
       await learn($, '퀴즈 새로')
       expect(quizItems(store).map(one => one.rung)).toEqual([isOn ? 'new' : 'mine'])
       expect(callsOf(w)).toEqual([{ budget: NOTE, system: SYSTEM }, { budget: isOn ? QUIZ_TRACE : QUIZ, system: QUIZ_SYSTEM }])
@@ -4514,16 +4587,18 @@ describe('1.9.0: the note and quiz calls\' output caps, raised by their sample (
       store.set('steps', ownSteps(store.get('concepts') as never))
       const w = world(on, 'ok', null, true, store)
       w.harness = { rungNewStep: null, rungChangedStep: step }
+      // 1.12.0 (G2, re-pinned on purpose): on, met in a.js written whole and asked by C · O · N; off as before.
+      if (step === 2) w.files.set('/proj/src/a.js', FILE_JS)
       await start($)
       w.answer = CONCEPT_NOTE(['for...of 반복문'])
-      await turn($, () => $.tool.call(EDIT_A))
+      await turn($, () => $.tool.call(step === 2 ? WRITE_JS : EDIT_A))
       await finish(w)
-      w.answer = ['T1: 예측', 'Q1: 아래 코드의 b는?', '```ts', 'const a = 5', 'const b = a * 2', 'console.log(b)', '```', 'H1: a부터', 'R1: a는 5, b는 10', 'A1: 10'].join('\n')
+      w.answer = step === 2 ? CON(1) : ['T1: 예측', 'Q1: 아래 코드의 b는?', '```ts', 'const a = 5', 'const b = a * 2', 'console.log(b)', '```', 'H1: a부터', 'R1: a는 5, b는 10', 'A1: 10'].join('\n')
       await learn($, '퀴즈 새로')
       expect(quizItems(store).map(one => one.rung)).toEqual([step === 2 ? 'changed' : 'mine'])
       expect(callsOf(w)).toEqual([{ budget: NOTE, system: SYSTEM }, { budget: step === 2 ? QUIZ_TRACE : QUIZ, system: QUIZ_SYSTEM }])
-      // The trace is dropped with code changed on; with it off, the R line is the hint's as in 1.9.0.
-      expect(quizItems(store)[0]!.hint).toBe(step === 2 ? 'a부터' : 'a부터\nR1: a는 5, b는 10')
+      // With code changed on, the plugin's hint by the line; with it off, the R line is the hint's as in 1.9.0.
+      expect(quizItems(store)[0]!.hint).toBe(step === 2 ? CHANGED_HINT(1, 'const items = [10, 4]') : 'a부터\nR1: a는 5, b는 10')
     })
   }
 })
