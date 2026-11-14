@@ -120,7 +120,9 @@ describe('1.12.0 G3: the quiz (K · L · A, scenes, the session\'s missed list)'
     await learn($, '퀴즈 새로')
     const again = calls.filter(call => call.system === QUIZ_SYSTEM).at(-1)!
     expect(again.prompt).not.toContain('처음 보는 코드')
-    expect(again.prompt).toContain('   칸: 내 코드\n   학습자가 만든 코드 (a.js):')
+    // haiku's shipped row turns 비슷한 코드 on (1.12.0 G2, re-pinned on purpose with the switch): its own code, a file
+    // written whole, is asked as code changed (1.12.0 G3 build: 내 코드 while that cell was off).
+    expect(again.prompt).toContain('   칸: 비슷한 코드\n   학습자가 만든 코드 (a.js):')
   })
 
   test('on, then remapped after the window started (modelOverrides set): the quiz asks the alias again first and is made with code never seen off (its own code, 3400)', { options: { model: 'haiku' } }, async ($, on) => {

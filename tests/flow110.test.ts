@@ -175,6 +175,17 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
   const OVERRIDDEN_EVERYWHERE: SettingsLayers = Object.fromEntries(SOURCES.map(source => [source, { ...OVERRIDES }]))
   /** What a window whose route read its alias at session start reads by then: once there, once again for each /learn 진단 while the alias is kept (recheckRemap). */
   const readTwice = (name: string) => [name, name]
+  /**
+   * What /learn 진단 names as each shipped row's route: 팀 규칙 표지 넓힘 in both rows (1.10.0 G6) and 비슷한 코드 in
+   * haiku's (1.12.0 G2: its samples passed with haiku, docs/qa/견본.md; re-pinned on purpose with the switch).
+   */
+  const ROUTE_ON: Readonly<Record<'haiku' | 'sonnet', string>> = { haiku: '이 모델에서 켠 기능: 팀 규칙 표지 넓힘 · 비슷한 코드', sonnet: '이 모델에서 켠 기능: 팀 규칙 표지 넓힘' }
+  /**
+   * What a window as shipped reads of its alias on the route day (session start, its two quizzes, one /learn 진단):
+   * sonnet's at session start and by /learn 진단 (readTwice); haiku's by each of the two quizzes too, its shipped row
+   * turning 비슷한 코드 on (makeQuiz's recheckRemap, 1.12.0 G2; re-pinned on purpose with the switch).
+   */
+  const readsShipped = (model: 'haiku' | 'sonnet') => (model === 'haiku' ? [HAIKU_ALIAS, HAIKU_ALIAS, HAIKU_ALIAS, HAIKU_ALIAS] : readTwice(SONNET_ALIAS))
 
   // The table as shipped turns 팀 규칙 표지 넓힘 on in both rows (1.10.0 G6, docs/qa/견본.md '모델별 결정'). This day's
   // note brings no rule's name in, so a window still sends what 1.9.0 sent, any level, either model; at beginner it
@@ -187,14 +198,16 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         const flags = providerReads(on)
         const { calls, diag, w } = await routeDay($, on)
         expect(calls).toEqual(ROUTE19_CALLS[level].map(call => ({ model, ...call })))
-        const route = level === 'beginner' ? '(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)' : '(설명 수준이 beginner가 아님 · 모델별 기능 모두 끔)'
+        const route = level === 'beginner' ? `(${ROUTE_ON[model]})` : '(설명 수준이 beginner가 아님 · 모델별 기능 모두 끔)'
         const said = ROUTE19_DIAG[`${model}/${level}`]!
         expect(diag).toBe(said.replace(`- 설정: 자동 노트 켬 · ${model} · `, `- 설정: 자동 노트 켬 · ${model}${route} · `))
         expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · ${model}${route}${SETTINGS_TAIL} ${level}`)
         expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
-        expect(reads).toEqual(level === 'beginner' ? readTwice(model === 'haiku' ? HAIKU_ALIAS : SONNET_ALIAS) : [])
-        expect(flags).toEqual(level === 'beginner' ? [...PROVIDERS, ...PROVIDERS] : [])
-        expect(w.settingsReads).toBe(level === 'beginner' ? 2 : 0)
+        expect(reads).toEqual(level === 'beginner' ? readsShipped(model) : [])
+        // As often as the alias (readsShipped): haiku's two quizzes read them again (1.12.0 G2, re-pinned on purpose).
+        const times = level !== 'beginner' ? 0 : readsShipped(model).length
+        expect(flags).toEqual(Array.from({ length: times }, () => PROVIDERS).flat())
+        expect(w.settingsReads).toBe(times)
       })
     }
   }
@@ -242,8 +255,8 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
       w.harness = { models: { sonnet: { ...ON } } }
     })
     expect(calls).toEqual(ROUTE19_CALLS.beginner.map(call => ({ model: 'haiku', ...call })))
-    expect(reads).toEqual(readTwice(HAIKU_ALIAS))
-    expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · haiku(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)${SETTINGS_TAIL} beginner`)
+    expect(reads).toEqual(readsShipped('haiku'))
+    expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · haiku(${ROUTE_ON.haiku})${SETTINGS_TAIL} beginner`)
     expect(versionLine(diag)).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
   })
 
@@ -327,8 +340,8 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         },
         env,
       )
-      expect(reads).toEqual(isKept ? readTwice(HAIKU_ALIAS) : [HAIKU_ALIAS])
-      expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · haiku(${isKept ? '이 모델에서 켠 기능: 팀 규칙 표지 넓힘' : '별칭 변수를 둠 · 모델별 기능 모두 끔'})${SETTINGS_TAIL} beginner`)
+      expect(reads).toEqual(isKept ? readsShipped('haiku') : [HAIKU_ALIAS])
+      expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · haiku(${isKept ? ROUTE_ON.haiku : '별칭 변수를 둠 · 모델별 기능 모두 끔'})${SETTINGS_TAIL} beginner`)
       expect(versionLine(diag)?.includes('시험 스위치')).toBe(isKept)
     })
   }
@@ -507,7 +520,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
       on('env.get', { name }, (_$, e, next) => (now[e.name] !== undefined ? { value: now[e.name] } : next(e)))
       world(on)
       await start($)
-      expect(modelSaid((await learn($, '진단')).text ?? '')).toBe('haiku(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)')
+      expect(modelSaid((await learn($, '진단')).text ?? '')).toBe(`haiku(${ROUTE_ON.haiku})`)
       now[name] = 'set-in-session-x'
       const diag = (await learn($, '진단')).text ?? ''
       expect(modelSaid(diag)).toBe(`haiku(${said})`)
@@ -538,7 +551,9 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         { [model === 'haiku' ? HAIKU_ALIAS : SONNET_ALIAS]: 'pinned-model-x', CLAUDE_CODE_USE_BEDROCK: '1' },
       )
       expect(calls).toEqual(ROUTE19_CALLS.beginner.map(call => ({ model, ...call })))
-      expect(diag).toBe(ROUTE19_DIAG[`${model}/beginner`]!.replace('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296', '- 버전: learn-notes 1.7.0 · Claude Code 2.1.296 · 시험 스위치: 팀 규칙 표지 넓힘 끔'))
+      // Each cell the window's shipped row has on is named as a test switch turned off (haiku's 비슷한 코드 too, 1.12.0 G2).
+      const offNamed = model === 'haiku' ? '팀 규칙 표지 넓힘 끔 · 비슷한 코드 단계 끔' : '팀 규칙 표지 넓힘 끔'
+      expect(diag).toBe(ROUTE19_DIAG[`${model}/beginner`]!.replace('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296', `- 버전: learn-notes 1.7.0 · Claude Code 2.1.296 · 시험 스위치: ${offNamed}`))
       expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · ${model}${SETTINGS_TAIL} beginner`)
       expect(reads).toEqual([])
       expect(flags).toEqual([])
@@ -576,7 +591,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         const diag = (await learn($, '진단')).text ?? ''
         expect(reads).toEqual(readTwice(model === 'sonnet' ? SONNET_ALIAS : HAIKU_ALIAS))
         expect(versionLine(diag)).toBe(`- 버전: learn-notes 1.7.0 · Claude Code 2.1.296${isSwitched ? ` · 시험 스위치: ${ON_NAMED[key]}` : ''}`)
-        expect(modelSaid(diag)).toBe(`${model}(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)`)
+        expect(modelSaid(diag)).toBe(`${model}(${ROUTE_ON[model]})`)
       })
     }
   }
@@ -1594,8 +1609,11 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
     await ui.press({ key: 'view-quiz' })
     expect(await ui.find({ type: 'Text', text: /^문제 1\/3 · 비슷한 코드 · 예측$/ })).toBeDefined()
     await ui.unmount()
-    const version = ((await learn($, '진단')).text ?? '').split('\n').find(line => line.startsWith('- 버전: '))
-    expect(version).toContain('시험 스위치: 비슷한 코드 단계 2')
+    // haiku's shipped row has it on at 2 (1.12.0 G2, re-pinned on purpose with the switch): the harness's 2 is no test
+    // switch, and /learn 진단 names it among the route's features.
+    const diag = (await learn($, '진단')).text ?? ''
+    expect(diag.split('\n').find(line => line.startsWith('- 버전: '))).toBe('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
+    expect(diag).toContain('- 설정: 자동 노트 켬 · haiku(이 모델에서 켠 기능: 팀 규칙 표지 넓힘 · 비슷한 코드) · ')
     expect(w.budgets.at(-1)).toBe(4600)
   })
 
@@ -1607,7 +1625,8 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
 
   for (const model of ['haiku', 'sonnet'] as const) {
     test(`(G7) ${model} with only sonnet's row turning it on: ${model === 'haiku' ? '1.9.0\'s request and no file read' : 'the request pinned, sent as sonnet'}`, { options: { model } }, async ($, on) => {
-      const { calls, reads } = await quizWorld($, on, { models: { sonnet: { rungChangedStep: 2 } } })
+      // haiku's shipped row has it on (1.12.0 G2): its own row is turned off here, so sonnet's alone turns it on.
+      const { calls, reads } = await quizWorld($, on, { models: { sonnet: { rungChangedStep: 2 }, ...(model === 'haiku' ? { haiku: { rungChangedStep: null } } : {}) } })
       // 1.12.0 (G2, re-pinned on purpose): on, the plugin's own sentence and C · O · N (1.10.0's CHANGED_QUIZ_ON no
       // more), sent as sonnet; no file read either way.
       if (model === 'haiku') expect(calls).toEqual([{ ...CHANGED_QUIZ_OFF, model }])
@@ -1620,6 +1639,21 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
       expect(reads.cart).toBe(0)
     })
   }
+
+  test('(G7, 1.12.0 G2) haiku as shipped: its own row turns it on (the plugin\'s sentence and C · O · N at 4600), no file read', async ($, on) => {
+    const shipped = await quizWorld($, on, null, storeOf(), () => {}, REPLY_CON)
+    expect(shipped.calls).toHaveLength(1)
+    expect(shipped.calls[0]).toMatchObject({ model: 'haiku', effort: 'low', system: QUIZ_SYSTEM, maxTokens: 4600, timeoutMs: 90_000 })
+    expect(shipped.calls[0]!.prompt).toContain('\n   칸: 비슷한 코드\n   학습자가 만든 코드 (evens.py):')
+    expect(shipped.calls[0]!.prompt).toContain('\nC1: (고른 곳 이름, 한 칸 띄우고 새 값만. 예: 1b 20)\n')
+    expect(itemsOf(shipped.store)[0]).toMatchObject({ name: COMP, rung: 'changed', kind: 'predict', answer: '[1, 3]' })
+    expect(shipped.reads).toMatchObject({ cart: 0, evens: 0 })
+  })
+
+  test('(G7, 1.12.0 G2) sonnet as shipped: 1.9.0\'s request (its row has it off)', { options: { model: 'sonnet' } }, async ($, on) => {
+    const { calls } = await quizWorld($, on, null)
+    expect(calls).toEqual([{ ...CHANGED_QUIZ_OFF, model: 'sonnet' }])
+  })
 
   test('beside code never seen (a harness\'s 4) or a worked example, code changed is asked in its own code: no sentence or R line of its own, the quiz\'s cap the other rung\'s', async ($, on) => {
     // COMP due at its fifth step: code never seen (EVENS written whole, no import).

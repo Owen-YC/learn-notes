@@ -9471,10 +9471,11 @@ export type MeasuredModel = 'haiku' | 'sonnet'
  * that model, in the commit after its decision (docs/qa/견본.md, '1.10.0 모델별 갈래 (G7): 두 모델을 재는 공통 입장'
  * and the feature's own section); never carried from one model to the other. A row with isRuleDrill on has isRuleWide
  * on too (1.10.0 G6: a team rule's practice was measured on notes kept so). On now: isRuleWide in both rows (1.10.0 G6:
- * its samples passed with each model; the team rule's practice did not, and stays off).
+ * its samples passed with each model; the team rule's practice did not, and stays off) and rungChangedStep 2 in haiku's
+ * row (1.12.0 G2: its samples passed with haiku; sonnet was not measured, and stays off).
  */
 export const MODEL_SWITCHES: Readonly<Record<MeasuredModel, Readonly<Switches>>> = Object.freeze({
-  haiku: Object.freeze({ ...SWITCHES_OFF, isRuleWide: true }),
+  haiku: Object.freeze({ ...SWITCHES_OFF, isRuleWide: true, rungChangedStep: 2 }),
   sonnet: Object.freeze({ ...SWITCHES_OFF, isRuleWide: true }),
 })
 

@@ -119,8 +119,9 @@ describe('1.7.0: /learn 진단, and failures that say their cause', () => {
     expect(lines[3]).toMatch(/^learn-notes 진단 · 2026-10-0[23] \d\d:\d\d$/)
     expect(lines).toContain('- 버전: learn-notes 1.7.0 · Claude Code 2.1.296')
     expect(lines).toContain('- 화면: terminal · 패널 오른쪽 60칸 · 터미널 200칸 · 키는 대화에 · Windows Terminal · tmux · vscode')
-    // The table as shipped turns 팀 규칙 표지 넓힘 on for haiku (1.10.0 G6): the settings line names it.
-    expect(reply).toContain('- 설정: 자동 노트 켬 · haiku(이 모델에서 켠 기능: 팀 규칙 표지 넓힘) · 하루 한도 40(관리자 잠금) · 일지 켬(기본 폴더) · 패널 자동 열기 켬 · 설명 수준 beginner')
+    // The table as shipped turns 팀 규칙 표지 넓힘 on for haiku (1.10.0 G6) and 비슷한 코드 (1.12.0 G2, re-pinned on
+    // purpose with the switch): the settings line names them.
+    expect(reply).toContain('- 설정: 자동 노트 켬 · haiku(이 모델에서 켠 기능: 팀 규칙 표지 넓힘 · 비슷한 코드) · 하루 한도 40(관리자 잠금) · 일지 켬(기본 폴더) · 패널 자동 열기 켬 · 설명 수준 beginner')
     expect(lines).toContain('- 오늘: 노트 1개 · 모델 호출 1번 · 실패 0번')
     expect(reply).toMatch(/\n- 저장소: \d+KB \/ 4MB \(history \d+KB · /)
     expect(lines).toContain('- 일지: 못 쓴 노트 없음')
