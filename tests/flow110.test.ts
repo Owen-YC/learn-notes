@@ -1617,6 +1617,18 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
     expect(w.budgets.at(-1)).toBe(4600)
   })
 
+  // (3/5 검토) Restored: the build commit 3f9084c dropped this OFF pin by mistake (its as-shipped twin now lives in
+  // the 'sonnet as shipped' test below, haiku's shipped row having it on).
+  test('off (a harness\'s null): 1.9.0\'s request to the byte, made outside the plugin by fca5988\'s own notes.ts; no file read; the R line the hint\'s as in 1.9.0', async ($, on) => {
+    const { store, calls, reads } = await quizWorld($, on, { rungChangedStep: null })
+    expect(calls).toEqual([CHANGED_QUIZ_OFF])
+    expect(CHANGED_QUIZ_OFF.maxTokens).toBe(3400)
+    expect(CHANGED_QUIZ_OFF.prompt).not.toContain('비슷한 코드')
+    expect(CHANGED_QUIZ_OFF.prompt).not.toContain('R1:')
+    expect(reads).toMatchObject({ cart: 0, evens: 0 })
+    expect(itemsOf(store)[0]).toMatchObject({ rung: 'mine', hint: '처음 값을 보세요\nR1: sum은 10에서 시작해 6을 더해 16' })
+  })
+
   test('before its step (the second review): each in its own code, no file read, 1.9.0\'s request', async ($, on) => {
     const { calls, reads } = await quizWorld($, on, { rungChangedStep: 2 }, storeOf({ [REDUCE]: 1, [ARROW]: 1, [COMP]: 1 }))
     expect(calls).toEqual([CHANGED_QUIZ_OFF])
@@ -1650,9 +1662,13 @@ describe('1.10.0: 비슷한 코드 (G2) behind its switch: what a quiz sends wit
     expect(shipped.reads).toMatchObject({ cart: 0, evens: 0 })
   })
 
-  test('(G7, 1.12.0 G2) sonnet as shipped: 1.9.0\'s request (its row has it off)', { options: { model: 'sonnet' } }, async ($, on) => {
-    const { calls } = await quizWorld($, on, null)
+  test('(G7, 1.12.0 G2) sonnet as shipped: 1.9.0\'s request (its row has it off); no file read; the R line the hint\'s as in 1.9.0', { options: { model: 'sonnet' } }, async ($, on) => {
+    const { store, calls, reads } = await quizWorld($, on, null)
     expect(calls).toEqual([{ ...CHANGED_QUIZ_OFF, model: 'sonnet' }])
+    // (3/5 검토) What the dropped 'off (as shipped, no harness)' pin held, now for the model whose shipped row has it off.
+    expect(CHANGED_QUIZ_OFF.maxTokens).toBe(3400)
+    expect(reads).toMatchObject({ cart: 0, evens: 0 })
+    expect(itemsOf(store)[0]).toMatchObject({ rung: 'mine', hint: '처음 값을 보세요\nR1: sum은 10에서 시작해 6을 더해 16' })
   })
 
   test('beside code never seen (a harness\'s 4) or a worked example, code changed is asked in its own code: no sentence or R line of its own, the quiz\'s cap the other rung\'s', async ($, on) => {
