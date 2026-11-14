@@ -15,6 +15,7 @@ import {
   RECAP_SYSTEM,
   RULE_DRILL_SYSTEM,
   RULE_DRILL_TOKENS,
+  RULE_FIX_TASK,
   SYSTEM,
   THINK_ASK,
   THINK_SYSTEM,
@@ -39,6 +40,8 @@ import {
   indexPrint,
   parseTeamFile,
   ruleDrillPrompt,
+  ruleFixCheck,
+  ruleFixLines,
   ruleNamesOf,
   screenNote,
   journalPath,
@@ -803,6 +806,11 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     '- 확인: `getUser(1)` → 같은 사용자 정보가 나옵니다',
     '- 예시 답: `` const res = await fetcher(`/u/${id}`) ``',
   ].join('\n')
+  /** ROUTE_RULE_NOTE as a window with isRuleDrill on keeps it (1.12.0 G6, tier 1): the task and the check code's. */
+  const ROUTE_MADE_NOTE = ROUTE_RULE_NOTE.replace('- 할 일 (팀 규칙): API 호출을 팀 규칙대로 fetcher로 바꿔 보세요', `- 할 일 (팀 규칙): ${RULE_FIX_TASK}`).replace(
+    '- 확인: `getUser(1)` → 같은 사용자 정보가 나옵니다',
+    `- 확인: ${ruleFixCheck('fetcher')}`,
+  )
   const ROUTE_RULE_ASK = '- 할 일 (팀 규칙): 그 규칙대로 고치는 일 한 문장'
   /** A question in code of its own for question `n`, with the trace of an R line where code never seen is asked. */
   const routeCode = (n: number, isTraced: boolean) =>
@@ -847,11 +855,12 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         const before = w.models.length
         await turn($, () => $.tool.call({ tool: 'Write', tool_use_id: 'a1', file_path: '/proj/src/api.js', content: ROUTE_API }), 't2')
         await finish(w)
-        // The note's prompt asks for no rule practice either way (1.10.0 G6); on, the rule's practice is a call of its own.
+        // The note's prompt asks for no rule practice either way (1.10.0 G6); on, the rule's practice is code's (1.12.0
+        // G6: a rename the rule's words give, no call of its own).
         expect(w.models[before]).not.toContain(ROUTE_RULE_ASK)
-        expect(w.systems.slice(before)).toEqual(isOnFirst ? [SYSTEM, RULE_DRILL_SYSTEM] : [SYSTEM])
+        expect(w.systems.slice(before)).toEqual([SYSTEM])
         const practiced = notesOf(store).at(-1)!
-        expect(practiced.text).toBe(ROUTE_RULE_NOTE)
+        expect(practiced.text).toBe(isOnFirst ? ROUTE_MADE_NOTE : ROUTE_RULE_NOTE)
         expect(await drillShown()).toBe(isOnFirst)
         w.answer = quizReply()
         await learn($, '퀴즈 새로')
@@ -866,7 +875,8 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         await start($)
         expect(asked(store)).toEqual(written)
         expect((await learn($, '퀴즈')).text?.includes(`(${label}) `)).toBe(isOnFirst)
-        expect(await drillShown()).toBe(!isOnFirst)
+        // Code's practice is none where the switch is off; the note's own call's is none where it is on (1.12.0 G6).
+        expect(await drillShown()).toBe(false)
         // It grades a question of another concept: the quiz written back as it was, that one graded.
         const plain = itemsOf(store).findIndex(one => one.name === '배열')
         w.answer = ROUTE_RIGHT
@@ -879,7 +889,7 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         await finish(w)
         expect(w.models.at(-1)).not.toContain(ROUTE_RULE_ASK)
         expect(w.systems.at(-1)).toBe(SYSTEM)
-        expect(notesOf(store).find(one => one.id === practiced.id)?.text).toBe(ROUTE_RULE_NOTE)
+        expect(notesOf(store).find(one => one.id === practiced.id)?.text).toBe(practiced.text)
         // Its next quiz is its own route's.
         await w.clock.advance(60_000)
         w.answer = quizReply()
@@ -920,14 +930,27 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
   const notesIn = (store: Map<string, unknown>) => (store.get('history') as Record<string, { notes: LearnNote[] }>)['/proj']!.notes
   const usageOf = (store: Map<string, unknown>) => Object.values(store.get('usage') as Record<string, { calls: number; auto: number }>)[0]
   const escape = (text: string) => new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  const SHOWN = escape(`### 직접 해 보기 · user.js\n${RULE_LINES[0]}\n${RULE_LINES[2]}`)
+  /** The rule practice code makes of the note (1.12.0 G6, tier 1, no call of its own): `fetch` renamed `apiRequest`. */
+  const MADE_CHECK = ruleFixCheck('apiRequest')
+  const MADE_LINES = [`- 할 일 (팀 규칙): ${RULE_FIX_TASK}`, RULE_LINES[1]!, `- 확인: ${MADE_CHECK}`, RULE_LINES[3]!]
+  const MADE_TEXT = [...HEAD, '### 직접 해 보기', ...MADE_LINES].join('\n')
+  const SHOWN = escape(`### 직접 해 보기 · user.js\n${MADE_LINES[0]}\n${MADE_LINES[2]}`)
+  /** A line of two arguments, which tier 1 does not rename: its practice is asked of a call of its own (tier 2). */
+  const LINE2 = 'const res = await fetch(url, opts)'
+  const EXAMPLE2 = 'const res = await apiRequest(url, opts)'
+  const USER2_JS = ["import { apiRequest } from './api/apiRequest.js'", '', 'export async function loadUser(url, opts) {', `  ${LINE2}`, '  return res.json()', '}', ''].join('\n')
+  const WRITE_USER2 = { tool: 'Write', tool_use_id: 'v1', file_path: '/proj/src/user.js', content: USER2_JS } as const
+  /** The tier-2 call's answer (rule 1, line 1, the line fixed) and the note made of it. */
+  const REPLY2 = ['- 규칙: 1', '- 줄: 1', `- 예시 답: \`${EXAMPLE2}\``].join('\n')
+  const MADE2 = [...HEAD, '### 직접 해 보기', `- 할 일 (팀 규칙): ${RULE_FIX_TASK}`, `- 고칠 줄: \`${LINE2}\``, `- 확인: ${MADE_CHECK}`, `- 예시 답: \`${EXAMPLE2}\``].join('\n')
+  type Write = { tool: 'Write'; tool_use_id: string; file_path: string; content: string }
 
   /**
-   * A world with the team file of the rules, its harness `harness`, a turn's end writing the note for a new user.js:
-   * the answered calls' texts `texts`, the calls' replies `replies` first, the environment `env`. Its calls, store, and
-   * the note as stored.
+   * A world with the team file of the rules, its harness `harness`, a turn's end writing the note for a new user.js
+   * (`write`: WRITE_USER, or WRITE_USER2 for tier 2): the answered calls' texts `texts`, the calls' replies `replies`
+   * first, the environment `env`. Its calls, store, and the note as stored.
    */
-  async function wrote($: Engine, on: On, harness: Record<string, unknown> | undefined, texts: string[], replies: Reply[] = [], env: Record<string, string> = {}, settings?: SettingsLayers) {
+  async function wrote($: Engine, on: On, harness: Record<string, unknown> | undefined, texts: string[], replies: Reply[] = [], env: Record<string, string> = {}, settings?: SettingsLayers, write: Write = WRITE_USER) {
     const calls = routeCalls(on)
     const store = new Map<string, unknown>()
     const w = world(on, 'ok', null, true, store, env)
@@ -937,22 +960,17 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     await start($)
     w.texts = [...texts]
     w.replies = [...replies]
-    await turn($, () => $.tool.call(WRITE_USER))
+    await turn($, () => $.tool.call(write))
     await finish(w)
     return { w, calls, store, note: () => notesIn(store).at(-1)! }
   }
 
-  test('on: a note with a "다를 수 있음" line in a repository with rules has a second call, the rule practice\'s own (system, prompt, cap, time limit, effort, the setting\'s model); its four lines are the practice; the pane shows its task and check; the journal keeps it', async ($, on) => {
-    const { w, calls, note } = await wrote($, on, ON, [OWN, REPLY])
-    expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM])
+  test('on, tier 1: a note with a "다를 수 있음" line in a repository with rules, its line a rename the rule\'s words give: one call, the practice code\'s (1.12.0 G6); the pane shows its task and check; the journal keeps it', async ($, on) => {
+    const { w, calls, note } = await wrote($, on, ON, [OWN])
+    expect(calls.map(call => call.system)).toEqual([SYSTEM])
     expect(calls[0]!.prompt).not.toContain('(팀 규칙)')
     expect(calls[0]!.maxTokens).toBe(3500)
-    expect(calls[1]).toEqual({ model: 'haiku', effort: 'low', system: RULE_DRILL_SYSTEM, prompt: ruleDrillPrompt(screenNote(note()), TEAM.rules, SAID), maxTokens: RULE_DRILL_TOKENS, timeoutMs: 90_000 })
-    // The code the note's own call was sent, the team's rules and the note's line.
-    expect(calls[1]!.prompt).toContain(`+  ${LINE}\n`)
-    expect(calls[1]!.prompt).toContain(`\n## 노트가 짚은 줄\n${RULE_LINE}\n`)
-    expect(calls[1]!.prompt).not.toContain('세션 토큰')
-    expect(note()).toMatchObject({ status: 'ready', text: RULE_TEXT })
+    expect(note()).toMatchObject({ status: 'ready', text: MADE_TEXT })
     const ui = await pane($)
     expect(await ui.find({ type: 'Markdown', text: SHOWN })).toBeDefined()
     expect(await ui.find({ type: 'Markdown', text: /고칠 줄|예시 답|apiRequest\(`/ })).toBeUndefined()
@@ -962,25 +980,50 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     await ui.input({ key: `drill-${note().id}`, text: '모르겠어요' })
     expect(await ui.find({ type: 'Markdown', text: `**힌트:** ${RULE_LINE} · 이 줄에서 바꿀 곳 한 군데를 찾아보세요` })).toBeDefined()
     await ui.unmount()
-    expect(w.models).toHaveLength(2)
+    expect(w.models).toHaveLength(1)
     const journal = w.journal().at(-1)!.text
-    expect(journal).toContain(`- 할 일 (팀 규칙): ${TASK}`)
+    expect(journal).toContain(`- 할 일 (팀 규칙): ${RULE_FIX_TASK}`)
     expect(journal).toContain(`- 예시 답: \`\` ${EXAMPLE} \`\``)
   })
 
-  test('on, a note a turn\'s end wrote by itself: the usage record counts two calls and one automatic note; with dailyAutoNotes 2, two such notes go before the limit', { options: { dailyAutoNotes: 2 } }, async ($, on) => {
-    const { w, store } = await wrote($, on, ON, [OWN, REPLY])
+  test('on, tier 2: a line the rule\'s words do not rename has a second call, the rule practice\'s own (system, prompt, cap, time limit, effort, the setting\'s model); the line it names, fixed and checked, is the practice', async ($, on) => {
+    const { w, calls, note } = await wrote($, on, ON, [OWN, REPLY2], [], {}, undefined, WRITE_USER2)
+    expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM])
+    expect(calls[0]!.prompt).not.toContain('(팀 규칙)')
+    expect(calls[1]).toEqual({ model: 'haiku', effort: 'low', system: RULE_DRILL_SYSTEM, prompt: ruleDrillPrompt(screenNote(note()), TEAM.rules, SAID, ruleFixLines(screenNote(note()), TEAM.rules, SAID).cands), maxTokens: RULE_DRILL_TOKENS, timeoutMs: 90_000 })
+    // The code the note's own call was sent, the team's rules, the note's line and the one line code listed.
+    expect(calls[1]!.prompt).toContain(`+  ${LINE2}\n`)
+    expect(calls[1]!.prompt).toContain(`\n## 노트가 짚은 줄\n${RULE_LINE}\n`)
+    expect(calls[1]!.prompt).toContain(`\n1) src/user.js · \`${LINE2}\` · 규칙 1번이 쓰지 말라는 \`fetch\`\n`)
+    expect(calls[1]!.prompt).not.toContain('세션 토큰')
+    expect(note()).toMatchObject({ status: 'ready', text: MADE2 })
+    const ui = await pane($)
+    expect(await ui.find({ type: 'Markdown', text: escape(`### 직접 해 보기 · user.js\n- 할 일 (팀 규칙): ${RULE_FIX_TASK}\n- 확인: ${MADE_CHECK}`) })).toBeDefined()
+    await ui.press({ key: 'note-drill' })
+    expect((await ui.find({ type: 'Input', key: `drill-${note().id}` }))?.props).toMatchObject({ value: LINE2 })
+    await ui.unmount()
+    expect(w.models).toHaveLength(2)
+    expect(w.journal().at(-1)!.text).toContain(`- 예시 답: \`${EXAMPLE2}\``)
+  })
+
+  test('on, a note a turn\'s end wrote by itself with a tier-2 practice: the usage record counts two calls and one automatic note; with dailyAutoNotes 2, two such notes go before the limit; tier 1 counts one call', { options: { dailyAutoNotes: 2 } }, async ($, on) => {
+    const { w, store } = await wrote($, on, ON, [OWN, REPLY2], [], {}, undefined, WRITE_USER2)
     expect(usageOf(store)).toMatchObject({ calls: 2, auto: 1 })
-    w.texts = [OWN, REPLY]
-    await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
+    w.texts = [OWN, REPLY2]
+    await turn($, () => $.tool.call({ ...WRITE_USER2, tool_use_id: 'w2' }), 't2')
     await finish(w)
     expect(usageOf(store)).toMatchObject({ calls: 4, auto: 2 })
-    expect(notesIn(store).map(one => [one.status, one.text])).toEqual([['ready', RULE_TEXT], ['ready', RULE_TEXT]])
+    expect(notesIn(store).map(one => [one.status, one.text])).toEqual([['ready', MADE2], ['ready', MADE2]])
     expect(w.toasts.filter(text => text.includes('한도'))).toEqual([])
-    await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w3' }), 't3')
+    await turn($, () => $.tool.call({ ...WRITE_USER2, tool_use_id: 'w3' }), 't3')
     await finish(w)
     expect(w.models).toHaveLength(4)
     expect(w.toasts.filter(text => text.includes('한도'))).toEqual(['학습 노트: 오늘 자동 노트 한도(2개)에 닿았습니다 · 패널에서 w를 누르면 씁니다'])
+  })
+
+  test('on, tier 1 by itself at a turn\'s end: one call, one automatic note', async ($, on) => {
+    const { store } = await wrote($, on, ON, [OWN])
+    expect(usageOf(store)).toMatchObject({ calls: 1, auto: 1 })
   })
 
   for (const [label, text] of [
@@ -1024,13 +1067,14 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     ['a server error', [OWN], ['ok', { status: 500, error: 'api_error' }], 0],
     ['its own time limit', [OWN], ['ok', 'timeout'], 90_000],
     ['an empty reply', [OWN, ''], [], 0],
-    ['"할 일: 없음"', [OWN, '- 할 일: 없음'], [], 0],
-    ['a reply withRuleDrill does not take (the example the line itself)', [OWN, REPLY.replace(EXAMPLE, LINE)], [], 0],
-    ['a reply with no check', [OWN, RULE_LINES.filter(line => !line.startsWith('- 확인')).join('\n')], [], 0],
+    ['"줄: 없음"', [OWN, '- 줄: 없음'], [], 0],
+    ['a reply ruleFixReply does not take (the example the line itself)', [OWN, REPLY2.replace(EXAMPLE2, LINE2)], [], 0],
+    ['a reply with no example', [OWN, REPLY2.split('\n').slice(0, 2).join('\n')], [], 0],
+    ['a reply naming a rule the note did not point at', [OWN, REPLY2.replace('- 규칙: 1', '- 규칙: 2')], [], 0],
   ]
   for (const [label, texts, replies, wait] of FAILS) {
     test(`on, the rule practice's call failing (${label}): the note is ready with its own practice, the text the off build keeps`, async ($, on) => {
-      const { w, calls, note } = await wrote($, on, ON, texts, replies)
+      const { w, calls, note } = await wrote($, on, ON, texts, replies, {}, undefined, WRITE_USER2)
       if (wait > 0) {
         await w.clock.advance(wait)
         await w.clock.settle()
@@ -1048,7 +1092,7 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
   }
 
   test('on, the rule practice\'s call cut short (a reload): the note stays being written, nothing journaled; the next load takes it up through both calls', async ($, on) => {
-    const { w, calls, note } = await wrote($, on, ON, [OWN, OWN, REPLY], ['ok', 'cut'])
+    const { w, calls, note } = await wrote($, on, ON, [OWN, OWN, REPLY2], ['ok', 'cut'], {}, undefined, WRITE_USER2)
     await w.clock.advance(60_000)
     expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM])
     expect(note().status).toBe('writing')
@@ -1057,30 +1101,33 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     await w.clock.advance(5)
     await w.clock.settle()
     expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM, SYSTEM, RULE_DRILL_SYSTEM])
-    expect(note()).toMatchObject({ status: 'ready', text: RULE_TEXT })
+    expect(note()).toMatchObject({ status: 'ready', text: MADE2 })
     expect(w.journal()).toHaveLength(1)
   })
 
   test('on: w writing the note again, and a turn\'s end note\'s one try again after a busy server, go through both calls', async ($, on) => {
-    const { w, calls, store, note } = await wrote($, on, ON, [OWN, REPLY])
+    const { w, calls, store, note } = await wrote($, on, ON, [OWN, REPLY2], [], {}, undefined, WRITE_USER2)
     const ui = await pane($)
-    w.texts = [OWN, REPLY.replace(TASK, `${TASK}.`)]
+    // Written again, its own call says it otherwise: the practice code makes is put in that text.
+    const AGAIN = '화면에 사용자 이름을 바로 보이려고 만들었습니다.'
+    const said = OWN.split('\n').find(line => line.startsWith('화면에'))!
+    w.texts = [OWN.replace(said, AGAIN), REPLY2]
     await ui.press({ key: 'write' })
     await w.clock.settle()
     await ui.unmount()
     expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM, SYSTEM, RULE_DRILL_SYSTEM])
-    expect(note().text).toBe(RULE_TEXT.replace(TASK, `${TASK}.`))
+    expect(note().text).toBe(MADE2.replace(said, AGAIN))
     expect(usageOf(store)).toMatchObject({ calls: 4, auto: 1 })
     // A busy server on a turn's end: the try again half a minute on, then its rule practice.
-    w.texts = [OWN, REPLY]
+    w.texts = [OWN, REPLY2]
     w.replies = [BUSY, 'ok', 'ok']
-    await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
+    await turn($, () => $.tool.call({ ...WRITE_USER2, tool_use_id: 'w2' }), 't2')
     await finish(w)
     expect(calls.map(call => call.system)).toHaveLength(5)
     await w.clock.advance(35_000)
     await w.clock.settle()
     expect(calls.map(call => call.system).slice(4)).toEqual([SYSTEM, SYSTEM, RULE_DRILL_SYSTEM])
-    expect(note()).toMatchObject({ status: 'ready', text: RULE_TEXT })
+    expect(note()).toMatchObject({ status: 'ready', text: MADE2 })
     expect(usageOf(store)).toMatchObject({ calls: 7, auto: 2 })
   })
 
@@ -1092,9 +1139,9 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     w.files.set('/proj/.claude/learn-notes.md', TEAM_MD)
     w.harness = ON
     await start($)
-    w.texts = [OWN, REPLY]
+    w.texts = [OWN, REPLY2]
     await turn($, async () => {
-      await $.tool.call(WRITE_USER)
+      await $.tool.call(WRITE_USER2)
       await $.tool.call(PRICING)
     })
     await finish(w)
@@ -1104,18 +1151,18 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     expect(calls[1]!.prompt).toContain('INTERNALONLY')
     w.files.set('/proj/.claude/learn-notes.md', `${TEAM_MD}\n## 빼기\n- src/pricing.js\n`)
     const ui = await pane($)
-    w.texts = [OWN, REPLY]
+    w.texts = [OWN, REPLY2]
     await ui.press({ key: 'write' })
     await w.clock.settle()
     await ui.unmount()
     expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM, SYSTEM, RULE_DRILL_SYSTEM])
     const note = notesIn(store).at(-1)!
-    expect(note).toMatchObject({ status: 'ready', text: RULE_TEXT })
+    expect(note).toMatchObject({ status: 'ready', text: MADE2 })
     // The note as stored still holds the file's code: only screening keeps it out of what is sent.
     expect(JSON.stringify(note.changes)).toContain('INTERNALONLY')
     for (const call of calls.slice(2)) expect(call.prompt).not.toContain('INTERNALONLY')
     expect(calls[3]!.prompt).toContain('pricing.js — 설정으로 빼서 내용을 싣지 않음')
-    expect(calls[3]!.prompt).toBe(ruleDrillPrompt(screenNote(note, ['src/pricing.js']), TEAM.rules, SAID))
+    expect(calls[3]!.prompt).toBe(ruleDrillPrompt(screenNote(note, ['src/pricing.js']), TEAM.rules, SAID, ruleFixLines(screenNote(note, ['src/pricing.js']), TEAM.rules, SAID).cands))
   })
 
   test('on, in a -p run, the rule practice\'s call cut short: no later load of this process takes the note up, so it is saved at once with its own practice, journaled; the next session calls nothing more (2/7 검토)', async ($, on) => {
@@ -1125,9 +1172,9 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     w.files.set('/proj/.claude/learn-notes.md', TEAM_MD)
     w.harness = ON
     await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
-    w.texts = [OWN, REPLY]
+    w.texts = [OWN, REPLY2]
     w.replies = ['ok', 'cut']
-    await turn($, () => $.tool.call(WRITE_USER))
+    await turn($, () => $.tool.call(WRITE_USER2))
     await finish(w)
     expect(calls.map(call => call.system)).toEqual([SYSTEM, RULE_DRILL_SYSTEM])
     expect(notesIn(store).at(-1)).toMatchObject({ status: 'ready', text: OWN })
@@ -1332,13 +1379,13 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     await ui.unmount()
   })
 
-  test('per model (G7): haiku\'s row on, the haiku window marks and asks; started again on haiku\'s shipped row (isRuleDrill off, as any other window reads it), no practice', { options: { model: 'haiku' } }, async ($, on) => {
-    const { w, calls, note } = await wrote($, on, { models: { haiku: ON } }, [PLAIN, '- 할 일: 없음'])
-    expect(calls.map(call => [call.model, call.system])).toEqual([['haiku', SYSTEM], ['haiku', RULE_DRILL_SYSTEM]])
-    expect(note().text).toBe(PLAIN_KEPT)
+  test('per model (G7): haiku\'s row on, the haiku window makes the practice by code in place of the one W2 marked (1.12.0 G6, tier 1, one call); started again on haiku\'s shipped row (isRuleDrill off, as any other window reads it), no practice', { options: { model: 'haiku' } }, async ($, on) => {
+    const { w, calls, note } = await wrote($, on, { models: { haiku: ON } }, [PLAIN])
+    expect(calls.map(call => [call.model, call.system])).toEqual([['haiku', SYSTEM]])
+    expect(note().text).toBe(MADE_TEXT)
     let ui = await pane($)
     expect((await ui.find({ type: 'Button', key: 'note-drill' }))?.props).toMatchObject({ hotkey: 't' })
-    expect(await ui.find({ type: 'Markdown', text: escape(`- 할 일 (팀 규칙): ${PLAIN_TASK}`) })).toBeDefined()
+    expect(await ui.find({ type: 'Markdown', text: escape(`- 할 일 (팀 규칙): ${RULE_FIX_TASK}`) })).toBeDefined()
     await ui.unmount()
     w.harness = { models: { sonnet: ON } }
     await start($)
@@ -1346,12 +1393,12 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     expect(await ui.find({ type: 'Button', key: 'note-drill' })).toBeUndefined()
     expect(await ui.find({ type: 'Markdown', text: /직접 해 보기/ })).toBeUndefined()
     await ui.unmount()
-    expect(note().text).toBe(PLAIN_KEPT)
+    expect(note().text).toBe(MADE_TEXT)
   })
 
   test('a question, r and e under a note with the rule practice send what the switch off sends (D31), the practice left out: the same bytes on and off', async ($, on) => {
-    const { w, calls, note } = await wrote($, on, ON, [OWN, REPLY])
-    expect(note().text).toBe(RULE_TEXT)
+    const { w, calls, note } = await wrote($, on, ON, [OWN])
+    expect(note().text).toBe(MADE_TEXT)
     /** r, a question after it and e under the newest note: their calls. */
     const asked = async () => {
       const from = calls.length
@@ -1373,14 +1420,15 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     expect(onAsks.map(call => call.system)).toEqual([ASK_SYSTEM, ASK_SYSTEM, ASK_SYSTEM])
     for (const call of onAsks) {
       expect(call.prompt).not.toContain('직접 해 보기')
-      expect(call.prompt).not.toContain(TASK)
+      expect(call.prompt).not.toContain(RULE_FIX_TASK)
+      expect(call.prompt).not.toContain(MADE_CHECK)
       expect(call.prompt).toContain(RULE_LINE)
     }
     // The same note again (nothing asked under it yet), asked where the switch is off.
-    w.texts = [OWN, REPLY]
+    w.texts = [OWN]
     await turn($, () => $.tool.call({ ...WRITE_USER, tool_use_id: 'w2' }), 't2')
     await finish(w)
-    expect(note().text).toBe(RULE_TEXT)
+    expect(note().text).toBe(MADE_TEXT)
     w.harness = OFF
     await start($)
     expect(await asked()).toEqual(onAsks)

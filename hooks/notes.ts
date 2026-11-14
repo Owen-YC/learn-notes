@@ -1525,8 +1525,9 @@ const DRILL_ASK = [
 
 /**
  * Whether a note whose "왜 이렇게 바꿨을까" says the change may differ from a team rule (`팀 규칙과 다를 수 있음: …`), in
- * a repository whose team file has rules, has its practice made that rule's by a call of its own (1.10.0 G6:
- * RULE_DRILL_SYSTEM, ruleDrillPrompt, withRuleDrill), its task marked on its label (`- 할 일 (팀 규칙):`, which no
+ * a repository whose team file has rules, has its practice made that rule's by code (1.12.0 G6, ruleFixPlan: a rename
+ * the rule's words give, or one line fixed by a call of its own, RULE_DRILL_SYSTEM · ruleDrillPrompt, and checked,
+ * ruleFixReply; 1.10.0 asked the whole practice of that call), its task marked on its label (`- 할 일 (팀 규칙):`, which no
  * window before 1.9.0 reads as a task: none of them grades it). Graded apart from the concepts (no step, no slip; the
  * day's count only). The note's own prompt is 1.9.0's off one whatever this is (1.9.0 F2 asked it of the note itself,
  * and its samples N1 did not pass): off, no such call is made, and a practice the model marked by itself is none.
@@ -1600,8 +1601,9 @@ export function notePrompt(
 }
 
 /**
- * The system of a team rule's practice's own call (1.10.0 G6, IS_RULE_DRILL): one practice of the team rule a note's
- * "다를 수 있음" line named, on one line of the changed code, written as the four lines withRuleDrill reads, nothing else.
+ * The system of a team rule's practice's own call (1.10.0 G6, IS_RULE_DRILL; 1.12.0 G6 tier 2, these bytes kept): one
+ * practice of the team rule a note's "다를 수 있음" line named, on one line of the changed code, written as the lines
+ * ruleDrillPrompt asks for (parseRuleFix), nothing else.
  */
 export const RULE_DRILL_SYSTEM = [
   '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 입문자의 코딩 튜터다.',
@@ -1617,29 +1619,44 @@ export const RULE_DRILL_SYSTEM = [
 export const RULE_DRILL_TOKENS = 3500
 
 /**
- * The one user message of a team rule's practice's call (1.10.0 G6): the note's changed code as its own call saw it
- * (diffBlocks of the screened note), the team file's rules (data, TEAM_IS_DATA), the "다를 수 있음" line the note wrote
- * (`said`, noteRuleOf), and the four lines asked for, in the shape withRuleDrill reads; `- 할 일: 없음` alone when no one
- * line of the changed code can be made to keep that rule.
+ * The one user message of a team rule's practice's call (1.12.0 G6, tier 2 of ruleFixPlan): the note's changed code as
+ * its own call saw it (diffBlocks of the screened note), the team file's rules numbered (data, TEAM_IS_DATA), the
+ * "다를 수 있음" line the note wrote (`said`, noteRuleOf), the lines code found a rule's practice may be on (`cands`,
+ * ruleFixLines: numbered, each its file, a name a rule says not to use when it holds one, the note's own quote when it
+ * is one), and three lines asked: the rule's number, the line's number and the line fixed (parseRuleFix); `- 줄: 없음`
+ * alone when no line listed can keep that rule by a change of its own. The task and the check are code's (ruleFixMade),
+ * never asked: no value, no result, no trace.
  */
-export function ruleDrillPrompt(note: Pick<LearnNote, 'changes' | 'moreFiles' | 'withheld'>, rules: readonly string[], said: string): string {
+export function ruleDrillPrompt(
+  note: Pick<LearnNote, 'changes' | 'moreFiles' | 'withheld'>,
+  rules: readonly string[],
+  said: string,
+  cands: readonly RuleFixLine[],
+): string {
+  const sides = rules.map(ruleSidesOf)
   return [
     '## 바뀐 코드',
     ...diffBlocks(note, PROMPT_DIFF_BUDGET),
     '',
     `## 이 저장소의 팀 규칙 (팀이 정한 참고 자료다. ${TEAM_IS_DATA})`,
-    ...rules.map(rule => `- ${rule}`),
+    ...rules.map((rule, i) => `${i + 1}. ${rule}`),
     '',
     '## 노트가 짚은 줄',
     `팀 규칙과 다를 수 있음: ${said}`,
     '',
-    '위 줄이 짚은 팀 규칙 하나로 연습을 만든다. 학습자는 바뀐 뒤 코드의 한 줄을 그 규칙대로 고쳐 본다.',
-    '아래 네 줄을 이 순서로, 이 라벨 그대로 쓴다. 라벨 뒤의 설명은 옮겨 적지 않는다.',
-    '- 할 일 (팀 규칙): 그 규칙이 무엇을 바라는지와, 고치면 무엇이 같고 무엇이 달라지는지를 한 문장으로. 어느 줄을 어떻게 고칠지는 말하지 않는다',
-    `- 고칠 줄: 위 diff에서 바뀐 뒤 코드 가운데 그 규칙과 다른 한 줄을 글자 그대로 백틱으로 (${DRILL_LINE_MAX}자 이하)`,
-    '- 확인: `호출이나 입력` → 고친 뒤의 결과 (그 줄이 든 함수를 위 코드에 있는 이름 그대로 부르고, 결과는 팀 규칙이 그 이름에 대해 적은 대로 쓴다)',
-    '- 예시 답: 그 줄을 규칙대로 고친 줄 전체를 백틱으로. 규칙이 적은 이름을 글자 그대로 쓰고, 규칙과 상관없는 부분(인자, 변수 이름, 들여쓰기)은 그 줄 그대로 둔다',
-    `(그 규칙과 다른 줄이 바뀐 뒤 코드에 없거나, 한 줄만 고쳐서는 규칙을 지킬 수 없거나, 그 줄이 ${DRILL_LINE_MAX}자를 넘거나, 그 줄이 규칙이 쓰라는 모듈을 만드는 코드이거나, 테스트·빌드 스크립트처럼 앱 코드가 아니면 "- 할 일: 없음" 한 줄만 쓴다)`,
+    '## 고쳐 볼 수 있는 줄 (위 diff에서 더해진 줄)',
+    ...cands.map((one, i) => {
+      const avoid = one.hint === undefined ? undefined : sides[one.hint]!.avoid.find(name => holdsName(one.text, name))
+      const mark = avoid !== undefined ? ` · 규칙 ${one.hint! + 1}번이 쓰지 말라는 ${tickCode(avoid)}` : one.isAnchored ? ' · 노트가 인용한 줄' : ''
+      return `${i + 1}) ${one.file} · ${tickCode(one.text)}${mark}`
+    }),
+    '',
+    '위 줄이 짚은 팀 규칙 하나로, 학습자가 위 목록의 한 줄을 그 규칙대로 고쳐 보는 연습을 만든다.',
+    '아래 세 줄만 이 순서로, 이 라벨 그대로 쓴다. 라벨 뒤의 설명은 옮겨 적지 않는다.',
+    '- 규칙: 위 팀 규칙의 번호 하나',
+    '- 줄: 위 목록에서 그 규칙과 다른 줄의 번호 하나',
+    '- 예시 답: 그 줄을 규칙대로 고친 줄 전체를 백틱으로. 규칙이 쓰라는 이름을 글자 그대로 쓰고, 규칙이 쓰지 말라는 이름과 원래 방식은 남기지 않으며(원래 호출을 규칙의 이름 안에 넣어 감싸지 않는다), 규칙과 상관없는 부분(인자, 변수 이름)은 그 줄 그대로 둔다',
+    '(목록의 어느 줄도 그 한 줄만 고쳐서는 그 규칙을 지킬 수 없으면 "- 줄: 없음" 한 줄만 쓴다)',
   ].join('\n')
 }
 
@@ -2528,40 +2545,12 @@ function isRuleModuleFile(file: string, ruleNames: readonly string[]): boolean {
 const NOTE_TEXT_MAX = 9000
 
 /**
- * A note's text with its practice made a team rule's (1.10.0 G6), from the reply of that practice's own call
- * (ruleDrillPrompt): its task (in any shape, taskLineOf), line to change, check and example as one practice section
- * (`### 직접 해 보기`, its task in the kept shape, RULE_TASK_HEAD), in place of every practice section the note has, or
- * after the note when it has none. Undefined, the note keeping its own section, when the reply has no task, says
- * there is none, or has no check; when drillOf reads no team rule's practice of the note in it (a line the changed
- * code does not hold, past DRILL_LINE_MAX, a secret masked in it, an example that is the line); when its file is a
- * test or a rule's own module (isRuleModuleFile); when its example brings in none of the names the rules
- * (`ruleNames`) and the note's rule line write as code that its line does not hold (none to check when neither writes
- * one); or when the text would pass NOTE_TEXT_MAX.
+ * A note's text with `section` (a practice section's lines, its heading first) in place of every practice section it
+ * has (each from its heading to the next heading, ruleLabelled's), the lines between them after it, or after the note
+ * when it has none (1.10.0 G6; 1.12.0 G6, ruleFixMade's).
  */
-export function withRuleDrill(
-  text: string,
-  reply: string,
-  changes: readonly Pick<LearnChange, 'file' | 'path' | 'diff'>[],
-  ruleNames: readonly string[],
-): string | undefined {
-  const got = new Map<string, string>()
-  for (const line of clean(reply).split('\n')) {
-    const task = taskLineOf(line)
-    if (task) {
-      if (!got.has('할일')) got.set('할일', task.words)
-      continue
-    }
-    const m = DRILL_LABEL.exec(line)
-    if (!m) continue
-    const label = m[1]!.replace(/\s+/g, '')
-    if (!got.has(label)) got.set(label, labelValue(m))
-  }
-  const task = (got.get('할일') ?? '').trim()
-  const check = (got.get('확인') ?? '').trim()
-  if (task === '' || NONE_SAID.test(task) || check === '' || !got.has('고칠줄') || !got.has('예시답')) return undefined
-  const section = ['### 직접 해 보기', `${RULE_TASK_HEAD} ${task}`, `- 고칠 줄: ${got.get('고칠줄')}`, `- 확인: ${check}`, `- 예시 답: ${got.get('예시답')}`]
+function withPracticeSection(text: string, section: readonly string[]): string {
   const lines = text.split('\n')
-  // Each practice section: from its heading to the next heading (ruleLabelled's).
   const spans: { start: number; end: number }[] = []
   for (let start = 0; start < lines.length; start += 1) {
     if (!DRILL_HEADING.test(lines[start]!.trim())) continue
@@ -2571,20 +2560,582 @@ export function withRuleDrill(
     start = end - 1
   }
   const first = spans[0]
-  let made: string
-  if (first === undefined) made = `${text.replace(/\s+$/, '')}\n\n${section.join('\n')}`
-  else {
-    const isIn = (i: number) => spans.some(span => i >= span.start && i < span.end)
-    const rest = lines.slice(first.start).filter((_, k) => !isIn(first.start + k))
-    made = [...lines.slice(0, first.start), ...section, ...(rest.length > 0 ? ['', ...rest] : [])].join('\n')
+  if (first === undefined) return `${text.replace(/\s+$/, '')}\n\n${section.join('\n')}`
+  const isIn = (i: number) => spans.some(span => i >= span.start && i < span.end)
+  const rest = lines.slice(first.start).filter((_, k) => !isIn(first.start + k))
+  return [...lines.slice(0, first.start), ...section, ...(rest.length > 0 ? ['', ...rest] : [])].join('\n')
+}
+
+/**
+ * The words that say what a team rule asks (1.12.0 G6, ruleSidesOf): not to use (1, `쓰지 말고`, `대신`, `금지`,
+ * `피하고`, `쓰면 안 됩니다`…) or to use (2, `쓴다`, `쓰고`, `남긴다`, `읽는다`…), the first tried first where both
+ * begin alike (`쓰지 말` before `쓰`). Korean only: a rule in other words gives no cue and is read as none (ruleSidesOf).
+ */
+const RULE_CUE = /(대신|말고|말\s*것|마라|마세요|말아|쓰지\s*말|쓰지\s*않|쓰지\s*마|쓰면\s*안|사용하지\s*말|사용하지\s*않|사용하면\s*안|하지\s*말|읽지\s*말|부르지\s*말|만들지\s*말|않는다|않습니다|안\s*됩니다|안\s*된다|피하|지양|삼가|금지)|(쓰고|쓴다|쓰며|쓰세요|써라|써야|씁니다|쓰자|사용한다|사용하고|사용하세요|사용합니다|읽는다|읽고|읽습니다|부른다|부르고|남긴다|남기고|남깁니다|감싼다|감쌉니다)/u
+
+/** A team rule's names by what its words say of them (1.12.0 G6, ruleSidesOf). */
+export type RuleSides = {
+  /** Names the rule says to use, in its order. */
+  use: string[]
+  /** Names it says not to use (a RULE_CUE not-to-use cue next after it). */
+  avoid: string[]
+  /** Names written as Python's (`(파이썬은 `x`)`). */
+  py: string[]
+  /** Use names the rule also writes with a member (`config` before `config.API_URL`): an object, read by `.NAME`. */
+  objects: string[]
+  /** Whether its words gave every name one side (ruleSidesOf); a rule not read gives no names and is never pointed at. */
+  isRead: boolean
+}
+
+/**
+ * A team rule's backticked names (RULE_NAME, 1.10.0's) split by its own words (1.12.0 G6): each time a name is
+ * written, the next cue after it in its sentence (RULE_CUE) says not to use it (avoid), to use it (use), or nothing.
+ * A name inside `(파이썬은 …)` is Python's. A use name the rule writes again with a member (`config.API_URL` after
+ * `config`) is an object, and the member, cue or none, is a use. The rule is read (isRead) only when every name has
+ * one side: none written both as one to avoid and otherwise, and none with no cue, but where the rule writes one
+ * name a language at most (`toDateText` and `to_date_text`: a use). Read so, a rule in other words fails closed: it
+ * gives no names (an English rule, `안 쓴다`, `X`, or `fetch` avoided then allowed in tests is none), so code never
+ * takes the name it forbids for the one it asks for.
+ */
+export function ruleSidesOf(rule: string): RuleSides {
+  const seen = new Map<string, Set<'avoid' | 'use' | 'none'>>()
+  const py: string[] = []
+  for (const m of rule.matchAll(/`([^`]+)`/g)) {
+    const name = m[1]!.trim()
+    if (!RULE_NAME.test(name)) continue
+    const before = rule.slice(0, m.index!)
+    const open = before.lastIndexOf('(')
+    if (open > before.lastIndexOf(')') && /^\(\s*(?:파이썬|python|py)/i.test(before.slice(open)) && !py.includes(name)) py.push(name)
+    // The sentence's next cue after the name decides its side here.
+    const rest = rule.slice(m.index! + m[0].length).split(/(?<=[.。!?])\s+|\n/)[0]!.replace(/`[^`]*`/g, ' ')
+    const cue = RULE_CUE.exec(rest)
+    const side = cue === null ? 'none' : cue[1] !== undefined ? 'avoid' : 'use'
+    seen.set(name, (seen.get(name) ?? new Set()).add(side))
   }
+  const names = [...seen.keys()]
+  const used = names.filter(name => seen.get(name)!.has('use') && !seen.get(name)!.has('avoid'))
+  const isMember = (name: string) => used.some(other => name.startsWith(`${other}.`))
+  const isOnePerLanguage = names.filter(name => py.includes(name)).length <= 1 && names.filter(name => !py.includes(name)).length <= 1
+  const sideOf = (name: string): 'avoid' | 'use' | undefined => {
+    const sides = seen.get(name)!
+    if (sides.has('avoid')) return sides.size === 1 ? 'avoid' : undefined
+    if (sides.has('use') || isMember(name) || isOnePerLanguage) return 'use'
+    return undefined
+  }
+  const none: RuleSides = { use: [], avoid: [], py: [], objects: [], isRead: false }
+  if (names.length === 0 || names.some(name => sideOf(name) === undefined)) return none
+  const use = names.filter(name => sideOf(name) === 'use')
+  const avoid = names.filter(name => sideOf(name) === 'avoid')
+  const objects = use.filter(name => use.some(other => other.startsWith(`${name}.`)))
+  return { use, avoid, py, objects, isRead: true }
+}
+
+/** One name a team rule sends away and the one it asks for in its place, in one language (1.12.0 G6, rulePairsOf). */
+export type RulePair = { rule: number; lang: 'js' | 'py'; away: string; use: string; isObject: boolean }
+
+/**
+ * The renames code may make by itself (1.12.0 G6, tier 1): for each rule and language (Python's names, every other
+ * one JavaScript's), a pair only when the rule says exactly one name not to use and one to use there (a use name's
+ * own member, `config.API_URL`, is no second name). An object's pair renames its `.NAME` reads only; any other its calls.
+ */
+export function rulePairsOf(rules: readonly string[]): RulePair[] {
+  const pairs: RulePair[] = []
+  for (const [rule, text] of rules.entries()) {
+    const sides = ruleSidesOf(text)
+    const plain = (names: readonly string[]) => names.filter(name => !names.some(other => name.startsWith(`${other}.`)))
+    for (const lang of ['js', 'py'] as const) {
+      const isLang = (name: string) => (lang === 'py') === sides.py.includes(name)
+      const away = sides.avoid.filter(isLang)
+      const own = plain(sides.use.filter(isLang))
+      // Python's use name is the rule's other one when it writes none of its own (`log.info` for both).
+      const use = own.length > 0 || lang === 'js' ? own : plain(sides.use.filter(name => !sides.py.includes(name)))
+      if (away.length !== 1 || use.length !== 1) continue
+      pairs.push({ rule, lang, away: away[0]!, use: use[0]!, isObject: sides.objects.includes(use[0]!) })
+    }
+  }
+  return pairs
+}
+
+/**
+ * The rules a note's "다를 수 있음" line points at (1.12.0 G6): those read (RuleSides.isRead) it holds a name of whole
+ * (holdsName), either side; none when it holds none (no practice: the note is the one isRuleWide keeps).
+ */
+export function saidRules(sides: readonly RuleSides[], said: string): number[] {
+  return sides.flatMap((side, i) => ([...side.use, ...side.avoid].some(name => holdsName(said, name)) ? [i] : []))
+}
+
+/**
+ * Code that is not the app's own (1.12.0 G6): build, tooling and CI folders and files, the path split at `/` or `\`.
+ * Never a team rule's practice (a build script reads `process.env` by design).
+ */
+export const NOT_APP_PATH =
+  /(?:^|[\\/])(?:scripts?|build|tools?|bin|ci|\.github|\.circleci)[\\/]|(?:^|[\\/])(?:[^\\/]+\.config\.[^\\/]+|Makefile|Dockerfile|[Gg]runtfile\.[^\\/]+|gulpfile\.[^\\/]+|webpack\.[^\\/]+|vite\.[^\\/]+|rollup\.[^\\/]+|setup\.py|conftest\.py|noxfile\.py|fabfile\.py|manage\.py)$/
+
+/** A line no rule's fix changes (1.12.0 G6): a comment, an import, or one with no name in it (`}`, `)`). */
+const NOT_FIX_LINE = /^(?:\/\/|#|\/\*|\*|<!--|import\b|from\s+\S+\s+import\b|export\s*\{)|\brequire\s*\(|^[^\p{L}_$]*$/u
+
+/**
+ * Whether the new side of a change to `file` makes `name` for other files (1.12.0 G6): exports it (`export function
+ * NAME`, `export const NAME`, `export { NAME }`, `export default NAME`, `module.exports = NAME` or `{ NAME }`,
+ * `exports.NAME =`) or, in Python, which exports every top-level name, defines it there (`def NAME`, `class NAME`,
+ * `NAME =` at no indent, or `__all__` naming it). A file that makes a rule's own name is its module, whatever its
+ * file is called; one that only keeps a local `const config` is app code.
+ */
+export function definesName(diff: string, name: string, file: string): boolean {
+  if (name.includes('.')) return false
+  const n = name.replace(/[$]/g, '\\$&')
+  const end = '(?![\\p{L}\\p{N}_$])'
+  const start = '(?<![\\p{L}\\p{N}_$.])'
+  const made = /\.py$/i.test(file)
+    ? [new RegExp(`^(?:(?:async\\s+)?def|class)\\s+${n}${end}`, 'u'), new RegExp(`^${n}\\s*(?::[^=]*)?=(?!=)`, 'u'), new RegExp(`^__all__\\b.*['"]${n}['"]`, 'u')]
+    : [
+        new RegExp(`^\\s*export\\s+(?:default\\s+)?(?:async\\s+)?(?:function\\s*\\*?|class|const|let|var)\\s+${n}${end}`, 'u'),
+        new RegExp(`^\\s*export\\s*\\{[^}]*${start}${n}${end}`, 'u'),
+        new RegExp(`^\\s*export\\s+default\\s+${n}${end}`, 'u'),
+        new RegExp(`^\\s*module\\.exports\\s*=\\s*(?:${n}${end}|\\{[^}]*${start}${n}${end})`, 'u'),
+        new RegExp(`^\\s*(?:module\\.)?exports\\.${n}\\s*=`, 'u'),
+      ]
+  return parseDiff(diff).some(h => h.lines.some(raw => !raw.startsWith('-') && !raw.startsWith('\\') && made.some(re => re.test(raw.slice(1)))))
+}
+
+/** A line a team rule's practice may be on (1.12.0 G6, ruleFixLines). */
+export type RuleFixLine = {
+  /** The change it is in (an index of the note's changes) and that change's file. */
+  change: number
+  file: string
+  /** The line as the change added it, its indent apart. */
+  text: string
+  /** The pointed rule (an index) one of whose names not to use it holds; undefined for none. */
+  hint?: number
+  /** Whether the note's "다를 수 있음" line quotes code of it (a span of 3 or more characters, not a rule's name alone). */
+  isAnchored: boolean
+  /** The words its file's new side holds (wordsIn): what a fix may take besides the line's own (isOneSpanFix). */
+  known?: ReadonlySet<string>
+}
+
+/** Lines a rule's practice offers at most (ruleFixLines). */
+export const RULE_FIX_LINES_MAX = 12
+
+/**
+ * The lines a team rule's practice may be on (1.12.0 G6), from the note as its own call saw it (screened, `## 빼기` out):
+ * lines the changes added, their indent apart, of 1 to DRILL_LINE_MAX characters, code (NOT_FIX_LINE), no secret
+ * masked (REDACTED), in an app file (not a test or a rule's module, isRuleModuleFile; not NOT_APP_PATH; not a file that
+ * makes a use name for other files, definesName), each line once by lineKey, in the order a practice finds them (drillSpot), and only
+ * where drillSpot finds it. When every rule the note points at (saidRules) says what not to use, only lines holding one
+ * of those names (hint lines). Hint lines first, then the ones the note quotes (anchored), then the rest;
+ * RULE_FIX_LINES_MAX at most.
+ */
+export function ruleFixLines(
+  note: Pick<LearnNote, 'changes'>,
+  rules: readonly string[],
+  said: string,
+): { cands: RuleFixLine[]; sides: RuleSides[]; pointed: number[] } {
+  const sides = rules.map(ruleSidesOf)
+  const pointed = saidRules(sides, said)
+  const names = ruleNamesOf(rules)
+  const uses = sides.flatMap(side => side.use)
+  const isAllAvoid = pointed.every(i => sides[i]!.avoid.length > 0)
+  const quotes = [...said.matchAll(/`([^`]+)`/g)]
+    .map(m => lineKey(m[1]!))
+    .filter(key => [...key].length >= 3 && !names.some(name => lineKey(name) === key))
+  const seen = new Set<string>()
+  const found: RuleFixLine[] = []
+  for (const [c, change] of note.changes.entries()) {
+    const known = wordsIn(parseDiff(change.diff).flatMap(h => h.lines.filter(raw => !raw.startsWith('-') && !raw.startsWith('\\')).map(raw => raw.slice(1))).join('\n'))
+    const isOut = NOT_APP_PATH.test(change.file) || isRuleModuleFile(change.file, names) || uses.some(name => definesName(change.diff, name, change.file))
+    for (const h of parseDiff(change.diff)) {
+      for (const raw of h.lines) {
+        if (!raw.startsWith('+')) continue
+        const text = raw.slice(1).trim()
+        const key = lineKey(text)
+        if (key === '' || seen.has(key)) continue
+        seen.add(key)
+        if (isOut || NOT_FIX_LINE.test(text) || [...text].length > DRILL_LINE_MAX || text.includes(REDACTED)) continue
+        if (drillSpot(text, note.changes)?.change !== c) continue
+        const hint = pointed.find(i => sides[i]!.avoid.some(name => holdsName(text, name)))
+        if (isAllAvoid && hint === undefined) continue
+        found.push({ change: c, file: change.file, text, ...(hint !== undefined ? { hint } : {}), isAnchored: quotes.some(q => key.includes(q)), known })
+      }
+    }
+  }
+  const ordered = [
+    ...found.filter(one => one.hint !== undefined),
+    ...found.filter(one => one.hint === undefined && one.isAnchored),
+    ...found.filter(one => one.hint === undefined && !one.isAnchored),
+  ]
+  return { cands: ordered.slice(0, RULE_FIX_LINES_MAX), sides, pointed }
+}
+
+/** Whether `code` before `at` leaves a string open (', ", `; a backslash escapes): a name there is a string's words. */
+function isInString(code: string, at: number): boolean {
+  let quote: string | undefined
+  for (let i = 0; i < at; i += 1) {
+    const ch = code[i]!
+    if (quote !== undefined) {
+      if (ch === '\\') i += 1
+      else if (ch === quote) quote = undefined
+    } else if (ch === '"' || ch === "'" || ch === '`') quote = ch
+  }
+  return quote !== undefined
+}
+
+/** The top-level arguments of the call whose `(` is at `open`: undefined when it does not close on the line. */
+function argCount(code: string, open: number): number | undefined {
+  let depth = 0
+  let quote: string | undefined
+  let commas = 0
+  let isEmpty = true
+  for (let i = open; i < code.length; i += 1) {
+    const ch = code[i]!
+    if (quote !== undefined) {
+      if (ch === '\\') i += 1
+      else if (ch === quote) quote = undefined
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === '`') quote = ch
+    else if ('([{'.includes(ch)) depth += 1
+    else if (')]}'.includes(ch)) {
+      depth -= 1
+      if (depth === 0) return isEmpty ? 0 : commas + 1
+    } else if (ch === ',' && depth === 1) commas += 1
+    if (i > open && !/\s/.test(ch) && depth >= 1) isEmpty = false
+  }
+  return undefined
+}
+
+/**
+ * `line` with a pair's name swapped for the one the rule asks for, every other byte kept (1.12.0 G6, tier 1); undefined
+ * unless the line is code, holds the name exactly once outside a string, as a call of exactly one argument, not spread (or, for an
+ * object, as a `.NAME` read, not a call), and holds no other name a rule says not to use (`avoids`).
+ */
+export function renamedLine(line: string, pair: RulePair, avoids: readonly string[]): string | undefined {
+  if (NOT_FIX_LINE.test(line.trim())) return undefined
+  const escaped = pair.away.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const hits = [...line.matchAll(new RegExp(`(?<![\\p{L}\\p{N}_$.])${escaped}(?![\\p{L}\\p{N}_$])`, 'gu'))]
+  if (hits.length !== 1) return undefined
+  const at = hits[0]!.index!
+  if (isInString(line, at)) return undefined
+  const after = line.slice(at + pair.away.length)
+  if (pair.isObject) {
+    if (!/^\.[\p{L}_$][\p{L}\p{N}_$]*(?![\p{L}\p{N}_$]|\s*\()/u.test(after)) return undefined
+  } else {
+    const open = /^\s*\(/.exec(after)
+    if (!open) return undefined
+    const count = argCount(line, at + pair.away.length + open[0].length - 1)
+    // One argument, never spread (`...args`, `*rows`): the call the rule asks for takes it as the old one did.
+    if (count !== 1 || /^\s*(?:\.\.\.|\*)/.test(after.slice(open[0].length))) return undefined
+  }
+  const swapped = line.slice(0, at) + pair.use + after
+  if (avoids.some(name => name !== pair.away && holdsName(swapped, name))) return undefined
+  return swapped
+}
+
+/** A rule's practice code can make or take: the line (a candidate), the line fixed, the rule, and the name brought in. */
+export type RuleFix = { rule: number; line: RuleFixLine; example: string; use: string }
+
+/** The language a file's pairs are of: Python's, JavaScript's and TypeScript's; none for any other. */
+function pairLangOf(file: string): 'js' | 'py' | undefined {
+  if (/\.py$/i.test(file)) return 'py'
+  return /\.(?:[cm]?jsx?|[cm]?tsx?)$/i.test(file) ? 'js' : undefined
+}
+
+/**
+ * What a note's team rule practice is made from (1.12.0 G6). Tier 1: the first line (the order changes hold them) a
+ * pointed rule's pair renames by itself (renamedLine), no call. Tier 2: no such line, and one listed is a hint line or
+ * one the note quotes: a call (ruleDrillPrompt) answers which line and how (parseRuleFix · ruleFixFault). Else none,
+ * and why (no rule read that the note's line names, no line, no line hinted or quoted): the note keeps its own
+ * section, as with the switch off.
+ */
+export function ruleFixPlan(
+  note: Pick<LearnNote, 'changes'>,
+  rules: readonly string[],
+  said: string,
+): { fix: RuleFix } | { cands: RuleFixLine[] } | { skip: 'no-rule' | 'no-line' | 'no-hint' } {
+  const { cands, sides, pointed } = ruleFixLines(note, rules, said)
+  if (pointed.length === 0) return { skip: 'no-rule' }
+  if (cands.length === 0) return { skip: 'no-line' }
+  const avoids = sides.flatMap(side => side.avoid)
+  const pairs = rulePairsOf(rules).filter(pair => pointed.includes(pair.rule))
+  const inOrder = [...cands].sort((a, b) => a.change - b.change)
+  for (const cand of inOrder) {
+    const lang = pairLangOf(cand.file)
+    for (const pair of pairs.filter(one => one.lang === lang)) {
+      const example = renamedLine(cand.text, pair, avoids)
+      if (example !== undefined) return { fix: { rule: pair.rule, line: cand, example, use: pair.use } }
+    }
+  }
+  return cands.some(one => one.hint !== undefined || one.isAnchored) ? { cands } : { skip: 'no-hint' }
+}
+
+/** A reply's labelled line (parseRuleFix): 규칙 · 줄 (고칠 줄 too) · 예시 답, bold, on a bullet or not. */
+const FIX_LABEL = /^\s*(?:[-*+•]\s+)?(?:\*\*)?\s*(규칙|고칠\s*줄|줄|예시\s*답)\s*(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*?)\s*(?:\*\*)?\s*$/
+/** A number as a reply writes it: `3`, `3번`, `(3)`, `3)`, `3.`. */
+const FIX_NUMBER = /^[([]?\s*(\d{1,2})\s*[)\].]?\s*(?:번)?\s*$/
+
+/**
+ * A rule practice call's reply read (1.12.0 G6): `규칙: n`, `줄: n`, `예시 답: `…``, each once (one label with two values
+ * is no reply); `none` for `줄: 없음`; undefined for anything else. Two repairs, each from the reply and what code
+ * holds, never a guess: a `줄` quoting a listed line instead of its number is that line when exactly one is it by
+ * lineKey; no `규칙` is the one rule the note points at, or else the one pointed rule whose use name the example brings in.
+ */
+export function parseRuleFix(
+  reply: string,
+  cands: readonly RuleFixLine[],
+  sides: readonly RuleSides[],
+  pointed: readonly number[],
+): { rule: number; line: number; example: string } | 'none' | undefined {
+  const got = new Map<string, string>()
+  for (const raw of clean(reply).split('\n')) {
+    const m = FIX_LABEL.exec(raw)
+    if (!m) continue
+    const label = m[1]!.replace(/\s+/g, '').replace('고칠줄', '줄')
+    if (got.has(label) && got.get(label) !== m[2]) return undefined
+    got.set(label, m[2]!)
+  }
+  if (NONE_SAID.test(got.get('줄') ?? '')) return 'none'
+  const example = quotedCode(got.get('예시답') ?? '')?.trim()
+  if (example === undefined || example === '') return undefined
+  let line = FIX_NUMBER.exec(got.get('줄') ?? '') ? Number(FIX_NUMBER.exec(got.get('줄')!)![1]) - 1 : undefined
+  if (line === undefined) {
+    const quote = quotedCode(got.get('줄') ?? '')
+    const at = quote === undefined ? [] : cands.flatMap((one, i) => (lineKey(one.text) === lineKey(quote) ? [i] : []))
+    if (at.length === 1) line = at[0]
+  }
+  if (line === undefined) return undefined
+  let rule = FIX_NUMBER.exec(got.get('규칙') ?? '') ? Number(FIX_NUMBER.exec(got.get('규칙')!)![1]) - 1 : undefined
+  if (rule === undefined && !got.has('규칙')) {
+    const text = cands[line]?.text ?? ''
+    const bringing = pointed.filter(i => sides[i]!.use.some(name => holdsName(example, name) && !holdsName(text, name)))
+    if (pointed.length === 1) rule = pointed[0]
+    else if (bringing.length === 1) rule = bringing[0]
+  }
+  return rule === undefined ? undefined : { rule, line, example }
+}
+
+/** Bracket depth of each kind and whether a string is left open, strings skipped (', ", `; a backslash escapes). */
+export function balanceOf(code: string): string {
+  const depth: Record<string, number> = { '(': 0, '[': 0, '{': 0 }
+  const opener: Record<string, string> = { ')': '(', ']': '[', '}': '{' }
+  let quote: string | undefined
+  for (let i = 0; i < code.length; i += 1) {
+    const ch = code[i]!
+    if (quote !== undefined) {
+      if (ch === '\\') i += 1
+      else if (ch === quote) quote = undefined
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === '`') quote = ch
+    else if (ch in depth) depth[ch]! += 1
+    else if (ch in opener) depth[opener[ch]!]! -= 1
+  }
+  return `${depth['(']},${depth['[']},${depth['{']},${quote === undefined ? '' : 'open'}`
+}
+
+/** The words of code (`d.toISOString()` gives `d` and `toISOString`), a string's words too, in lower case. */
+export function wordsIn(code: string): Set<string> {
+  return new Set([...code.matchAll(/[\p{L}_$][\p{L}\p{N}_$]*/gu)].map(m => m[0].toLowerCase()))
+}
+
+/** Whether `code` calls a method (`.name(`) outside its strings; with `on`, only one called on one of those words. */
+function callsMethod(code: string, on?: ReadonlySet<string>): boolean {
+  return [...code.matchAll(/([\p{L}_$][\p{L}\p{N}_$]*)?\s*\??\.\s*[\p{L}_$][\p{L}\p{N}_$]*\s*\(/gu)].some(
+    m => !isInString(code, m.index!) && (on === undefined || (m[1] !== undefined && on.has(m[1].toLowerCase()))),
+  )
+}
+
+/** Where the bracket opened at `open` closes (strings skipped), or undefined when not on the line. */
+function closeOf(code: string, open: number): number | undefined {
+  let depth = 0
+  let quote: string | undefined
+  for (let i = open; i < code.length; i += 1) {
+    const ch = code[i]!
+    if (quote !== undefined) {
+      if (ch === '\\') i += 1
+      else if (ch === quote) quote = undefined
+    } else if (ch === '"' || ch === "'" || ch === '`') quote = ch
+    else if ('([{'.includes(ch)) depth += 1
+    else if (')]}'.includes(ch) && --depth === 0) return i
+  }
+  return undefined
+}
+
+/**
+ * The places an example brings in a use name of a rule (1.12.0 G6, isOneSpanFix), each from the name to its end, with
+ * what it takes: a call `U(…)` (to its `)`, or to the line's end when the call goes on past it); for an object
+ * (RuleSides.objects) a read `U.NAME` (NAME taken), `U[…]` or `U.m(…)` (what is in the brackets taken: `m` is the
+ * object's own). Strings skipped.
+ */
+function usePlaces(example: string, side: RuleSides): { start: number; end: number; inner: string }[] {
+  const places: { start: number; end: number; inner: string }[] = []
+  const plain = side.use.filter(name => !side.use.some(other => name.startsWith(`${other}.`)))
+  for (const name of plain) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    for (const m of example.matchAll(new RegExp(`(?<![\\p{L}\\p{N}_$.])${escaped}(?![\\p{L}\\p{N}_$])`, 'gu'))) {
+      const start = m.index!
+      if (isInString(example, start)) continue
+      const at = start + m[0].length
+      const rest = example.slice(at)
+      if (side.objects.includes(name)) {
+        const member = /^\.\s*([\p{L}_$][\p{L}\p{N}_$]*)(\s*\()?/u.exec(rest)
+        const open = member?.[2] !== undefined ? at + member[0].length - 1 : rest.startsWith('[') ? at : undefined
+        if (member && member[2] === undefined) places.push({ start, end: at + member[0].length, inner: member[1]! })
+        else if (open !== undefined) {
+          const close = closeOf(example, open)
+          places.push({ start, end: close === undefined ? example.length : close + 1, inner: example.slice(open + 1, close) })
+        }
+        continue
+      }
+      const call = /^\s*\(/.exec(rest)
+      if (!call) continue
+      const open = at + call[0].length - 1
+      const close = closeOf(example, open)
+      places.push({ start, end: close === undefined ? example.length : close + 1, inner: example.slice(open + 1, close) })
+    }
+  }
+  return places
+}
+
+/**
+ * Whether an example changes its line in one place only, into the name a rule asks for (1.12.0 G6, the h3 guard of
+ * a model's fix): the example is the line's own start, then one use of a use name (`U(…)`; an object's `U.NAME`,
+ * `U[…]`, `U.m(…)`), then the line's own end; what the line had between them is the part that goes. What the new
+ * call takes holds no word that is neither in that part nor in the file (`known`: no value made up, `Date.now()`).
+ * For a rule that names nothing not to use, whose old way code cannot know by name, the new call takes no method's
+ * result (`toDateText(d.toJSON())`), and the line's kept start and end call no method on a word it takes (the old
+ * way kept beside it: `toDateText(d) + d.getDate()`).
+ */
+export function isOneSpanFix(line: string, example: string, side: RuleSides, known: ReadonlySet<string> = new Set()): boolean {
+  return usePlaces(example, side).some(({ start, end, inner }) => {
+    const before = example.slice(0, start)
+    const after = example.slice(end)
+    if (!line.startsWith(before) || !line.endsWith(after) || before.length + after.length >= line.length) return false
+    const gone = wordsIn(line.slice(before.length, line.length - after.length))
+    const taken = wordsIn(inner)
+    if ([...taken].some(word => !gone.has(word) && !known.has(word))) return false
+    return side.avoid.length > 0 || (!callsMethod(inner) && !callsMethod(before, taken) && !callsMethod(after, taken))
+  })
+}
+
+/** Why a reply's practice is not taken (ruleFixFault), a code a pilot logs and the learner never sees. */
+export type RuleFixFault =
+  | 'line-number'
+  | 'rule-number'
+  | 'rule-not-pointed'
+  | 'line-keeps-rule'
+  | 'not-anchored'
+  | 'same-as-line'
+  | 'no-use-name'
+  | 'avoid-left'
+  | 'not-one-span'
+  | 'brackets'
+
+/**
+ * Why a reply's practice is not taken (1.12.0 G6), or the practice, each a check of one part against another or
+ * against the rule's own words, in this order: a line or rule number out of range; a rule the note did not point at; a
+ * line that holds none of the names a rule with such names says not to use (it keeps that rule); for a rule with no
+ * such names, a line the note does not quote (`isAnchorNeeded`); an example that is the line; one that brings in no
+ * name of that rule the line lacks; one that keeps a name it says not to use; one that is not the line changed in one
+ * place into a call of a use name (isOneSpanFix: the old way kept inside or beside it, a new value, another line);
+ * one whose brackets or strings close otherwise than the line's.
+ */
+export function ruleFixFault(
+  got: { rule: number; line: number; example: string },
+  cands: readonly RuleFixLine[],
+  sides: readonly RuleSides[],
+  pointed: readonly number[],
+  isAnchorNeeded = true,
+): { fault: RuleFixFault } | { fix: RuleFix } {
+  const cand = cands[got.line]
+  const side = sides[got.rule]
+  if (cand === undefined || got.line < 0) return { fault: 'line-number' }
+  if (side === undefined || got.rule < 0) return { fault: 'rule-number' }
+  if (!pointed.includes(got.rule)) return { fault: 'rule-not-pointed' }
+  const line = cand.text
+  const { example } = got
+  if (side.avoid.length > 0 && !side.avoid.some(name => holdsName(line, name))) return { fault: 'line-keeps-rule' }
+  if (side.avoid.length === 0 && isAnchorNeeded && !cand.isAnchored) return { fault: 'not-anchored' }
+  if (lineKey(example) === lineKey(line)) return { fault: 'same-as-line' }
+  const brought = side.use.filter(name => holdsName(example, name) && !holdsName(line, name))
+  if (brought.length === 0) return { fault: 'no-use-name' }
+  if (side.avoid.some(name => holdsName(example, name))) return { fault: 'avoid-left' }
+  if (!isOneSpanFix(line, example, side, cand.known)) return { fault: 'not-one-span' }
+  if (balanceOf(line) !== balanceOf(example)) return { fault: 'brackets' }
+  const use = [...brought].sort((a, b) => a.length - b.length)[0]!
+  return { fix: { rule: got.rule, line: cand, example, use } }
+}
+
+/**
+ * A rule practice's task as code writes it (1.12.0 G6): one for every rule, the rule shown by the check, one line of
+ * a pane 56 columns wide after its label. Never changed once shipped: isMadeRuleDrill reads a stored practice as one
+ * code made by these bytes, so a later build that changed them would read every practice stored before as none.
+ */
+export const RULE_FIX_TASK = '바뀐 한 줄을 규칙대로 고쳐 보세요.'
+
+/** A rule practice's check as code writes it (1.12.0 G6): what the fixed line goes through, no value, no call. */
+export function ruleFixCheck(use: string): string {
+  return `고친 줄이 돌 때 ${tickCode(use)} 쪽을 거칩니다`
+}
+
+/** The use name a check code wrote names (ruleFixCheck); undefined for any other check. */
+const RULE_FIX_CHECK = /^고친 줄이 돌 때 `([^`]+)` 쪽을 거칩니다$/
+
+/**
+ * Whether a team rule's practice is one code made (1.12.0 G6): its task RULE_FIX_TASK, its check ruleFixCheck of a name
+ * its example holds and its line does not. While isRuleDrill is on, drillOf and hideDrillAnswer read no other team
+ * rule's practice (one the note's own call marked, or ruleLabelled did): no unchecked practice is graded.
+ */
+export function isMadeRuleDrill(task: string, check: string, line: string, example: string): boolean {
+  const use = RULE_FIX_CHECK.exec(check.trim())?.[1]
+  return task.trim() === RULE_FIX_TASK && use !== undefined && holdsName(example, use) && !holdsName(line, use)
+}
+
+/** Code in backticks, two of them when it holds one (`` a`b ``). */
+function tickCode(code: string): string {
+  return code.includes('`') ? `\`\` ${code} \`\`` : `\`${code}\``
+}
+
+/**
+ * A note's text with a team rule's practice code made or took (1.12.0 G6) in place of its practice sections
+ * (withPracticeSection): the task (RULE_FIX_TASK, kept shape) and the check (ruleFixCheck) code's, the line and the
+ * example the fix's. Undefined, the note keeping its own section, when the text would pass NOTE_TEXT_MAX or when
+ * drillOf does not read it back as that rule's practice on that line of that file (another change holds the line first).
+ */
+export function ruleFixMade(text: string, fix: RuleFix, changes: readonly Pick<LearnChange, 'file' | 'path' | 'diff'>[]): string | undefined {
+  const section = [
+    '### 직접 해 보기',
+    `${RULE_TASK_HEAD} ${RULE_FIX_TASK}`,
+    `- 고칠 줄: ${tickCode(fix.line.text)}`,
+    `- 확인: ${ruleFixCheck(fix.use)}`,
+    `- 예시 답: ${tickCode(fix.example)}`,
+  ]
+  const made = withPracticeSection(text, section)
   if (made.length > NOTE_TEXT_MAX) return undefined
   const drill = drillOf(made, changes, true)
-  if (drill?.rule === undefined || isRuleModuleFile(drill.file, ruleNames)) return undefined
-  // An example that brings in no name the rules or the note's rule line write as code fixes no rule (1.9.0 N1 (b)).
-  const named = [...new Set([...ruleNames, ...ruleNamesOf([drill.rule])])]
-  if (named.length > 0 && !named.some(name => holdsName(drill.example, name) && !holdsName(drill.line, name))) return undefined
+  if (drill?.rule === undefined || drill.file !== fix.line.file || lineKey(drill.line) !== lineKey(fix.line.text)) return undefined
   return made
+}
+
+/**
+ * A tier-2 reply made into a note's text (1.12.0 G6): read (parseRuleFix), checked (ruleFixFault), made (ruleFixMade);
+ * else why not, a code the pilot logs: `parse`, `none`, a fault, or `made` (ruleFixMade took none).
+ */
+export function ruleFixReply(
+  text: string,
+  reply: string,
+  plan: { cands: RuleFixLine[] },
+  rules: readonly string[],
+  said: string,
+  changes: readonly Pick<LearnChange, 'file' | 'path' | 'diff'>[],
+): { text: string; fix: RuleFix } | { why: 'parse' | 'none' | 'made' | RuleFixFault } {
+  const sides = rules.map(ruleSidesOf)
+  const pointed = saidRules(sides, said)
+  const got = parseRuleFix(reply, plan.cands, sides, pointed)
+  if (got === undefined) return { why: 'parse' }
+  if (got === 'none') return { why: 'none' }
+  const checked = ruleFixFault(got, plan.cands, sides, pointed)
+  if ('fault' in checked) return { why: checked.fault }
+  const made = ruleFixMade(text, checked.fix, changes)
+  return made === undefined ? { why: 'made' } : { text: made, fix: checked.fix }
 }
 
 /**
@@ -2666,6 +3217,8 @@ export function drillOf(text: string, changes: readonly Pick<LearnChange, 'file'
   const line = spot.text.slice(indent.length).trimEnd()
   // An example that is the line itself as a practice compares them (sameLine) could never be done.
   if (sameCode(line, example, quotesAlike(change.file))) return undefined
+  // A team rule's practice code did not make is none while the switch is on (1.12.0 G6, isMadeRuleDrill).
+  if (isRule && !isMadeRuleDrill(task, parts.get('확인') ?? '', line, example)) return undefined
   return {
     task,
     check: (parts.get('확인') ?? '').trim(),
@@ -2716,7 +3269,10 @@ export function hideDrillAnswer(text: string, file?: string, how: { isRuleDrill?
   const section = lines.slice(span.start + 1, span.end)
   const { parts, isRule } = drillParts(section)
   const task = parts.get('할일')
-  const isRuleLeft = isRule && (!(how.isRuleDrill ?? IS_RULE_DRILL) || how.isTool === true || ruleOf(lines, span.start) === undefined)
+  // On (1.12.0 G6), a team rule's practice code did not make (isMadeRuleDrill) is left out whole, as one is while off.
+  const isMade = () =>
+    isMadeRuleDrill(parts.get('할일') ?? '', parts.get('확인') ?? '', quotedCode(parts.get('고칠줄') ?? '')?.trim() ?? '', quotedCode(parts.get('예시답') ?? '')?.trim() ?? '')
+  const isRuleLeft = isRule && (!(how.isRuleDrill ?? IS_RULE_DRILL) || how.isTool === true || ruleOf(lines, span.start) === undefined || !isMade())
   if (isRuleLeft || (task !== undefined && (task.trim() === '' || NONE_SAID.test(task.trim())))) {
     return [...lines.slice(0, span.start), ...lines.slice(span.end)].join('\n').replace(/\n+$/, '')
   }

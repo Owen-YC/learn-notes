@@ -349,7 +349,9 @@ import {
   RULE_DRILL_SYSTEM,
   RULE_DRILL_TOKENS,
   sameLine,
-  withRuleDrill,
+  ruleFixMade,
+  ruleFixPlan,
+  ruleFixReply,
 } from './notes'
 
 const PANE = 'learn-notes'
@@ -4161,22 +4163,38 @@ async function writeNote(
     if (!('error' in asked) && build.isRuleWide && ruleNames.length > 0 && text !== keptNoteText(asked.text) && !(await recheckRemap($))) {
       text = keptNoteText(asked.text, build.isRuleWide ? ruleNames : [])
     }
-    // While this model's isRuleDrill is on (1.10.0 G6), a note that says the change may differ from a team rule has
-    // that rule's practice made by a call of its own, in place of its own; one that fails or that withRuleDrill does
-    // not take leaves the note its own, as with the switch off. Never `auto`: the note alone counts toward the day's
-    // limit. Cut short as the note's call may be (a reload, not its time limit), the note stays being written: the
-    // next load takes it up from its note's call.
+    // While this model's isRuleDrill is on (1.12.0 G6), a note that says the change may differ from a team rule has
+    // that rule's practice made by code (ruleFixPlan): a rename the rule's own words give (tier 1, no call), or one line
+    // of those code lists fixed by a call of its own and checked (tier 2, ruleFixReply); the task and the check are
+    // code's. None made, or a call that fails, leaves the note its own, as with the switch off. Never `auto`: the note
+    // alone counts toward the day's limit. Cut short as the note's call may be (a reload, not its time limit), the note
+    // stays being written: the next load takes it up from its note's call. The alias is read again first, and again
+    // once the call is back (recheckRemap): one turned in the session keeps the note as every switch off does, no
+    // practice made, no call, and nothing the call sent back taken.
     const said = 'error' in asked || !build.isRuleDrill || rules === undefined || rules.rules.length === 0 ? undefined : noteRuleOf(text)
-    if (said !== undefined && rules !== undefined) {
-      const drilled = await askModel(
-        $,
-        cfg,
-        'note',
-        { system: RULE_DRILL_SYSTEM, prompt: ruleDrillPrompt(await screened($, cfg, note), rules.rules, said), maxTokens: RULE_DRILL_TOKENS },
-        'manual',
-      )
-      if ('error' in drilled && drilled.fail?.reason === 'aborted' && drilled.fail.isTimeout !== true && isInteractive) return
-      if (!('error' in drilled)) text = withRuleDrill(text, drilled.text, note.changes, ruleNames) ?? text
+    if (said !== undefined && rules !== undefined && !('error' in asked)) {
+      const off = keptNoteText(asked.text)
+      if (!(await recheckRemap($))) text = off
+      else {
+        const shown = await screened($, cfg, note)
+        const plan = ruleFixPlan(shown, rules.rules, said)
+        if ('fix' in plan) text = ruleFixMade(text, plan.fix, note.changes) ?? text
+        else if ('cands' in plan) {
+          const drilled = await askModel(
+            $,
+            cfg,
+            'note',
+            { system: RULE_DRILL_SYSTEM, prompt: ruleDrillPrompt(shown, rules.rules, said, plan.cands), maxTokens: RULE_DRILL_TOKENS },
+            'manual',
+          )
+          if ('error' in drilled && drilled.fail?.reason === 'aborted' && drilled.fail.isTimeout !== true && isInteractive) return
+          if (!(await recheckRemap($))) text = off
+          else if (!('error' in drilled)) {
+            const got = ruleFixReply(text, drilled.text, plan, rules.rules, said, note.changes)
+            if ('text' in got) text = got.text
+          }
+        }
+      }
     }
     const patch: Partial<LearnNote> =
       'error' in asked
