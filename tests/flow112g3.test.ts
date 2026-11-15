@@ -12,7 +12,7 @@ import {
   checkPrompt,
   conceptKey,
 } from '../hooks/notes'
-import { CONCEPT_NOTE, NOW, finish, learn, ownSteps, routeCalls, start, turn, world } from './flowkit'
+import { CONCEPT_NOTE, NOW, PANE_PROPS, finish, learn, ownSteps, pane, routeCalls, start, turn, world } from './flowkit'
 
 const DAY = 86_400_000
 const NAME = 'for...of 반복문'
@@ -202,5 +202,75 @@ describe('1.12.0 G3: the quiz (K · L · A, scenes, the session\'s missed list)'
     w.answer = [WHY(1), WHY(2), WHY(3)].join('\n')
     await learn($, '퀴즈 새로')
     expect(calls.filter(call => call.system === QUIZ_SYSTEM).at(-1)!.prompt).toContain('   칸: 처음 보는 코드 (js로)\n')
+  })
+
+  /** A reply's slot `n` for code never seen the plugin reads (its code not the learner's); it prints 10. */
+  const GOOD_K = (n: number) => [`K${n}:`, '```js', 'const scores = [5, 1, 4]', 'let best = 0', 'for (const s of scores) best += s', 'console.log(best)', '```', `L${n}: for (const s of scores) best += s`, `A${n}:`, '10'].join('\n')
+  /** The 칸 line of `name`'s pick in `prompt` (the line after its numbered line). */
+  const rungOf = (prompt: string, name: string) => prompt.split(`. ${name} — `)[1]?.split('\n')[1]
+  const lastQuiz = (calls: { system?: string; prompt?: string }[]) => calls.filter(call => call.system === QUIZ_SYSTEM).at(-1)!.prompt ?? ''
+
+  test('(1.12.0 G3 retry review) concepts code never seen could not check in two quizzes in a row: the next quiz asks neither in code never seen (quizRun.newMissed adds to the list, never replaces it)', { options: { model: 'haiku' } }, async ($, on) => {
+    const second = '배열 합'
+    const { w, store, calls } = await worldOf($, on, [NAME, second], ['채움 하나'])
+    // The first quiz: both in code never seen; the first refused (a print in a loop), the second read.
+    w.answer = [BAD_K(1), GOOD_K(2), WHY(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(rungOf(lastQuiz(calls), NAME)).toBe('   칸: 처음 보는 코드 (js로)')
+    expect(rungOf(lastQuiz(calls), second)).toBe('   칸: 처음 보는 코드 (js로)')
+    expect(itemsOf(store).map(one => one.name)).toEqual([second, '채움 하나'])
+    // The second: the first in its own code (code changed is not asked beside code never seen), the second in code never
+    // seen again, the call back empty (as a refusal arrives).
+    await w.clock.advance(60_000)
+    w.replies.push('empty')
+    expect((await learn($, '퀴즈 새로')).text).toContain('퀴즈를 내지 못했습니다')
+    expect(rungOf(lastQuiz(calls), NAME)).toBe('   칸: 내 코드')
+    expect(rungOf(lastQuiz(calls), second)).toBe('   칸: 처음 보는 코드 (js로)')
+    // The third: neither in code never seen (a list the second quiz replaced would ask the first in it again); both in
+    // their own code, as haiku's shipped row asks it (code changed, 1.12.0 G2).
+    await w.clock.advance(60_000)
+    w.answer = [WHY(1), WHY(2), WHY(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(lastQuiz(calls)).not.toContain('처음 보는 코드')
+    expect(rungOf(lastQuiz(calls), NAME)).toBe('   칸: 비슷한 코드')
+    expect(rungOf(lastQuiz(calls), second)).toBe('   칸: 비슷한 코드')
+  })
+
+  test('(1.12.0 G3 retry review) a question in code never seen the plugin could not check, from the pane: the next quiz the pane makes asks it in its own code (quizRun.newMissed kept through the pane\'s quiz)', { options: { model: 'haiku' } }, async ($, on) => {
+    const { w, store, calls } = await worldOf($, on, [NAME], ['채움 하나', '채움 둘'])
+    w.answer = [BAD_K(1), WHY(2), WHY(3)].join('\n')
+    const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
+    await ui.press({ key: 'view-quiz' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(lastQuiz(calls)).toContain('   칸: 처음 보는 코드 (js로)\n')
+    expect(itemsOf(store).map(one => one.name)).not.toContain(NAME)
+    await w.clock.advance(60_000)
+    w.answer = [WHY(1), WHY(2), WHY(3)].join('\n')
+    const count = calls.length
+    // Its questions not all graded: the first press arms a new quiz, the second makes it.
+    await ui.press({ key: 'quiz-new' })
+    await ui.press({ key: 'quiz-new' })
+    await w.clock.settle()
+    expect(calls).toHaveLength(count + 1)
+    expect(lastQuiz(calls)).not.toContain('처음 보는 코드')
+    // haiku's shipped row: its own code, a file written whole, asked as code changed (1.12.0 G2).
+    expect(lastQuiz(calls)).toContain('   칸: 비슷한 코드\n   학습자가 만든 코드 (a.js):')
+    await ui.unmount()
+  })
+
+  test('(1.12.0 G3 retry review) a concept code never seen could not check stays out of code never seen after a reload (quizRun.newMissed kept by session start)', { options: { model: 'haiku' } }, async ($, on) => {
+    const { w, store, calls } = await worldOf($, on, [NAME], ['채움 하나', '채움 둘'])
+    w.answer = [BAD_K(1), WHY(2), WHY(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(lastQuiz(calls)).toContain('   칸: 처음 보는 코드 (js로)\n')
+    expect(itemsOf(store).map(one => one.name)).not.toContain(NAME)
+    await start($)
+    await w.clock.settle()
+    await w.clock.advance(60_000)
+    w.answer = [WHY(1), WHY(2), WHY(3)].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(lastQuiz(calls)).not.toContain('처음 보는 코드')
+    expect(lastQuiz(calls)).toContain('   칸: 비슷한 코드\n   학습자가 만든 코드 (a.js):')
   })
 })

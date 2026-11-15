@@ -550,6 +550,32 @@ describe('1.8.0: the question ladder, 비슷한 코드 and 풀이 보고 풀기 
     expect(w.models.at(-1)).not.toContain('비슷한 코드')
   })
 
+  test('(1.12.0 G3 retry review) concepts code changed could not check in two quizzes in a row: the next quiz asks both in their own code (quizRun.changedMissed adds to the list, never replaces it)', async ($, on) => {
+    const [first, second] = ['for...of 반복문', '배열 합']
+    /** The 칸 line of `name`'s pick in `prompt` (the line after its numbered line). */
+    const rungOf = (prompt: string, name: string) => prompt.split(`. ${name} — `)[1]?.split('\n')[1]
+    const { w, store } = await changedWorld($, on, [first, second], ['채움 하나'])
+    // The first quiz: both in code changed; the first refused (N the same as O), the second read.
+    w.answer = [REFUSED_CON(1), CON(2), 'T3: 왜', 'Q3: 문제 3', 'A3: 답 3'].join('\n')
+    await learn($, '퀴즈 새로')
+    expect(rungOf(w.models.at(-1)!, first)).toBe('   칸: 비슷한 코드')
+    expect(rungOf(w.models.at(-1)!, second)).toBe('   칸: 비슷한 코드')
+    expect(quizItems(store).map(one => one.name)).toEqual([second, '채움 하나'])
+    // The second: the first in its own code, the second in code changed again, the call back empty (as a refusal arrives).
+    await w.clock.advance(60_000)
+    w.replies.push('empty')
+    expect((await learn($, '퀴즈 새로')).text).toContain('퀴즈를 내지 못했습니다')
+    expect(rungOf(w.models.at(-1)!, first)).toBe('   칸: 내 코드')
+    expect(rungOf(w.models.at(-1)!, second)).toBe('   칸: 비슷한 코드')
+    // The third: both in their own code (a list the second quiz replaced would ask the first in code changed again).
+    await w.clock.advance(60_000)
+    w.answer = MINE_REPLY
+    await learn($, '퀴즈 새로')
+    expect(rungOf(w.models.at(-1)!, first)).toBe('   칸: 내 코드')
+    expect(rungOf(w.models.at(-1)!, second)).toBe('   칸: 내 코드')
+    expect(w.models.at(-1)).not.toContain('비슷한 코드')
+  })
+
   test('(1.12.0 review) the pane\'s quiz failing on a throw keeps the concepts code changed could not check (startQuiz\'s catch)', async ($, on) => {
     const name = 'for...of 반복문'
     // The notes' store key unreadable once, when armed: the quiz made next throws (makeQuiz reads it unguarded).
