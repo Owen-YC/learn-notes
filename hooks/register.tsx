@@ -364,6 +364,13 @@ import {
   ruleFixMade,
   ruleFixPlan,
   ruleFixReply,
+  capKnownNames,
+  pairLangOf,
+  ruleAvoidsOf,
+  ruleCapText,
+  ruleFixUse,
+  ruleGradeCap,
+  RULE_CAP_NUDGE,
 } from './notes'
 
 const PANE = 'learn-notes'
@@ -2791,11 +2798,11 @@ const IMPORTS_READ_MAX = 1_000_000
  * nothing of it is shown, kept or sent. None for one gone, not a file, past IMPORTS_READ_MAX, not text, or kept from
  * Read by the permission rules (where its link leads too).
  */
-async function importsText($: EngineInterface, path: string | undefined): Promise<string | undefined> {
+async function importsText($: EngineInterface, path: string | undefined, max = IMPORTS_READ_MAX): Promise<string | undefined> {
   if (typeof path !== 'string' || path === '') return undefined
   try {
     const stat = await $.fs.stat(path, { resolve: true })
-    if (stat.kind !== 'file' || stat.size > IMPORTS_READ_MAX || stat.realPath === undefined) return undefined
+    if (stat.kind !== 'file' || stat.size > max || stat.realPath === undefined) return undefined
     if ((await isReadDenied($, path)) || (stat.realPath !== path && (await isReadDenied($, stat.realPath)))) return undefined
     const text = String(await $.fs.read(path))
     return text.includes('\u0000') ? undefined : text
@@ -2803,6 +2810,12 @@ async function importsText($: EngineInterface, path: string | undefined): Promis
     return undefined
   }
 }
+
+/**
+ * Bytes past which a team-rule practice's file is not read for the names its grade cap knows (1.13.0 G6, gradeDrill):
+ * the note's diff alone then. Read as importsText reads (the permission rules kept), nothing of it shown, kept or sent.
+ */
+const CAP_FILE_MAX = 200_000
 
 /** Concepts a review quiz looks through: twice the questions it asks, so it can take them from different notes. */
 const QUIZ_CANDIDATES = 6
@@ -3931,17 +3944,30 @@ async function gradeDrill($: EngineInterface, cfg: Config, note: LearnNote, dril
   const prompt = checkPrompt({ name, question: drillQuestion(sent), answer: sent.example, kind: 'modify' }, `${sent.indent}${mine}`, cfg.level, first, undefined, extra)
   const asked = await askModel($, cfg, 'grade', { system: CHECK_SYSTEM, prompt, maxTokens: 480, timeoutMs: 60_000 })
   if ('error' in asked) return { error: `확인하지 못했습니다: ${asked.error}` }
-  const graded = parseCheck(asked.text, sent.rule !== undefined ? { rule: true } : {})
-  if (!graded) {
+  const parsed = parseCheck(asked.text, sent.rule !== undefined ? { rule: true } : {})
+  if (!parsed) {
     void fault($, 'grade', 'unreadable', '직접 해 보기의 확인 결과를 읽지 못했습니다')
     return { error: '확인 결과를 읽지 못했습니다. 다시 Enter를 눌러 보세요.' }
   }
   // The note written again meanwhile (w): its practice is another, and this line's grade is not kept on it.
   const latest = (await read($, notes)).find(one => one.id === note.id)
   if (!latest || latest.text !== note.text || isDrillOver(latest.drill)) return { error: '그사이 노트를 다시 써서 이 줄은 확인하지 않았습니다' }
+  // A made team-rule practice's right holds only where code sees nothing against it (1.13.0 G6, ruleGradeCap): the
+  // rule's name missing, the old way left, a name the note's code never shows, brackets closed otherwise, or another
+  // place of the example changed is partly right, said by code, with one try again. Never raised, never on another line.
+  // A try again is held to it too (its first try's code line goes with it as the feedback it got): a line code sees
+  // against is never right on either try.
+  const use = build.isRuleDrill && sent.rule !== undefined && parsed.verdict === 'right' ? ruleFixUse(sent.check) : undefined
+  const file = use === undefined ? undefined : await importsText($, sent.path, CAP_FILE_MAX)
+  // What the rule asking for that name says not to use, from the team file screened read just now (teamOf keeps it).
+  const team = use === undefined ? undefined : await teamOf($, note.root)
+  const avoids = use === undefined || team === undefined ? [] : ruleAvoidsOf(team.rules, use)
+  const cap = use === undefined ? undefined : ruleGradeCap(sent, use, mine, capKnownNames(shown.changes.map(change => change.diff), file), pairLangOf(sent.file), file, avoids)
+  const graded = cap === undefined ? parsed : { ...parsed, verdict: 'partial' as const, feedback: ruleCapText(cap) }
   // The slip this line showed, asked for on its first grade only (after "모르겠어요" too), as a quiz's; a team rule's has none.
   const slip = !isRule && (first === undefined || isBlankAnswer(first.mine)) && graded.slip !== undefined ? { slip: graded.slip, slipType: graded.slipType ?? ('other' as const) } : {}
-  const nudge = first === undefined && graded.verdict !== 'right' ? keptNudge(graded.nudge, sent.example) : undefined
+  const capNudge = cap === undefined ? undefined : cap.why === 'rule-use' || cap.why === 'rule-old' ? drillRuleHint(sent.rule!) : RULE_CAP_NUDGE
+  const nudge = first === undefined && graded.verdict !== 'right' ? (capNudge ?? keptNudge(graded.nudge, sent.example)) : undefined
   if (nudge !== undefined && graded.verdict !== 'right') {
     return keepDrillTry($, note.id, { mine: line, verdict: graded.verdict, feedback: graded.feedback, nudge, at: now, ...slip })
   }

@@ -29,6 +29,7 @@ import {
 } from '../hooks/notes'
 import { RULE_DRILL_IN } from './fixtures/ruledrill110'
 import { RULE_DRILL_PROMPT_112 } from './fixtures/ruledrill112'
+import { RULE_DRILL_IN_113, RULE_DRILL_PROMPT_113 } from './fixtures/ruledrill113'
 import { finish, start, turn, world } from './flowkit'
 
 const TEAM_MD = [
@@ -187,7 +188,8 @@ describe('1.12.0: 팀 규칙 연습 (G6): code makes the task, the check and, wh
     expect(cands.map(one => one.text)).toEqual(many.slice(2, 2 + RULE_FIX_LINES_MAX))
     const date = { changes: [change('src/a.js', ['const s = toDateText(a) + b.toJSON()'])] }
     const saidName = '날짜는 `toDateText`로 보이라는 규칙과 달리 직접 만듭니다'
-    expect(ruleFixLines(date, RULES, saidName).cands.map(one => one.isAnchored)).toEqual([false])
+    // A rule with no avoid names lists only quoted lines (1.13.0 G6): this one is left out, counted, still no-hint.
+    expect(ruleFixLines(date, RULES, saidName)).toMatchObject({ cands: [], unquoted: 1 })
     expect(ruleFixPlan(date, RULES, saidName)).toEqual({ skip: 'no-hint' })
   })
 
@@ -237,14 +239,18 @@ describe('1.12.0: 팀 규칙 연습 (G6): code makes the task, the check and, wh
     for (const file of ['src/app.js', 'app/orders.py', 'src/scriptsList.js']) expect(NOT_APP_PATH.test(file)).toBe(false)
   })
 
-  test('a rule with no avoid names lists every short added line, hint and quoted lines first; tier 2 only when one is quoted', () => {
+  test('a rule with no avoid names lists only the lines the note quotes, the only ones ruleFixFault takes for it (1.13.0 G6); tier 2 only when one is quoted', () => {
     const note = { changes: [change('src/badge.js', ['const n = items.length', "const s = d.toISOString().slice(0, 10)", 'return { n, s }'])] }
     const said = '날짜는 `toDateText`로 보이라는 규칙과 달리 직접 만듭니다'
-    expect(ruleFixLines(note, RULES, said).cands.map(one => one.isAnchored)).toEqual([false, false, false])
+    expect(ruleFixLines(note, RULES, said)).toMatchObject({ cands: [], unquoted: 3 })
     expect(ruleFixPlan(note, RULES, said)).toEqual({ skip: 'no-hint' })
     const quoted = '날짜는 `toDateText`로 보이라는 규칙과 달리 `d.toISOString().slice(0, 10)`로 직접 만듭니다'
     const plan = ruleFixPlan(note, RULES, quoted)
-    expect('cands' in plan && plan.cands.map(one => one.text)).toEqual(["const s = d.toISOString().slice(0, 10)", 'const n = items.length', 'return { n, s }'])
+    expect('cands' in plan && plan.cands.map(one => one.text)).toEqual(["const s = d.toISOString().slice(0, 10)"])
+    // A note pointing at a rule with avoid names too lists as 1.12.0 did: hint, quoted, then the rest.
+    const both = '기록은 `log.info`로 남기고 날짜는 `toDateText`로 보이라는 규칙과 달리 `d.toISOString().slice(0, 10)`로 씁니다'
+    expect(ruleFixLines(note, RULES, both)).toMatchObject({ unquoted: 0 })
+    expect(ruleFixLines(note, RULES, both).cands.map(one => one.text)).toEqual(["const s = d.toISOString().slice(0, 10)", 'const n = items.length', 'return { n, s }'])
   })
 
   test('ruleFixPlan: tier 1 for a one-name rename, tier 2 for a hint line it cannot rename, none for no line', () => {
@@ -262,8 +268,44 @@ describe('1.12.0: 팀 규칙 연습 (G6): code makes the task, the check and, wh
     expect(parseRuleFix(`- 줄: \`${cands[0]!.text}\`\n- 예시 답: \`${ex}\``, cands, SIDES, [0])).toEqual({ rule: 0, line: 0, example: ex })
     expect(parseRuleFix(`- 줄: 1\n- 예시 답: \`${ex}\``, cands, SIDES, [0, 1])).toEqual({ rule: 0, line: 0, example: ex })
     expect(parseRuleFix('- 줄: 없음', cands, SIDES, [0])).toBe('none')
-    expect(parseRuleFix(`- 규칙: 1\n- 규칙: 2\n- 줄: 1\n- 예시 답: \`${ex}\``, cands, SIDES, [0])).toBeUndefined()
     expect(parseRuleFix('- 규칙: 1\n- 줄: 1', cands, SIDES, [0])).toBeUndefined()
+  })
+
+  test('parseRuleFix: a reply that corrects itself is its last whole answer (1.13.0 G6); a last answer short of a part is no reply', () => {
+    const cands = [{ change: 0, file: 'src/a.js', text: "await fetch(u, { method: 'POST' })", hint: 0, isAnchored: false }]
+    const ex = "await apiRequest(u, { method: 'POST' })"
+    const wrong = "await apiRequest(url, { method: 'POST' })"
+    // As a model writes it: an answer, a sentence of its own, the answer again.
+    const again = `- 규칙: 1\n- 줄: 1\n- 예시 답: \`${wrong}\`\nWait, \`url\` is not on that line.\n- 규칙: 1\n- 줄: 1\n- 예시 답: \`${ex}\``
+    expect(parseRuleFix(again, cands, SIDES, [0])).toEqual({ rule: 0, line: 0, example: ex })
+    // A label written again with the same value is the same answer, as 1.12.0 read it.
+    expect(parseRuleFix(`- 규칙: 1\n- 규칙: 1\n- 줄: 1\n- 예시 답: \`${ex}\``, cands, SIDES, [0])).toEqual({ rule: 0, line: 0, example: ex })
+    // A second rule number starts the second answer: its own whole answer, the rule 2 (which ruleFixFault then refuses).
+    expect(parseRuleFix(`- 규칙: 1\n- 규칙: 2\n- 줄: 1\n- 예시 답: \`${ex}\``, cands, SIDES, [0])).toEqual({ rule: 1, line: 0, example: ex })
+    // The last answer short of its example, or of the rule the first one gave: none.
+    expect(parseRuleFix(`- 규칙: 1\n- 줄: 1\n- 예시 답: \`${wrong}\`\n- 줄: 2`, cands, SIDES, [0])).toBeUndefined()
+    // A trailing restatement that agrees with the answer is that answer, as 1.12.0 read it.
+    expect(parseRuleFix(`- 규칙: 1\n- 줄: 1\n- 예시 답: \`${ex}\`\n- 줄: 1`, cands, SIDES, [0])).toEqual({ rule: 0, line: 0, example: ex })
+    expect(parseRuleFix(`- 규칙: 1\n- 줄: 1\n- 예시 답: \`${wrong}\`\n- 예시 답: \`${ex}\``, cands, SIDES, [0])).toBeUndefined()
+    // The last answer saying there is none: none.
+    expect(parseRuleFix(`- 규칙: 1\n- 줄: 1\n- 예시 답: \`${wrong}\`\n- 규칙: 1\n- 줄: 없음`, cands, SIDES, [0])).toBe('none')
+  })
+
+  test('a one-line destructuring declaration reads the rule\'s object whole (1.13.0 G6): tier 1 swaps it, a tier-2 reply that does is taken; any other whole use is not', () => {
+    const pair = rulePairsOf(RULES).find(one => one.rule === 3 && one.lang === 'js')!
+    expect(renamedLine('const { SUPPORT_EMAIL } = process.env;', pair, AVOIDS)).toBe('const { SUPPORT_EMAIL } = config;')
+    expect(renamedLine('let { A, B = 2 } = process.env', pair, AVOIDS)).toBe('let { A, B = 2 } = config')
+    expect(renamedLine('var { PORT: port } = process.env; // 포트', pair, AVOIDS)).toBe('var { PORT: port } = config; // 포트')
+    for (const line of ['const env = process.env;', 'const { a: { b } } = process.env;', 'const { A } = process.env || {};', 'start({ env: process.env })', 'log(process.env)', 'Object.keys(process.env)', 'process.env = {}', 'delete process.env', '({ A } = process.env);'])
+      expect([line, renamedLine(line, pair, AVOIDS)]).toEqual([line, undefined])
+    const py = rulePairsOf(RULES).find(one => one.rule === 3 && one.lang === 'py')!
+    expect(renamedLine('{ A } = os.environ', py, AVOIDS)).toBeUndefined()
+    const said = '설정 값은 `config`에서 읽으라는 규칙과 달리 `process.env`를 바로 읽습니다'
+    expect(ruleFixPlan({ changes: [change('src/mail.js', ['const { SUPPORT_EMAIL } = process.env;'])] }, RULES, said)).toMatchObject({ fix: { rule: 3, example: 'const { SUPPORT_EMAIL } = config;', use: 'config' } })
+    const cands = [{ change: 0, file: 'src/mail.js', text: 'const { SUPPORT_EMAIL, SUPPORT_NAME } = process.env;', hint: 3, isAnchored: true }]
+    expect(ruleFixFault({ rule: 3, line: 0, example: 'const { SUPPORT_EMAIL, SUPPORT_NAME } = config;' }, cands, SIDES, [3])).toMatchObject({ fix: { use: 'config' } })
+    const notWhole = [{ change: 0, file: 'src/mail.js', text: 'send(process.env);', hint: 3, isAnchored: true }]
+    expect(ruleFixFault({ rule: 3, line: 0, example: 'send(config);' }, notWhole, SIDES, [3])).toEqual({ fault: 'not-one-span' })
   })
 
   test('ruleFixFault: each check names its fault; a fix that passes them all is taken with its shortest use name', () => {
@@ -315,6 +357,16 @@ describe('1.12.0: 팀 규칙 연습 (G6): code makes the task, the check and, wh
     const { cands } = ruleFixLines(shown, team.rules, RULE_DRILL_IN.said)
     expect(ruleDrillPrompt(shown, team.rules, RULE_DRILL_IN.said, cands)).toBe(RULE_DRILL_PROMPT_112)
     expect(RULE_DRILL_SYSTEM).toContain('연습 하나를 만든다')
+  })
+
+  test('ruleDrillPrompt for a rule with no avoid name (1.13.0 G6): only the line the note quotes is listed, marked as quoted; the rest of the prompt 1.12.0\'s (tests/fixtures/ruledrill113.ts)', () => {
+    const team = parseTeamFile(RULE_DRILL_IN_113.teamMd)
+    const shown = screenNote(RULE_DRILL_IN_113.note)
+    const plan = ruleFixPlan(shown, team.rules, RULE_DRILL_IN_113.said)
+    if (!('cands' in plan)) throw new Error('no tier 2')
+    expect(plan.cands.map(one => [one.text, one.isAnchored])).toEqual([['const s = d.toISOString().slice(0, 10)', true]])
+    expect(ruleFixLines(shown, team.rules, RULE_DRILL_IN_113.said)).toMatchObject({ unquoted: 3 })
+    expect(ruleDrillPrompt(shown, team.rules, RULE_DRILL_IN_113.said, plan.cands)).toBe(RULE_DRILL_PROMPT_113)
   })
 
   test('the made section: drillOf and hideDrillAnswer read it on, never off; a team rule\'s practice code did not make is none on, as off', () => {

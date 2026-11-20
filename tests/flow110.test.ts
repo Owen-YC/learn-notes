@@ -66,6 +66,7 @@ import {
   traceCallQuestion,
   withKnownMarks,
   type Switches,
+  RULE_CAP_NUDGE,
 } from '../hooks/notes'
 import { COEXIST_CASES, COEXIST_MIXED, type CoexistStore } from './fixtures/coexist19'
 import { ROUTE19_CALLS, ROUTE19_DIAG } from './fixtures/route19'
@@ -1067,6 +1068,92 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     await ui.unmount()
     expect(w.models).toHaveLength(2)
     expect(w.journal().at(-1)!.text).toContain(`- 예시 답: \`${EXAMPLE2}\``)
+  })
+
+  test('on, the grade cap (1.13.0 G6): a made practice\'s line the model grades right with a name the note\'s code never shows is partly right, said by code, with one try again; the grading request is the one sent before; a line code sees nothing against stays right', async ($, on) => {
+    const { w, note } = await wrote($, on, ON, [OWN, REPLY2], [], {}, undefined, WRITE_USER2)
+    const ui = await pane($)
+    await ui.press({ key: 'note-drill' })
+    const id = note().id
+    w.answer = '규칙: 지킴\n판정: 맞음\n피드백: apiRequest로 잘 바꿨습니다.'
+    await ui.input({ key: `drill-${id}`, text: 'const res = await apiRequest(url, options)' })
+    const grade = w.models.at(-1)!
+    expect(grade).toContain('## 학습자의 답\nconst res = await apiRequest(url, options)\n')
+    expect(w.budgets.at(-1)).toBe(480)
+    expect(note().drill?.firstTry).toMatchObject({ mine: 'const res = await apiRequest(url, options)', verdict: 'partial', feedback: '이 노트의 코드에 없는 이름입니다: `options`', nudge: RULE_CAP_NUDGE })
+    expect(note().drill?.verdict).toBeUndefined()
+    // The try again: right by the model and by code, after a first try short of it (secondVerdict, isRetried).
+    w.answer = '규칙: 지킴\n판정: 맞음\n피드백: 좋습니다.'
+    await ui.input({ key: `drill-${id}-again`, text: 'const res = await apiRequest(url, { ...opts })' })
+    // The try again's request carries the first try as the learner saw it: code's grade and line (pinned, ON only).
+    expect(w.models.at(-1)!).toContain(
+      `\n## 학습자의 첫 답과 받은 되묻기\n첫 답: const res = await apiRequest(url, options)\n첫 판정: 거의\n받은 피드백: 이 노트의 코드에 없는 이름입니다: \`options\`\n받은 되묻기: ${RULE_CAP_NUDGE}\n`,
+    )
+    expect(w.budgets.at(-1)).toBe(480)
+    expect(note().drill).toMatchObject({ verdict: 'right', isRetried: true, feedback: '좋습니다.' })
+    await ui.unmount()
+  })
+
+  test('on, a try again code sees against again is held too: the same line again is not sent (unchanged), another with the same unknown name ends partly right (secondVerdict), never right', async ($, on) => {
+    const { w, note } = await wrote($, on, ON, [OWN, REPLY2], [], {}, undefined, WRITE_USER2)
+    const ui = await pane($)
+    await ui.press({ key: 'note-drill' })
+    const id = note().id
+    w.answer = '규칙: 지킴\n판정: 맞음\n피드백: 잘 바꿨습니다.'
+    await ui.input({ key: `drill-${id}`, text: 'const res = await apiRequest(url, options)' })
+    expect(note().drill?.firstTry).toMatchObject({ verdict: 'partial', feedback: '이 노트의 코드에 없는 이름입니다: `options`' })
+    const sent = w.models.length
+    await ui.input({ key: `drill-${id}-again`, text: 'const res = await apiRequest(url, options)' })
+    expect(w.models).toHaveLength(sent)
+    expect(note().drill?.verdict).toBeUndefined()
+    await ui.input({ key: `drill-${id}-again`, text: 'const res = await apiRequest(url, { ...options })' })
+    expect(w.models).toHaveLength(sent + 1)
+    expect(note().drill).toMatchObject({ verdict: 'partial', feedback: '이 노트의 코드에 없는 이름입니다: `options`' })
+    expect(w.budgets.slice(-2)).toEqual([480, 480])
+    await ui.unmount()
+  })
+
+  test('on, a made practice\'s first-try grade is sent as 1.12.0 sent it, to the byte (tests/fixtures/rule19.ts, 1.13.0 G6): the cap reads the reply after, never the request; a 틀림 is kept as the model gave it', async ($, on) => {
+    const { w, calls, note } = await wrote($, on, ON, [OWN])
+    expect(note().text).toBe(MADE_TEXT)
+    const ui = await pane($)
+    await ui.press({ key: 'note-drill' })
+    const id = note().id
+    const swap = (prompt: string) => prompt.replace(`할 일: ${TASK}`, `할 일: ${RULE_FIX_TASK}`).replace(`확인: ${OUTPUT_RULE19.drill.check}`, `확인: ${MADE_CHECK}`)
+    const first = { model: 'haiku', effort: 'low', system: CHECK_SYSTEM, prompt: swap(OUTPUT_RULE19.grades.first), maxTokens: 480, timeoutMs: 60_000 }
+    // A 맞음 code sees against (the rule's name missing): the request the same, the grade lowered after it.
+    w.answer = '규칙: 지킴\n판정: 맞음\n피드백: 잘 바꿨습니다.'
+    await ui.input({ key: `drill-${id}`, text: INPUT_RULE19.mine.trimStart() })
+    expect(calls.at(-1)).toEqual(first)
+    expect(note().drill?.firstTry).toMatchObject({ verdict: 'partial', feedback: '규칙이 쓰라는 `apiRequest` 없이 고쳤습니다' })
+    await ui.unmount()
+  })
+
+  test('on, a made practice\'s 틀림 first try: the same request (rule19\'s bytes), the verdict and feedback the model\'s', async ($, on) => {
+    const { calls, note, w: world1 } = await wrote($, on, ON, [OWN])
+    const ui = await pane($)
+    await ui.press({ key: 'note-drill' })
+    const id = note().id
+    const swap = (prompt: string) => prompt.replace(`할 일: ${TASK}`, `할 일: ${RULE_FIX_TASK}`).replace(`확인: ${OUTPUT_RULE19.drill.check}`, `확인: ${MADE_CHECK}`)
+    world1.answer = '규칙: 안 지킴\n판정: 틀림\n피드백: 아직 fetch를 씁니다.'
+    await ui.input({ key: `drill-${id}`, text: INPUT_RULE19.mine.trimStart() })
+    expect(calls.at(-1)).toEqual({ model: 'haiku', effort: 'low', system: CHECK_SYSTEM, prompt: swap(OUTPUT_RULE19.grades.first), maxTokens: 480, timeoutMs: 60_000 })
+    expect(note().drill).toMatchObject({ verdict: 'wrong', feedback: '아직 fetch를 씁니다.' })
+    await ui.unmount()
+  })
+
+  test('on, the grade cap never lowers 거의 or 틀림 and never raises; the old way left is said with the rule\'s own hint; off, a 맞음 stays', async ($, on) => {
+    const { w, note } = await wrote($, on, ON, [OWN, REPLY2], [], {}, undefined, WRITE_USER2)
+    const ui = await pane($)
+    await ui.press({ key: 'note-drill' })
+    const id = note().id
+    w.answer = '규칙: 지킴\n판정: 맞음\n피드백: 바꿨습니다.'
+    await ui.input({ key: `drill-${id}`, text: 'const res = (await apiRequest(url, opts)) || (await fetch(url))' })
+    expect(note().drill?.firstTry).toMatchObject({ verdict: 'partial', feedback: '고친 줄에 원래 방식이 남아 있습니다: `fetch`', nudge: `팀 규칙과 다를 수 있음: ${SAID} · 이 줄에서 바꿀 곳 한 군데를 찾아보세요` })
+    w.answer = '규칙: 지킴\n판정: 틀림\n피드백: 아닙니다.'
+    await ui.input({ key: `drill-${id}-again`, text: 'const res = await apiRequest(url, options)' })
+    expect(note().drill).toMatchObject({ verdict: 'wrong', feedback: '아닙니다.' })
+    await ui.unmount()
   })
 
   test('on, a note a turn\'s end wrote by itself with a tier-2 practice: the usage record counts two calls and one automatic note; with dailyAutoNotes 2, two such notes go before the limit; tier 1 counts one call', { options: { dailyAutoNotes: 2 } }, async ($, on) => {

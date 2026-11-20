@@ -3553,19 +3553,22 @@ export const RULE_FIX_LINES_MAX = 12
  * masked (REDACTED), in an app file (not a test or a rule's module, isRuleModuleFile; not NOT_APP_PATH; not a file that
  * makes a use name for other files, definesName), each line once by lineKey, in the order a practice finds them (drillSpot), and only
  * where drillSpot finds it. When every rule the note points at (saidRules) says what not to use, only lines whose code
- * (codeOf: a comment at the line's end apart) holds one of those names (hint lines). Hint lines first, then the ones the note quotes (anchored), then the rest;
- * RULE_FIX_LINES_MAX at most.
+ * (codeOf: a comment at the line's end apart) holds one of those names (hint lines). When every rule it points at says
+ * nothing not to use (1.13.0 G6), only the lines the note quotes (anchored): ruleFixFault takes no other for such a rule,
+ * so none other is offered (`unquoted` counts the ones left out). Hint lines first, then the ones the note quotes
+ * (anchored), then the rest; RULE_FIX_LINES_MAX at most.
  */
 export function ruleFixLines(
   note: Pick<LearnNote, 'changes'>,
   rules: readonly string[],
   said: string,
-): { cands: RuleFixLine[]; sides: RuleSides[]; pointed: number[] } {
+): { cands: RuleFixLine[]; sides: RuleSides[]; pointed: number[]; unquoted: number } {
   const sides = rules.map(ruleSidesOf)
   const pointed = saidRules(sides, said)
   const names = ruleNamesOf(rules)
   const uses = sides.flatMap(side => side.use)
   const isAllAvoid = pointed.every(i => sides[i]!.avoid.length > 0)
+  const isNoAvoid = pointed.length > 0 && pointed.every(i => sides[i]!.avoid.length === 0)
   const quotes = [...said.matchAll(/`([^`]+)`/g)]
     .map(m => lineKey(m[1]!))
     .filter(key => [...key].length >= 3 && !names.some(name => lineKey(name) === key))
@@ -3593,9 +3596,10 @@ export function ruleFixLines(
   const ordered = [
     ...found.filter(one => one.hint !== undefined),
     ...found.filter(one => one.hint === undefined && one.isAnchored),
-    ...found.filter(one => one.hint === undefined && !one.isAnchored),
+    ...(isNoAvoid ? [] : found.filter(one => one.hint === undefined && !one.isAnchored)),
   ]
-  return { cands: ordered.slice(0, RULE_FIX_LINES_MAX), sides, pointed }
+  const unquoted = isNoAvoid ? found.filter(one => !one.isAnchored).length : 0
+  return { cands: ordered.slice(0, RULE_FIX_LINES_MAX), sides, pointed, unquoted }
 }
 
 /** Whether `code` before `at` leaves a string open (', ", `; a backslash escapes): a name there is a string's words. */
@@ -3668,9 +3672,18 @@ function argCount(code: string, open: number): number | undefined {
 }
 
 /**
+ * A one-line destructuring declaration's head and tail around the object it reads (1.13.0 G6): `const|let|var { … } =`
+ * before it, only `;` after it. Such a line reads the object's `.NAME` once for each name listed, so a rule's object
+ * may stand for the one it sends away there as in a `.NAME` read; a nested pattern, a call, a write or more after it is none.
+ */
+const DESTRUCTURE_HEAD = /^\s*(?:const|let|var)\s*\{[^{}]*\}\s*=\s*$/
+const DESTRUCTURE_TAIL = /^\s*;?\s*$/
+
+/**
  * `line` with a pair's name swapped for the one the rule asks for, every other byte kept (1.12.0 G6, tier 1); undefined
  * unless the line is code, holds the name exactly once outside a string, as a call of exactly one argument, not spread (or, for an
- * object, as a `.NAME` read, not a call), and holds no other name a rule says not to use (`avoids`). Only where the
+ * object, as a `.NAME` read, not a call, or the whole object a one-line destructuring declaration reads, 1.13.0
+ * DESTRUCTURE_HEAD), and holds no other name a rule says not to use (`avoids`). Only where the
  * line's code uses it: not in a comment at its end (commentStart), not JSX text, not a definition (`function NAME(`,
  * `def NAME(`, `class NAME(`, a method `NAME(…) {` or `NAME(…):`), not an object's member written or deleted
  * (`NAME.KEY = …`, `NAME.KEY++`, `delete NAME.KEY`, `del NAME.KEY`).
@@ -3684,7 +3697,11 @@ export function renamedLine(line: string, pair: RulePair, avoids: readonly strin
   if (isInString(line, at) || at >= commentStart(line, pair.lang) || (pair.lang === 'js' && isJsxText(line, at))) return undefined
   const head = line.slice(0, at)
   const after = line.slice(at + pair.away.length)
-  if (pair.isObject) {
+  // `const { A, B } = AWAY;`: a read of AWAY.A and AWAY.B, nothing written (1.13.0 G6).
+  const isWholeRead = pair.isObject && pair.lang === 'js' && DESTRUCTURE_HEAD.test(head) && DESTRUCTURE_TAIL.test(codeOf(after, pair.lang))
+  if (isWholeRead) {
+    // Taken as it is: the object is all the line reads.
+  } else if (pair.isObject) {
     const member = /^\.[\p{L}_$][\p{L}\p{N}_$]*(?![\p{L}\p{N}_$]|\s*\()/u.exec(after)
     if (!member) return undefined
     // Written or deleted, not read: the rule's object is where a value is read from.
@@ -3713,7 +3730,7 @@ export function renamedLine(line: string, pair: RulePair, avoids: readonly strin
 export type RuleFix = { rule: number; line: RuleFixLine; example: string; use: string }
 
 /** The language a file's pairs are of: Python's, JavaScript's and TypeScript's; none for any other. */
-function pairLangOf(file: string): 'js' | 'py' | undefined {
+export function pairLangOf(file: string): 'js' | 'py' | undefined {
   if (/\.py$/i.test(file)) return 'py'
   return /\.(?:[cm]?jsx?|[cm]?tsx?)$/i.test(file) ? 'js' : undefined
 }
@@ -3730,9 +3747,9 @@ export function ruleFixPlan(
   rules: readonly string[],
   said: string,
 ): { fix: RuleFix } | { cands: RuleFixLine[] } | { skip: 'no-rule' | 'no-line' | 'no-hint' } {
-  const { cands, sides, pointed } = ruleFixLines(note, rules, said)
+  const { cands, sides, pointed, unquoted } = ruleFixLines(note, rules, said)
   if (pointed.length === 0) return { skip: 'no-rule' }
-  if (cands.length === 0) return { skip: 'no-line' }
+  if (cands.length === 0) return { skip: unquoted > 0 ? 'no-hint' : 'no-line' }
   const avoids = sides.flatMap(side => side.avoid)
   const pairs = rulePairsOf(rules).filter(pair => pointed.includes(pair.rule))
   const inOrder = [...cands].sort((a, b) => a.change - b.change)
@@ -3752,8 +3769,10 @@ const FIX_LABEL = /^\s*(?:[-*+•]\s+)?(?:\*\*)?\s*(규칙|고칠\s*줄|줄|예�
 const FIX_NUMBER = /^[([]?\s*(\d{1,2})\s*[)\].]?\s*(?:번)?\s*$/
 
 /**
- * A rule practice call's reply read (1.12.0 G6): `규칙: n`, `줄: n`, `예시 답: `…``, each once (one label with two values
- * is no reply); `none` for `줄: 없음`; undefined for anything else. Two repairs, each from the reply and what code
+ * A rule practice call's reply read (1.12.0 G6): `규칙: n`, `줄: n`, `예시 답: `…``, each once; `none` for `줄: 없음`;
+ * undefined for anything else. A label written again with another value starts another answer (1.13.0 G6: a reply
+ * that corrects itself): the last one is the reply when it is whole (줄 and 예시 답, and 규칙 when the first had one),
+ * else there is none. Two repairs, each from the reply and what code
  * holds, never a guess: a `줄` quoting a listed line instead of its number is that line when exactly one is it by
  * lineKey; no `규칙` is the one rule the note points at, or else the one pointed rule whose use name the example brings in.
  */
@@ -3763,13 +3782,23 @@ export function parseRuleFix(
   sides: readonly RuleSides[],
   pointed: readonly number[],
 ): { rule: number; line: number; example: string } | 'none' | undefined {
-  const got = new Map<string, string>()
+  // Each label written again starts another answer; answers that never disagree are one, as 1.12.0 read them.
+  const answers: Map<string, string>[] = [new Map()]
+  const all = new Map<string, string>()
+  let isSaidOnce = true
   for (const raw of clean(reply).split('\n')) {
     const m = FIX_LABEL.exec(raw)
     if (!m) continue
     const label = m[1]!.replace(/\s+/g, '').replace('고칠줄', '줄')
-    if (got.has(label) && got.get(label) !== m[2]) return undefined
-    got.set(label, m[2]!)
+    if (answers[answers.length - 1]!.has(label)) answers.push(new Map())
+    answers[answers.length - 1]!.set(label, m[2]!)
+    if (all.has(label) && all.get(label) !== m[2]) isSaidOnce = false
+    all.set(label, m[2]!)
+  }
+  const got = isSaidOnce ? all : answers[answers.length - 1]!
+  if (!isSaidOnce) {
+    const isWhole = got.has('줄') && (NONE_SAID.test(got.get('줄')!) || got.has('예시답')) && (!answers[0]!.has('규칙') || got.has('규칙'))
+    if (!isWhole) return undefined
   }
   if (NONE_SAID.test(got.get('줄') ?? '')) return 'none'
   const example = quotedCode(got.get('예시답') ?? '')?.trim()
@@ -3844,8 +3873,8 @@ function closeOf(code: string, open: number): number | undefined {
  * (RuleSides.objects) a read `U.NAME` (NAME taken), `U[…]` or `U.m(…)` (what is in the brackets taken: `m` is the
  * object's own). Strings skipped.
  */
-function usePlaces(example: string, side: RuleSides): { start: number; end: number; inner: string }[] {
-  const places: { start: number; end: number; inner: string }[] = []
+function usePlaces(example: string, side: RuleSides): { start: number; end: number; inner: string; isWhole?: true }[] {
+  const places: { start: number; end: number; inner: string; isWhole?: true }[] = []
   const plain = side.use.filter(name => !side.use.some(other => name.startsWith(`${other}.`)))
   for (const name of plain) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -3854,6 +3883,11 @@ function usePlaces(example: string, side: RuleSides): { start: number; end: numb
       if (isInString(example, start)) continue
       const at = start + m[0].length
       const rest = example.slice(at)
+      if (side.objects.includes(name) && DESTRUCTURE_HEAD.test(example.slice(0, start)) && DESTRUCTURE_TAIL.test(rest)) {
+        // The whole object a one-line destructuring declaration reads (1.13.0 G6): nothing taken.
+        places.push({ start, end: at, inner: '', isWhole: true })
+        continue
+      }
       if (side.objects.includes(name)) {
         const member = /^\.\s*([\p{L}_$][\p{L}\p{N}_$]*)(\s*\()?/u.exec(rest)
         const open = member?.[2] !== undefined ? at + member[0].length - 1 : rest.startsWith('[') ? at : undefined
@@ -3884,10 +3918,12 @@ function usePlaces(example: string, side: RuleSides): { start: number; end: numb
  * way kept beside it: `toDateText(d) + d.getDate()`).
  */
 export function isOneSpanFix(line: string, example: string, side: RuleSides, known: ReadonlySet<string> = new Set()): boolean {
-  return usePlaces(example, side).some(({ start, end, inner }) => {
+  return usePlaces(example, side).some(({ start, end, inner, isWhole }) => {
     const before = example.slice(0, start)
     const after = example.slice(end)
     if (!line.startsWith(before) || !line.endsWith(after) || before.length + after.length >= line.length) return false
+    // The whole object read by destructuring stands only for a name the rule sends away, whole (1.13.0 G6).
+    if (isWhole === true) return side.avoid.includes(line.slice(before.length, line.length - after.length).trim())
     const gone = wordsIn(line.slice(before.length, line.length - after.length))
     const taken = wordsIn(inner)
     if ([...taken].some(word => !gone.has(word) && !known.has(word))) return false
@@ -4016,6 +4052,446 @@ export function ruleFixReply(
   if ('fault' in checked) return { why: checked.fault }
   const made = ruleFixMade(text, checked.fix, changes)
   return made === undefined ? { why: 'made' } : { text: made, fix: checked.fix }
+}
+
+/** The languages a grade cap reads names in (ruleGradeCap): pairLangOf's, undefined for a file of neither. */
+type CapLang = 'js' | 'py' | undefined
+
+/** A name where one may start (not inside a word or a number: `1e5`, `0x1F`). */
+const CAP_NAME = /(?<![\p{L}\p{N}_$])[\p{L}_$][\p{L}\p{N}_$]*/gu
+
+/**
+ * Names a language gives with no file making them (1.13.0 G6, ruleGradeCap), from the languages' own references:
+ * JavaScript's keywords, ECMAScript's globals, Node's globals (not its modules: `fs`, `path`, `os` are a file's names),
+ * the browser's that are no plain word (`innerWidth`, not `name` or `status`), TypeScript's primitive, lib and utility
+ * types; Python's keywords (soft ones too) and every builtin (`dir(builtins)`, exceptions and all). A closed list of
+ * the languages' own names, never one of a project's: a name in it is never held against a typed line.
+ */
+export const GIVEN_NAMES: Readonly<Record<'js' | 'py', ReadonlySet<string>>> = {
+  js: new Set(
+    (
+      'await async const let var return new typeof instanceof in of if else function class this super null undefined ' +
+      'true false void delete yield throw try catch finally switch case default break continue do while for import ' +
+      'export from as extends static get set with debugger arguments globalThis Infinity NaN Math JSON Number String ' +
+      'Boolean Array Object Function Symbol BigInt Promise Date RegExp Error TypeError RangeError SyntaxError ' +
+      'ReferenceError EvalError URIError AggregateError Map Set WeakMap WeakSet WeakRef FinalizationRegistry Proxy ' +
+      'Reflect Intl Atomics Iterator ArrayBuffer SharedArrayBuffer DataView Int8Array Uint8Array Uint8ClampedArray ' +
+      'Int16Array Uint16Array Int32Array Uint32Array Float32Array Float64Array BigInt64Array BigUint64Array parseInt ' +
+      'parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI escape unescape eval ' +
+      'console process require module exports Buffer global __dirname __filename setTimeout clearTimeout setInterval ' +
+      'clearInterval setImmediate clearImmediate queueMicrotask structuredClone performance crypto fetch Response ' +
+      'Request Headers FormData Blob File URL URLSearchParams AbortController AbortSignal TextEncoder TextDecoder ' +
+      'TextEncoderStream TextDecoderStream atob btoa Event EventTarget CustomEvent MessageEvent MessageChannel ' +
+      'MessagePort BroadcastChannel DOMException WebSocket WebAssembly ReadableStream WritableStream TransformStream ' +
+      'CompressionStream DecompressionStream Crypto CryptoKey SubtleCrypto Navigator Performance PerformanceObserver ' +
+      'window document self navigator location localStorage sessionStorage alert confirm innerWidth innerHeight ' +
+      'outerWidth outerHeight scrollX scrollY pageXOffset pageYOffset devicePixelRatio requestAnimationFrame ' +
+      'cancelAnimationFrame requestIdleCallback cancelIdleCallback getComputedStyle getSelection matchMedia ' +
+      'indexedDB customElements visualViewport HTMLElement Element Node NodeList Document DocumentFragment ' +
+      'ShadowRoot Image Audio FileReader FileList XMLHttpRequest Worker SharedWorker IntersectionObserver ' +
+      'MutationObserver ResizeObserver KeyboardEvent MouseEvent PointerEvent InputEvent FocusEvent UIEvent ' +
+      'ErrorEvent ProgressEvent StorageEvent PopStateEvent DOMParser XMLSerializer Notification ClipboardItem ' +
+      'EventSource Storage HTMLInputElement HTMLFormElement HTMLButtonElement HTMLDivElement HTMLAnchorElement ' +
+      'HTMLImageElement HTMLCanvasElement HTMLSelectElement HTMLTextAreaElement SVGElement CanvasRenderingContext2D ' +
+      'OffscreenCanvas ImageData AudioContext MediaStream string number boolean any unknown never object bigint ' +
+      'symbol keyof readonly satisfies type interface enum namespace declare abstract implements private public ' +
+      'protected override is asserts infer unique Partial Required Readonly Record Pick Omit Exclude Extract ' +
+      'NonNullable ReturnType Parameters ConstructorParameters InstanceType Awaited ThisType ThisParameterType ' +
+      'OmitThisParameter Uppercase Lowercase Capitalize Uncapitalize NoInfer ReadonlyArray ReadonlyMap ReadonlySet ' +
+      'ArrayLike PropertyKey PromiseLike Iterable IterableIterator AsyncIterable AsyncIterator AsyncIterableIterator ' +
+      'Generator AsyncGenerator TemplateStringsArray PropertyDescriptor RequestInit HeadersInit BodyInit ' +
+      'ResponseInit RequestInfo NodeJS'
+    ).split(' '),
+  ),
+  py: new Set(
+    (
+      'False None True and as assert async await break class continue def del elif else except finally for from ' +
+      'global if import in is lambda nonlocal not or pass raise return try while with yield match case type _ ' +
+      'ArithmeticError AssertionError AttributeError BaseException BaseExceptionGroup BlockingIOError ' +
+      'BrokenPipeError BufferError BytesWarning ChildProcessError ConnectionAbortedError ConnectionError ' +
+      'ConnectionRefusedError ConnectionResetError DeprecationWarning EOFError Ellipsis EncodingWarning ' +
+      'EnvironmentError Exception ExceptionGroup FileExistsError FileNotFoundError FloatingPointError FutureWarning ' +
+      'GeneratorExit IOError ImportError ImportWarning IndentationError IndexError InterruptedError ' +
+      'IsADirectoryError KeyError KeyboardInterrupt LookupError MemoryError ModuleNotFoundError NameError ' +
+      'NotADirectoryError NotImplemented NotImplementedError OSError OverflowError PendingDeprecationWarning ' +
+      'PermissionError ProcessLookupError PythonFinalizationError RecursionError ReferenceError ResourceWarning ' +
+      'RuntimeError RuntimeWarning StopAsyncIteration StopIteration SyntaxError SyntaxWarning SystemError SystemExit ' +
+      'TabError TimeoutError TypeError UnboundLocalError UnicodeDecodeError UnicodeEncodeError UnicodeError ' +
+      'UnicodeTranslateError UnicodeWarning UserWarning ValueError Warning ZeroDivisionError abs aiter all anext any ' +
+      'ascii bin bool breakpoint bytearray bytes callable chr classmethod compile complex copyright credits delattr ' +
+      'dict dir divmod enumerate eval exec exit filter float format frozenset getattr globals hasattr hash help hex ' +
+      'id input int isinstance issubclass iter len license list locals map max memoryview min next object oct open ' +
+      'ord pow print property quit range repr reversed round set setattr slice sorted staticmethod str sum super ' +
+      'tuple type vars zip self cls __name__ __file__ __doc__ __debug__ __import__ __builtins__ __spec__ __package__'
+    ).split(' '),
+  ),
+}
+
+/** Where a JavaScript `/` opens a regular expression rather than divides: after these marks, a line's start or a keyword. */
+const REGEX_BEFORE = /(?:^|[(,=:[!&|?{};+\-*%<>~^]|\b(?:return|typeof|case|in|of|delete|void|throw|new))\s*$/u
+
+/** Where an f-string field's format starts (its first `!` or `:` outside brackets, `!=` and `:=` apart); its length for none. */
+function formatAt(field: string): number {
+  let depth = 0
+  for (let i = 0; i < field.length; i += 1) {
+    const ch = field[i]!
+    if ('([{'.includes(ch)) depth += 1
+    else if (')]}'.includes(ch)) depth -= 1
+    else if (depth === 0 && (ch === '!' || ch === ':') && field[i + 1] !== '=') return i
+  }
+  return field.length
+}
+
+/**
+ * A line's code as a grade cap reads names in it (1.13.0 G6): strings blanked (a Python string's prefix too), a
+ * JavaScript regular expression blanked, a comment at its end cut; kept as code, what a template holds in `${…}` and
+ * what a Python f-string holds in `{…}` before its `!` or `:`. Every other byte keeps its place.
+ */
+export function nameCode(line: string, lang: CapLang): string {
+  let out = ''
+  let i = 0
+  while (i < line.length) {
+    const ch = line[i]!
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const pre = lang !== 'js' ? /(?<![\p{L}\p{N}_$])(?:[rRbBuUfF]|[rR][bBfF]|[bBfF][rR])$/u.exec(out)?.[0] : undefined
+      const isF = pre !== undefined && /f/i.test(pre)
+      if (pre !== undefined) out = out.slice(0, out.length - pre.length) + ' '.repeat(pre.length)
+      const isTriple = lang !== 'js' && line.startsWith(ch.repeat(3), i)
+      const close = isTriple ? ch.repeat(3) : ch
+      out += ' '.repeat(close.length)
+      let j = i + close.length
+      while (j < line.length && !line.startsWith(close, j)) {
+        if (line[j] === '\\') {
+          out += line[j + 1] === undefined ? ' ' : '  '
+          j += 2
+          continue
+        }
+        const isTemplate = ch === '`' && lang !== 'py' && line.startsWith('${', j)
+        if (isTemplate || (isF && line[j] === '{' && !line.startsWith('{{', j))) {
+          const start = j + (isTemplate ? 2 : 1)
+          let k = start
+          let depth = 1
+          while (k < line.length && depth > 0) {
+            if (line[k] === '{') depth += 1
+            else if (line[k] === '}') depth -= 1
+            k += 1
+          }
+          let body = line.slice(start, depth === 0 ? k - 1 : k)
+          if (isF) body = body.slice(0, formatAt(body))
+          out += ' '.repeat(start - j) + body + ' '.repeat(k - start - body.length)
+          j = k
+          continue
+        }
+        if (isF && line.startsWith('{{', j)) {
+          out += '  '
+          j += 2
+          continue
+        }
+        out += ' '
+        j += 1
+      }
+      out += ' '.repeat(Math.min(close.length, line.length - j))
+      i = j + close.length
+      continue
+    }
+    if (lang !== 'js' && ch === '#') break
+    if (lang !== 'py' && ch === '/' && (line[i + 1] === '/' || line[i + 1] === '*')) break
+    if (lang !== 'py' && ch === '/' && REGEX_BEFORE.test(out)) {
+      let j = i + 1
+      let isClass = false
+      while (j < line.length && (isClass || line[j] !== '/')) {
+        if (line[j] === '\\') j += 1
+        else if (line[j] === '[') isClass = true
+        else if (line[j] === ']') isClass = false
+        j += 1
+      }
+      if (j < line.length) {
+        j += 1
+        while (j < line.length && /[a-z]/.test(line[j]!)) j += 1
+        out += ' '.repeat(j - i)
+        i = j
+        continue
+      }
+    }
+    out += ch
+    i += 1
+  }
+  return out
+}
+
+/** The names `pattern` holds (a destructuring pattern, a parameter list, a tuple of targets). */
+function namesIn(pattern: string): string[] {
+  return [...pattern.matchAll(CAP_NAME)].map(m => m[0])
+}
+
+/**
+ * The names a line's code looks a value up by (1.13.0 G6, ruleGradeCap), in order, from nameCode: not a member
+ * (`.name`, `?.name`; a spread `...name` is looked up), an object key, a label or a ternary's middle (`name:`, lenient), a Python keyword argument
+ * (`name=` inside a call), a decorator (`@name`), a TypeScript type (`as T`, `satisfies T`, `<T>(`, a declaration's
+ * `: T`), nor a name the line binds for itself: arrow and lambda parameters, `for … of|in` and comprehension targets, a
+ * `catch (e)`, a `function (…)`'s parameters, Python's `as` and `:=`, a declaration's targets (`const`, `let`, `var`; at a Python line's start, `a, b =`).
+ */
+export function usedNames(line: string, lang: CapLang): string[] {
+  const code = nameCode(line, lang)
+  const bound = new Set<string>()
+  const bind = (pattern: string) => namesIn(pattern).forEach(name => bound.add(name))
+  for (const m of code.matchAll(/\(([^()]*)\)\s*(?::[^=]*)?=>/g)) bind(m[1]!)
+  for (const m of code.matchAll(/([\p{L}_$][\p{L}\p{N}_$]*)\s*=>/gu)) bound.add(m[1]!)
+  for (const m of code.matchAll(/\bfunction\b\s*\*?\s*(?:[\p{L}_$][\p{L}\p{N}_$]*)?\s*\(([^()]*)\)/gu)) bind(m[1]!)
+  for (const m of code.matchAll(/\b(?:const|let|var)\s+([^=;]+?)\s+(?:of|in)\b/g)) bind(m[1]!)
+  for (const m of code.matchAll(/\bcatch\s*\(\s*([\p{L}_$][\p{L}\p{N}_$]*)/gu)) bound.add(m[1]!)
+  const typed = new Set<number>()
+  if (lang !== 'py') {
+    const declared = /^\s*(?:export\s+)?(?:const|let|var)\s+([\p{L}_$][\p{L}\p{N}_$]*|\{[^=]*?\}|\[[^=]*?\])\s*(:[^=]*)?=(?![=>])/u.exec(code)
+    if (declared) {
+      bind(declared[1]!)
+      if (declared[2] !== undefined) {
+        const from = declared.index + declared[0].indexOf(declared[2], declared[1]!.length)
+        for (const m of declared[2].matchAll(CAP_NAME)) typed.add(from + m.index!)
+      }
+    }
+  }
+  if (lang !== 'js') {
+    for (const m of code.matchAll(/\blambda\b([^:]*):/g)) bind(m[1]!)
+    for (const m of code.matchAll(/\bfor\s+([\p{L}\p{N}_$\s,()[\]]+?)\s+in\b/gu)) bind(m[1]!)
+    for (const m of code.matchAll(/\bas\s+([\p{L}_$][\p{L}\p{N}_$]*)/gu)) bound.add(m[1]!)
+    for (const m of code.matchAll(/([\p{L}_$][\p{L}\p{N}_$]*)\s*:=/gu)) bound.add(m[1]!)
+    const target = /^\s*([\p{L}_$][\p{L}\p{N}_$]*(?:\s*,\s*[\p{L}_$][\p{L}\p{N}_$]*)*|\([^()=]*\)|\[[^[\]=]*\])\s*(?::[^=]*)?=(?!=)/u.exec(code)
+    if (target) bind(target[1]!)
+  }
+  const names: string[] = []
+  for (const m of code.matchAll(CAP_NAME)) {
+    const at = m.index!
+    const before = code.slice(0, at).trimEnd()
+    const after = code.slice(at + m[0].length).trimStart()
+    // A member (`.name`, `?.name`) is the object's; a spread (`...name`, JavaScript) is a value looked up like any.
+    if ((before.endsWith('.') && !(lang !== 'py' && before.endsWith('...'))) || before.endsWith('@') || typed.has(at) || bound.has(m[0])) continue
+    if (lang !== 'py' && after.startsWith(':') && !after.startsWith('::')) continue
+    if (lang !== 'js' && /^=(?!=)/.test(after) && (before.match(/\(/g)?.length ?? 0) > (before.match(/\)/g)?.length ?? 0)) continue
+    if (lang !== 'py' && /(?:^|[^\p{L}\p{N}_$])(?:as|satisfies)$/u.test(before)) continue
+    if (lang !== 'py' && /<[^<>()=]*$/.test(before) && /^[^<>()=]*>\s*\(/.test(after)) continue
+    names.push(m[0])
+  }
+  return names
+}
+
+/**
+ * The words a typed line may take from the note's code (1.13.0 G6, ruleGradeCap), case kept, a string's words too:
+ * every change's new side and its context lines (the side a `-` line leaves), and the practice file's text as it is
+ * now when the window could read it (`file`, never sent anywhere).
+ */
+export function capKnownNames(diffs: readonly string[], file?: string): Set<string> {
+  const words = new Set<string>()
+  for (const diff of diffs) {
+    for (const h of parseDiff(diff)) {
+      for (const raw of h.lines) if (!raw.startsWith('-') && !raw.startsWith('\\')) for (const m of raw.slice(1).matchAll(CAP_NAME)) words.add(m[0])
+    }
+  }
+  for (const m of (file ?? '').matchAll(CAP_NAME)) words.add(m[0])
+  return words
+}
+
+/**
+ * A line's code as tokens a grade's shape check compares (1.13.0 G6): names, keywords, values, marks; `text` what is
+ * compared, `raw` what the line wrote (what a cap shows).
+ */
+type ShapeToken = { kind: 'name' | 'word' | 'value' | 'live' | 'mark'; text: string; raw: string }
+
+/**
+ * A line's code as tokens (1.13.0 G6, ruleGradeCap): spaces and a last `;` dropped; a string by its text, its escapes
+ * read (', " and a template with no `${` alike: `'it\\'s'` is `"it's"`), one holding code as it is (`live`), a number
+ * by its value, a name, a keyword or one mark.
+ */
+function shapeTokens(code: string, lang: CapLang): ShapeToken[] {
+  const words = new Set(['const', 'let', 'var', 'await', 'async', 'return', 'new', 'typeof', 'instanceof', 'in', 'of', 'if', 'else', 'for', 'while', 'function', 'class', 'this', 'null', 'undefined', 'true', 'false', 'void', 'delete', 'yield', 'import', 'from', 'export', 'default', 'as', 'is', 'not', 'and', 'or', 'None', 'True', 'False', 'lambda', 'def', 'pass', 'with', 'del', 'elif'])
+  const out: ShapeToken[] = []
+  const re = /\s+|((?<![\p{L}\p{N}_$])[rRbBuUfF]{0,2}(?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`))|((?<![\p{L}\p{N}_$])\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][-+]?\d+)?)|([\p{L}_$][\p{L}\p{N}_$]*)|(.)/gu
+  for (const m of code.trim().replace(/;\s*$/, '').matchAll(re)) {
+    if (m[1] !== undefined) {
+      const quote = m[1].search(/['"`]/)
+      const prefix = m[1].slice(0, quote).toLowerCase()
+      const body = m[1].slice(quote + 1, -1)
+      // A string that holds code (a template's `${`, an f-string's `{`) is no plain value: code changed in it is no
+      // value of another kind, so it never makes a swap (`f"{sum(rows)}"` and `f"{sum(r for r in rows)}"` alike).
+      const isLive = (m[1][quote] === '`' && lang !== 'py' && body.includes('${')) || (prefix.includes('f') && /\{(?!\{)/.test(body))
+      // A raw string (`r'…'`) keeps its backslashes; any other reads `\x` as `x` (an escaped quote, `\\`).
+      const text = prefix.includes('r') ? body : body.replace(/\\(.)/gsu, '$1')
+      out.push(isLive ? { kind: 'live', text: m[1], raw: m[1] } : { kind: 'value', text: `${prefix.replace('r', '')}'${text}'`, raw: m[1] })
+    } else if (m[2] !== undefined) out.push({ kind: 'value', text: String(Number(m[2].replace(/_/g, ''))), raw: m[2] })
+    else if (m[3] !== undefined) out.push({ kind: words.has(m[3]) ? 'word' : 'name', text: m[3], raw: m[3] })
+    else if (m[4] !== undefined) out.push({ kind: 'mark', text: m[4], raw: m[4] })
+  }
+  return out
+}
+
+/**
+ * Whether `b` lists the entries of the bracket round token `at` in `a` in another order where order means nothing
+ * (1.13.0 G6, ruleGradeCap's swap): the same entries (split at its commas) in both, the bracket a `{ … }` (an object's
+ * or a destructuring's entries, no spread among them: `{ b, a }`, `{ b: y, a: x }`), or a Python call whose entries in
+ * another place are keyword arguments alone (`f(u, b=2, a=1)`). Never a call's places nor an operation's sides.
+ */
+function isLooseReorder(a: readonly ShapeToken[], b: readonly ShapeToken[], moved: readonly number[], lang: CapLang): boolean {
+  const at = moved[0]!
+  let depth = 0
+  let open = -1
+  for (let i = at - 1; i >= 0; i -= 1) {
+    const one = a[i]!
+    if (one.kind !== 'mark') continue
+    if ('}])'.includes(one.text)) depth += 1
+    else if ('{[('.includes(one.text)) {
+      if (depth === 0) {
+        open = i
+        break
+      }
+      depth -= 1
+    }
+  }
+  if (open === -1 || (a[open]!.text !== '{' && !(a[open]!.text === '(' && lang === 'py'))) return false
+  // Its entries, each as the tokens it holds, and where the bracket closes.
+  const entries = (tokens: readonly ShapeToken[]): { list: string[]; close: number } | undefined => {
+    const list: string[] = []
+    let level = 0
+    let text = ''
+    for (let i = open + 1; i < tokens.length; i += 1) {
+      const one = tokens[i]!
+      const isMark = one.kind === 'mark'
+      if (isMark && '}])'.includes(one.text) && level === 0) return { list: [...list, text], close: i }
+      if (isMark && '{[('.includes(one.text)) level += 1
+      else if (isMark && '}])'.includes(one.text)) level -= 1
+      if (level === 0 && isMark && one.text === ',') {
+        list.push(text)
+        text = ''
+      } else text += `${one.kind}:${one.text} `
+    }
+    return undefined
+  }
+  const ea = entries(a)
+  const eb = entries(b)
+  if (!ea || !eb || ea.list.length !== eb.list.length || ea.close !== eb.close || moved.some(i => i >= ea.close)) return false
+  const sorted = (list: string[]) => JSON.stringify([...list].sort())
+  if (sorted(ea.list) !== sorted(eb.list)) return false
+  if (a[open]!.text === '{') return ea.list.every(one => !one.startsWith('mark:. mark:. mark:.'))
+  // A Python call: an entry in another place is a keyword argument (`name =`, not `==`).
+  return ea.list.every((one, i) => one === eb.list[i] || (/^name:\S+ mark:= /.test(one) && !/^name:\S+ mark:= mark:= /.test(one)))
+}
+
+/** The use name a practice's check names (ruleFixCheck): what a grade cap holds the typed line to; undefined for another check. */
+export function ruleFixUse(check: string): string | undefined {
+  return RULE_FIX_CHECK.exec(check.trim())?.[1]
+}
+
+/**
+ * The names the team rules that ask for `use` say not to use (1.13.0 G6, ruleGradeCap's old way left): each rule read
+ * by ruleSidesOf (fail-closed) whose use names hold `use`. None for a rule that says nothing not to use (the date
+ * rule's), nor for any rule read otherwise.
+ */
+export function ruleAvoidsOf(rules: readonly string[], use: string): string[] {
+  return [...new Set(rules.map(ruleSidesOf).filter(side => side.use.includes(use)).flatMap(side => side.avoid))]
+}
+
+/** Why code holds a made team-rule practice's typed line short of right (ruleGradeCap). */
+export type RuleGradeCap =
+  | { why: 'rule-use'; name: string }
+  | { why: 'rule-old'; name: string }
+  | { why: 'name'; name: string }
+  | { why: 'brackets' }
+  | { why: 'swap'; from: string; to: string }
+
+/**
+ * The cap code puts on a made team-rule practice's grade (1.13.0 G6), from the practice, the typed line and the note's
+ * code alone (`known`, capKnownNames), `use` the name its check names (ruleFixUse), `avoids` what the rule asking for
+ * it says not to use (ruleAvoidsOf). The first that holds, in this order:
+ * the line's code holds no use of that name's first part (`log` of `log.info`): `rule-use`; it still calls, indexes or
+ * reads a member of the first part of a name the rule says not to use, where the line to change did and the example
+ * dropped it (the old way left: `fetch(`, `process.env`; never another name the example dropped, `new Date(…)` or
+ * `str(…)`, and none for a rule that says nothing not to use): `rule-old`; it looks a value up by a name neither the note's code, the line, the example, the lines
+ * around it, the line itself (usedNames) nor the language (GIVEN_NAMES) gives (a typo, a value made up: `options`; not
+ * read past a Python `import *` in the file), or reads a member of the rule's object the code never shows: `name`; its
+ * brackets or strings close otherwise than the example's: `brackets`; it is the example's very shape with a name or a
+ * value of its own in a place the use name is not (`apiRequest(otherUrl)`), the example's own entries in another order
+ * only where order means nothing (isLooseReorder: an object's or a destructuring's entries, Python keyword arguments): `swap`.
+ * Undefined for none. Only ever
+ * lowers a grade (gradeDrill): what the grade said stays for every other line.
+ */
+export function ruleGradeCap(
+  drill: Pick<Drill, 'line' | 'example' | 'above' | 'below'>,
+  use: string,
+  mine: string,
+  known: ReadonlySet<string>,
+  lang: CapLang,
+  file = '',
+  avoids: readonly string[] = [],
+): RuleGradeCap | undefined {
+  const code = nameCode(mine, lang)
+  const root = use.split('.')[0]!
+  if (!holdsName(code, root)) return { why: 'rule-use', name: use }
+  const escape = (name: string) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const reached = (text: string) => new Set([...text.matchAll(/(?<![\p{L}\p{N}_$.])([\p{L}_$][\p{L}\p{N}_$]*)\s*(?=[(.[])/gu)].map(m => m[1]!))
+  const exWords = new Set(namesIn(nameCode(drill.example, lang)))
+  const roots = new Set(avoids.map(name => name.split('.')[0]!))
+  const left = [...reached(nameCode(drill.line, lang))].find(name => roots.has(name) && !exWords.has(name) && reached(code).has(name))
+  if (left !== undefined) return { why: 'rule-old', name: left }
+  const seen = new Set([...known, ...[drill.line, drill.example, drill.above ?? '', drill.below ?? ''].flatMap(namesIn)])
+  const given = lang === undefined ? new Set([...GIVEN_NAMES.js, ...GIVEN_NAMES.py]) : GIVEN_NAMES[lang]
+  if (!(lang !== 'js' && /^\s*from\s+\S+\s+import\s+\*/m.test(file))) {
+    const strange = usedNames(mine, lang).find(name => !seen.has(name) && !given.has(name))
+    if (strange !== undefined) return { why: 'name', name: strange }
+  }
+  const member = (text: string) => [...text.matchAll(new RegExp(`(?<![\\p{L}\\p{N}_$.])${escape(root)}\\s*\\.\\s*([\\p{L}_$][\\p{L}\\p{N}_$]*)(?![\\p{L}\\p{N}_$])(?!\\s*\\()`, 'gu'))].map(m => m[1]!)
+  if (member(nameCode(drill.example, lang)).length > 0) {
+    const unknown = member(code).find(name => !seen.has(name))
+    if (unknown !== undefined) return { why: 'name', name: `${root}.${unknown}` }
+  }
+  if (balanceOf(codeOf(mine, lang)) !== balanceOf(codeOf(drill.example, lang))) return { why: 'brackets' }
+  const a = shapeTokens(codeOf(drill.example, lang), lang)
+  const b = shapeTokens(codeOf(mine, lang), lang)
+  if (a.length === b.length) {
+    const parts = use.split('.')
+    const useAt = a.findIndex((_, i) => parts.every((part, k) => a[i + 2 * k]?.text === part && (k === 0 || a[i + 2 * k - 1]?.text === '.')))
+    const inUse = (i: number) => useAt !== -1 && i >= useAt && i < useAt + 2 * parts.length - 1
+    const moved: { at: number; from: string; to: string }[] = []
+    let isShape = true
+    for (const [i, one] of a.entries()) {
+      const other = b[i]!
+      if (one.kind === other.kind && one.text === other.text) continue
+      if (inUse(i)) continue
+      if (one.kind !== other.kind || (one.kind !== 'name' && one.kind !== 'value')) {
+        isShape = false
+        break
+      }
+      moved.push({ at: i, from: one.raw, to: other.raw })
+    }
+    // The example's own entries in another order are no swap only where order means nothing (isLooseReorder):
+    // `const { b, a } = config;` reads what `{ a, b }` does, `f(u, b=2, a=1)` calls what `f(u, a=1, b=2)` does. In a
+    // call's places or an operation (`apiRequest(opts, url)`, `used - total`) it does, and stays a swap.
+    const isReorder = isShape && moved.length > 0 && isLooseReorder(a, b, moved.map(one => one.at), lang)
+    if (isShape && moved.length > 0 && !isReorder) return { why: 'swap', from: moved[0]!.from, to: moved[0]!.to }
+  }
+  return undefined
+}
+
+/** What a capped grade says (ruleGradeCap), one line by code in place of the model's words. */
+export const RULE_CAP_BRACKETS = '괄호나 따옴표가 고칠 줄과 다르게 닫힙니다'
+/** The question a capped grade asks back for its try again when the line is not the rule's way short (no example in it). */
+export const RULE_CAP_NUDGE = '고칠 줄과 견주어 규칙 말고 바뀐 곳을 찾아보세요'
+/** Characters of a name or a value a capped grade's line shows at most (ruleCapText), `…` after a longer one. */
+const RULE_CAP_CODE = 16
+
+/** A capped grade's feedback (1.13.0 G6, ruleGradeCap): the reason, the code named. */
+export function ruleCapText(cap: RuleGradeCap): string {
+  const code = (text: string) => tickCode([...text].length > RULE_CAP_CODE ? `${[...text].slice(0, RULE_CAP_CODE - 1).join('')}…` : text)
+  switch (cap.why) {
+    case 'rule-use':
+      return `규칙이 쓰라는 ${code(cap.name)} 없이 고쳤습니다`
+    case 'rule-old':
+      return `고친 줄에 원래 방식이 남아 있습니다: ${code(cap.name)}`
+    case 'name':
+      return `이 노트의 코드에 없는 이름입니다: ${code(cap.name)}`
+    case 'brackets':
+      return RULE_CAP_BRACKETS
+    case 'swap':
+      return `규칙 밖에서 바뀐 곳이 있습니다: ${code(cap.from)} → ${code(cap.to)}`
+  }
 }
 
 /**
