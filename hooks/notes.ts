@@ -17,6 +17,8 @@ import type {
   LearnSubmit,
   LearnWithheld,
 } from '../types'
+// The run route's device evaluator lives in its own module (1.13.0 G2); the `.ts` ending lets node-run tools import it too.
+import { newRun } from './newrun.ts'
 
 export type Hunk = {
   oldStart: number
@@ -7203,7 +7205,7 @@ export type QuizPick = RankedConcept & {
    * what code never seen alone looks for (isNewLibraryChange, NEW_UNRUNNABLE): set only where code never seen could.
    * None is kept or sent.
    */
-  code?: { file: string; text: string; isLibrary?: true; isImporting?: true; isNewLibrary?: true; isWhole?: true; around?: string }
+  code?: { file: string; text: string; isLibrary?: true; isImporting?: true; isNewLibrary?: true; isWhole?: true; around?: string; run?: ChangedRun }
   noteId?: string
   slip?: Pick<LearnSlip, 'what' | 'question' | 'mine'>
   team?: true
@@ -7250,6 +7252,14 @@ export const RUNG_LABEL: Readonly<Record<QuizRung, string>> = { worked: '풀이 
  */
 export const RUNG_CHANGED_STEP = Infinity
 /**
+ * Whether code changed is asked only where the plugin ran the code and each change itself (1.13.0 G2, the run route):
+ * the quiz shows what the learner's code prints and lists the places the plugin certified; the model names one place
+ * and a new value (C only, no output of its own), the plugin applies it and runs it on this device, and the question's
+ * answer is that run (changedRunItem). Widening any part of it (isCertified, the kinds or values of a place, printArgs,
+ * newRun itself) takes a new round (G2's decision rule 6, 1.13.0). Off: 1.12.0's route.
+ */
+export const IS_CHANGED_RUN = false
+/**
  * The review step from which a concept due is asked in code never seen (처음 보는 코드). Off in 1.8.0: that question's
  * answer is the model's too, and a wrong one would cost a concept weeks of steps; on (4) once a sample shows it right.
  * Off in 1.9.0 too: in its run-checked sample (docs/qa/견본.md) the answers were right once the R line was in, but too
@@ -7288,7 +7298,7 @@ export const WORKED_PLAIN_AFTER_TIMES = Infinity
  * (docs/qa/견본.md); a test harness may run a load with others (register.tsx `build`). `workedAfter` is for a concept
  * met in code, `workedPlainAfter` for one met in none (1.10.0 G1, workedAfterFor).
  */
-export type LadderSteps = { changedStep: number; workedAfter: number; workedPlainAfter: number }
+export type LadderSteps = { changedStep: number; workedAfter: number; workedPlainAfter: number; changedRun?: boolean }
 /** The languages a question in code never seen may be written in: the ones its samples could run. */
 const RUNG_NEW_EXTS: readonly string[] = ['js', 'mjs', 'cjs', 'ts', 'py']
 
@@ -7383,7 +7393,7 @@ export function extOf(file: string): string | undefined {
 export function rungOf(
   one: LearnConcept,
   how: {
-    code?: { file: string; text?: string; isLibrary?: boolean; isImporting?: boolean; isNewLibrary?: boolean; isWhole?: boolean }
+    code?: { file: string; text?: string; isLibrary?: boolean; isImporting?: boolean; isNewLibrary?: boolean; isWhole?: boolean; run?: ChangedRun }
     slip?: Pick<LearnSlip, 'times' | 'isRight'>
     isAsking: boolean
     isTeam: boolean
@@ -7392,7 +7402,7 @@ export function rungOf(
     isNewMissed?: boolean
   },
   newStep = RUNG_NEW_STEP,
-  { changedStep = RUNG_CHANGED_STEP, workedAfter = WORKED_AFTER_TIMES, workedPlainAfter = WORKED_PLAIN_AFTER_TIMES }: Partial<LadderSteps> = {},
+  { changedStep = RUNG_CHANGED_STEP, workedAfter = WORKED_AFTER_TIMES, workedPlainAfter = WORKED_PLAIN_AFTER_TIMES, changedRun = IS_CHANGED_RUN }: Partial<LadderSteps> = {},
 ): QuizRung | undefined {
   if (how.isTeam) return undefined
   if (how.slip) {
@@ -7406,7 +7416,10 @@ export function rungOf(
   const isNewRunnable = isRunnable && how.code.isNewLibrary !== true && (how.code.text === undefined || !isNewOnlyUnrunnable(how.code.text))
   if (isNewAskable(one, how.code.file, how.isDue, newStep) && isNewRunnable && isNewInScope(how.code.file, one.blurb, how.code.text, how.isNewMissed === true)) return 'new'
   // 1.12.0 (G2): only a JavaScript or Python file shown whole, in the shape the plugin can change one token of (isChangedShaped).
-  return stepOf(one) >= changedStep && isRunnable && isChangedRunnable(how.code) && isChangedShaped(how.code, one.blurb) ? 'changed' : 'mine'
+  const isChanged = stepOf(one) >= changedStep && isRunnable && isChangedRunnable(how.code) && isChangedShaped(how.code, one.blurb)
+  // 1.13.0 (G2, the run route): only where the plugin ran the code and certified two changes at least (changedRunFor).
+  if (changedRun) return isChanged && (how.code.run?.certs.length ?? 0) >= 2 ? 'changed' : 'mine'
+  return isChanged ? 'changed' : 'mine'
 }
 
 /**
@@ -7671,7 +7684,7 @@ function printLines(lines: readonly string[], lang: 'js' | 'py'): Set<number> {
  * comparison, an and/or, a true/false or a method of a same-type pair, never on a print call, in a comment or in a
  * `for (…;…;…)` header; the six nearest to the line its words quote (codeFor's match), in the code's order.
  */
-export function changeSites(text: string, file: string, blurb: string): ChangeSite[] {
+export function changeSites(text: string, file: string, blurb: string, isAll = false): ChangeSite[] {
   const lang = changedLang(file)
   if (!lang) return []
   const lines = text.split('\n')
@@ -7713,6 +7726,8 @@ export function changeSites(text: string, file: string, blurb: string): ChangeSi
   const shape = (one: ChangeSite) => echoed(lines[one.line]!.slice(0, one.at) + '\u0000' + lines[one.line]!.slice(one.end), lang)
   const shapes = found.map(shape)
   const plain = found.filter((one, i) => !found.some((other, j) => j !== i && other.line !== one.line && shapes[j] === shapes[i]))
+  // 1.13.0 (G2, the run route, `isAll`): every place, nearest first, uncut (changedRunFor certifies before it cuts).
+  if (isAll) return [...plain].sort((a, b) => Math.abs(a.line - hit) - Math.abs(b.line - hit) || a.line - b.line || a.at - b.at)
   const near = [...plain].sort((a, b) => Math.abs(a.line - hit) - Math.abs(b.line - hit) || a.line - b.line || a.at - b.at).slice(0, 6)
   // Shown in the code's own order, so the letters run down the code as the learner reads it.
   return near.sort((a, b) => a.line - b.line || a.at - b.at)
@@ -8044,6 +8059,184 @@ export function changedItem(parts: Map<string, string[]>, n: number, pick: QuizP
       ...(pick.noteId ? { noteId: pick.noteId } : {}),
       rung: 'changed',
     },
+  }
+}
+
+// ───────────────────────────── 1.13.0 G2 (G2-RUN): code changed that the plugin ran itself ─────────────────────────────
+
+/** One change the plugin made and ran (1.13.0 G2, changedRunFor): its place, its fixed value, the code changed and what it prints. */
+export type ChangedCert = { site: ChangeSite; value: string; changedLine: string; changed: string; lines: string[] }
+/** What the plugin ran of a concept's code (1.13.0 G2): what the learner's code prints and the changes it certified. Never kept or sent whole. */
+export type ChangedRun = { out: string[]; certs: ChangedCert[] }
+
+/** The run route's limits: changes listed per concept, lines a change may print, the length of a line. */
+const CHANGED_RUN_CERTS = 6
+const CHANGED_RUN_LINES = 4
+const CHANGED_RUN_WIDTH = 160
+/** What the learner's code may print to be shown under its code: one to eight lines, each short. */
+const CHANGED_RUN_OUT = 8
+
+/** A line as the run route tells two lines apart the loosest way: the stance's clause 6, then no case, space, quote or end mark. */
+const looseSame = (line: string) => outputSame(line).toLowerCase().replace(/\s+/g, '').replace(/['"`]/g, '').replace(/\.$/, '')
+
+/**
+ * Whether `lines`, what a change prints, may be asked beside `out`, what the learner's code prints (1.13.0 G2): one to
+ * four lines, none blank, each 160 characters at most, and under clause 6 and under a looser reading too, not `out`
+ * itself (the stance's 8 (a)), not lines of it in a row anywhere (8 (b): one line equal to any of its lines counts), not
+ * each line equal to its line at the same place (8 (c)).
+ */
+export function isCertified(lines: readonly string[], out: readonly string[]): boolean {
+  if (lines.length < 1 || lines.length > CHANGED_RUN_LINES) return false
+  if (lines.some(line => line.trim() === '' || line.length > CHANGED_RUN_WIDTH)) return false
+  for (const key of [outputSame, looseSame]) {
+    const n = lines.map(key)
+    const o = out.map(key)
+    if (n.length === o.length && n.every((line, i) => line === o[i])) return false
+    if (o.some((_, at) => at + n.length <= o.length && n.every((line, i) => line === o[at + i]))) return false
+    if (n.every((line, i) => i < o.length && line === o[i])) return false
+  }
+  return true
+}
+
+/** The partner of a comparison tried first (strict with non-strict), then the rest of its list. */
+const COMPARE_PARTNER: Readonly<Record<string, string>> = { '<': '<=', '<=': '<', '>': '>=', '>=': '>', '==': '!=', '!=': '==', '===': '!==', '!==': '===' }
+
+/**
+ * The values the plugin tries at a place, in order (1.13.0 G2): a whole number n as n+1, n−1, n+2, 2n kept from 0 to
+ * numberBound (a number with a fraction is never changed); a string as each other string place's text of the same
+ * quote; a comparison its partner first, then the rest; an and/or, a true/false, a method its listed others.
+ */
+function runValues(site: ChangeSite, all: readonly ChangeSite[]): string[] {
+  if (site.kind === 'number') {
+    if (!/^\d+$/.test(site.token)) return []
+    const n = Number(site.token)
+    const bound = numberBound(site.token)
+    return [n + 1, n - 1, n + 2, 2 * n].filter((v, i, a) => v !== n && v >= 0 && v <= bound && a.indexOf(v) === i).map(String)
+  }
+  if (site.kind === 'string') return [...new Set(all.filter(one => one.kind === 'string' && one.token !== site.token && one.token[0] === site.token[0]).map(one => one.token))]
+  if (site.kind === 'compare') {
+    const partner = COMPARE_PARTNER[site.token]
+    return partner !== undefined && site.alts.includes(partner) ? [partner, ...site.alts.filter(x => x !== partner)] : [...site.alts]
+  }
+  return [...site.alts]
+}
+
+/**
+ * The changes the plugin can ask in a concept's code itself (1.13.0 G2, the run route): the learner's whole file run on
+ * this device (newRun with printArgs: exact for its closed subset, any error, limit or print of a container a refusal),
+ * then each place to change (changeSites, every one, nearest the quoted line first) tried with its values in order
+ * (runValues), the first whose code runs clean and prints what may be asked (isCertified) kept, six places at most,
+ * listed in the code's order. Undefined when the file itself does not run so or prints nothing to show.
+ */
+export function changedRunFor(text: string, file: string, blurb: string): ChangedRun | undefined {
+  const lang = changedLang(file)
+  if (!lang) return undefined
+  const ran = newRun(text, lang, { printArgs: true })
+  if (!('lines' in ran)) return undefined
+  const out = ran.lines
+  if (out.length < 1 || out.length > CHANGED_RUN_OUT || out.some(line => line.trim() === '' || line.length > CHANGED_RUN_WIDTH)) return undefined
+  const lines = text.split('\n')
+  const all = changeSites(text, file, blurb, true)
+  const certs: ChangedCert[] = []
+  for (const site of all) {
+    if (certs.length >= CHANGED_RUN_CERTS) break
+    for (const value of runValues(site, all)) {
+      const changedLine = lines[site.line]!.slice(0, site.at) + value + lines[site.line]!.slice(site.end)
+      const changed = [...lines.slice(0, site.line), changedLine, ...lines.slice(site.line + 1)].join('\n')
+      const res = newRun(changed, lang, { printArgs: true })
+      if (!('lines' in res) || !isCertified(res.lines, out)) continue
+      certs.push({ site, value, changedLine, changed, lines: res.lines })
+      break
+    }
+  }
+  certs.sort((a, b) => a.site.line - b.site.line || a.site.at - b.site.at)
+  return { out, certs }
+}
+
+/** What the quiz is asked of a changed pick the plugin ran (1.13.0 G2), in RUNG_ASK's 'changed' place: no trace, no output of its own code. */
+export const CHANGED_RUN_ASK =
+  '비슷한 코드: 이 칸은 문제 글을 쓰지 않는다. 문제와 바꾼 코드와 답은 플러그인이 만든다. 그 개념 아래 "바꿀 수 있는 곳" 가운데 그 개념이 쓰이는 한 곳을 골라, 괄호 안에 적힌 대로 새 값을 정한다. 바꾼 뒤 찍히는 글자가 "지금 찍히는 글자"와 달라지고, 입문자가 코드를 읽고 그 글자를 알아낼 수 있는 값을 고른다. 오류로 멈추게 되는 값은 고르지 않는다. 이 번호에는 T·Q·H·A를 쓰지 않고 C만 쓴다. C 줄에는 고른 곳의 이름과 새 값만 쓴다(예: C2: 2b >=). 다 쓴 C는 다시 쓰거나 고쳐 쓰지 않는다.'
+
+/** What a place on the run route may become (1.13.0 G2): a whole number from 0 to numberBound, else SITE_WHAT's. */
+const RUN_WHAT = (site: ChangeSite) => (site.kind === 'number' ? `0부터 ${numberBound(site.token)} 사이의 다른 정수로` : SITE_WHAT[site.kind](site))
+
+/**
+ * The lines under a changed concept's code the plugin ran (1.13.0 G2): what it prints now, then the places it
+ * certified (each has one value at least whose run prints what may be asked), each with what it may become (RUN_WHAT).
+ */
+export function runLines(n: number, text: string, file: string, run: ChangedRun): string[] {
+  const lang = changedLang(file) ?? 'js'
+  const lines = text.split('\n')
+  const fence = fenceFor(run.out.join('\n'))
+  return [
+    '   지금 찍히는 글자:',
+    fence,
+    ...run.out,
+    fence,
+    '   바꿀 수 있는 곳 (줄은 위 코드의 첫 줄을 1로 셈):',
+    ...run.certs.map((cert, i) => {
+      const site = cert.site
+      const same = codeSpans(lines[site.line]!, lang).filter(t => t.text === site.token)
+      const nth = same.length > 1 ? `${SITE_ORDINAL[same.findIndex(t => t.at === site.at)] ?? ''} 번째 ` : ''
+      return `   ${n}${'abcdef'[i]}: ${site.line + 1}번째 줄의 ${nth}\`${site.token}\` (${RUN_WHAT(site)})`
+    }),
+  ]
+}
+
+/**
+ * What the run route reads of a changed slot (1.13.0 G2): the item and whether its change is the model's own value
+ * (`isOwn`; false where the place's certified change stood in, which the measured stance counts as a miss), or why none.
+ */
+export type ChangedRunRead = { item: LearnQuizItem; isOwn: boolean } | { reason: 'missing' | 'grammar' | 'other-slot' | 'site' | 'long' }
+
+/**
+ * A question in code changed the plugin ran (1.13.0 G2) from the model's C for slot `n`: C names one of the places
+ * listed (its number and letter) and, after it, a new value (siteValue's reading; on this route a number only a whole one
+ * from 0 to numberBound). The plugin applies it and runs the changed file on this device (newRun with printArgs); a value
+ * that is no value, a run refused (an error, a limit, a container printed) or lines that may not be asked (isCertified)
+ * fall back to the place's own certified change (changedRunFor's). The answer is the plugin's run; the model writes no
+ * output at all. The item is the one changedItem makes (CHANGED_LEAD over the changed code, CHANGED_HINT by its line).
+ */
+export function changedRunItem(parts: Map<string, string[]>, n: number, pick: QuizPick): ChangedRunRead {
+  const code = pick.code
+  const lang = code ? changedLang(code.file) : undefined
+  const run = code?.run
+  if (!code || !lang || !run) return { reason: 'missing' }
+  const cPart = parts.get(`~C${n}`) ?? parts.get(`C${n}`)
+  if (!cPart) return { reason: 'missing' }
+  const head = cPart.filter(line => !BARE_FENCE.test(line)).find(line => line.trim() !== '') ?? ''
+  const m = /^\s*`?(\d+)([a-f])`?(?:$|[\s:：)]\s*(?:→|->|=>)?\s*(.*?)\s*$)/.exec(head)
+  if (!m) return { reason: 'grammar' }
+  if (Number(m[1]) !== n) return { reason: 'other-slot' }
+  const cert = run.certs['abcdef'.indexOf(m[2]!)]
+  if (!cert) return { reason: 'site' }
+  const site = cert.site
+  const lines = code.text.split('\n')
+  const toks = codeSpans(lines[site.line]!, lang)
+  const said = m[3] ? siteValue(site, m[3], toks[toks.findIndex(t => t.at === site.at) - 1]?.text) : undefined
+  const own = (() => {
+    if (said === undefined || (site.kind === 'number' && (!/^\d+$/.test(said) || Number(said) > numberBound(site.token)))) return undefined
+    const changedLine = lines[site.line]!.slice(0, site.at) + said + lines[site.line]!.slice(site.end)
+    const changed = [...lines.slice(0, site.line), changedLine, ...lines.slice(site.line + 1)].join('\n')
+    const ran = newRun(changed, lang, { printArgs: true })
+    return 'lines' in ran && isCertified(ran.lines, run.out) ? { changedLine, changed, lines: ran.lines } : undefined
+  })()
+  const use = own ?? cert
+  const fence = fenceFor(use.changed)
+  const question = `${CHANGED_LEAD}\n${fence}${lang === 'py' ? 'python' : 'js'}\n${use.changed}\n${fence}`
+  if (question.length > 1200) return { reason: 'long' }
+  return {
+    item: {
+      key: pick.key,
+      name: pick.name,
+      question,
+      hint: CHANGED_HINT(site.line + 1, use.changedLine),
+      answer: use.lines.join('\n'),
+      kind: 'predict',
+      ...(pick.noteId ? { noteId: pick.noteId } : {}),
+      rung: 'changed',
+    },
+    isOwn: own !== undefined,
   }
 }
 
@@ -8668,6 +8861,8 @@ function changedQuizPrompt(
 ): string {
   const hasOther = picks.some(one => one.rung !== 'changed')
   const hasSlip = picks.some(one => one.slip !== undefined)
+  // 1.13.0 (G2, the run route): a changed pick the plugin ran (code.run) is asked for C only (a place and a new value).
+  const isRun = picks.some(one => one.rung === 'changed' && one.code?.run !== undefined)
   const isTeam = (one: Pick<QuizPick, 'team' | 'isTeamMarked'>) => one.team === true || one.isTeamMarked === true
   const n = picks.length
   return [
@@ -8684,12 +8879,13 @@ function changedQuizPrompt(
       }
       if (!one.code) return [head, ...last, ...rung]
       const fence = fenceFor(one.code.text)
-      const sites = one.rung === 'changed' ? siteLines(i + 1, one.code.text, one.code.file, changeSites(one.code.text, one.code.file, one.blurb)) : []
+      const sites =
+        one.rung !== 'changed' ? [] : one.code.run ? runLines(i + 1, one.code.text, one.code.file, one.code.run) : siteLines(i + 1, one.code.text, one.code.file, changeSites(one.code.text, one.code.file, one.blurb))
       return [head, ...last, ...rung, `   학습자가 만든 코드 (${one.code.file}):`, fence, one.code.text, fence, ...sites]
     }),
     '',
     `개념마다 하나씩, 위 순서대로 ${n}개를 낸다. 번호는 1부터 ${n}까지만 쓰고, 번호마다 그 번호의 개념만 다룬다.${hasOther ? ' 문제에 개념 이름을 그대로 쓰지 말고, 코드나 상황을 보여 주고 묻는다.' : ''}`,
-    ...RUNG_ASK.filter(([rung]) => rungs.has(rung)).map(([, ask]) => ask),
+    ...RUNG_ASK.filter(([rung]) => rungs.has(rung)).map(([rung, ask]) => (rung === 'changed' && isRun ? CHANGED_RUN_ASK : ask)),
     ...(hasSlip ? ['"지난번" 줄이 붙은 개념은 같은 헷갈림이 드러나는 다른 코드나 값으로 묻는다. 지난 문제를 되풀이하지 않는다. 헷갈린 점을 문제나 힌트에 쓰지 않는다.'] : []),
     ...(picks.some(isTeam) ? [TEAM_FOR_QUIZ] : []),
     ...(hasOther
@@ -8702,7 +8898,9 @@ function changedQuizPrompt(
       : []),
     '정확히 아래 형식만 쓴다. 다른 말은 쓰지 않는다. 아래에 없는 번호나 줄은 쓰지 않는다.',
     ...picks.flatMap((one, i) =>
-      one.rung === 'changed'
+      one.rung === 'changed' && one.code?.run
+        ? [`C${i + 1}: (고른 곳 이름, 한 칸 띄우고 새 값만. 예: ${i + 1}b 20)`]
+        : one.rung === 'changed'
         ? [`C${i + 1}: (고른 곳 이름, 한 칸 띄우고 새 값만. 예: ${i + 1}b 20)`, '(그 값으로 바꾼 줄 통째로)', `O${i + 1}:`, '(원래 코드가 찍는 줄들)', `N${i + 1}:`, '(바꾼 코드가 찍는 줄들)']
         : [`T${i + 1}: (예측 · 왜 · 바꿔 보기 중 하나)`, `Q${i + 1}: (문제 한두 문장)`, `H${i + 1}: (힌트 한 문장)`, `A${i + 1}: (답 한두 문장)`],
     ),
@@ -9921,7 +10119,7 @@ function quizItems(parts: Map<string, string[]>, picks: readonly QuizPick[]): Le
   picks.forEach((one, i) => {
     // Code changed (1.12.0 G2) and code never seen (1.12.0 G3): only the plugin's own item from C · O · N or K · L · A, or none.
     if (one.rung === 'changed' || one.rung === 'new') {
-      const made = one.rung === 'changed' ? changedItem(parts, i + 1, one) : newItem(parts, i + 1, one)
+      const made = one.rung === 'changed' ? (one.code?.run ? changedRunItem(parts, i + 1, one) : changedItem(parts, i + 1, one)) : newItem(parts, i + 1, one)
       if ('item' in made) items.push(made.item)
       return
     }
@@ -10743,6 +10941,8 @@ export type Switches = {
   isRuleWide: boolean
   rungNewStep: number
   rungChangedStep: number
+  /** Code changed asked only where the plugin ran each change itself (IS_CHANGED_RUN, 1.13.0 G2's run route). */
+  isChangedRun: boolean
   /** Misses running before a worked example of a concept met in code (WORKED_AFTER_TIMES, 1.10.0 G1's branch 'code'). */
   workedAfterTimes: number
   /** The same for a concept met in no code (WORKED_PLAIN_AFTER_TIMES, 1.10.0 G1's branch 'plain'). */
@@ -10761,6 +10961,7 @@ export const SWITCH_KINDS: Readonly<Record<keyof Switches, 'flag' | 'step'>> = O
   isRuleWide: 'flag',
   rungNewStep: 'step',
   rungChangedStep: 'step',
+  isChangedRun: 'flag',
   workedAfterTimes: 'step',
   workedPlainAfterTimes: 'step',
   isBaseAsked: 'flag',
@@ -10783,6 +10984,7 @@ export const SWITCHES_OFF: Readonly<Switches> = Object.freeze({
   isRuleWide: false,
   rungNewStep: RUNG_NEW_STEP,
   rungChangedStep: RUNG_CHANGED_STEP,
+  isChangedRun: IS_CHANGED_RUN,
   workedAfterTimes: WORKED_AFTER_TIMES,
   workedPlainAfterTimes: WORKED_PLAIN_AFTER_TIMES,
   isBaseAsked: IS_BASE_ASKED,
@@ -10830,6 +11032,7 @@ export const FEATURE_NAMES: Readonly<Record<keyof Switches, string>> = Object.fr
   isRuleWide: '팀 규칙 표지 넓힘',
   rungNewStep: '처음 보는 코드',
   rungChangedStep: '비슷한 코드',
+  isChangedRun: '비슷한 코드',
   workedAfterTimes: '풀이 보고 풀기(코드)',
   workedPlainAfterTimes: '풀이 보고 풀기(코드 없는 개념)',
   isBaseAsked: '바탕 개념',
@@ -10850,6 +11053,7 @@ export const SWITCH_NAMES: Readonly<Record<keyof Switches, string>> = Object.fre
   isRuleWide: '팀 규칙 표지 넓힘',
   rungNewStep: '처음 보는 코드 단계',
   rungChangedStep: '비슷한 코드 단계',
+  isChangedRun: '비슷한 코드 기기 실행',
   workedAfterTimes: '풀이 보고 풀기 오답 수 (코드 개념)',
   workedPlainAfterTimes: '풀이 보고 풀기 오답 수 (코드 없는 개념)',
   isBaseAsked: '바탕 개념',

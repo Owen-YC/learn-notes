@@ -40,6 +40,7 @@ import {
   bankQuestion,
   isChangedAskable,
   isWholeShown,
+  changedRunFor,
   answerShown,
   changedShown,
   isChangedAsked,
@@ -818,8 +819,10 @@ async function recheckRemap($: EngineInterface): Promise<boolean> {
  * The ladder's steps as this load runs them (build), for rungOf, baseFor and workedAfterFor (isWorkedNext, slipNotice):
  * a worked example's count for a concept met in code and for one met in none apart (1.10.0 G1).
  */
-function ladderSteps(): { changedStep: number; workedAfter: number; workedPlainAfter: number } {
-  return { changedStep: build.rungChangedStep, workedAfter: build.workedAfterTimes, workedPlainAfter: build.workedPlainAfterTimes }
+function ladderSteps(): { changedStep: number; workedAfter: number; workedPlainAfter: number; changedRun?: boolean } {
+  // 1.13.0 (G2): the run route only with code changed on; off, the steps are 1.12.0's, key for key.
+  const changedRun = build.isChangedRun && Number.isFinite(build.rungChangedStep)
+  return { changedStep: build.rungChangedStep, workedAfter: build.workedAfterTimes, workedPlainAfter: build.workedPlainAfterTimes, ...(changedRun ? { changedRun } : {}) }
 }
 /** This session's id, read at session start: the key of its stamp (SESSIONS_KEY); undefined when it cannot be read. */
 let mySessionId: string | undefined
@@ -2696,6 +2699,7 @@ async function withCode(
   now: number,
   changedStep: number,
   missed: ReadonlySet<string> = new Set(),
+  changedRun = false,
 ): Promise<QuizPick[]> {
   const written = (await allNotes($)).filter(note => note.status === 'ready').sort((a, b) => b.at - a.at)
   const found: QuizPick[] = []
@@ -2722,6 +2726,9 @@ async function withCode(
         // What code never seen alone leaves out (1.10.0 G3, D29): read only where that rung could ask it.
         const isNewLibrary = isNew && isNewLibraryChange(change)
         const isWhole = isChanged && isWholeShown(change, text)
+        // 1.13.0 (G2, the run route): the whole file run on this device and its changes certified (changedRunFor), for
+        // rungOf and the quiz's lines; never kept, and only its output and changes are sent.
+        const run = isWhole && changedRun ? changedRunFor(text, change.file, one.blurb) : undefined
         code = {
           file: baseName(change.file),
           text,
@@ -2731,6 +2738,7 @@ async function withCode(
           ...(isWhole ? { isWhole: true as const } : {}),
           // The file already read, for code never seen's setting and clause-3 check (1.12.0 G3): on this device only.
           ...(isNew && file !== undefined ? { around: file } : {}),
+          ...(run ? { run } : {}),
         }
         break
       }
@@ -2925,7 +2933,7 @@ async function makeQuiz(
   // A concept whose code changed gave no question in this window is asked from its own code until the window closes
   // (1.12.0 review): the plugin keeps no other record of it, and the same reply would come again.
   const missed = new Set(Number.isFinite(build.rungChangedStep) ? ((await read($, quizRun)).changedMissed ?? []) : [])
-  const found = await withCode($, cfg, chosen, map, newStep, now, build.rungChangedStep, missed)
+  const found = await withCode($, cfg, chosen, map, newStep, now, build.rungChangedStep, missed, ladderSteps().changedRun === true)
   // A concept that came in as a team term: of this repository (any of its terms, in a team quiz) asked as one, by the
   // team's words; of another, its words are the team's all the same.
   const marks = await storedTeamTerms($, map)

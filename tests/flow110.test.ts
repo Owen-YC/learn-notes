@@ -109,13 +109,14 @@ import {
 
 describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the switches, once at session start', () => {
   /** A value that turns each switch on, as a measured route may (a step a whole number). */
-  const ON: Readonly<Record<keyof Switches, boolean | number>> = { isRuleDrill: true, isRuleWide: true, rungNewStep: 4, rungChangedStep: 2, workedAfterTimes: 2, workedPlainAfterTimes: 2, isBaseAsked: true, isThinkAsked: true }
+  const ON: Readonly<Record<keyof Switches, boolean | number>> = { isRuleDrill: true, isRuleWide: true, rungNewStep: 4, rungChangedStep: 2, isChangedRun: true, workedAfterTimes: 2, workedPlainAfterTimes: 2, isBaseAsked: true, isThinkAsked: true }
   /** Each switch as /learn 진단's harness list names it on (ON). */
   const ON_NAMED: Readonly<Record<keyof Switches, string>> = {
     isRuleDrill: '팀 규칙 연습 켬',
     isRuleWide: '팀 규칙 표지 넓힘 켬',
     rungNewStep: '처음 보는 코드 단계 4',
     rungChangedStep: '비슷한 코드 단계 2',
+    isChangedRun: '비슷한 코드 기기 실행 켬',
     workedAfterTimes: '풀이 보고 풀기 오답 수 (코드 개념) 2',
     workedPlainAfterTimes: '풀이 보고 풀기 오답 수 (코드 없는 개념) 2',
     isBaseAsked: '바탕 개념 켬',
@@ -898,7 +899,8 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
         const editA = rung === 'new' ? { ...EDIT_A, file_path: '/proj/src/a.js' } : ({ tool: 'Write', tool_use_id: 'u1', file_path: '/proj/src/a.js', content: ROUTE_WHOLE } as const)
         if (rung === 'new') w.files.set('/proj/src/a.js', 'const a = 1\nconst b = 2\n')
         else w.files.set('/proj/src/a.js', ROUTE_WHOLE)
-        const onRow = { models: { sonnet: { ...ON } } }
+        // 1.13.0 G2: this case is 1.12.0's route for code changed (its C · O · N reply); the run route has tests of its own (run113).
+        const onRow = { models: { sonnet: { ...ON, ...(rung === 'changed' ? { isChangedRun: false } : {}) } } }
         const isNew = rung === 'new'
         const quizReply = () => [routeCode(1, isNew, !isNew), routeCode(2, isNew, !isNew), routeCode(3, isNew, !isNew)].join('\n')
         const asked = (store: Map<string, unknown>) => itemsOf(store).map(one => [one.name, one.rung, one.kind, one.question])
