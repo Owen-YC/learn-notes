@@ -251,8 +251,9 @@ describe('1.10.0: 모델별 갈래 (G7): the model setting and level pick the sw
     expect(calls.every(call => call.model === 'sonnet' && call.effort === 'low')).toBe(true)
     // Read at session start, again by each of the day's three questions while 생각해 보기 is on (r, e and /learn 질문:
     // askNote, 1.11.0 review), by each of its two quizzes while code changed or code never seen is on (makeQuiz's
-    // recheckRemap, 1.12.0 G2 · G3; re-pinned on purpose) and by /learn 진단.
-    expect(reads).toEqual(Array.from({ length: 7 }, () => SONNET_ALIAS))
+    // recheckRemap, 1.12.0 G2 · G3; re-pinned on purpose), by /learn 진단, and, 팀 규칙 연습 on, twice by each of the
+    // practice's two checked lines (checkDrill and gradeDrill before the call, 1.13.0 cross-review 1; re-pinned 7 → 11).
+    expect(reads).toEqual(Array.from({ length: 11 }, () => SONNET_ALIAS))
     // The route's own table turns 팀 규칙 표지 넓힘 on (1.10.0 G6): the harness's row is named as a test switch where
     // it differs from that table, each one; a cell the shipped row has on already is none.
     expect(settingsLine(diag)).toBe(`- 설정: 자동 노트 켬 · sonnet(이 모델에서 켠 기능: 팀 규칙 표지 넓힘)${SETTINGS_TAIL} beginner`)
@@ -1097,6 +1098,45 @@ describe('1.10.0: 팀 규칙 연습 (G6): the note\'s prompt 1.9.0\'s, a team ru
     expect(note().drill).toMatchObject({ verdict: 'right', isRetried: true, feedback: '좋습니다.' })
     await ui.unmount()
   })
+
+  // 1.13.0 cross-review 1 (robust-1-1): the grade asks the alias again before it reads isRuleDrill (recheckRemap's
+  // rule), so a window whose modelOverrides turned after its practice opened grades as every switch off does: no
+  // made rule practice to grade, no call, nothing code wrote kept; turned while the grading call is out, the model's
+  // grade is kept as it came and code writes nothing over it. The row is haiku's own (a flat-key harness is laid again
+  // after the recheck and could not show it); the control, nothing turned, still caps.
+  for (const when of ['never', 'before the line', 'during the call'] as const) {
+    test(`on, the grade cap (1.13.0 G6) with the haiku row of a harness: modelOverrides turned ${when}: ${when === 'never' ? 'the cap acts' : when === 'before the line' ? 'no grading call and nothing kept (every switch off)' : 'the model grade kept, no cap'}`, { options: { model: 'haiku' } }, async ($, on) => {
+      let turn: (() => void) | undefined
+      on('model.complete', { prompt: /## 학습자의 답/ }, async (_$, e, next) => {
+        turn?.()
+        return next(e)
+      })
+      const { w, note } = await wrote($, on, { models: { haiku: { isRuleWide: true, isRuleDrill: true } } }, [OWN, REPLY2], [], {}, undefined, WRITE_USER2)
+      const ui = await pane($)
+      await ui.press({ key: 'note-drill' })
+      const id = note().id
+      const before = w.models.length
+      const overridden = () => {
+        w.settings = { user: { modelOverrides: { 'some-model-1': 'override-target-x' } } }
+      }
+      if (when === 'before the line') overridden()
+      if (when === 'during the call') turn = overridden
+      w.answer = '규칙: 지킴\n판정: 맞음\n피드백: apiRequest로 잘 바꿨습니다.'
+      await ui.input({ key: `drill-${id}`, text: 'const res = await apiRequest(url, options)' })
+      if (when === 'before the line') {
+        expect(w.models).toHaveLength(before)
+        expect(note().drill).toBeUndefined()
+      } else if (when === 'during the call') {
+        expect(w.models).toHaveLength(before + 1)
+        expect(note().drill).toMatchObject({ verdict: 'right', feedback: 'apiRequest로 잘 바꿨습니다.' })
+        expect(JSON.stringify(note().drill)).not.toContain('이 노트의 코드에 없는 이름')
+      } else {
+        expect(w.models).toHaveLength(before + 1)
+        expect(note().drill?.firstTry).toMatchObject({ verdict: 'partial', feedback: '이 노트의 코드에 없는 이름입니다: `options`', nudge: RULE_CAP_NUDGE })
+      }
+      await ui.unmount()
+    })
+  }
 
   test('on, a try again code sees against again is held too: the same line again is not sent (unchanged), another with the same unknown name ends partly right (secondVerdict), never right', async ($, on) => {
     const { w, note } = await wrote($, on, ON, [OWN, REPLY2], [], {}, undefined, WRITE_USER2)

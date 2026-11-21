@@ -801,8 +801,9 @@ async function chooseSwitches($: EngineInterface, cfg: Config, harness: Record<s
  * have (the harness laid again), and never back on. Asked right before the shipped switch on takes effect (writeNote),
  * by askNote while 생각해 보기 is on (1.11.0 review), by /learn 진단, by makeQuiz before a quiz is made while code changed
  * or code never seen is on (1.12.0 G2 · G3: haiku's code changed as shipped), before an exact grade of code never seen,
- * and before and after G6's rule drill call (1.12.0 G6). The quiz's G1 and G4, off in both rows, are not asked again
- * where they act: a row that turns one on asks there first.
+ * before and after G6's rule drill call (1.12.0 G6), and, while 팀 규칙 연습 is on, before a practice line is checked,
+ * before its grading call and once that is back, ahead of the code-side grade cap (1.13.0 cross-review 1). The quiz's
+ * G1 and G4, off in both rows, are not asked again where they act: a row that turns one on asks there first.
  */
 async function recheckRemap($: EngineInterface): Promise<boolean> {
   if (aliasRead === undefined || remap !== 'kept') return remap === 'kept'
@@ -3880,6 +3881,9 @@ async function drillConcept($: EngineInterface, note: LearnNote): Promise<{ key:
 async function checkDrill($: EngineInterface, cfg: Config, id: string, text: string): Promise<void> {
   const note = (await read($, notes)).find(one => one.id === id)
   if (!note || note.status !== 'ready') return
+  // A made team-rule practice is graded only while its switch holds (recheckRemap's rule, 1.13.0 cross-review 1): an
+  // alias turned since session start turns it off here, and the practice is none, as every switch off has it.
+  if (build.isRuleDrill) await recheckRemap($)
   const drill = drillOf(note.text, note.changes, build.isRuleDrill)
   const state = note.drill
   if (!drill || isDrillOver(state)) return
@@ -3949,6 +3953,9 @@ async function gradeDrill($: EngineInterface, cfg: Config, note: LearnNote, dril
   if (sameLine(drill, mine, drill.example)) return finishDrill($, cfg, note, drill, { mine: line, verdict: 'right', feedback: '' }, { first, at: now })
   // The code as it may go to a model: a file the settings or the team file leave out now is not sent.
   const shown = await screened($, cfg, note)
+  // Asked again right before the call (recheckRemap's rule, 1.13.0 cross-review 1): turned off, a made team-rule
+  // practice is none, and nothing is sent for it.
+  if (build.isRuleDrill) await recheckRemap($)
   const sent = drillOf(shown.text, shown.changes, build.isRuleDrill)
   if (!sent) return { error: '이 줄은 지금 노트에서 빼는 파일에 있어 확인하지 않았습니다' }
   const name = isRule ? '팀 규칙' : ((await drillConcept($, note))?.one.name ?? '직접 해 보기')
@@ -3969,7 +3976,8 @@ async function gradeDrill($: EngineInterface, cfg: Config, note: LearnNote, dril
   // place of the example changed is partly right, said by code, with one try again. Never raised, never on another line.
   // A try again is held to it too (its first try's code line goes with it as the feedback it got): a line code sees
   // against is never right on either try.
-  const use = build.isRuleDrill && sent.rule !== undefined && parsed.verdict === 'right' ? ruleFixUse(sent.check) : undefined
+  // Asked again once the call is back (recheckRemap's rule, 1.13.0 cross-review 1): turned off meanwhile, code writes nothing.
+  const use = build.isRuleDrill && sent.rule !== undefined && parsed.verdict === 'right' && (await recheckRemap($)) ? ruleFixUse(sent.check) : undefined
   const file = use === undefined ? undefined : await importsText($, sent.path, CAP_FILE_MAX)
   // What the rule asking for that name says not to use, from the team file screened read just now (teamOf keeps it).
   const team = use === undefined ? undefined : await teamOf($, note.root)
