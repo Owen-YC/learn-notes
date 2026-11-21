@@ -4628,11 +4628,6 @@ export function calcLiteral(text: string, lang: CalcLang): { value: unknown } | 
   }
 }
 
-/** A value as the runner shows it (js JSON.stringify, py repr), or undefined when calc cannot be sure. */
-export function calcShow(value: unknown, lang: CalcLang): string | undefined {
-  return calcShowSafe(value, lang)
-}
-
 /**
  * Whether two values are one result (stance [같음], S13, S18): numbers by value (7 is not "7"), strings exactly,
  * booleans with booleans, null with null (py None), undefined only with undefined, lists with lists and tuples with

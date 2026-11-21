@@ -2545,17 +2545,6 @@ function untypedLine(line: string): string {
     .replace(/\b(const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*[^=]+?=(?!=)/g, '$1 $2 =').replace(/\s+as\s+(?:const\b|[A-Za-z_$][\w$.]*(?:<[^>]*>)?(?:\[\])*)/g, '')
 }
 
-/** Whether brackets and quotes close within a text. */
-function isBalanced(text: string): boolean {
-  let depth = 0
-  for (const c of text.replace(CALL_SKIP_JS, '""')) {
-    if ('([{'.includes(c)) depth++
-    else if (')]}'.includes(c)) depth--
-    if (depth < 0) return false
-  }
-  return depth === 0
-}
-
 /** A top-level statement that only calls a function with literals (printed or not): its call, or undefined. */
 function anchorOf(text: string, isPy: boolean): ThinkCall | undefined {
   if (/^\s/.test(text)) return undefined
@@ -2707,20 +2696,6 @@ function callsOf(text: string, name: string, isPy: boolean): string[] {
 
 /** The walk-through's own example line (`예시 호출: \`f(3)\``), bold or listed or not. */
 const EXAMPLE_CALL = /^[^\p{L}\p{N}`]*예시\s*호출\s*(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*)$/u
-
-/**
- * The system prompt of the call that reads whatever is typed while code's 생각해 보기 is open (1.12.0 G5): a guess, a
- * "don't know" or a question, all of it the learner's thinking, never a thing that happened.
- */
-export const THINK_SLOT_SYSTEM = [
-  '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 코딩 튜터다.',
-  "학습자는 '예시로 따라가기'를 읽고, 그 끝의 생각해 보기 호출을 실행하면 결과가 어떻게 될지 코드를 실행하지 않고 생각한 뒤 질문 칸에 적었다.",
-  '학습자의 글은 실제로 겪은 일이 아니라 짐작이나 질문이다. 원인을 찾거나 오류 메시지·코드를 더 보여 달라고 하지 않는다.',
-  WITHHELD_RULE,
-  '코드는 백틱(`)으로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
-  TONE,
-  BOLD,
-].join(' ')
 
 /**
  * How the check tells a text's kind, per model (THINK_VARIANT, with the work line): `wide` reads every yes/no about the
@@ -3146,7 +3121,6 @@ const PICK_RESULT_MAX = 60
  */
 export function thinkPick(walked: { call: ThinkCall; callee: ThinkCallee }, run0: CalcResult, mod: CalcModule, walkText: string, noteText: string, diffs: readonly string[]): string | undefined {
   const { call, callee } = walked
-  const lang: CalcLang = callee.isPy ? 'py' : 'js'
   const shownCalls = new Set([walkText, noteText, ...diffs].flatMap(text => canonCallsOf(text, callee)))
   shownCalls.add(canonOf(call, callee))
   const spans = new Set([walkText, noteText].flatMap(text => [...text.matchAll(/`([^`\n]+)`/g)].map(m => m[1]!.trim())))
@@ -3379,7 +3353,7 @@ export function thinkCalcPlan(
   return { kind: 'check', system: THINK_CALC_SYSTEM, prompt: thinkCalcPrompt(note, think, mine, level, variant, facts), facts }
 }
 
-/** The system prompt of that check (1.13.0 G5e): THINK_SLOT_SYSTEM's, its second sentence saying the plugin computed the result. */
+/** The system prompt of that check (1.13.0 G5e): 1.12.0 G5's slot system (gone with its route), its second sentence saying the plugin computed the result. */
 export const THINK_CALC_SYSTEM = [
   '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 코딩 튜터다.',
   "학습자는 '예시로 따라가기' 끝의 생각해 보기 호출을 읽고 질문 칸에 적었다. 결과는 플러그인이 코드를 직접 계산해 알려 주므로 너는 계산하지 않는다.",
@@ -3806,28 +3780,6 @@ function namesInput(mine: string, args: readonly string[]): boolean {
     const value = raw.replace(/[\s'"`]/g, '')
     return value !== '' && flat.includes(value)
   })
-}
-/** A comma list split at the top level (no comma inside brackets or quotes). */
-function splitTopLevel(text: string): string[] {
-  const out: string[] = []
-  let depth = 0
-  let quote = ''
-  let from = 0
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]!
-    if (quote) {
-      if (c === '\\') i++
-      else if (c === quote) quote = ''
-    } else if (c === '"' || c === "'") quote = c
-    else if ('([{'.includes(c)) depth++
-    else if (')]}'.includes(c)) depth--
-    else if (c === ',' && depth === 0) {
-      out.push(text.slice(from, i).trim())
-      from = i + 1
-    }
-  }
-  if (text.slice(from).trim() !== '') out.push(text.slice(from).trim())
-  return out
 }
 /** The closed words a 짐작값 may be (thinkCalcPrompt). */
 const closedGuessWords = ['오류', '돌려주는 것 없음', '따라가기와 같음', '음수', '0', '빈 값', '참', '거짓', '기타', '없음']

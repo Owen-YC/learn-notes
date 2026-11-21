@@ -19,7 +19,6 @@ import {
   SYSTEM,
   THINK_ASK,
   THINK_SYSTEM,
-  THINK_SLOT_SYSTEM,
   SLOT_UNREAD,
   thinkCallees,
   THINK_CALC_SYSTEM,
@@ -4697,7 +4696,7 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
     expect(prompt).not.toContain(GUESSED)
     expect(prompt).not.toContain('실행하지 않았다')
     expect(w.systems).not.toContain(THINK_SYSTEM)
-    expect(w.systems).not.toContain(THINK_SLOT_SYSTEM)
+    expect(w.systems).not.toContain(THINK_CALC_SYSTEM)
     expect(await ui.find({ type: 'Markdown', text: '맞습니다.' })).toBeDefined()
     await ui.unmount()
   })

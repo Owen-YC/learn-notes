@@ -58,7 +58,6 @@ import {
   storedConcepts,
   switchKeys,
   traceQuestion,
-  THINK_SLOT_SYSTEM,
   THINK_VARIANT,
   thinkCallees,
   THINK_CALC_SYSTEM,
@@ -3132,8 +3131,8 @@ describe('1.10.0: 생각해 보기 (G5) behind its switch: the line only under c
   const FREE = `${STEPS}\n\n**생각해 보기:** 수량이 음수면 어느 줄에서 멈출까요?`
   const TRACE_170 = traceQuestion(false)
   /**
-   * r's prompt under the code note while the switch is on (1.12.0 G5): 1.9.0's with its question 1.12.0's traceCallQuestion's
-   * for the function code found (itemTotal, no anchor), nothing else changed.
+   * r's prompt under the code note while the switch is on (1.12.0 G5; 1.13.0 G5e): 1.9.0's with its question
+   * traceCalcQuestion's (1.12.0's traceCallQuestion is gone) for the function code found (itemTotal, no anchor), nothing else changed.
    */
   const CODE_NOTE = (thinkStore('code').get('history') as Record<string, { notes: LearnNote[] }>)['/proj']!.notes[0]!
   // 1.13.0 G5e (re-pinned on purpose): r's question is traceCalcQuestion's for the functions thinkCalcScope finds.
