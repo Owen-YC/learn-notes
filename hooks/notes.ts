@@ -8821,13 +8821,13 @@ const CHANGED_RUN_WIDTH = 160
 /** What the learner's code may print to be shown under its code: one to eight lines, each short. */
 const CHANGED_RUN_OUT = 8
 /**
- * A safety net over one changedRunFor as a whole (1.13.0 cross-review 1), as calc's CALC_PICK_STEPS and CALC_PICK_MS
- * are over one pick: newRun calls at most (the learner's own run with them), and ms. Each run is bounded alone
- * (NEW_RUN_STEPS); these bound the places times values, which makeQuiz runs for each concept it looks at, on its turn.
- * Reached, the places certified so far are the run's (fewer than two: the concept is asked in its own code, rungOf).
+ * A safety net over one changedRunFor as a whole (1.13.0 cross-review 1): newRun calls at most (the learner's own run
+ * with them). Each run is bounded alone (NEW_RUN_STEPS); this bounds the places times values, which makeQuiz runs for
+ * each concept it looks at, on its turn. Reached, the places certified so far are the run's (fewer than two: the concept
+ * is asked in its own code, rungOf). No clock (1.13.0 cross-review 2): a cap in ms made the places, and so the rung and
+ * the quiz request, hang on how fast or busy the device was; a count of runs is the same on every device, as newrun.ts is.
  */
 export const CHANGED_RUN_TRIES = 80
-export const CHANGED_RUN_MS = 600
 
 /** A line as the run route tells two lines apart the loosest way: the stance's clause 6, then no case, space, quote or end mark. */
 const looseSame = (line: string) => outputSame(line).toLowerCase().replace(/\s+/g, '').replace(/['"`]/g, '').replace(/\.$/, '')
@@ -8879,13 +8879,12 @@ function runValues(site: ChangeSite, all: readonly ChangeSite[]): string[] {
  * this device (newRun with printArgs: exact for its closed subset, any error, limit or print of a container a refusal),
  * then each place to change (changeSites, every one, nearest the quoted line first) tried with its values in order
  * (runValues), the first whose code runs clean and prints what may be asked (isCertified) kept, six places at most,
- * listed in the code's order, as many as CHANGED_RUN_TRIES and CHANGED_RUN_MS let it try. Undefined when the file
- * itself does not run so or prints nothing to show.
+ * listed in the code's order, as many as CHANGED_RUN_TRIES lets it try (no clock: the same places on every device).
+ * Undefined when the file itself does not run so or prints nothing to show.
  */
 export function changedRunFor(text: string, file: string, blurb: string): ChangedRun | undefined {
   const lang = changedLang(file)
   if (!lang) return undefined
-  const until = Date.now() + CHANGED_RUN_MS
   let tries = 1
   const ran = newRun(text, lang, { printArgs: true })
   if (!('lines' in ran)) return undefined
@@ -8897,7 +8896,7 @@ export function changedRunFor(text: string, file: string, blurb: string): Change
   places: for (const site of all) {
     if (certs.length >= CHANGED_RUN_CERTS) break
     for (const value of runValues(site, all)) {
-      if (tries >= CHANGED_RUN_TRIES || Date.now() > until) break places
+      if (tries >= CHANGED_RUN_TRIES) break places
       const changedLine = lines[site.line]!.slice(0, site.at) + value + lines[site.line]!.slice(site.end)
       const changed = [...lines.slice(0, site.line), changedLine, ...lines.slice(site.line + 1)].join('\n')
       tries += 1

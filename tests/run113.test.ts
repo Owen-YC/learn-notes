@@ -4,7 +4,6 @@ import {
   CHANGED_HINT,
   CHANGED_LEAD,
   CHANGED_RUN_ASK,
-  CHANGED_RUN_MS,
   CHANGED_RUN_TRIES,
   IS_CHANGED_RUN,
   MODEL_SWITCHES,
@@ -100,7 +99,7 @@ describe('1.13.0 (G2-RUN): code changed the plugin ran itself', () => {
   })
 
   test('changedRunFor: a safety net over the whole run (1.13.0 cross-review 1): past CHANGED_RUN_TRIES newRun calls it stops with the places certified so far; under it, the same places as with none', () => {
-    expect([CHANGED_RUN_TRIES, CHANGED_RUN_MS]).toEqual([80, 600])
+    expect(CHANGED_RUN_TRIES).toBe(80)
     // Four unused arrays nearest the quoted line: each number's values run and print the same (never certified), so the
     // one place that changes the output, `let t = 0`, comes after 40 · 4 · 4 tries with 40 numbers an array; with 5, first.
     const arr = (k: number, per: number) => `const d${k} = [${Array.from({ length: per }, (_, i) => (i % 7) + 1).join(', ')}]`
@@ -112,6 +111,28 @@ describe('1.13.0 (G2-RUN): code changed the plugin ran itself', () => {
     const under = changedRunFor(code(5), 'a.js', blurb(5))!
     expect(under.out).toEqual(['합계: 10'])
     expect(under.certs.map(c => [c.site.token, c.value])).toEqual([['0', '1']])
+  })
+
+  test('changedRunFor: no clock (1.13.0 cross-review 2): with Date.now running far faster (a device that slow, or that busy), the very same places as on the clock as it is', () => {
+    const asIs = changedRunFor(CODE, 'a.js', BLURB)!
+    expect(asIs.certs.length).toBe(6)
+    // The engine freezes Date itself, so the global binding is what a test can swap: every Date.now() a second later.
+    const Real = globalThis.Date
+    let t = Real.now()
+    const g = globalThis as { Date: DateConstructor }
+    g.Date = class extends Real {
+      static override now() {
+        return (t += 1000)
+      }
+    } as DateConstructor
+    let slow: ReturnType<typeof changedRunFor>
+    try {
+      expect(Date.now() - Date.now()).toBe(-1000)
+      slow = changedRunFor(CODE, 'a.js', BLURB)
+    } finally {
+      g.Date = Real
+    }
+    expect(slow).toEqual(asIs)
   })
 
   test('rungOf: off, the 1.12.0 branch byte for byte; on, two certified changes at least, else 내 코드', () => {
