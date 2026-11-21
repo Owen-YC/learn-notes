@@ -266,13 +266,12 @@ import {
   openThink,
   THINK_OPEN_MS,
   thinkKept,
-  thinkCallees,
-  traceCallQuestion,
-  thinkCallKept,
-  THINK_SLOT_SYSTEM,
-  thinkSlotCheckPrompt,
-  thinkSlotReply,
-  slotFallback,
+  thinkCalcScope,
+  traceCalcQuestion,
+  thinkCalcKept,
+  thinkCalcPlan,
+  thinkCalcReply,
+  type ThinkCalcScope,
   thinkVariantOf,
   VERDICT_TEXT,
   type RankedConcept,
@@ -3659,33 +3658,38 @@ async function askNote(
   const isThinkAsked = wasThinkAsked && (await recheckRemap($))
   const isKeyed = label === TRACE_LABEL && question !== label
   const isTrace = isThinkAsked && isKeyed
-  // 1.12.0 G5: the functions the line may call (thinkCallees), read only while on; none asks 1.7.0's words to the byte.
-  const callees = isThinkAsked ? thinkCallees(shown.changes) : []
-  const isCode = isTrace && callees.length > 0
+  // 1.13.0 G5e: the functions the line may call and their calc modules (thinkCalcScope), read only while on; none asks 1.7.0's words to the byte.
+  const scope: ThinkCalcScope = isThinkAsked ? thinkCalcScope(shown.changes) : { callees: [], mods: new Map() }
+  const isCode = isTrace && scope.callees.length > 0
   // A key pasted into a question is masked before the model, the store or the journal sees it.
-  const masked = redactText(wasThinkAsked && isKeyed ? (isCode ? traceCallQuestion(callees) : traceQuestion(false)) : question).text
+  const masked = redactText(wasThinkAsked && isKeyed ? (isCode ? traceCalcQuestion(scope.callees) : traceQuestion(false)) : question).text
   const kept = label === question ? masked : redactText(label).text
   // A question typed (in the field or by /learn 질문, never r's or e's) while r's walk-through is open (1.8.0): sent
   // with the walk-through in full and its 생각해 보기, to be checked as an answer or answered as a question. While
   // the switch is on, only a 생각해 보기 in its closed form is open (1.10.0 G5, isThinkShape).
   const askedAt = await $.clock.now()
   const think = label === question ? openThink(shown.asks, askedAt, isThinkAsked, isThinkAsked) : undefined
-  // 1.12.0 G5: while code's line is open, every text typed goes to the check, which tells its kind itself.
+  // 1.13.0 G5e: while code's line is open, a blank, an error or a value guessed is answered by code (no call); any
+  // other text goes to one check with code's computed facts; a line calc cannot run now goes as 1.9.0's question.
   const isCheck = isThinkAsked && think !== undefined
-  const asked = await askModel(
-    $,
-    cfg,
-    'ask',
-    isCheck
-      ? { system: THINK_SLOT_SYSTEM, prompt: thinkSlotCheckPrompt(shown, think, masked, level, thinkVariantOf(cfg.model)), maxTokens: THINK_CHECK_TOKENS }
-      : { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules, think, isThinkAsked), maxTokens: 900 },
-  )
-  if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
-  // A check's reply not in its format is shown as it came, its walk-through taken out (1.10.0 G5), unless that was
-  // all it said. r's answer while the switch is on keeps a 생각해 보기 only as thinkKept lets (1.10.0 G5).
+  const plan = isCheck ? thinkCalcPlan(shown, think, masked, level, thinkVariantOf(cfg.model)) : undefined
   const diffs = shown.changes.map(one => one.diff)
-  const unread = isCheck ? slotFallback(asked.text) : isTrace ? (isCode ? thinkCallKept(asked.text, callees, shown.text, diffs) : thinkKept(asked.text, false)) : asked.text
-  const answer = cut((isCheck ? thinkSlotReply(asked.text, masked) : undefined) ?? unread, 4000)
+  let answer: string
+  if (plan?.kind === 'code') answer = cut(plan.text, 4000)
+  else {
+    const asked = await askModel(
+      $,
+      cfg,
+      'ask',
+      plan?.kind === 'check'
+        ? { system: plan.system, prompt: plan.prompt, maxTokens: THINK_CHECK_TOKENS }
+        : { system: ASK_SYSTEM, prompt: askPrompt(shown, masked, level, rules, plan?.kind === 'fallback' ? undefined : think, plan?.kind === 'fallback' ? false : isThinkAsked), maxTokens: 900 },
+    )
+    if ('error' in asked) return { error: `답하지 못했습니다: ${asked.error}` }
+    // r's answer while the switch is on: code's line or none (thinkCalcKept); thinkKept for a note with nothing to call.
+    const seen = think === undefined ? '' : [shown.text, think.trace, masked, ...diffs].join('\n')
+    answer = cut(plan?.kind === 'check' ? thinkCalcReply(asked.text, plan.facts, masked, seen) : isTrace ? (isCode ? thinkCalcKept(asked.text, scope, shown.text, diffs) : thinkKept(asked.text, false)) : asked.text, 4000)
+  }
   const now = await $.clock.now()
   const latest = (await read($, notes)).find(one => one.id === id) ?? note
   await setNote($, id, { asks: [...(latest.asks ?? []), { question: cut(kept, 1000), answer, at: now }].slice(-ASKS_KEPT) })

@@ -21,10 +21,13 @@ import {
   THINK_SYSTEM,
   THINK_SLOT_SYSTEM,
   SLOT_UNREAD,
-  thinkCallLine,
   thinkCallees,
-  thinkSlotCheckPrompt,
-  traceCallQuestion,
+  THINK_CALC_SYSTEM,
+  thinkCalcKept,
+  thinkCalcPlan,
+  thinkCalcScope,
+  traceCalcQuestion,
+  valueThinkLine,
   WORKED_BASE_NEXT,
   WORKED_NEXT,
   RUNG_CHANGED_STEP,
@@ -4506,13 +4509,14 @@ describe('1.9.0: 바탕 개념, a base concept asked right before the worked exa
 
 describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call of its own, a question answered as before (F6)', () => {
   const MIN = 60_000
-  /** r's walk-through of one call the model chose, as 1.12.0 G5 asks it (traceCallQuestion), and its last line. */
+  /** r's walk-through of one call the model chose, as 1.12.0 G5 asked it, and its last line. */
   const WALK = ['예시 호출: `sumOdd([1, 2, 3])`', '', '1. `t`는 0에서 시작합니다.', '2. 홀수 1과 3만 더해 `t`는 4가 됩니다.', '3. `4`를 돌려줍니다.', '', '바뀌기 전 코드였다면 2단계에서 2도 더해 6이 됩니다.'].join('\n')
   const CALL = 'sumOdd([5, 7])'
   const THOUGHT = '`sumOdd([5, 7])`를 실행하면 최종 결과는 무엇이 될까요?'
-  /** The model's reply, and what is kept: its line put in code's own words (thinkCallKept). */
+  /** The model's reply, and what is kept: its line put in 1.12.0 code's own words. */
   const REPLY = `${WALK}\n\n**생각해 보기:** \`${CALL}\``
-  const KEPT = `${WALK}\n\n${thinkCallLine(CALL)}`
+  // 1.12.0's own line for that call, as a 1.12.0 store keeps it (its maker thinkCallLine went with the G5c ON path in 1.13.0).
+  const KEPT = `${WALK}\n\n**생각해 보기:** \`${CALL}\`를 실행하면 최종 결과는 무엇이 될까요?`
   const HINT = 'i(영문 상태): 질문 칸에 답 적기 · 넘어가도 됩니다'
   const OPEN = '답이나 궁금한 점 적고 Enter'
   const SHUT = '궁금한 것을 적고 Enter'
@@ -4521,7 +4525,7 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
   const OLD_THOUGHT = '`b`를 3으로 바꾸면 마지막에 `b`는 얼마일까요?'
   const TRACED = ['1. `const a = 1`: `a`는 1입니다.', '2. `const b = 2`: `b`는 2입니다.', '', `**생각해 보기:** ${OLD_THOUGHT}`].join('\n')
   const GUESSED = '## 학습자의 짐작'
-  /** The check's reply in its six lines (thinkSlotCheckPrompt, haiku's work line). */
+  /** The check's reply in its six lines (1.12.0's slot check, haiku's work line). */
   const slot = (kind: string, result: string, verdict: string, why = '5와 7이 모두 홀수라 둘 다 더합니다.', answer = '없음') =>
     `종류: ${kind}\n따라가기: \`t\`는 0, 5를 더해 5, 7을 더해 12\n바른 결과: ${result}\n판정: ${verdict}\n까닭: ${why}\n답: ${answer}`
   type Ui = Awaited<ReturnType<typeof pane>>
@@ -4556,120 +4560,125 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
     await w.clock.settle()
   }
 
-  test('on, in the terminal with the keys in the pane: r asks for one call (ASK_SYSTEM, 900) and code writes the line; a guess goes to the check (THINK_SLOT_SYSTEM, 900), headed 맞혔습니다, its kind and work lines nowhere, nothing graded', async ($, on) => {
+  /** 1.13.0 G5e: the walk-through with its 결과 line, and what askNote keeps of it (thinkCalcKept: code's own line, last). */
+  const REPLY_E = `${WALK}\n\n결과: \`4\``
+  const keptOf = (store: Map<string, unknown>, answer = REPLY_E) => {
+    const one = noteOf(store)
+    return thinkCalcKept(answer, thinkCalcScope(one.changes), one.text, one.changes.map(c => c.diff))
+  }
+  const thinkOfKept = (kept: string) => {
+    const line = kept.split('\n').at(-1)!
+    const call = /`([^`]+)`/.exec(line)![1]!
+    return { question: line.replace(/^\*\*생각해 보기:\*\* /, ''), trace: kept, call }
+  }
+  /** A check reply in its seven closed lines (thinkCalcPrompt). */
+  const calcSlot = (kind: string, guess = '없음', answer = '없음', other = '없음', exprs: [string, string] = ['없음', '없음'], verdict = '없음') =>
+    `종류: ${kind}\n짐작값: ${guess}\n다른 호출: ${other}\n식: ${exprs[0]}\n식: ${exprs[1]}\n답: ${answer}\n판정: ${verdict}`
+
+  test('on (1.13.0 G5e), in the terminal with the keys in the pane: r asks for one walk and code writes the line; a value guessed is answered by code with no call, headed 맞혔습니다, nothing graded', async ($, on) => {
     const store = new Map<string, unknown>()
     const w = await noted($, on, { isThinkAsked: true }, store)
     const ui = await pane($, 'terminal', { ...PANE_PROPS, isFocused: true })
     const index = JSON.stringify(store.get('concepts'))
-    const callees = thinkCallees(noteOf(store).changes)
-    expect(callees.map(one => one.name)).toEqual(['sumOdd'])
-    await trace(ui, w)
-    // r's own call: one call to follow and a last line holding only another call (1.12.0 G5's words, no THINK_ASK).
-    expect(w.models.at(-1)).toContain(`## 학습자의 질문\n${traceCallQuestion(callees)}\n\n`)
+    const scope = thinkCalcScope(noteOf(store).changes)
+    expect(scope.callees.map(one => one.name)).toEqual(['sumOdd'])
+    await trace(ui, w, REPLY_E)
+    expect(w.models.at(-1)).toContain(`## 학습자의 질문\n${traceCalcQuestion(scope.callees)}\n\n`)
     expect(w.models.at(-1)).not.toContain(THINK_ASK)
     expect(w.systems.at(-1)).toBe(ASK_SYSTEM)
     expect(w.budgets.at(-1)).toBe(900)
-    expect(asksOf(store).map(one => one.answer)).toEqual([KEPT])
+    const kept = keptOf(store)
+    expect(kept.split('\n').at(-1)).toMatch(/^\*\*생각해 보기:\*\* `sumOdd\(/)
+    expect(asksOf(store).map(one => one.answer)).toEqual([kept])
     expect(await hintsOf(ui)).toEqual([HINT])
     expect((await fieldOf(ui)).props.placeholder).toBe(OPEN)
+    const think = thinkOfKept(kept)
+    const right = thinkCalcPlan(noteOf(store), think, '모르겠어요', 'beginner', 'trace')
+    const value = right.kind === 'code' ? /바른 결과: `([^`]+)`/.exec(right.text)![1]! : ''
     const calls = w.models.length
     await w.clock.advance(5 * MIN)
-    await typed(ui, w, '12요', slot('짐작', '`12`를 돌려준다', '맞음'))
-    expect(w.models).toHaveLength(calls + 1)
-    expect(w.systems.at(-1)).toBe(THINK_SLOT_SYSTEM)
-    expect(w.budgets.at(-1)).toBe(900)
-    const note = noteOf(store)
-    expect(w.models.at(-1)).toBe(thinkSlotCheckPrompt(note, { question: THOUGHT, trace: KEPT }, '12요', 'beginner', 'trace'))
-    expect(w.models.at(-1)).toContain(`## 생각해 보기 물음\n${THOUGHT}\n\n## 그 물음이 붙은 '예시로 따라가기'\n${KEPT}\n\n## 학습자의 글\n12요\n`)
-    expect(w.models.at(-1)).not.toContain(GUESSED)
-    expect(w.models.at(-1)).not.toContain(SECTION)
-    expect(await ui.find({ type: 'Text', text: '이어서 · 12요' })).toBeDefined()
-    const shown = '**맞혔습니다.** 5와 7이 모두 홀수라 둘 다 더합니다.'
-    expect(await ui.find({ type: 'Markdown', text: shown })).toBeDefined()
+    await typed(ui, w, `${value}요`, 'unused')
+    expect(w.models).toHaveLength(calls)
+    const shown = String(asksOf(store).at(-1)!.answer)
+    expect(shown).toMatch(/^\*\*맞혔습니다\.\*\* /)
+    expect(await ui.find({ type: 'Text', text: `이어서 · ${value}요` })).toBeDefined()
     expect(await hintsOf(ui)).toEqual([])
     expect((await fieldOf(ui)).props).toMatchObject({ placeholder: SHUT, value: '' })
-    const journal = w.files.get(JOURNAL) ?? ''
-    expect(journal).toContain(`**물음** (생각해 보기 뒤): 12요\n\n${shown}\n`)
-    for (const label of ['종류:', '따라가기:', '근거:', '판정:', '까닭:']) expect(journal).not.toContain(label)
+    expect(w.files.get(JOURNAL) ?? '').toContain(`**물음** (생각해 보기 뒤): ${value}요\n\n${shown}\n`)
     await ui.unmount()
-    // Kept as 1.8.0 keeps a question: the same three fields, nothing graded or stepped, no new store key.
     for (const one of asksOf(store)) expect(Object.keys(one).sort()).toEqual(['answer', 'at', 'question'])
-    expect(asksOf(store).map(one => [one.question, one.answer])).toEqual([['예시로 따라가기', KEPT], ['12요', shown]])
     expect(store.get('slips')).toBeUndefined()
     const day = (store.get('activity') as Record<string, Record<string, number>> | undefined)?.['2026-10-03'] ?? {}
     expect([day.right ?? 0, day.wrong ?? 0, day.drills ?? 0]).toEqual([0, 0, 0])
     expect(JSON.stringify(store.get('concepts'))).toBe(index)
   })
 
-  test('on: wrong under its head with the right result, a conceding sentence gone; 모르겠어요 the right result and its reason; a question its answer alone; a reply it cannot read by its parts or one fixed line, never a label; a failed check leaves all as it was', async ($, on) => {
+  test('on (1.13.0 G5e): a wrong value under its head with the right result; 모르겠어요 and an error guessed with no call; a question to the check (THINK_CALC_SYSTEM, 900), its answer kept by code; a reply it cannot read one fixed line; a failed check leaves all as it was', async ($, on) => {
     const store = new Map<string, unknown>()
     const w = await noted($, on, { isThinkAsked: true }, store)
     const ui = await pane($)
     const last = () => String(asksOf(store).at(-1)!.answer)
-    await trace(ui, w)
-    await typed(ui, w, '16이요', slot('짐작', '`12`를 돌려준다', '틀림', '5와 7은 맞지만 더한 값이 다릅니다. 5 + 7 = 12입니다.'))
-    expect(last()).toBe('**아쉽지만 틀렸습니다.** 5 + 7 = 12입니다.\n\n바른 결과: `12`를 돌려준다')
-    // A plain number guessed against a plain number: code's verdict, whatever the model's (stance S13).
-    await trace(ui, w)
-    await typed(ui, w, '12', slot('짐작', '`12`를 돌려준다', '틀림'))
-    expect(last()).toBe('**맞혔습니다.**')
-    await trace(ui, w)
-    await typed(ui, w, '모르겠어요', slot('모름', '`12`를 돌려준다', '없음', '5와 7이 모두 홀수입니다.'))
-    expect(w.systems.at(-1)).toBe(THINK_SLOT_SYSTEM)
-    expect(w.models.at(-1)).toContain('## 학습자의 글\n(모르겠다고 했다)\n')
-    expect(last()).toBe('바른 결과: `12`를 돌려준다\n\n5와 7이 모두 홀수입니다.')
-    await trace(ui, w)
-    await typed(ui, w, '왜 2는 안 더해요?', slot('질문', '`12`를 돌려준다', '없음', '없음', '`2 % 2`가 0이라 조건이 거짓입니다.'))
-    expect(w.systems.at(-1)).toBe(THINK_SLOT_SYSTEM)
-    expect(last()).toBe('`2 % 2`가 0이라 조건이 거짓입니다.')
-    // Out of form: its right result and reason; nothing to show at all, one fixed line (never a label or a verdict word).
-    await trace(ui, w)
-    await typed(ui, w, '에러 날 것 같아요', slot('짐작', '`12`를 돌려준다', '없음', '더합니다.'))
-    expect(last()).toBe('바른 결과: `12`를 돌려준다\n\n더합니다.')
-    await trace(ui, w)
-    await typed(ui, w, '모르겠어요', '판정: 틀림\n까닭:')
+    await trace(ui, w, REPLY_E)
+    let calls = w.models.length
+    await typed(ui, w, '999요', 'unused')
+    expect(w.models).toHaveLength(calls)
+    expect(last()).toMatch(/^\*\*아쉽지만 틀렸습니다\.\*\* [\s\S]*\n\n바른 결과: `-?\d+`$/)
+    await trace(ui, w, REPLY_E)
+    calls = w.models.length
+    await typed(ui, w, '모르겠어요', 'unused')
+    expect(w.models).toHaveLength(calls)
+    expect(last()).toMatch(/^바른 결과: `-?\d+`/)
+    await trace(ui, w, REPLY_E)
+    calls = w.models.length
+    await typed(ui, w, '에러 날 것 같아요', 'unused')
+    expect(w.models).toHaveLength(calls)
+    expect(last()).toMatch(/^\*\*아쉽지만 틀렸습니다\.\*\*/)
+    await trace(ui, w, REPLY_E)
+    await typed(ui, w, '왜 2는 안 더해요?', calcSlot('질문', '없음', '짝수는 2로 나눈 나머지가 0이라 조건이 거짓입니다.'))
+    expect(w.systems.at(-1)).toBe(THINK_CALC_SYSTEM)
+    expect(w.budgets.at(-1)).toBe(900)
+    expect(w.models.at(-1)).toContain('## 플러그인이 코드를 직접 실행해 얻은 사실 (정답은 이것이다)')
+    expect(last()).toBe('짝수는 2로 나눈 나머지가 0이라 조건이 거짓입니다.')
+    await trace(ui, w, REPLY_E)
+    await typed(ui, w, '이거 맞나 싶어요', '`t`가 12가 되어 12를 돌려줍니다.')
     expect(last()).toBe(SLOT_UNREAD)
-    await trace(ui, w)
-    await typed(ui, w, '12요', '`t`가 12가 되어 12를 돌려줍니다.')
-    expect(last()).toBe(SLOT_UNREAD)
-    expect(await ui.find({ type: 'Text', text: '이어서 · 12요' })).toBeDefined()
     // A check that did not come back: the words, the line and the placeholder stay.
-    await trace(ui, w)
+    await trace(ui, w, REPLY_E)
     const asked = asksOf(store).length
     w.model = 'error'
-    await typed(ui, w, '12요', slot('짐작', '`12`를 돌려준다', '맞음'))
-    expect(w.systems.at(-1)).toBe(THINK_SLOT_SYSTEM)
+    await typed(ui, w, '왜 그래요?', calcSlot('질문'))
+    expect(w.systems.at(-1)).toBe(THINK_CALC_SYSTEM)
     expect(await ui.find({ type: 'Text', text: /답하지 못했습니다: 서버가 붐빕니다/ })).toBeDefined()
-    expect((await fieldOf(ui)).props).toMatchObject({ value: '12요', placeholder: OPEN })
+    expect((await fieldOf(ui)).props).toMatchObject({ value: '왜 그래요?', placeholder: OPEN })
     expect(await hintsOf(ui)).toEqual([HINT])
     expect(asksOf(store)).toHaveLength(asked)
     await ui.unmount()
-    for (const one of asksOf(store)) expect(String(one.answer)).not.toMatch(/^(?:종류|따라가기|근거|판정|까닭|답)\s*:/m)
+    for (const one of asksOf(store)) expect(String(one.answer)).not.toMatch(/^(?:종류|짐작값|다른 호출|식|답|판정)\s*:/m)
   })
 
-  test('on: a question typed while the line is open goes to the same check (THINK_SLOT_SYSTEM, 900), no head; the mobile app\'s /learn 질문 with a guess is checked, its head 1.8.0\'s', async ($, on) => {
+  test('on (1.13.0 G5e): a question typed while the line is open goes to the check (THINK_CALC_SYSTEM, 900), no head; the mobile app\'s /learn 질문 with a guess is answered by code, its head the plugin\'s', async ($, on) => {
     const store = new Map<string, unknown>()
     const w = await noted($, on, { isThinkAsked: true }, store)
     const ui = await pane($)
     for (const question of ['꼭 홀수만 더해야 해요?', '뭐가 달라요']) {
-      await trace(ui, w)
-      await typed(ui, w, question, slot('질문', '`12`를 돌려준다', '없음', '없음', '네, 짝수는 건너뜁니다.'))
-      expect(w.systems.at(-1)).toBe(THINK_SLOT_SYSTEM)
+      await trace(ui, w, REPLY_E)
+      await typed(ui, w, question, calcSlot('질문', '없음', '짝수는 건너뜁니다.'))
+      expect(w.systems.at(-1)).toBe(THINK_CALC_SYSTEM)
       expect(w.budgets.at(-1)).toBe(900)
       expect(w.models.at(-1)).toContain(`## 학습자의 글\n${question}\n`)
       expect(w.models.at(-1)).not.toContain('## 학습자의 질문')
-      expect(asksOf(store).at(-1)!.answer).toBe('네, 짝수는 건너뜁니다.')
+      expect(asksOf(store).at(-1)!.answer).toBe('짝수는 건너뜁니다.')
       expect(await ui.find({ type: 'Text', text: `이어서 · ${question}` })).toBeDefined()
     }
-    await trace(ui, w)
+    await trace(ui, w, REPLY_E)
     await ui.unmount()
     const phone = await $.ui.mount({ plugin: 'learn-notes', surface: 'mobile', component: 'Pane', requestId: 'learn-notes', props: PANE_PROPS })
     await phone.unmount()
-    w.answer = slot('짐작', '`12`를 돌려준다', '맞음')
-    const told = (await learn($, '질문 12요')).text ?? ''
-    expect(w.systems.at(-1)).toBe(THINK_SLOT_SYSTEM)
-    expect(told).toBe('01:00 노트 (sumOdd가 홀수만 더하게 해줘)에 대한 답 · 일지에 남김 · 패널의 노트 아래에도 남습니다\n\n**맞혔습니다.** 5와 7이 모두 홀수라 둘 다 더합니다.')
-    expect(w.files.get(JOURNAL)).toContain('**물음** (생각해 보기 뒤): 12요')
+    const calls = w.models.length
+    const told = (await learn($, '질문 999요')).text ?? ''
+    expect(w.models).toHaveLength(calls)
+    expect(told).toMatch(/^01:00 노트 \(sumOdd가 홀수만 더하게 해줘\)에 대한 답 · 일지에 남김 · 패널의 노트 아래에도 남습니다\n\n\*\*아쉽지만 틀렸습니다\.\*\*/)
+    expect(w.files.get(JOURNAL)).toContain('**물음** (생각해 보기 뒤): 999요')
   })
 
   test('off (a harness, as the constant may ship): r\'s prompt 1.7.0\'s, and a guess goes as 1.8.0 sends it, THINK_RULE and 900, no check', async ($, on) => {
@@ -4693,20 +4702,20 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
     await ui.unmount()
   })
 
-  test('on: half an hour and a millisecond on, a text is a question again; a last line code cannot settle opens nothing; e closes it and r again opens the new one', async ($, on) => {
+  test('on (1.13.0 G5e): half an hour and a millisecond on, a text is a question again; a line the model wrote itself is never kept; e closes it and r again opens the new one', async ($, on) => {
     const w = await noted($, on)
     const ui = await pane($)
-    await trace(ui, w)
+    await trace(ui, w, REPLY_E)
     await w.clock.advance(30 * MIN + 1)
     await w.clock.settle()
     await typed(ui, w, '12요', '네.')
     expect(await ui.find({ type: 'Text', text: '질문 · 12요' })).toBeDefined()
     expect(w.systems.at(-1)).toBe(ASK_SYSTEM)
     expect(w.models.at(-1)).not.toContain(SECTION)
-    // A line with no call in it (a sentence, a hint): not kept, nothing under it, a text typed after it a plain question.
-    for (const told of ['**생각해 보기:** 홀수만 더하면 결과가 어떻게 바뀔까요?', '**생각해 보기:** `sumOdd([1, 2, 3])`', '**생각해 보기:** `sumOdd(숫자들)`']) {
-      await trace(ui, w, `${WALK}\n\n${told}`)
-      expect(await ui.find({ type: 'Markdown', text: WALK })).toBeDefined()
+    // A 생각해 보기 the model wrote itself, with no 결과 code can read and no walked call: taken out, code's own line or none.
+    for (const told of ['**생각해 보기:** 홀수만 더하면 결과가 어떻게 바뀔까요?', '**생각해 보기:** `sumOdd([9, 9])`']) {
+      await trace(ui, w, `1. 홀수만 더합니다.\n\n${told}`)
+      expect(await ui.find({ type: 'Markdown', text: '1. 홀수만 더합니다.' })).toBeDefined()
       expect(await hintsOf(ui)).toEqual([])
       expect((await fieldOf(ui)).props.placeholder).toBe(SHUT)
     }
@@ -4714,19 +4723,15 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
     expect(w.models.at(-1)).not.toContain(SECTION)
     expect(w.systems.at(-1)).toBe(ASK_SYSTEM)
     expect(w.files.get(JOURNAL)).not.toContain('(생각해 보기 뒤)')
-    // r, then e: closed; r again: its new line is the one a text is checked against.
-    await trace(ui, w)
+    await trace(ui, w, REPLY_E)
     w.answer = '쉽게 말하면 홀수만 골라 더합니다.'
     await ui.press({ key: 'easier' })
     await w.clock.settle()
     expect(await hintsOf(ui)).toEqual([])
-    const next = '`sumOdd([9])`를 실행하면 최종 결과는 무엇이 될까요?'
-    await trace(ui, w, `${WALK}\n\n**생각해 보기:** \`sumOdd([9])\``)
-    await typed(ui, w, '9요', slot('짐작', '`9`를 돌려준다', '맞음', '9는 홀수입니다.'))
-    expect(w.systems.at(-1)).toBe(THINK_SLOT_SYSTEM)
-    expect(w.models.at(-1)).toContain(`## 생각해 보기 물음\n${next}\n`)
-    expect(w.models.at(-1)).not.toContain(THOUGHT)
-    expect(await ui.find({ type: 'Text', text: '이어서 · 9요' })).toBeDefined()
+    await trace(ui, w, REPLY_E)
+    await typed(ui, w, '헷갈려요 설명해 주세요', calcSlot('질문', '없음', '홀수만 더합니다.'))
+    expect(w.systems.at(-1)).toBe(THINK_CALC_SYSTEM)
+    expect(await ui.find({ type: 'Text', text: '이어서 · 헷갈려요 설명해 주세요' })).toBeDefined()
     await ui.unmount()
   })
 
@@ -4760,9 +4765,10 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
 
   for (const [answer, isOpen] of [
     [TRACED, false],
-    [KEPT, true],
+    [KEPT, false],
+    [`${WALK}\n\n${valueThinkLine('sumOdd([5, 7])')}`, true],
   ] as const) {
-    test(isOpen ? 'on: code\'s own line kept young by a 1.12.0 window opens to the check; the asks as they were' : 'on: a store 1.8.0, 1.7.0 or 1.6 wrote loads its asks as they are; its free line kept young opens nothing, a text after it a question', async ($, on) => {
+    test(isOpen ? 'on (1.13.0 G5e): code\'s 1.13.0 line kept young opens; a call calc cannot run in the note as it now is goes as 1.9.0\'s question; the asks as they were' : `on: a store ${answer === KEPT ? '1.12.0' : '1.8.0, 1.7.0 or 1.6'} wrote loads its asks as they are; its line kept young opens nothing, a text after it a question`, async ($, on) => {
       const kept = [{ question: '왜 const야?', answer: '다시 대입하지 않아서입니다.', at: NOW - 15 * MIN }, { question: '예시로 따라가기', answer, at: NOW - 10 * MIN }]
       const store = new Map<string, unknown>([['history', { '/proj': { at: NOW, notes: [note('old', NOW - 86_400_000), note('kept', NOW - 20 * MIN, kept)] } }]])
       const v = world(on, 'ok', null, true, store)
@@ -4771,8 +4777,9 @@ describe('1.9.0: 생각해 보기 behind its switch: a guess checked by a call o
       const ui = await pane($)
       expect(await ui.find({ type: 'Markdown', text: answer })).toBeDefined()
       expect(await hintsOf(ui)).toEqual(isOpen ? [HINT] : [])
-      await typed(ui, v, '12요', isOpen ? slot('짐작', '`12`를 돌려준다', '맞음') : '네.')
-      expect(v.systems.at(-1)).toBe(isOpen ? THINK_SLOT_SYSTEM : ASK_SYSTEM)
+      await typed(ui, v, '12요', '네.')
+      expect(v.systems.at(-1)).toBe(ASK_SYSTEM)
+      expect(v.models.at(-1)).not.toContain(SECTION)
       expect(await ui.find({ type: 'Text', text: `${isOpen ? '이어서' : '질문'} · 12요` })).toBeDefined()
       const keptAsks = (store.get('history') as Record<string, { notes: { id: string; asks?: unknown[] }[] }>)['/proj']!.notes.find(one => one.id === 'kept')!.asks!
       expect(keptAsks.slice(0, 2)).toEqual(kept)

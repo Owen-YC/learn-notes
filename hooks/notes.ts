@@ -19,6 +19,26 @@ import type {
 } from '../types'
 // The run route's device evaluator lives in its own module (1.13.0 G2); the `.ts` ending lets node-run tools import it too.
 import { newRun } from './newrun.ts'
+// 생각해 보기's calc engine lives in its own module (1.13.0 G5e, the plan's module layout); imported by name, never `export *`.
+import {
+  CALC_PICK_MS,
+  CALC_PICK_STEPS,
+  CALC_STEP_MAX,
+  calcBindings,
+  calcCall,
+  calcEqual,
+  calcExpr,
+  calcLiteral,
+  calcModule,
+  calcShowSafe,
+  jsIsPlain,
+  PyDict,
+  PySet,
+  PyTuple,
+  type CalcLang,
+  type CalcModule,
+  type CalcResult,
+} from './calc.ts'
 
 export type Hunk = {
   oldStart: number
@@ -1916,11 +1936,15 @@ export function thinkKept(answer: string, isCode: boolean): string {
  * ago at most. With it, the walk-through in full as far as 2000 characters, for the call that checks an answer to it
  * (askPrompt). One stamped ahead of `now` (a clock set back since) is closed, never open for as long as it is ahead.
  */
-export function openThink(asks: readonly LearnAsk[] | undefined, now: number, isShaped = false, isCalled = false): { question: string; trace: string } | undefined {
+export function openThink(asks: readonly LearnAsk[] | undefined, now: number, isShaped = false, isCalled = false): { question: string; trace: string; call?: string } | undefined {
   const last = asks?.at(-1)
   if (last === undefined || last.question !== TRACE_LABEL || !isThinkAge(now - last.at)) return undefined
+  // 1.13.0 G5e: while on, only code's own line opens (valueThinkOf), with its call.
+  if (isCalled) {
+    const call = valueThinkOf(last.answer)
+    return call === undefined ? undefined : { question: valueThinkLine(call).replace(/^\*\*생각해 보기:\*\* /, ''), trace: cut(last.answer, 2000), call }
+  }
   const question = thinkOf(last.answer, isShaped)
-  if (question !== undefined && isCalled && !isThinkCallSaid(question)) return undefined
   return question === undefined ? undefined : { question, trace: cut(last.answer, 2000) }
 }
 
@@ -1936,8 +1960,9 @@ export function isThinkFollow(asks: readonly LearnAsk[], i: number, isShaped = f
   const one = asks[i]
   const before = asks[i - 1]
   if (one === undefined || before === undefined || KEYED_LABELS.includes(one.question)) return false
+  if (isCalled) return before.question === TRACE_LABEL && isThinkAge(one.at - before.at) && valueThinkOf(before.answer) !== undefined
   const said = before.question === TRACE_LABEL && isThinkAge(one.at - before.at) ? thinkOf(before.answer, isShaped) : undefined
-  return said !== undefined && (!isCalled || isThinkCallSaid(said))
+  return said !== undefined
 }
 
 /** Whether a time since r's walk-through answered is within its open bound (THINK_OPEN_MS); never one below zero. */
@@ -2680,135 +2705,8 @@ function callsOf(text: string, name: string, isPy: boolean): string[] {
   return found
 }
 
-/**
- * What r asks while 생각해 보기 is on and the note has functions to call (1.12.0 G5, thinkCallees): its walk-through
- * of one call, the anchor when the diff has one (then the example is given, not chosen) or else one the reply names
- * on its first line (`예시 호출:`), numbered steps (ten at most), 1.7.0's third sentence, and a last line holding only
- * one call of the same function with one argument changed, for code to check and put in its own words
- * (thinkCallKept). 1.7.0's sentence for a change with no run and THINK_ASK are left out: code found the run.
- */
-export function traceCallQuestion(callees: readonly ThinkCallee[]): string {
-  const anchored = callees.find(one => one.anchor !== undefined)
-  const names = callees.map(one => `\`${one.name}\``).join(' · ')
-  return [
-    anchored
-      ? `바뀐 코드를 코드에 있는 호출 \`${anchored.anchor}\` 그대로 한 단계씩 따라가 주세요.`
-      : `바뀐 코드에서 함수 ${names} 하나를 예시 입력 하나로 부르는 호출을 정해, 첫 줄에 예시 호출: 뒤에 그 호출을 \`${callees[0]!.name}(값)\`처럼 코드 그대로 백틱으로 적고, 그 호출을 한 단계씩 따라가 주세요.`,
-    '번호 목록으로, 단계마다 어느 줄이 실행되고 변수 값이 어떻게 바뀌는지 적고 마지막에 결과를 적어 주세요. 단계는 열 개를 넘기지 않습니다.',
-    '바뀌기 전 코드였다면 어느 단계에서 결과가 달라지는지 한 줄로 짚어 주세요.',
-    '마지막 줄에는 번호 없이 **생각해 보기:** 뒤에, 따라간 호출에서 인자 하나만 다른 값으로 바꾼 같은 함수의 호출 하나만 80자 안으로 백틱에 적어 주세요. 문장, 실마리, 결과는 쓰지 않습니다. 인자는 변수 이름 없이 값으로만 쓰고, 결과가 끝없는 소수가 되는 값이나 노트(직접 해 보기 포함)·따라가기에 이미 나온 입력이나 따라가기의 중간 값으로 결과가 보이는 입력은 고르지 마세요.',
-  ].join(' ')
-}
-
-/** The one sentence code writes for a call it settled (1.12.0 G5): it fits THINK_SHAPE and every older window's thinkOf. */
-export function thinkCallLine(call: string): string {
-  return `**생각해 보기:** \`${call}\`를 실행하면 최종 결과는 무엇이 될까요?`
-}
-/** That sentence read back (after its label): the call's name, or none for any other line. */
-const THINK_CALL_SAID = /^`([A-Za-z_$][\w$]*)\([^`\n]*\)`를 실행하면 최종 결과는 무엇이 될까요\?$/
-
-/**
- * Whether a 생각해 보기 (thinkOf's) is code's own sentence (1.12.0 G5): the only one that opens while the switch is
- * on. Its span must read as a call of literals (js or py); no older window writes that sentence, so it needs no look
- * at the note's changes (the pane and askNote then open the same line whatever each screens).
- */
-export function isThinkCallSaid(said: string): boolean {
-  const span = THINK_CALL_SAID.exec(said.trim())?.[0].slice(1).split('`')[0]
-  return span !== undefined && (parseThinkCall(span, false) !== undefined || parseThinkCall(span, true) !== undefined)
-}
-
 /** The walk-through's own example line (`예시 호출: \`f(3)\``), bold or listed or not. */
 const EXAMPLE_CALL = /^[^\p{L}\p{N}`]*예시\s*호출\s*(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.*)$/u
-
-/**
- * r's answer as kept while 생각해 보기 is on and the note has functions to call (1.12.0 G5): every 생각해 보기 line
- * taken out, and when the last line the answer has (clean()ed, not blank) is one, holding a call code can settle,
- * code's own sentence for that call put last (thinkCallLine). The call it holds: one call of literals of a callee in
- * its backticks, the line's only one; else `name`을 `v`로 (a parameter of the walked call) or `old`을 `new`로 (one
- * argument of it), swapped into the walked call: the `예시 호출:` line's, else the anchor r was told, else the one call
- * of a callee the walk-through writes. Settled only when its arguments fit, it is THINK_CALL_MAX characters at most,
- * holds no Korean and no comment outside quotes, differs from the walked call and is written nowhere in the
- * walk-through, the note or the diffs (no answer shown before it is asked). Else no line: the answer reads as 1.9.0's.
- */
-export function thinkCallKept(answer: string, callees: readonly ThinkCallee[], noteText: string, diffs: readonly string[]): string {
-  const lines = answer.split('\n')
-  const named: [number, number][] = []
-  for (let i = 0; i < lines.length; i++) {
-    const said = thinkLabelOf(clean(lines[i]!).trim())
-    if (said === undefined) continue
-    let end = i
-    if (said === '') {
-      let next = i + 1
-      while (next < lines.length && lines[next]!.trim() === '') next++
-      if (next < lines.length) end = next
-    }
-    named.push([i, end])
-    i = end
-  }
-  if (named.length === 0) return answer
-  const gone = new Set(named.flatMap(([from, to]) => Array.from({ length: to - from + 1 }, (_, k) => from + k)))
-  const left = lines.filter((_, i) => !gone.has(i))
-  while (left.length > 0 && (left.at(-1)!.trim() === '' || RULED_LINE.test(left.at(-1)!))) left.pop()
-  const bare = left.join('\n')
-  const lastLine = lines.findLastIndex(line => line.trim() !== '')
-  const final = named.at(-1)!
-  if (final[1] !== lastLine) return bare
-  const said = final[0] === final[1] ? thinkLabelOf(clean(lines[final[0]]!).trim())! : clean(lines[final[1]]!).trim().replace(/^(?:[-*+•]\s+|>\s*)+/, '').replace(/\*\*$/, '').trim()
-  const above = lines.slice(0, final[0]).join('\n')
-  const call = settledCall(said, above, callees)
-  if (!call) return bare
-  const isPy = callees.find(one => one.name === call.name)!.isPy
-  const shown = [above, noteText, ...diffs].flatMap(text => callsOf(text, call.name, isPy))
-  if (shown.includes(call.norm)) return bare
-  return `${bare}\n\n${thinkCallLine(call.text)}`
-}
-
-/** The call a 생각해 보기 line holds, settled against the walked call (thinkCallKept), or undefined. */
-function settledCall(said: string, above: string, callees: readonly ThinkCallee[]): ThinkCall | undefined {
-  const of = (name: string) => callees.find(one => one.name === name)
-  const parse = (span: string) => {
-    const name = /^\s*([A-Za-z_$][\w$]*)\s*\(/.exec(span)?.[1]
-    const callee = name === undefined ? undefined : of(name)
-    return callee ? parseThinkCall(span, callee.isPy) : undefined
-  }
-  // The walked call: the 예시 호출 line, else the anchor r was told, else the one call of literals the walk-through writes.
-  const example = above
-    .split('\n')
-    .map(line => EXAMPLE_CALL.exec(clean(line).trim())?.[1])
-    .find(found => found !== undefined)
-  const exampleCall = example === undefined ? undefined : (parse(/`([^`\n]+)`/.exec(example)?.[1] ?? example.replace(/[*`]/g, '').trim()) ?? undefined)
-  const anchored = callees.find(one => one.anchor !== undefined)
-  const written = [...new Set(callees.flatMap(one => callsOf(above, one.name, one.isPy).filter(norm => parseThinkCall(norm, one.isPy) !== undefined)))]
-  const walked = exampleCall ?? (anchored ? parse(anchored.anchor!) : undefined) ?? (written.length === 1 ? parse(written[0]!) : undefined)
-  if (!walked) return undefined
-  const spans = [...said.matchAll(/`([^`\n]+)`/g)].map(m => m[1]!)
-  const calls = spans.map(parse).filter((one): one is ThinkCall => one !== undefined)
-  let call: ThinkCall | undefined
-  if (calls.length === 1) call = calls[0]
-  else if (calls.length === 0) {
-    const swap = /^`([^`\n]+)`\s*(?:의\s*값\s*)?(?:을|를)\s*`([^`\n]+)`\s*(?:으로|로)\s/.exec(said)
-    const callee = of(walked.name)!
-    if (swap) {
-      const value = parseThinkCall(`x(${swap[2]})`, callee.isPy)
-      const from = parseThinkCall(`x(${swap[1]})`, callee.isPy)
-      const params = callee.params
-      const byName = params.indexOf(swap[1]!.trim())
-      const byValue = from ? walked.args.flatMap((one, k) => (one.norm === from.args[0]?.norm ? [k] : [])) : []
-      const at = byName !== -1 && byName < walked.args.length ? byName : byValue.length === 1 ? byValue[0]! : -1
-      if (value && value.args.length === 1 && at !== -1) {
-        const args = walked.args.map((one, k) => (k === at ? value.args[0]! : one))
-        call = parseThinkCall(`${walked.name}(${args.map(one => one.text).join(', ')})`, callee.isPy)
-      }
-    }
-  }
-  if (!call) return undefined
-  const callee = of(call.name)!
-  const outside = call.text.replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g, '""')
-  if (call.isNamed || call.args.length < callee.min || call.args.length > callee.max) return undefined
-  if (call.text.length > THINK_CALL_MAX || /[가-힣]/.test(outside) || /\/\/|\/\*|#/.test(outside)) return undefined
-  if (call.norm === walked.norm) return undefined
-  return call
-}
 
 /**
  * The system prompt of the call that reads whatever is typed while code's 생각해 보기 is open (1.12.0 G5): a guess, a
@@ -2823,16 +2721,6 @@ export const THINK_SLOT_SYSTEM = [
   TONE,
   BOLD,
 ].join(' ')
-
-/**
- * The work line a check writes before its right result, per model (THINK_VARIANT): its one-line walk-through
- * (1.11.0's, measured on haiku), or the one expression or condition that decides the result (no written trace, which
- * a model's API may refuse).
- */
-const THINK_WORK: Readonly<Record<'trace' | 'basis', readonly [string, string]>> = {
-  trace: ['먼저 따라가기 줄에, 물음의 호출로 지금의 바뀐 코드를 한 단계씩 따라간 과정을 한 줄로 쓴다(조건마다 참인지 거짓인지와 바뀐 값).', '따라가기: (한 단계씩, 한 줄)'],
-  basis: ['먼저 근거 줄에, 바른 결과를 정하는 마지막 식이나 조건 하나를 쓴다(예: `8 + 0`).', '근거: (식이나 조건 하나)'],
-}
 
 /**
  * How the check tells a text's kind, per model (THINK_VARIANT, with the work line): `wide` reads every yes/no about the
@@ -2857,31 +2745,685 @@ export function thinkVariantOf(model: string): 'trace' | 'basis' {
   return model === 'sonnet' ? THINK_VARIANT.sonnet : THINK_VARIANT.haiku
 }
 
+/** A part left empty on purpose. */
+const SLOT_NONE = /^(?:없음|없습니다|해당\s*없음|-|\(없음\)|—)?[.]?$/
+/** What a check's reply shows when nothing in it can be read (1.12.0 G5; 1.13.0 G5e thinkCalcReply · answerKept). */
+export const SLOT_UNREAD = '답을 제대로 읽지 못했습니다. 질문을 한 번 더 적어 주세요.'
+
+// ---------------------------------------------------------------------------------------------------------------
+// 1.13.0 G5e '플러그인이 셈하고, 모델은 읽기만': code computes every result (calc), picks the 생각해 보기 call, writes
+// the line, every verdict, head, right result and reason; the model walks one example (r), reads a typed text it
+// cannot settle into closed slots, and answers a concept question in two sentences with no values. Read only while
+// 생각해 보기 is on for the model (after recheckRemap); off, nothing here runs.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** A shown name a body mutates (a module list or dict changed by a call), so it is no name a call may read. */
+function isMutatedIn(code: string, name: string): boolean {
+  const n = name.replace(/\$/g, '\\$')
+  return new RegExp(
+    `(?<![\\w$.])${n}\\s*\\.\\s*(?:push|pop|shift|unshift|splice|sort|reverse|fill|append|extend|insert|remove|clear|update|setdefault|add|discard|popitem)\\s*\\(|(?<![\\w$.])${n}\\s*\\[[^\\]\\n]*\\]\\s*(?:[-+*/%]|\\*\\*|\\/\\/)?=(?!=)|\\bdel\\s+${n}\\b|(?<![\\w$.])${n}\\s*(?:[-+*/%]|\\*\\*|\\/\\/)=`,
+  ).test(code)
+}
+
+/** unknownNames with the 1.13.0 reading of targets: py tuple targets (`a, b =`, `(a, b) =`, `a, *rest =`) and js destructuring assignment at a statement's start. */
+function unknownNamesWide(body: readonly string[], params: readonly string[], known: ReadonlySet<string>, isPy: boolean): string[] {
+  const code = body.map(one => one.replace(isPy ? CALL_SKIP_PY : CALL_SKIP_JS, '""')).join('\n')
+  const extra = new Set<string>()
+  const targets = isPy
+    ? /^[ \t]*\(?([A-Za-z_]\w*(?:[ \t]*,[ \t]*\*?[A-Za-z_]\w*)+)[ \t]*,?[ \t]*\)?[ \t]*=(?!=)/gm
+    : /^[ \t]*;?[ \t]*(?:\[([^\]\n]*)\]|\(\s*\{([^}\n]*)\}\s*)\s*=(?!=)|\b(?:let|var)\s+([A-Za-z_$][\w$]*(?:\s*,\s*[A-Za-z_$][\w$]*)+)\s*;?\s*$/gm
+  for (const m of code.matchAll(targets))
+    for (const g of m.slice(1))
+      if (g)
+        for (const part of splitTop(g)) {
+          const name = /^(?:\.\.\.|\*)?([A-Za-z_$][\w$]*)/.exec(part.replace(/^.*:\s*/, ''))?.[1]
+          if (name) extra.add(name)
+        }
+  // Rounding is in (calc computes it exactly): `round` is a python builtin a body may read.
+  return unknownNames(body, [...params, ...extra], known, isPy).filter(name => !(isPy && name === 'round'))
+}
+
+/** Whether a literal call's arguments fit a callee: positional first, then (py) named ones, each a parameter not already filled, no name twice, every parameter with no default filled. */
+export function namedFits(call: ThinkCall, callee: Pick<ThinkCallee, 'params' | 'min' | 'max' | 'isPy'>): boolean {
+  if (call.args.length > callee.max) return false
+  const filled = new Set<string>()
+  let isNamedSeen = false
+  for (const [k, arg] of call.args.entries()) {
+    const named = /^([A-Za-z_]\w*)=/.exec(arg.norm)?.[1]
+    if (named === undefined) {
+      if (isNamedSeen || k >= callee.params.length) return false
+      filled.add(callee.params[k]!)
+    } else {
+      if (!callee.isPy || !callee.params.includes(named) || filled.has(named)) return false
+      isNamedSeen = true
+      filled.add(named)
+    }
+  }
+  return callee.params.slice(0, callee.min).every(one => filled.has(one))
+}
+
+/** A call written the one way two spellings of it compare (by parameter order: `f(4, 2)` and `f(4, extra_shots=2)` alike). */
+export function canonOf(call: ThinkCall, callee: Pick<ThinkCallee, 'params'>): string {
+  const slots: string[] = []
+  call.args.forEach((arg, k) => {
+    const named = /^([A-Za-z_]\w*)=(.*)$/s.exec(arg.norm)
+    if (named) slots[callee.params.indexOf(named[1]!)] = named[2]!
+    else slots[k] = arg.norm
+  })
+  return `${call.name}(${Array.from(slots, one => one ?? '~').join(',')})`
+}
+
+/** Every call of a callee written in a text, canonical (canonOf) when it reads as one of literals. */
+function canonCallsOf(text: string, callee: ThinkCallee): string[] {
+  return callsOf(text, callee.name, callee.isPy).map(norm => {
+    const call = parseThinkCall(norm, callee.isPy)
+    return call ? canonOf(call, callee) : norm
+  })
+}
+
+/** The functions a 1.13.0 line may call, and the calc module of each file they are in. */
+export type ThinkCalcScope = { callees: ThinkCallee[]; mods: Map<string, CalcModule> }
+
 /**
- * The one user message of that call (1.12.0 G5, THINK_SLOT_SYSTEM): the sections thinkCheckPrompt sends (as 1.11.0
- * measured them), then the text's kind first (짐작 · 모름 · 질문), the work line, the right result of the asked call,
- * a verdict only for a guess, the reason the result comes out (no word on the guess: the plugin's head is the only
- * one), and an answer only for a question. Called only while the switch is on.
+ * thinkCallees's scope made wider in code (1.13.0 G5e): rounding is in (calc computes it), py tuple targets and js
+ * destructuring are known locals, named arguments fit by namedFits, a module-level list, dict or object of literals
+ * (whole in one hunk, CALL_CONTAINER_LINES lines at most, never mutated in the shown code) is a known name, and a
+ * callee qualifies only when calc parses it and every helper it calls. The anchor is the first literal call of a
+ * callee anywhere in the shown code that fits and calc runs. Still out: jsx, tsx, the DOM, printing, classes, module
+ * state, other files' names, partly shown functions.
  */
-export function thinkSlotCheckPrompt(
+export function thinkCalcScope(changes: readonly Pick<LearnChange, 'file' | 'kind' | 'diff' | 'isCut' | 'added' | 'removed'>[]): ThinkCalcScope {
+  const none: ThinkCalcScope = { callees: [], mods: new Map() }
+  const live = changes.filter(one => one.kind !== 'delete')
+  if (live.length === 0) return none
+  const shown = shownChanges(live, PROMPT_DIFF_BUDGET)
+  if (shown.length !== live.length) return none
+  const code = live.filter(one => CALL_EXTS.includes(extOf(one.file) ?? ''))
+  if (code.length === 0) return none
+  if (live.some(one => !CALL_EXTS.includes(extOf(one.file) ?? '') && !CALL_SIDE_EXTS.includes(extOf(one.file) ?? ''))) return none
+  if (code.some(one => THINK_SETUP_NAME.test(baseName(one.file)) || one.isCut || one.diff === '')) return none
+  type Found = { name: string; file: string; isPy: boolean; min: number; max: number; params: string[]; body: string[] }
+  const found: Found[] = []
+  const knownIn = new Map<string, Set<string>>()
+  const mods = new Map<string, CalcModule>()
+  const allLines: { text: string; isPy: boolean; file: string }[] = []
+  for (const change of code) {
+    const isPy = extOf(change.file) === 'py'
+    const known = knownIn.get(change.file) ?? new Set<string>()
+    knownIn.set(change.file, known)
+    const hunks = afterHunks(change.diff)
+    mods.set(change.file, calcModule(hunks.map(h => h.lines.map(one => one.text)), isPy ? 'py' : 'js'))
+    const fileCode = hunks.flatMap(h => h.lines.map(one => one.text.replace(isPy ? CALL_SKIP_PY : CALL_SKIP_JS, '""'))).join('\n')
+    for (const hunk of hunks) {
+      const lines = hunk.lines.map(one => one.text)
+      lines.forEach(text => allLines.push({ text, isPy, file: change.file }))
+      lines.forEach((text, at) => {
+        const constant = isPy ? /^([A-Z][A-Z0-9_]*)\s*=(?!=)\s*(.+?)\s*$/.exec(text) : /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=(?!>)\s*(.+?);?\s*$/.exec(text)
+        if (constant && CALL_PRIMITIVE.test(constant[2]!.replace(isPy ? /\s+#.*$/ : /\s*\/\/.*$/, ''))) known.add(constant[1]!)
+        // A module-level list, dict or object of literals, whole in this hunk and never mutated in the shown code.
+        const container = isPy ? /^([A-Za-z_]\w*)\s*(?::[^=]+)?=(?!=)\s*([[{(].*)$/.exec(text) : /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=(?!>)\s*([[{].*)$/.exec(text)
+        if (container) {
+          let depth = 0
+          let end = -1
+          for (let k = at; k < lines.length && k < at + CALL_CONTAINER_LINES; k++) {
+            for (const c of lines[k]!.replace(isPy ? CALL_SKIP_PY : CALL_SKIP_JS, '""')) {
+              if ('([{'.includes(c)) depth++
+              else if (')]}'.includes(c)) depth--
+            }
+            if (depth <= 0) {
+              end = k
+              break
+            }
+          }
+          if (end !== -1) {
+            const literal = [container[2]!, ...lines.slice(at + 1, end + 1)].join('\n').replace(isPy ? /\s+#[^\n]*$/gm : /\s*\/\/[^\n]*$/gm, '').trim().replace(/;$/, '')
+            const after = fileCode.replace(new RegExp(`^${container[1]!.replace(/\$/g, '\\$')}\\s*(?::[^=\\n]+)?=(?!=)`, 'm'), '')
+            if (calcLiteral(literal, isPy ? 'py' : 'js') !== undefined && !isMutatedIn(after, container[1]!)) known.add(container[1]!)
+          }
+        }
+        const typed = isPy ? undefined : /^(?:export\s+)?(?:type|interface)\s+([A-Za-z_$][\w$]*)\b/.exec(text)
+        if (typed) known.add(typed[1]!)
+        const imported = isPy ? /^import\s+(math)\s*$|^from\s+(math)\s+import\s+([\w\s,]+)$/.exec(text) : undefined
+        if (imported) (imported[1] ?? imported[3]!).split(',').forEach(name => known.add(name.trim()))
+        const head = isPy ? CALL_DEF_PY.exec(text) : (CALL_DEF_JS.exec(text) ?? CALL_DEF_ARROW.exec(text))
+        if (!head) return
+        const name = head[1]!
+        const list = isPy ? head[2]! : (head[2] ?? head[3] ?? head[4] ?? '')
+        const params = paramsOf(list, isPy)
+        if (params.length === 0 || params.some(one => one.isRest || one.name === undefined)) return
+        const body = wholeBody(lines, at, isPy, hunk.isCreate || hunk.isEnd)
+        if (!body || body.length - 1 > CALL_BODY_MAX) return
+        if (!hunk.lines.slice(at, at + body.length).some(one => one.isChanged)) return
+        const bare = body.map(one => one.replace(isPy ? CALL_SKIP_PY : CALL_SKIP_JS, '""')).join('\n')
+        if (CALL_UNSEEN.test(bare)) return
+        if ((isPy ? /(?<![\w.])print\s*\(/ : /\bconsole\s*\./).test(bare) || !(isPy ? /\breturn\s+\S/ : /\breturn\s+[^\s;}]|=>\s*[^\s{]/).test(bare)) return
+        const isTs = /^(?:ts|mts|cts)$/.test(extOf(change.file) ?? '')
+        const read = isTs ? [untypedHead(body[0]!, list), ...body.slice(1).map(untypedLine)] : body
+        found.push({ name, file: change.file, isPy, min: params.filter(one => !one.hasDefault).length, max: params.length, params: params.map(one => one.name!), body: read })
+      })
+    }
+  }
+  let callees = found.filter(one => allLines.filter(line => anyDefOf(one.name).test(line.text)).length === 1 && mods.get(one.file)!.fns.has(one.name))
+  for (let isDropped = true; isDropped; ) {
+    const next = callees.filter(one => {
+      const names = new Set([...(knownIn.get(one.file) ?? []), ...callees.filter(other => other.file === one.file).map(other => other.name)])
+      return unknownNamesWide(one.body, one.params, names, one.isPy).length === 0
+    })
+    isDropped = next.length !== callees.length
+    callees = next
+  }
+  const out = callees.map(one => {
+    const callee: ThinkCallee = { name: one.name, file: one.file, isPy: one.isPy, params: one.params, min: one.min, max: one.max }
+    const mod = mods.get(one.file)!
+    for (const line of allLines) {
+      if (line.file !== one.file) continue
+      const anchor = callsOf(line.text, one.name, one.isPy)
+        .map(norm => parseThinkCall(norm, one.isPy))
+        .find(call => call !== undefined && namedFits(call, callee) && call.text.length <= ANCHOR_MAX && calcCall(mod, call.text).kind !== 'unknown')
+      if (anchor) return { ...callee, anchor: anchor.text }
+    }
+    return callee
+  })
+  return { callees: out, mods }
+}
+/** The longest module-level literal a body may read (thinkCalcScope). */
+const CALL_CONTAINER_LINES = 20
+
+/**
+ * What r asks while 생각해 보기 is on and code found functions to call (1.13.0 G5e): its walk-through of one call
+ * (the anchor when there is one, else one the reply names on its first line), numbered steps (ten at most), a
+ * `결과:` line, 1.7.0's old-versus-new sentence, and no 생각해 보기 of its own: code picks and writes the line.
+ */
+export function traceCalcQuestion(callees: readonly ThinkCallee[]): string {
+  const anchored = callees.find(one => one.anchor !== undefined)
+  const names = callees.map(one => `\`${one.name}\``).join(' · ')
+  return [
+    anchored
+      ? `바뀐 코드를 코드에 있는 호출 \`${anchored.anchor}\` 그대로 한 단계씩 따라가 주세요.`
+      : `바뀐 코드에서 함수 ${names} 하나를 예시 입력 하나로 부르는 호출을 정해, 첫 줄에 예시 호출: 뒤에 그 호출을 \`${callees[0]!.name}(값)\`처럼 코드 그대로 백틱으로 적고, 그 호출을 한 단계씩 따라가 주세요.`,
+    ...(callees.some(one => one.isPy) ? ['이름 붙은 인자(`이름=값`)는 따라간 호출처럼 이름을 붙여 씁니다.'] : []),
+    '번호 목록으로, 단계마다 어느 줄이 실행되고 변수 값이 어떻게 바뀌는지 적어 주세요. 단계는 열 개를 넘기지 않습니다.',
+    '단계 뒤에 번호 없이 결과: 뒤에 그 호출의 최종 결과를 코드 값 그대로 백틱으로 적어 주세요.',
+    '바뀌기 전 코드였다면 어느 단계에서 결과가 달라지는지 한 줄로 짚어 주세요.',
+    '생각해 보기 물음은 쓰지 않습니다.',
+  ].join(' ')
+}
+
+/** The one line code writes (1.13.0 G5e): an ask in the imperative that ends on a bracket, so no 1.5–1.12 window opens it. */
+export function valueThinkLine(call: string): string {
+  return `**생각해 보기:** \`${call}\`를 실행한 결과를 값 하나로 적어 보세요 (오류면 \`오류\`)`
+}
+const VALUE_THINK_SAID = /^\*\*생각해 보기:\*\* `([A-Za-z_$][\w$]*\([^`\n]*\))`를 실행한 결과를 값 하나로 적어 보세요 \(오류면 `오류`\)$/
+
+/** The call of code's own line when it is an answer's last line (valueThinkLine), or undefined: the only line that opens while on. */
+export function valueThinkOf(answer: string): string | undefined {
+  const last = clean(answer)
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line !== '')
+    .at(-1)
+  const call = last === undefined ? undefined : VALUE_THINK_SAID.exec(last)?.[1]
+  return call !== undefined && (parseThinkCall(call, false) !== undefined || parseThinkCall(call, true) !== undefined) ? call : undefined
+}
+
+/** An answer with every 생각해 보기 line taken out (a label alone with its next line), and the blank lines and rules left at its end. */
+function withoutThinkLines(answer: string): string {
+  const lines = answer.split('\n')
+  const gone = new Set<number>()
+  for (let i = 0; i < lines.length; i++) {
+    const said = thinkLabelOf(clean(lines[i]!).trim())
+    if (said === undefined) continue
+    let end = i
+    if (said === '') {
+      let next = i + 1
+      while (next < lines.length && lines[next]!.trim() === '') next++
+      if (next < lines.length) end = next
+    }
+    for (let k = i; k <= end; k++) gone.add(k)
+    i = end
+  }
+  const left = lines.filter((_, i) => !gone.has(i))
+  while (left.length > 0 && (left.at(-1)!.trim() === '' || RULED_LINE.test(left.at(-1)!))) left.pop()
+  return left.join('\n')
+}
+
+/** The call a walk-through followed: its `예시 호출:` line, else the anchor r was told, else the one literal call of a callee it writes. */
+function walkedCallOf(text: string, callees: readonly ThinkCallee[], mods?: ReadonlyMap<string, CalcModule>): { call: ThinkCall; callee: ThinkCallee } | undefined {
+  const parse = (span: string) => {
+    const name = /^\s*([A-Za-z_$][\w$]*)\s*\(/.exec(span)?.[1]
+    const callee = callees.find(one => one.name === name)
+    const call = callee ? (parseThinkCall(span, callee.isPy) ?? literalCall(span, callee, mods?.get(callee.file))) : undefined
+    return callee && call && namedFits(call, callee) ? { call, callee } : undefined
+  }
+  const example = text
+    .split('\n')
+    .map(line => EXAMPLE_CALL.exec(clean(line).trim())?.[1])
+    .find(one => one !== undefined)
+  if (example !== undefined) return parse(/`([^`\n]+)`/.exec(example)?.[1] ?? example.replace(/[*`]/g, '').trim())
+  const anchored = callees.find(one => one.anchor !== undefined)
+  if (anchored) return parse(anchored.anchor!)
+  const written = [...new Set(callees.flatMap(one => callsOf(text, one.name, one.isPy).filter(norm => parseThinkCall(norm, one.isPy) !== undefined)))]
+  return written.length === 1 ? parse(written[0]!) : undefined
+}
+
+/**
+ * A call whose arguments name module-level bindings of literals (`fuelCost(myTrip)` with `const myTrip = { … }`
+ * shown), written with those literals in their place, or undefined: the walked call made one of literals.
+ */
+function literalCall(span: string, callee: ThinkCallee, mod: CalcModule | undefined): ThinkCall | undefined {
+  const head = /^\s*([A-Za-z_$][\w$]*)\s*\((.*)\)\s*$/s.exec(span)
+  if (!head || !mod) return undefined
+  const lang: CalcLang = callee.isPy ? 'py' : 'js'
+  const args = splitTop(head[2]!).map(arg => {
+    const named = /^([A-Za-z_]\w*)\s*=(?!=)\s*(.*)$/s.exec(arg)
+    const value = (named ? named[2]! : arg).trim()
+    if (!/^[A-Za-z_$][\w$]*$/.test(value) || ['true', 'false', 'null', 'undefined', 'None', 'True', 'False'].includes(value)) return arg
+    const bound = mod.env.vars.get(value)
+    const lit = bound === undefined ? undefined : literalText(bound.v, lang)
+    return lit === undefined ? arg : named ? `${named[1]}=${lit}` : lit
+  })
+  return parseThinkCall(`${head[1]}(${args.join(', ')})`, callee.isPy)
+}
+
+/** A walk-through's `결과:` line, what it says after the label, or undefined. */
+function resultLineOf(text: string): string | undefined {
+  return text
+    .split('\n')
+    .map(line => /^[^\S\n]*(?:[-*]\s+)?(?:\*\*)?결과(?:\*\*)?[^\S\n]*[:：][^\S\n]*(.*)$/.exec(clean(line))?.[1])
+    .filter(one => one !== undefined)
+    .at(-1)
+}
+
+/** A result as a sentence shows it: the value in backticks, or the error's name and 오류. */
+function shownResult(run: CalcResult): string {
+  return run.kind === 'value' ? `\`${run.show}\`` : run.kind === 'error' ? `\`${run.name}\` 오류` : ''
+}
+
+/** A literal text in a language, read leniently for what a learner or a model writes (`true` in py, `None` in js, a bare word as a string). */
+function literalOf(text: string, lang: CalcLang, isBareWord: boolean): { value: unknown } | undefined {
+  const t = text.trim()
+  if (t === '참') return { value: true }
+  if (t === '거짓') return { value: false }
+  const own = calcLiteral(t, lang)
+  if (own) return own
+  if (lang === 'py' && /^(?:true|false|null)$/.test(t)) return { value: t === 'null' ? null : t === 'true' }
+  if (lang === 'js' && /^(?:True|False|None)$/.test(t)) return { value: t === 'None' ? null : t === 'True' }
+  const other = calcLiteral(t, lang === 'py' ? 'js' : 'py')
+  if (other && !(typeof other.value === 'object' && other.value !== null && !Array.isArray(other.value))) return other
+  if (isBareWord && /^[A-Za-z_][\w-]*$/.test(t)) return { value: t }
+  return undefined
+}
+
+/** Candidate values for one argument, from its literal (a number moved, a string's digits moved or cut, a list shortened …). */
+function argVariants(value: unknown, lang: CalcLang): unknown[] {
+  const out: unknown[] = []
+  if (typeof value === 'bigint') out.push(value + 1n, value - 1n, 0n, value * 2n, 1n, -1n, value + 10n, 100n)
+  else if (typeof value === 'number') {
+    if (Number.isInteger(value) && lang === 'js') out.push(value + 1, value - 1, 0, value * 2, 1, -1, value + 10, 100)
+    else out.push(value + 1, value * 2, 0, value / 2, value - 1, 1.5, 0.5, 10.25)
+  } else if (typeof value === 'string') {
+    const digits = [...value.matchAll(/\d+/g)]
+    for (const d of digits.slice(0, 2)) {
+      const n = String(Number(d[0]) + 1).padStart(d[0].length, '0')
+      out.push(value.slice(0, d.index) + n + value.slice(d.index! + d[0].length))
+    }
+    if (digits.length > 0) out.push(value.replace(/\d+/, m => '0'.repeat(m.length)))
+    // A one-letter string moves to its neighbours (a grade, a code): `B` to `C` and `A`.
+    if (/^[A-Za-z]$/.test(value)) out.push(String.fromCharCode(value.charCodeAt(0) + 1), String.fromCharCode(value.charCodeAt(0) - 1), value === value.toUpperCase() ? value.toLowerCase() : value.toUpperCase())
+    out.push('', value.slice(0, -1), value.toUpperCase(), value.slice(1), value + value.slice(-1), ` ${value}`)
+    if (/^[a-z]/.test(value)) out.push(value[0]!.toUpperCase() + value.slice(1))
+  } else if (typeof value === 'boolean') out.push(!value)
+  else if (Array.isArray(value)) {
+    out.push([], value.slice(0, -1), value.slice(1), [...value, value.at(-1)], [...value].reverse())
+    if (value.length > 0) for (const v of argVariants(value[0], lang).slice(0, 3)) out.push([v, ...value.slice(1)])
+  } else if (value instanceof PyTuple) {
+    for (const v of argVariants(value.items, lang)) if (Array.isArray(v)) out.push(new PyTuple(v))
+  } else if (value instanceof PyDict) {
+    for (const [k, [key, v]] of [...value.m].slice(0, 3))
+      for (const w of argVariants(v, lang).slice(0, 4)) {
+        const d = new PyDict()
+        for (const [k2, pair] of value.m) d.m.set(k2, k2 === k ? [key, w] : pair)
+        out.push(d)
+      }
+  } else if (jsIsPlain(value)) {
+    for (const k of Object.keys(value).slice(0, 3)) for (const w of argVariants(value[k], lang).slice(0, 4)) out.push({ ...value, [k]: w })
+  }
+  return out
+}
+/** A value written as a literal in its language, the way the learner reads it; undefined when it cannot be. */
+function literalText(value: unknown, lang: CalcLang): string | undefined {
+  if (lang === 'py') return calcShowSafe(value, 'py')
+  if (typeof value === 'string') return JSON.stringify(value)
+  if (typeof value === 'number') return Number.isFinite(value) && !Object.is(value, -0) ? String(value) : undefined
+  if (typeof value === 'boolean' || value === null) return String(value)
+  if (Array.isArray(value)) {
+    const items = value.map(one => literalText(one, lang))
+    return items.every(one => one !== undefined) ? `[${items.join(', ')}]` : undefined
+  }
+  if (jsIsPlain(value)) {
+    const parts = Object.entries(value).map(([k, v]) => {
+      const t = literalText(v, lang)
+      return t === undefined ? undefined : `${/^[A-Za-z_$][\w$]*$/.test(k) ? k : JSON.stringify(k)}: ${t}`
+    })
+    return parts.every(one => one !== undefined) ? `{ ${parts.join(', ')} }` : undefined
+  }
+  return undefined
+}
+
+/** A run's branch signature: each condition met and what it came to, in order. */
+function branchOf(run: CalcResult): string {
+  return run.kind === 'unknown' ? '' : run.trace.conds.map(c => `${c.s}:${c.v ? 1 : 0}`).join(',') + (run.kind === 'error' ? `!${run.name}` : '')
+}
+/** The calls thinkPick may try, in order: each argument of the walked call changed to each of its variants (argVariants). */
+export function pickTexts(call: ThinkCall, callee: ThinkCallee): string[] {
+  const lang: CalcLang = callee.isPy ? 'py' : 'js'
+  const out: string[] = []
+  for (const [k, arg] of call.args.entries()) {
+    const named = /^([A-Za-z_]\w*)=/.exec(arg.norm)?.[1]
+    const value = literalOf(named ? arg.text.replace(/^[A-Za-z_]\w*\s*=\s*/, '') : arg.text, lang, false)
+    if (!value) continue
+    for (const v of argVariants(value.value, lang)) {
+      const lit = literalText(v, lang)
+      if (lit === undefined) continue
+      const args = call.args.map((one, j) => (j === k ? (named ? `${named}=${lit}` : lit) : one.text))
+      out.push(`${call.name}(${args.join(', ')})`)
+    }
+  }
+  return out
+}
+/** Candidates thinkPick tries at most. */
+const PICK_MAX = 24
+/** The longest result a line may ask for, as shown. */
+const PICK_RESULT_MAX = 60
+
+/**
+ * The call code's line asks (1.13.0 G5e), or undefined: one argument of the walked call changed (argVariants), at
+ * most PICK_MAX candidates, each run by calc within CALC_PICK_STEPS together. A candidate is kept only when calc
+ * gives a definite result, it is THINK_CALL_MAX characters at most and its result PICK_RESULT_MAX as shown, it is
+ * written nowhere in the walk-through, the note or the diffs (canonOf), and its result as shown is no span in
+ * backticks there and no whole token of the walk-through's `결과:` line or the note's `- 예:` lines. Ranked: a
+ * branch that differs from the walked run's, then a result that differs, then a value before an error, then order.
+ */
+export function thinkPick(walked: { call: ThinkCall; callee: ThinkCallee }, run0: CalcResult, mod: CalcModule, walkText: string, noteText: string, diffs: readonly string[]): string | undefined {
+  const { call, callee } = walked
+  const lang: CalcLang = callee.isPy ? 'py' : 'js'
+  const shownCalls = new Set([walkText, noteText, ...diffs].flatMap(text => canonCallsOf(text, callee)))
+  shownCalls.add(canonOf(call, callee))
+  const spans = new Set([walkText, noteText].flatMap(text => [...text.matchAll(/`([^`\n]+)`/g)].map(m => m[1]!.trim())))
+  // The note's `- 예:` lines with the calls they write taken out: an input written there is no result.
+  const tokenLines = [resultLineOf(walkText) ?? '', ...noteText.split('\n').filter(line => /^\s*[-*]\s*예\s*[:：]/.test(line)).map(line => line.replace(/`[^`\n]*\([^`\n]*`/g, ' '))].join('\n')
+  const isExposed = (shown: string) => {
+    const bare = /^(['"])(.*)\1$/s.exec(shown)?.[2]
+    const forms = [shown, ...(bare !== undefined && bare.length >= 2 ? [bare] : [])]
+    return forms.some(one => spans.has(one) || new RegExp(`(?<![\\w.'"])${one.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w.'"])`).test(tokenLines))
+  }
+  // An error is asked only where neither the walk-through nor the note speaks of errors (a guard it explains would give the answer).
+  const isErrorSaid = /오류|에러|예외|\b[A-Z]\w*Error\b|\braise\b|\bthrow\b/.test(`${walkText}\n${noteText}`)
+  const base = branchOf(run0)
+  const baseShown = run0.kind === 'value' ? run0.show : run0.kind === 'error' ? run0.name : ''
+  const tried: { text: string; rank: number; order: number }[] = []
+  let steps = 0
+  let order = 0
+  const until = Date.now() + CALC_PICK_MS
+  for (const text of pickTexts(call, callee)) {
+    {
+      if (order >= PICK_MAX || steps >= CALC_PICK_STEPS || Date.now() > until) break
+      const parsed = parseThinkCall(text, callee.isPy)
+      if (!parsed || text.length > THINK_CALL_MAX || shownCalls.has(canonOf(parsed, callee))) continue
+      order++
+      const run = calcCall(mod, text, Math.min(CALC_STEP_MAX, CALC_PICK_STEPS - steps))
+      if (run.kind === 'unknown') {
+        steps += CALC_STEP_MAX
+        continue
+      }
+      steps += run.trace.steps ?? 0
+      const shown = run.kind === 'value' ? run.show : run.name
+      // One value a learner can write: no number past three decimal places (a long float is no fair thing to guess).
+      if (shown.length > PICK_RESULT_MAX || (run.kind === 'value' && (isExposed(shown) || /\d\.\d{4,}/.test(shown))) || (run.kind === 'error' && isErrorSaid)) continue
+      // A value before any error: the line asks for one value whenever a value candidate is left.
+      // Within the same rank, an empty or zero input (`""`, `[]`, `0`) comes after a middle one: it teaches less.
+      const changedArg = parsed.args.find((one, k) => one.norm !== call.args[k]?.norm)?.norm.replace(/^[A-Za-z_]\w*=/, '') ?? ''
+      const isEdge = /^(?:-?0(?:\.0)?|""|''|\[\]|\{\}|\(\)|None|null)$/.test(changedArg)
+      const rank = (run.kind === 'error' ? 8 : 0) + (branchOf(run) !== base ? 0 : 4) + (shown !== baseShown ? 0 : 2) + (isEdge ? 1 : 0)
+      tried.push({ text, rank, order })
+      shownCalls.add(canonOf(parsed, callee))
+    }
+  }
+  tried.sort((a, b) => a.rank - b.rank || a.order - b.order)
+  const best = tried[0]
+  return best !== undefined && best.rank % 8 < 6 ? best.text : undefined
+}
+
+/**
+ * r's answer as kept while 생각해 보기 is on and code found functions to call (1.13.0 G5e): every 생각해 보기 line
+ * out; the walked call run by calc (none, or unknown, keeps the answer so, as 1.9.0 would show it); when the walk's
+ * `결과:` line says a value calc's run contradicts, one sentence of code's own after it; then code's line for the
+ * call thinkPick chooses, last.
+ */
+export function thinkCalcKept(answer: string, scope: ThinkCalcScope, noteText: string, diffs: readonly string[]): string {
+  const bare = withoutThinkLines(answer)
+  const walked = walkedCallOf(bare, scope.callees, scope.mods)
+  if (!walked) return bare
+  const mod = scope.mods.get(walked.callee.file)
+  if (!mod) return bare
+  const run = calcCall(mod, walked.call.text)
+  if (run.kind === 'unknown') return bare
+  let text = bare
+  const said = resultLineOf(bare)
+  const span = said === undefined ? undefined : (/`([^`\n]+)`/.exec(said)?.[1] ?? said.replace(/[*.]+$/, '').trim())
+  const lit = span === undefined ? undefined : literalOf(span, mod.lang, false)
+  if (lit && (run.kind === 'error' || !calcEqual(lit.value, run.value))) text += `\n\n플러그인이 직접 계산해 보니 \`${walked.call.text}\`의 결과는 ${shownResult(run)}입니다.`
+  const pick = thinkPick(walked, run, mod, bare, noteText, diffs)
+  return pick === undefined ? text : `${text}\n\n${valueThinkLine(pick)}`
+}
+
+// --- the typed text: read by code first, else one check call
+
+/** An error guessed alone (에러 · 오류 · 예외 · `ValueError` · 터져요, a lead word and a fixed ending around it). */
+const THINK_ERROR_GUESS =
+  /^(?:(?:그럼|아마|혹시|제\s*생각엔|답은|결과는)\s*)?(?:`?([A-Z]\w*(?:Error|Exception))`?(?:\s*오류)?|에러|오류|예외|터져요|터질\s*(?:것|거)\s*같아요|터지나요|터집니다|멈추나요|멈춰요|멈출\s*(?:것|거)\s*같아요|멈춥니다|멈출까요)(?:\s*(?:가|이|로|으로)?\s*(?:나요|나와요|날\s*(?:것|거)\s*같아요|납니다|나겠죠|발생해요|발생합니다|발생할\s*(?:것|거)\s*같아요|떠요|요|입니다|예요|이에요|일\s*(?:것|거)\s*같아요|나나요|날까요|발생하나요|끝나요|멈춰요|나죠|이죠|죠))?\s*[.!?？~]*$/u
+/** A value guessed alone: one literal (a number, comma-grouped or with a unit word, a quoted string, a list, an object, a tuple, a literal word, 참/거짓, a bare word), a lead word and a fixed ending around it. */
+const THINK_VALUE_SAID =
+  /^(?:(?:그럼|혹시|아마|답은|결과는|최종\s*결과는|정답은|제\s*생각엔)\s*)?(`[^`\n]+`|-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?|'[^'\n]*'|"[^"\n]*"|\[[^\n]*\]|\{[^\n]*\}|\([^\n]*\)|true|false|null|undefined|None|True|False|참|거짓|[A-Za-z_][\w-]*)(?:\s*(초|원|점|개|명|분|시간|살|번|등|위|일|달|년|km|kg|cm|m|g|%))?(?:\s*(?:(?:이|가)\s*)?(?:나와요|나올\s*(?:것|거)\s*같아요|나올까요|나오나요|나오죠|나옵니다|돼요|되나요|될까요|될\s*(?:것|거)\s*같아요|예요|이에요|요|이요|입니다|일\s*(?:것|거)\s*같아요|일까요|인가요|맞나요|맞죠|이죠|죠|아닐까요|겠죠|일걸요|인데요|이\s*나와요|가\s*나와요))?\s*[.!?？~]*$/u
+
+/**
+ * What code reads of a typed text before any call: a blank, an error guessed (with its name), a value guessed, or
+ * none. A value keeps the learner's own words (`said`: the literal and its unit word as written, `14,000원`) and
+ * whether it was a plain literal (no unit word, no bare word): a string result is matched against those words
+ * (isGuessRight). A bare word is a guess only when the asked result is a string (`resultKind`) and the text has no
+ * question mark (`split?` is a question), and never when it is a name the code or the walk-through uses.
+ */
+export type ThinkTextRead =
+  | { kind: 'blank' }
+  | { kind: 'error'; name?: string }
+  | { kind: 'value'; value: unknown; said?: string; isPlain?: boolean }
+  | undefined
+export function thinkTextOf(text: string, lang: CalcLang, codeNames: ReadonlySet<string>, resultKind?: 'string' | 'other'): ThinkTextRead {
+  const said = text.trim()
+  if (isBlankAnswer(said)) return { kind: 'blank' }
+  const err = THINK_ERROR_GUESS.exec(said)
+  if (err) return { kind: 'error', name: err[1] }
+  const m = THINK_VALUE_SAID.exec(said)
+  if (!m) return undefined
+  let lit = m[1]!
+  const isTicked = lit.startsWith('`')
+  if (isTicked) lit = lit.slice(1, -1)
+  const words = `${lit}${m[2] ?? ''}`
+  if (!isTicked && /^-?\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(lit)) lit = lit.replace(/,/g, '')
+  // js's own number words are values, not bare words (calc never gives NaN or an infinity, so they are never right).
+  if (lang === 'js' && /^-?(?:NaN|Infinity)$/.test(lit)) return { kind: 'value', value: Number(lit), said: words, isPlain: m[2] === undefined }
+  const isBare = /^[A-Za-z_][\w-]*$/.test(lit) && !/^(?:true|false|null|undefined|None|True|False)$/.test(lit)
+  if (isBare && (codeNames.has(lit) || /[?？]/.test(said) || (resultKind !== undefined && resultKind !== 'string'))) return undefined
+  const got = literalOf(lit, lang, isBare)
+  return got ? { kind: 'value', value: got.value, said: words, isPlain: !isBare && m[2] === undefined } : undefined
+}
+
+/** What a check needs that code computed (1.13.0 G5e): the scope, the asked call and its run, the walked call and its. */
+export type ThinkFacts = {
+  lang: CalcLang
+  mod: CalcModule
+  callee: ThinkCallee
+  call: ThinkCall
+  asked: Exclude<CalcResult, { kind: 'unknown' }>
+  walked?: { call: ThinkCall; run: CalcResult }
+  scope: ThinkCalcScope
+  codeNames: Set<string>
+}
+/** How one typed text is answered: by code alone, by one check call, or as 1.9.0 answers a question (calc cannot run it now). */
+export type ThinkCalcPlan = { kind: 'code'; text: string } | { kind: 'fallback' } | { kind: 'check'; system: string; prompt: string; facts: ThinkFacts }
+
+/** A span of a module's source as one line (a reason's code), or undefined past `max` characters. */
+function srcOf(mod: CalcModule, span: { s: number; e: number } | undefined, max = 60): string | undefined {
+  if (!span) return undefined
+  const text = mod.src.slice(span.s, span.e).replace(/\s+/g, ' ').trim().replace(/;$/, '')
+  return text === '' || text.length > max || text.includes('`') ? undefined : text
+}
+
+/**
+ * Code's reason for a run (1.13.0 G5e), two sentences at most, from calc's trace: where it first parts from the
+ * walked run (the condition and what it came to), or else how many times its loop turned; then its last return with
+ * the values of the names it reads, or the statement it stopped on with its error.
+ */
+export function calcReasons(facts: Pick<ThinkFacts, 'mod' | 'walked'>, run: Exclude<CalcResult, { kind: 'unknown' }>): string[] {
+  const out: string[] = []
+  const walkedRun = facts.walked?.run
+  if (walkedRun && walkedRun.kind !== 'unknown') {
+    const a = walkedRun.trace.conds
+    const b = run.trace.conds
+    const at = b.findIndex((c, i) => a[i] === undefined || a[i]!.s !== c.s || a[i]!.v !== c.v)
+    const cond = at === -1 ? undefined : b[at]
+    const src = srcOf(facts.mod, cond)
+    if (cond && src) out.push(`이번 호출에서는 \`${src}\` 조건이 ${cond.v ? '참' : '거짓'}입니다.`)
+  }
+  if (out.length === 0 && run.trace.loops.length > 0) out.push(`반복은 ${run.trace.loops[0]!.n}번 돕니다.`)
+  if (run.kind === 'value') {
+    const ret = run.trace.ret
+    const src = srcOf(facts.mod, ret)
+    // A long float (`1851.8999999999999`) says nothing to a beginner: only names whose values read plainly.
+    const names = (ret?.names ?? []).filter(([, v]) => !v.includes('`') && !/\d\.\d{5,}/.test(v))
+    if (src && names.length > 0) out.push(`마지막 \`${src}\`에서 ${names.map(([n, v]) => `\`${n}\` = \`${v}\``).join(', ')}이므로 결과는 \`${run.show}\`입니다.`)
+    else if (src) out.push(`마지막에 \`${src}\`의 값을 돌려주므로 결과는 \`${run.show}\`입니다.`)
+  } else {
+    const src = srcOf(facts.mod, run.trace.err)
+    out.push(src ? `\`${src}\`에서 \`${run.name}\` 오류가 나서 멈춥니다.` : `실행하다가 \`${run.name}\` 오류가 나서 멈춥니다.`)
+  }
+  return out.slice(0, 2)
+}
+
+/** The right result's line code writes (1.13.0 G5e). */
+function rightLine(run: Exclude<CalcResult, { kind: 'unknown' }>, lang: CalcLang): string {
+  if (run.kind === 'error') return `바른 결과: \`${run.name}\` 오류로 멈춥니다.`
+  const isNone = lang === 'py' ? run.value === null : run.value === undefined
+  return isNone ? `바른 결과: \`${run.show}\` (돌려주는 것 없음)` : `바른 결과: \`${run.show}\``
+}
+
+/** Code's reply to a guess it settled (1.13.0 G5e): the plugin's head, code's reason, and the right result under 틀림. */
+function verdictReply(facts: ThinkFacts, isRight: boolean): string {
+  const reasons = calcReasons(facts, facts.asked).join(' ')
+  const head = `**${VERDICT_TEXT[isRight ? 'right' : 'wrong']}**${reasons ? ` ${reasons}` : ''}`
+  return isRight ? head : `${head}\n\n${rightLine(facts.asked, facts.lang)}`
+}
+/** Code's reply to a "don't know": the right result, then the reason. */
+function blankReply(facts: ThinkFacts): string {
+  return [rightLine(facts.asked, facts.lang), calcReasons(facts, facts.asked).join(' ')].filter(one => one !== '').join('\n\n')
+}
+/** Whether a guess (code-read or a closed word's meaning) is the asked run's result (stance [같음], P3's strict rules). */
+function isGuessRight(facts: ThinkFacts, guess: Exclude<ThinkTextRead, undefined | { kind: 'blank' }>): boolean {
+  const run = facts.asked
+  if (guess.kind === 'error') return run.kind === 'error' && (guess.name === undefined || guess.name === run.name)
+  if (run.kind !== 'value') return false
+  // A string result is matched against the learner's own words when they wrote a unit word (`5개`, `14,000원`, `25%`):
+  // the string's characters exactly, a space between a number and its unit aside. A plain number is no string (S18).
+  if (typeof run.value === 'string' && typeof guess.value !== 'string' && guess.said !== undefined && !guess.isPlain)
+    return guess.said === run.value || guess.said.replace(/(\d)\s+(?=\D)/, '$1') === run.value.replace(/(\d)\s+(?=\D)/, '$1')
+  return calcEqual(guess.value, run.value)
+}
+
+/**
+ * How a text typed under code's open line is answered (1.13.0 G5e), or 'fallback' when calc cannot run the line's
+ * call against the note as it now is (askNote then sends 1.9.0's question, to the byte). A blank, an error guessed
+ * or a value guessed is answered by code with no call; anything else goes to one check call with code's facts.
+ */
+export function thinkCalcPlan(
+  note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles' | 'withheld'>,
+  think: { question: string; trace: string; call?: string },
+  mine: string,
+  level: Level,
+  variant: 'trace' | 'basis',
+): ThinkCalcPlan {
+  if (think.call === undefined) return { kind: 'fallback' }
+  const scope = thinkCalcScope(note.changes)
+  const name = /^([A-Za-z_$][\w$]*)\(/.exec(think.call)?.[1]
+  const callee = scope.callees.find(one => one.name === name)
+  const call = callee ? parseThinkCall(think.call, callee.isPy) : undefined
+  const mod = callee ? scope.mods.get(callee.file) : undefined
+  if (!callee || !call || !mod || !namedFits(call, callee)) return { kind: 'fallback' }
+  const asked = calcCall(mod, call.text)
+  if (asked.kind === 'unknown') return { kind: 'fallback' }
+  const w = walkedCallOf(think.trace, scope.callees, scope.mods)
+  const walkedMod = w ? scope.mods.get(w.callee.file) : undefined
+  const walked = w && walkedMod ? { call: w.call, run: calcCall(walkedMod, w.call.text) } : undefined
+  // Every name the shown code or the walk-through's code spans use, outside string literals (`text.split(":")` gives
+  // `text` and `split`): such a word typed alone is about the code, not a guessed string.
+  const unquoted = (code: string) => code.replace(/(['"`])(?:\\.|(?!\1)[^\\\n])*\1/g, ' ')
+  const namesIn = (code: string) => [...unquoted(code).matchAll(/[A-Za-z_$][\w$]*/g)].map(m => m[0])
+  const codeNames = new Set<string>([
+    ...scope.callees.flatMap(one => [one.name, ...one.params]),
+    ...[...scope.mods.values()].flatMap(one => namesIn(one.src)),
+    ...[...think.trace.matchAll(/`([^`\n]+)`/g)].flatMap(m => namesIn(m[1]!)),
+  ])
+  const facts: ThinkFacts = { lang: mod.lang, mod, callee, call, asked, walked, scope, codeNames }
+  const read = thinkTextOf(mine, mod.lang, codeNames, asked.kind === 'value' && typeof asked.value === 'string' ? 'string' : 'other')
+  if (read?.kind === 'blank') return { kind: 'code', text: blankReply(facts) }
+  if (read) return { kind: 'code', text: verdictReply(facts, isGuessRight(facts, read)) }
+  return { kind: 'check', system: THINK_CALC_SYSTEM, prompt: thinkCalcPrompt(note, think, mine, level, variant, facts), facts }
+}
+
+/** The system prompt of that check (1.13.0 G5e): THINK_SLOT_SYSTEM's, its second sentence saying the plugin computed the result. */
+export const THINK_CALC_SYSTEM = [
+  '너는 바이브코딩(AI 코딩 도우미에게 코드를 맡기면서 배우는 방식)을 하는 사람의 코딩 튜터다.',
+  "학습자는 '예시로 따라가기' 끝의 생각해 보기 호출을 읽고 질문 칸에 적었다. 결과는 플러그인이 코드를 직접 계산해 알려 주므로 너는 계산하지 않는다.",
+  '학습자의 글은 실제로 겪은 일이 아니라 짐작이나 질문이다. 원인을 찾거나 오류 메시지·코드를 더 보여 달라고 하지 않는다.',
+  WITHHELD_RULE,
+  '코드는 백틱(`)으로 감싼다. 인사말이나 맺음말은 쓰지 않는다.',
+  TONE,
+  BOLD,
+].join(' ')
+
+/** One check's user message (1.13.0 G5e): the line, code's computed facts, the walk-through, the text, the note and its code, the kind rule and the closed slots. */
+export function thinkCalcPrompt(
   note: Pick<LearnNote, 'prompt' | 'text' | 'status' | 'changes' | 'moreFiles' | 'withheld'>,
   think: { question: string; trace: string },
   mine: string,
   level: Level,
   variant: 'trace' | 'basis',
+  facts: ThinkFacts,
 ): string {
-  const [workRule, workLine] = THINK_WORK[variant]
+  const asked = facts.asked
+  const facts1 = [`- \`${facts.call.text}\`의 결과: ${asked.kind === 'value' ? `\`${asked.show}\`` : `\`${asked.name}\` 오류로 멈춤`}`]
+  const w = facts.walked
+  if (w && w.run.kind !== 'unknown') {
+    facts1.push(`- 따라간 호출 \`${w.call.text}\`의 결과: ${w.run.kind === 'value' ? `\`${w.run.show}\`` : `\`${w.run.name}\` 오류로 멈춤`}`)
+    const a = w.run.trace.conds
+    const b = asked.trace.conds
+    const at = b.findIndex((c, i) => a[i] === undefined || a[i]!.s !== c.s || a[i]!.v !== c.v)
+    const src = at === -1 ? undefined : srcOf(facts.mod, b[at], 80)
+    if (src) facts1.push(`- 두 실행이 처음 갈리는 조건: \`${src}\` (이번 호출에서는 ${b[at]!.v ? '참' : '거짓'})`)
+  }
   return [
     LEVEL_TEXT[level],
     '',
     '## 생각해 보기 물음',
     think.question,
     '',
+    '## 플러그인이 코드를 직접 실행해 얻은 사실 (정답은 이것이다)',
+    ...facts1,
+    '',
     "## 그 물음이 붙은 '예시로 따라가기'",
     think.trace,
     '',
     '## 학습자의 글',
-    isBlankAnswer(mine) ? '(모르겠다고 했다)' : cut(mine, 1000),
+    cut(mine, 1000),
     '',
     '## 그 노트의 요청',
     note.prompt === '' ? '(요청 문장 없음)' : cut(note.prompt, 1000),
@@ -2893,57 +3435,50 @@ export function thinkSlotCheckPrompt(
     ...diffBlocks(note, PROMPT_DIFF_BUDGET),
     '',
     THINK_KIND[variant === 'trace' ? 'narrow' : 'wide'],
-    workRule,
-    '물음의 호출은 학습자가 지금의 바뀐 코드에 대고 그 호출 하나만 따로 실행한다고 생각한 것이다. 바른 결과 줄에는 그 호출의 최종 결과(돌려주는 값, 출력, 오류로 끝나면 그 오류) 하나만, 종류와 상관없이 늘 쓴다. 돌려주는 값이면 돌려준다고, 찍히는 출력이면 출력된다고 구별해 쓴다. 파일에 이미 있는 다른 호출이나 그 출력, 요청이나 노트가 말하는 결과는 바른 결과가 아니다.',
-    "짐작이면 판정은 반드시 맞음 또는 틀림이다. 최종 결과가 같으면 맞음(까닭을 빠뜨리거나 틀리게 덧붙여도, 오류로 끝난다고만 하고 오류 이름을 빠뜨리거나 달라도 맞음). 다르면 틀림. 값 없이 문제를 짐작했으면('에러가 날 것 같다', '멈춘다', '이상하게 나온다') 결과가 실제로 오류로 끝나거나 멈출 때만 맞음이고 아니면 틀림. 모름·질문이면 없음.",
-    '까닭에는 종류와 상관없이 바른 결과가 왜 그렇게 나오는지만 두 문장 이내로 쓴다. 학습자의 글을 평가하는 말(맞다, 틀리다, 맞지만, 아쉽지만, 짐작하신)은 쓰지 않는다.',
-    '답은 질문일 때만 쓴다. 물은 것에 세 문장 이내로 바로 답한다. 코드로 정해지는 것은 위 코드대로, 일반적인 개념은 일반론으로 답하고, 답을 미루거나 알 수 없다고 하지 않는다. 예시 값은 꼭 필요할 때만 하나 쓴다. 오류 메시지나 코드를 보여 달라고 하지 않는다. 아니면 없음.',
+    '결과는 위 사실에 있다. 너는 아무것도 계산하지 않고, 사실에 없는 값을 새로 쓰지 않는다.',
+    '짐작값에는 짐작이면 학습자가 짐작한 결과를 코드의 값 하나로 옮겨 쓴다(문자열은 따옴표, 목록은 대괄호). 값으로 옮길 수 없으면 다음 말 가운데 하나만 쓴다: 오류 · 돌려주는 것 없음 · 따라가기와 같음 · 음수 · 0 · 빈 값 · 참 · 거짓 · 기타. 짐작이 아니면 없음.',
+    '다른 호출에는 학습자가 물음의 호출과 다른 입력을 말했을 때(…면, …일 때, …넣으면) 그 입력으로 같은 함수를 부르는 호출 하나를 코드 그대로 쓴다. 아니면 없음.',
+    '식에는 질문에 답하는 데 값이 필요할 때 그 값을 내는 코드 식을 하나씩 쓴다. 플러그인이 계산해 값을 붙인다. 필요 없으면 없음.',
+    '답은 질문일 때, 그리고 학습자의 글이 묻는 꼴(물음표, …나요, …까요, 왜 · 어떻게 · 무엇)이면 종류가 무엇이든 쓴다. 값이나 결과는 쓰지 않고, 물은 것에 두 문장 이내로 바로 답한다. 코드가 무엇을 하는지와 그 까닭을 말하고, 값이 필요하면 식 줄에 맡긴다. 답을 미루거나 알 수 없다고 하지 않는다. 플러그인이나 식 줄을 가리키는 말은 쓰지 않는다. 오류 메시지나 코드를 보여 달라고 하지 않는다. 묻지 않는 짐작이나 모름이면 없음.',
+    '판정은 짐작값이 기타일 때만, 위 사실의 결과와 견주어 맞음 또는 틀림을 쓴다. 아니면 없음.',
     '생각해 보기를 새로 쓰지 않는다. 정확히 아래 형식만 쓴다.',
     '종류: (짐작 · 모름 · 질문 중 하나)',
-    workLine,
-    '바른 결과: (한 줄)',
-    '판정: (맞음 · 틀림 · 없음 중 하나)',
-    '까닭: (두 문장 이내)',
-    '답: (질문이면 세 문장 이내, 아니면 없음)',
+    '짐작값: (값 하나, 위의 정해진 말 하나, 또는 없음)',
+    '다른 호출: (호출 하나 또는 없음)',
+    '식: (코드 식 하나 또는 없음)',
+    '식: (코드 식 하나 또는 없음)',
+    '답: (질문이면 두 문장 이내, 아니면 없음)',
+    '판정: (짐작값이 기타일 때만 맞음 · 틀림, 아니면 없음)',
   ].join('\n')
 }
 
-/** A labelled line of that reply, bold or not, and what it says on it. */
-const SLOT_PART = /^[^\S\n]*(?:[-*]\s+)?(?:\*\*)?(종류|따라가기|근거|바른[^\S\n]*결과|판정|까닭|답)(?:\*\*)?[^\S\n]*[:：][^\S\n]*(?:\*\*)?(.*?)(?:\*\*)?[^\S\n]*$/
-/** A part left empty on purpose. */
-const SLOT_NONE = /^(?:없음|없습니다|해당\s*없음|-|\(없음\)|—)?[.]?$/
-/** A reason's sentence conceding part of a wrong guess (1.11.0's (f) misses), dropped under 틀림. */
-const SLOT_CONCEDE = /맞지만|맞았지만|맞긴|맞으나|맞는데|일부\s*맞|짐작하신\s*대로|짐작대로/
-/**
- * A text that is one value alone, said or asked (`0`, `null?`, `"P"`, `data-science-101이 나오나요?`, `[1, 3]이 나올 것
- * 같아요.`): a number, a quoted string, a literal word, a list or object written on one line, or one token with no
- * space and no Korean; a lead word and an ending allowed around it. For the verdict code settles (slotVerdict).
- */
-const BARE_GUESS = /^\s*(?:(?:그럼|혹시|답은|결과는|최종\s*결과는)\s*)?`?(-?\d[\d,]*(?:\.\d+)?|'[^'\n]*'|"[^"\n]*"|\[[^\]\n]*\]|\{[^}\n]*\}|[^\s가-힣`?？]+)`?\s*(?:(?:이|가|으로|로)?\s*(?:나와요|나올\s*것\s*같아요|나올까요|나오나요|나오죠|돼요|되나요|될까요|될\s*것\s*같아요|예요|이에요|요|일\s*것\s*같아요|일까요|인가요|맞나요|입니다|이요))?\s*[?？.!~]*\s*$/
-/** Literal words whose case or spelling a learner may change (left to the model). */
-const SLOT_WORDS = /^(?:true|false|null|none|undefined|nan)$/i
-
-/** Each labelled part of a slot reply, with the lines under it; a label seen twice keeps its first. */
-function slotParts(text: string): Map<string, string> {
-  const parts = new Map<string, string[]>()
+/** A labelled line of a check's reply (1.13.0 G5e), bold or listed or not. */
+const CALC_PART = /^[^\S\n]*(?:[-*]\s+)?(?:\*\*)?(종류|짐작값|다른[^\S\n]*호출|식|답|판정)(?:\*\*)?[^\S\n]*[:：][^\S\n]*(?:\*\*)?(.*?)(?:\*\*)?[^\S\n]*$/
+/** A check reply's parts: each label's first line (식 twice), with the lines under it. */
+function calcParts(text: string): { one: Map<string, string>; exprs: string[] } {
+  const one = new Map<string, string>()
+  const exprs: string[] = []
   let current: string[] | undefined
+  const lists = new Map<string, string[]>()
   for (const line of clean(text).split('\n')) {
-    const m = SLOT_PART.exec(line)
-    const name = m ? m[1]!.replace(/\s+/g, ' ') : undefined
-    if (m && name !== undefined && !parts.has(name)) {
-      current = [m[2]!]
-      parts.set(name, current)
-    } else if (m) current = undefined
-    else if (current) current.push(line)
+    const m = CALC_PART.exec(line)
+    if (m) {
+      const name = m[1]!.replace(/\s+/g, ' ')
+      if (name === '식') {
+        exprs.push(m[2]!.trim())
+        current = undefined
+      } else if (!lists.has(name)) {
+        current = [m[2]!]
+        lists.set(name, current)
+      } else current = undefined
+    } else if (current) current.push(line)
   }
-  return new Map([...parts].map(([label, lines]) => [label, lines.join('\n').trim()]))
+  for (const [k, v] of lists) one.set(k, v.join('\n').trim())
+  return { one, exprs: exprs.map(e => e.replace(/^`+|`+$/g, '').trim()).filter(e => !SLOT_NONE.test(e)) }
 }
 
-/**
- * At most `max` sentences of a text, on one line: a sentence ends on . ! ? or 。 followed by a space or the end,
- * never inside a code span (`parts.length` is no end).
- */
-function sentencesOf(text: string, max: number): string[] {
+/** Sentences of a text, where `. name` (a field written apart: `parts. length`) ends none. */
+function sentencesKept(text: string, max: number): string[] {
   const flat = text.replace(/\s*\n\s*/g, ' ').trim()
   const out: string[] = []
   let from = 0
@@ -2951,7 +3486,7 @@ function sentencesOf(text: string, max: number): string[] {
   for (let i = 0; i < flat.length; i++) {
     const c = flat[i]!
     if (c === '`') isCode = !isCode
-    else if (!isCode && '.!?。'.includes(c) && (i + 1 === flat.length || /\s/.test(flat[i + 1]!))) {
+    else if (!isCode && '.!?。'.includes(c) && (i + 1 === flat.length || (/\s/.test(flat[i + 1]!) && !/^\s+[a-z_$]/.test(flat.slice(i + 1))))) {
       out.push(flat.slice(from, i + 1).trim())
       from = i + 1
     }
@@ -2960,102 +3495,360 @@ function sentencesOf(text: string, max: number): string[] {
   return out.filter(one => one !== '').slice(0, max)
 }
 
-/**
- * A value as written, only its wrapping out: the spaces around it, backticks or bold around it (never a `*` inside:
- * `***` is a value) and a sentence's full stop after it. Quotes, spaces inside and commas stay: `"3"` is not `3`,
- * `"Kim Minsu"` is not `"KimMinsu"`, and `[1,000]` is a list of two.
- */
-function plainValue(text: string): string {
-  return text.trim().replace(/^`+|`+$/g, '').replace(/^\*\*(?=[^*])|(?<=[^*])\*\*$/g, '').trim().replace(/(?<=[^.])[.。]$/, '').trim()
+/** Values a sentence states outside code: numbers that are no counts or steps, and quoted strings. */
+function statedValues(sentence: string): string[] {
+  // Ranges (`0~3주차`) and small whole numbers (0 to 12) in prose are counts and positions, not values claimed.
+  const prose = sentence.replace(/`[^`]*`/g, ' ').replace(/-?\d+(?:\.\d+)?\s*[~∼-]\s*-?\d+(?:\.\d+)?/g, ' ').replace(/(?<![\w.])(?:1[0-2]|\d)(?![\w.])/g, ' ')
+  const nums = [...prose.matchAll(/(?<![\w.])-?\d+(?:\.\d+)?(?![\w.]|\s*(?:번|째|단계|줄|개|글자|자리|칸|가지|살|명))/g)].map(m => m[0])
+  // A quoted Korean phrase in prose is a quotation or a paraphrase ("지금까지 몇 번 지났는지"), checked only as a claim.
+  const quoted = [...prose.matchAll(/'([^'\n]+)'|"([^"\n]+)"/g)].map(m => m[1] ?? m[2]!).filter(one => !/[가-힣]/.test(one))
+  const spans = [...sentence.matchAll(/`([^`\n]+)`/g)].map(m => m[1]!).filter(one => /^(?:-?\d+(?:\.\d+)?|'[^']*'|"[^"]*")$/.test(one.trim()))
+  return [...nums, ...quoted, ...spans.map(one => one.trim().replace(/^['"]|['"]$/g, ''))]
+}
+/** A result a sentence claims: `결과는 7`, `값이 '7'`, `7이 나옵니다`, `` `205`를 돌려줍니다 `` (small numbers too; `2가 됩니다` is no claim of a result). */
+const CLAIM_VALUE = '`?(-?\\d+(?:\\.\\d+)?|\'[^\'\\n]*\'|"[^"\\n]*")`?'
+const CLAIMED = new RegExp(`(?:결과|값|반환값|리턴값)\\s*(?:은|는|이|가)\\s*${CLAIM_VALUE}|${CLAIM_VALUE}\\s*(?:이|가|을|를)?\\s*(?:나와|나옵|나올|나오|돌려|반환|출력)`, 'g')
+function claimedValues(sentence: string): string[] {
+  return [...sentence.matchAll(CLAIMED)].map(m => (m[1] ?? m[2]!).replace(/^(['"])(.*)\1$/s, '$2'))
 }
 
 /**
- * A slot check's reply (thinkSlotCheckPrompt) as the answer under the note (1.12.0 G5), or undefined when it cannot
- * be read (askNote then keeps it with its work lines out, withoutWork). The plugin's head is the only word on the
- * guess: 맞음 `**맞혔습니다.** reason`; 틀림 `**아쉽지만 틀렸습니다.** reason`, a blank line, `바른 결과: …`; 모름 (or a
- * "모르겠어요") the right result's line, a blank line, the reason; 질문 the answer alone. Under 틀림 a reason's sentence
- * conceding part of the guess goes (SLOT_CONCEDE); the reason is cut to two sentences, an answer to three. A bare
- * value guessed against a right result of one value (slotVerdict): the same value as written is shown 맞음, a
- * different plain number 틀림, each with no reason where the model's verdict said otherwise. The kind, work and
- * basis lines are never shown; a reply it cannot read goes through slotFallback.
+ * A concept question's answer as shown (1.13.0 G5e). The model's 답 is to carry no values (thinkCalcPrompt); code
+ * holds it to that: cut to two sentences, a sentence is dropped when it states a value seen nowhere (the code, the
+ * note, the walk-through, the learner's text, either run, the 식 results); when it says something comes to a value
+ * (claimedValues, small numbers too) that is neither written in the code or the learner's text nor computed by calc;
+ * when that claimed value is the open line's own result (two characters or more: the answer is not given away); when a backticked expression in it
+ * is said to be a value calc's run of that expression contradicts; or when it claims a failure (수 없 · 오류 · 에러 ·
+ * 예외 · NaN) about an expression calc ran cleanly. No 생각해 보기, no final sentence ending in '?'. Then `- \`식\`의
+ * 값: \`v\`` for each 식 calc evaluates (the asked call's parameters bound), never the line's own call nor a value
+ * equal to its result. Nothing left: SLOT_UNREAD (never code's reason for the line's call, which would give the
+ * answer away and answer another question).
  */
-export function thinkSlotReply(text: string, mine: string): string | undefined {
-  const parts = slotParts(text)
-  const kind = (parts.get('종류') ?? '').replace(/[*`()]/g, '').trim()
-  const result = (parts.get('바른 결과') ?? '').trim()
-  const verdictSaid = (parts.get('판정') ?? '').replace(/[*`()]/g, '').trim()
-  const why = SLOT_NONE.test((parts.get('까닭') ?? '').trim()) ? '' : (parts.get('까닭') ?? '').trim()
-  const answer = SLOT_NONE.test((parts.get('답') ?? '').trim()) ? '' : (parts.get('답') ?? '').trim()
-  const line = SLOT_NONE.test(result) ? undefined : `바른 결과: ${result}`
-  const shown = (...pieces: (string | undefined)[]) => pieces.filter(one => one !== undefined && one !== '').join('\n\n') || undefined
-  // A value guessed (BARE_GUESS) is told right or wrong whatever kind the model gave it, by code, against its own result.
-  const settled = line === undefined || isBlankAnswer(mine) ? undefined : slotVerdict(mine, result)
-  const isVerdict = /^(?:맞음|틀림)/.test(verdictSaid)
-  // An answer written for a text the model gave no verdict (a question it took for a guess or a "don't know"): shown alone.
-  if (!isBlankAnswer(mine) && settled === undefined && !isVerdict && answer !== '') return sentencesOf(answer, 3).join(' ')
-  if (isBlankAnswer(mine) || (/^모름/.test(kind) && settled === undefined)) return line === undefined ? undefined : shown(line, sentencesOf(why, 2).join(' '))
-  if (/^질문/.test(kind) && settled === undefined) return answer === '' ? undefined : sentencesOf(answer, 3).join(' ')
-  let verdict = /^맞음/.test(verdictSaid) ? 'right' : /^틀림/.test(verdictSaid) ? 'wrong' : settled
-  if (verdict === undefined || line === undefined) return undefined
-  // A reason the model wrote for a text it took for no guess (모름, 질문, no verdict) is not shown under code's verdict.
-  let reason = /^짐작/.test(kind) && /^(?:맞음|틀림)/.test(verdictSaid) ? sentencesOf(why, 2) : []
-  if (settled !== undefined && settled !== verdict) [verdict, reason] = [settled, []]
-  if (verdict === 'wrong') reason = reason.filter(one => !SLOT_CONCEDE.test(one))
-  const head = `**${VERDICT_TEXT[verdict as 'right' | 'wrong']}**${reason.length > 0 ? ` ${reason.join(' ')}` : ''}`
-  return verdict === 'right' ? head : `${head}\n\n${line}`
-}
-
-/**
- * The verdict code settles for a value guessed (BARE_GUESS) against a right result holding one value (its one code
- * span that is a value, or the result line itself when it is one), only where no reading can differ (1.12.0 G5 final,
- * stance S13): two plain numerals (digits, a sign, one point; no quotes, no commas) are right when equal in value and
- * wrong when not; a plain numeral against a literal word (null, None, undefined, true, false, True, False, NaN) is
- * wrong; a word typed without quotes (no space, no bracket, no quote, no Korean, not a numeral or literal word)
- * against a result of one quoted string is right when it is that string's content exactly and wrong when not; two
- * values written the same (plainValue) are right. Anything else (a quoted string against a number, true against
- * True, spaces or commas that differ, lists, objects) is the model's verdict as it gave it.
- */
-function slotVerdict(mine: string, result: string): 'right' | 'wrong' | undefined {
-  const guess = BARE_GUESS.exec(mine.trim())?.[1]
-  if (guess === undefined) return undefined
-  const isValue = (one: string) => parseThinkCall(`x(${one})`, false) !== undefined || parseThinkCall(`x(${one})`, true) !== undefined
-  const spans = [...new Set([...result.matchAll(/`([^`\n]+)`/g)].map(m => m[1]!).filter(isValue).map(plainValue))]
-  const only = spans.length === 1 ? spans[0]! : spans.length === 0 && /^[^\s가-힣]+$/.test(plainValue(result)) ? plainValue(result) : undefined
-  if (only === undefined) return undefined
-  const [a, b] = [plainValue(guess), only]
-  const isNumeral = (v: string) => /^-?\d+(?:\.\d+)?$/.test(v)
-  const isWord = (v: string) => /^(?:null|None|undefined|true|false|True|False|NaN)$/.test(v)
-  if (isNumeral(a) && isNumeral(b)) return Number(a) === Number(b) ? 'right' : 'wrong'
-  if ((isNumeral(a) && isWord(b)) || (isWord(a) && isNumeral(b))) return 'wrong'
-  const quoted = /^(['"])((?:(?!\1)[^\\])*)\1$/.exec(b)
-  if (quoted && /^[^\s'"`[\]{}(),가-힣]+$/.test(a) && !isNumeral(a) && !isWord(a)) return a === quoted[2] ? 'right' : 'wrong'
-  return a === b ? 'right' : undefined
-}
-
-/**
- * A slot check's reply that thinkSlotReply cannot read, as shown and kept (1.12.0 G5 final): built from its parts,
- * never its labels: the right result's line and its reason (two sentences), else an answer (three), else one fixed
- * line. The kind, work and basis lines, a verdict word and empty parts are never shown; prose with no part at all is
- * not shown either (it may hold a walk-through), only the fixed line.
- */
-export function slotFallback(text: string): string {
-  const parts = slotParts(text)
-  const of = (label: string) => {
-    const said = (parts.get(label) ?? '').trim()
-    return SLOT_NONE.test(said) ? '' : said
+export function answerKept(answer: string, exprs: readonly string[], facts: ThinkFacts, seen: string, mine = ''): string {
+  const bind = calcBindings(facts.mod, facts.call.text)
+  const lines: string[] = []
+  const known = new Set<string>()
+  const own = new Set<string>()
+  const addTo = (set: Set<string>, text: string) => {
+    for (const m of text.matchAll(/-?\d+(?:\.\d+)?/g)) set.add(String(Number(m[0])))
+    for (const m of text.matchAll(/'([^'\n]*)'|"([^"\n]*)"/g)) set.add(m[1] ?? m[2]!)
   }
-  const result = of('바른 결과')
-  if (result !== '') return [`바른 결과: ${result}`, sentencesOf(of('까닭'), 2).join(' ')].filter(one => one !== '').join('\n\n')
-  const answer = sentencesOf(of('답'), 3).join(' ')
-  return answer !== '' ? answer : SLOT_UNREAD
+  const code = [...facts.scope.mods.values()].map(one => one.src).join('\n')
+  addTo(known, seen)
+  // What a claimed result may be: written in the code or the learner's text, or computed by calc (either run, its names).
+  addTo(own, code)
+  addTo(own, mine)
+  for (const run of [facts.asked, facts.walked?.run])
+    if (run && run.kind !== 'unknown') {
+      for (const set of [known, own]) {
+        if (run.kind === 'value') addTo(set, run.show)
+        for (const [, v] of run.trace.ret?.names ?? []) addTo(set, v)
+      }
+    }
+  const answerShown = facts.asked.kind === 'value' ? facts.asked.show.replace(/^(['"])(.*)\1$/s, '$2') : undefined
+  const isAnswer = (v: string) =>
+    answerShown !== undefined && answerShown.length >= 2 && (v === answerShown || (/^-?\d+(?:\.\d+)?$/.test(v) && /^-?\d+(?:\.\d+)?$/.test(answerShown) && Number(v) === Number(answerShown)))
+  for (const e of exprs.slice(0, 2)) {
+    // A call of a function in scope is no 식: another input is asked through the other call (otherCallOf, S21).
+    const asCall = parseThinkCall(e, facts.callee.isPy)
+    if (asCall && facts.scope.callees.some(one => one.name === asCall.name)) continue
+    const r = calcExpr(facts.mod, e, bind)
+    if (r.kind === 'value' && r.show.length <= 80 && !(facts.asked.kind === 'value' && r.show === facts.asked.show && isAnswer(answerShown!))) {
+      lines.push(`- \`${e}\`의 값: \`${r.show}\``)
+      addTo(known, r.show)
+      addTo(own, r.show)
+    } else if (r.kind === 'error') lines.push(`- \`${e}\`: \`${r.name}\` 오류`)
+  }
+  // A string is seen when the code, the note, the walk-through or the learner's own words hold it anywhere.
+  const isIn = (set: Set<string>, v: string, text: string) => set.has(v) || (/^-?\d+(?:\.\d+)?$/.test(v) ? set.has(String(Number(v))) : v !== '' && text.includes(v))
+  let sentences = sentencesKept(answer, 2).filter(s => !/생각해\s*보기/.test(s))
+  sentences = sentences.filter(s => {
+    if (!statedValues(s).every(v => isIn(known, v, seen))) return false
+    const claimed = claimedValues(s)
+    return claimed.every(v => isIn(own, v, `${code}\n${mine}`)) && !claimed.some(isAnswer)
+  })
+  sentences = sentences.filter(s => {
+    const spans = [...s.matchAll(/`([^`\n]+)`/g)].map(m => m[1]!)
+    const between = s.split(/`[^`\n]+`/)
+    for (let i = 0; i + 1 < spans.length; i++) {
+      const lit = literalOf(spans[i + 1]!, facts.lang, false)
+      if (!lit || literalOf(spans[i]!, facts.lang, false)) continue
+      // Only `expr` said to be `value` (은 · 는 · 이 · 가 · 의 값은 · 를 실행하면 · = · →) is a claim of its value.
+      if (!/^\s*(?:은|는|이|가|의\s*값은|의\s*결과는|을\s*계산하면|를\s*계산하면|을\s*실행하면|를\s*실행하면|=|==|→)?\s*$/.test(between[i + 1] ?? '')) continue
+      const r = calcExpr(facts.mod, spans[i]!, bind)
+      if (r.kind === 'value' && !calcEqual(r.value, lit.value)) return false
+    }
+    if (/수\s*없|오류|에러|예외|NaN/.test(s) && spans.some(one => calcExpr(facts.mod, one, bind).kind === 'value' && !literalOf(one, facts.lang, false))) return false
+    return true
+  })
+  if (sentences.length > 0 && /[?？]\s*$/.test(sentences.at(-1)!)) sentences.pop()
+  // A sentence that points at the plugin or a 식 line says nothing by itself.
+  sentences = sentences.filter(s => !/플러그인|식\s*줄|위\s*(?:두\s*)?식|식들/.test(s))
+  const body = [sentences.join(' '), ...lines].filter(one => one !== '').join('\n')
+  return body !== '' ? body : SLOT_UNREAD
 }
-/** What a check's reply shows when nothing in it can be read (slotFallback). */
-export const SLOT_UNREAD = '답을 제대로 읽지 못했습니다. 질문을 한 번 더 적어 주세요.'
 
-/** A slot check's reply with its kind, work and basis lines out (1.12.0 G5), for a reply thinkSlotReply cannot read. */
-export function withoutWork(text: string): string {
-  const left = text.split('\n').filter(line => !/^[^\S\n]*(?:[-*]\s+)?(?:\*\*)?(?:종류|따라가기|근거)(?:\*\*)?[^\S\n]*[:：]/.test(line))
-  return left.join('\n').trim()
+/** Whether a text names an input of its own (…면 · …일 때 · 넣 · 주): only then is a 다른 호출 taken for it. */
+const INPUT_PHRASE = /면|일\s*때|넣|주(?:면|고|어|세요|었|는)/
+/** A question word: a yes/no claim has none. */
+const WH_WORD = /왜|어떻게|뭐|무엇|어디|어느|몇|무슨/
+
+/** A closed word of 짐작값 read as a guess against the facts, or undefined for 기타 and anything else. */
+function closedGuess(word: string, facts: ThinkFacts): boolean | undefined {
+  const run = facts.asked
+  const w = word.replace(/[.\s]+$/, '').trim()
+  switch (w) {
+    case '오류':
+      return run.kind === 'error'
+    case '돌려주는 것 없음':
+      return run.kind === 'value' && (facts.lang === 'py' ? run.value === null : run.value === undefined)
+    case '따라가기와 같음': {
+      const wr = facts.walked?.run
+      if (!wr || wr.kind === 'unknown') return undefined
+      return wr.kind === 'error' ? run.kind === 'error' && run.name === wr.name : run.kind === 'value' && calcEqual(wr.value, run.value)
+    }
+    case '음수':
+      return run.kind === 'value' && (typeof run.value === 'bigint' ? run.value < 0n : typeof run.value === 'number' && run.value < 0)
+    case '빈 값':
+      return run.kind === 'value' && (run.value === '' || (Array.isArray(run.value) && run.value.length === 0) || (run.value instanceof PyTuple && run.value.items.length === 0) || ((run.value instanceof PyDict || run.value instanceof PySet) && run.value.m.size === 0) || (jsIsPlain(run.value) && Object.keys(run.value).length === 0))
+  }
+  return undefined
+}
+
+/**
+ * A check's reply as shown (1.13.0 G5e). (b) A 다른 호출 that parses, is a callee's, fits and comes with an input
+ * phrase in the text: calc runs it and code writes its result and one reason (a yes/no claim with no question word
+ * gets 네/아니요 first). (a) A guessed value or closed word: code's verdict (the model's 판정 only for 기타). 모름: the
+ * right result and the reason. (c) A question: answerKept. A reply with no part code can read: SLOT_UNREAD.
+ */
+export function thinkCalcReply(text: string, facts: ThinkFacts, mine: string, seen: string): string {
+  const { one, exprs } = calcParts(text)
+  if (one.size === 0 && exprs.length === 0) return SLOT_UNREAD
+  const part = (k: string) => {
+    const v = (one.get(k) ?? '').trim()
+    return SLOT_NONE.test(v) ? '' : v
+  }
+  let kind = part('종류').replace(/[*`()]/g, '').trim()
+  let guessRaw = part('짐작값').replace(/^`+|`+$/g, '').trim()
+  // The learner's own literal wins over the model's copy of it, whichever side has the quotes (`"1"` read as `1`, an
+  // unquoted `12.6` copied as `"12.6"`): the one literal of the learner's text with the same characters, as written.
+  const own = [...mine.replace(/(\d),(?=\d{3})/g, '$1').matchAll(/'[^'\n]*'|"[^"\n]*"|\[[^\]\n]*\]|(?<![\w.'"])-?\d+(?:\.\d+)?(?![\w.'"])/g)].map(m => m[0])
+  const unq = (t: string) => t.replace(/^(['"])(.*)\1$/s, '$2')
+  // A 짐작값 written as a sentence gives its last literal (`… '99.68°F'입니다.` is `'99.68°F'`).
+  if (guessRaw !== '' && literalOf(guessRaw, facts.lang, false) === undefined && !closedGuessWords.includes(guessRaw) && /[가-힣\s]/.test(guessRaw)) {
+    const lits = [...guessRaw.matchAll(/`([^`\n]+)`|'[^'\n]*'|"[^"\n]*"|-?\d+(?:\.\d+)?/g)].map(m => m[1] ?? m[0])
+    if (lits.length > 0) guessRaw = lits.at(-1)!
+  }
+  const sameOwn = [...new Set(own.filter(one => guessRaw !== '' && unq(one) === unq(guessRaw)))]
+  if (sameOwn.length === 1) guessRaw = sameOwn[0]!
+  // A 짐작 with no value read: the learner's one literal (a quoted string or a number) is the guess.
+  if (/^짐작/.test(kind) && guessRaw === '') {
+    const mineLits = [...mine.replace(/(\d),(?=\d{3})/g, '$1').matchAll(/'[^'\n]*'|"[^"\n]*"|(?<![\w.])-?\d+(?:\.\d+)?(?![\w.])/g)].map(m => m[0])
+    if (mineLits.length === 1) guessRaw = mineLits[0]!
+  }
+  // A question-shaped text is a guess only when it says the value guessed in its own words (S6: a question never gets a verdict).
+  const isAsking = /[?？]\s*[~ㅠㅜ.!]*$|(?:나요|까요|가요|래요|주세요)\s*[.!~]*$/.test(mine.trim()) || WH_WORD.test(mine) || INPUT_PHRASE.test(mine)
+  if (/^짐작/.test(kind) && isAsking && !guessSaidIn(guessRaw, mine)) {
+    kind = '질문'
+    guessRaw = ''
+  }
+  const otherRaw = part('다른 호출').replace(/^`+|`+$/g, '').trim()
+  const guessOf = (raw: string): boolean | undefined => {
+    if (raw === '' || raw === '기타') return undefined
+    const closed = closedGuess(raw, facts)
+    if (closed !== undefined) return closed
+    if (raw === '오류' || raw === '돌려주는 것 없음' || raw === '따라가기와 같음' || raw === '음수' || raw === '빈 값') return undefined
+    const named = /^`?([A-Z]\w*(?:Error|Exception))`?(?:\s*오류)?$/.exec(raw)?.[1]
+    if (named) return facts.asked.kind === 'error' && facts.asked.name === named
+    const lit = literalOf(raw, facts.lang, /^[A-Za-z_][\w-]*$/.test(raw) && !facts.codeNames.has(raw))
+    return lit ? facts.asked.kind === 'value' && calcEqual(lit.value, facts.asked.value) : undefined
+  }
+  const other = otherCallOf(mine, otherRaw, facts)
+  if (other) {
+    const { callee, call, mod } = other
+    {
+      const run = calcCall(mod, call.text)
+      if (run.kind !== 'unknown') {
+        let head = ''
+        if (!WH_WORD.test(mine) && guessRaw !== '') {
+          const sub: ThinkFacts = { ...facts, asked: run, callee, call, mod }
+          const g = guessOfFor(guessRaw, sub)
+          if (g !== undefined) head = g ? '**네.** ' : '**아니요.** '
+        }
+        const said = run.kind === 'value' ? `\`${call.text}\`를 실행하면 결과는 \`${run.show}\`입니다.` : `\`${call.text}\`를 실행하면 \`${run.name}\` 오류로 끝납니다.`
+        // The model's own answer, kept by answerKept's rules against that run, says why; else code's reason.
+        const sub: ThinkFacts = { ...facts, asked: run, callee, call, mod }
+        const keptAll = part('답') === '' ? SLOT_UNREAD : answerKept(part('답'), [], sub, `${seen}\n${said}`, mine)
+        const kept = keptAll === SLOT_UNREAD ? '' : sentencesKept(keptAll, 2).filter(one => !calcReasons(sub, run).includes(one)).join(' ')
+        const reason = calcReasons({ mod, walked: facts.walked }, run).at(-1)
+        const tail = kept !== '' ? kept : reason && !reason.endsWith(`결과는 \`${run.kind === 'value' ? run.show : ''}\`입니다.`) ? reason : ''
+        return `${head}${said}${tail ? ` ${tail}` : ''}`
+      }
+    }
+  }
+  const verdict = guessOf(guessRaw)
+  if (verdict !== undefined && (/^짐작/.test(kind) || kind === '')) return verdictReply(facts, verdict)
+  if (/^짐작/.test(kind) && guessRaw === '기타') {
+    const said = part('판정').replace(/[*`()]/g, '').trim()
+    if (/^맞음/.test(said)) return verdictReply(facts, true)
+    if (/^틀림/.test(said)) return verdictReply(facts, false)
+  }
+  if (/^짐작/.test(kind) && verdict !== undefined) return verdictReply(facts, verdict)
+  if (/^모름/.test(kind) || (/^짐작/.test(kind) && verdict === undefined)) return blankReply(facts)
+  return answerKept(part('답'), exprs, facts, seen, mine)
+}
+
+/**
+ * The other call a text asks about (1.13.0 G5e), or undefined. Code reads the learner's own words first: one literal
+ * call of a callee written in the text, parsed and fitting (namedFits), is that call. Else the model's 다른 호출 is
+ * taken only when the text names an input (INPUT_PHRASE) and every argument it changes from the line's call carries
+ * a value or a parameter name the learner wrote (S21: the arguments the learner did not name stay the line's). A call
+ * that is the line's own call (canonOf) is no other call.
+ */
+function otherCallOf(mine: string, otherRaw: string, facts: ThinkFacts): { callee: ThinkCallee; call: ThinkCall; mod: CalcModule } | undefined {
+  const fit = (text: string) => {
+    const name = /^([A-Za-z_$][\w$]*)\s*\(/.exec(text)?.[1]
+    const callee = facts.scope.callees.find(c => c.name === name)
+    const call = callee ? parseThinkCall(text, callee.isPy) : undefined
+    const mod = callee ? facts.scope.mods.get(callee.file) : undefined
+    if (!callee || !call || !mod || !namedFits(call, callee)) return undefined
+    if (callee.name === facts.callee.name && canonOf(call, callee) === canonOf(facts.call, facts.callee)) return undefined
+    return { callee, call, mod }
+  }
+  const written = facts.scope.callees.flatMap(callee =>
+    [...mine.matchAll(new RegExp(`(?<![\\w$.])${callee.name.replace(/\$/g, '\\$')}\\s*\\(`, 'g'))].map(m => {
+      let depth = 0
+      for (let i = m.index! + m[0].length - 1; i < mine.length; i++) {
+        if ('([{'.includes(mine[i]!)) depth++
+        else if (')]}'.includes(mine[i]!) && --depth === 0) return mine.slice(m.index!, i + 1)
+      }
+      return undefined
+    }),
+  )
+  const mineCalls = [...new Set(written.filter((one): one is string => one !== undefined))].map(fit).filter(one => one !== undefined)
+  if (mineCalls.length === 1) return mineCalls[0]
+  if (mineCalls.length > 1 || otherRaw === '' || !INPUT_PHRASE.test(mine)) return undefined
+  const got = fit(otherRaw)
+  if (!got) return undefined
+  // Another function's call: every argument must be the learner's.
+  if (got.callee.name !== facts.callee.name) return got.call.args.every(a => namesInput(mine, [a.text])) ? got : undefined
+  // The line's function: an argument changed from the line's call is taken only when it is the learner's (its value,
+  // a word for its kind, or its parameter's name, in the text); one the learner did not name stays the line's (S21).
+  const slotsOf = (call: ThinkCall) => {
+    const out: (string | undefined)[] = []
+    call.args.forEach((arg, k) => {
+      const named = /^([A-Za-z_]\w*)\s*=\s*(.*)$/s.exec(arg.text)
+      const at = named && facts.callee.isPy ? facts.callee.params.indexOf(named[1]!) : k
+      if (at >= 0) out[at] = named && facts.callee.isPy ? named[2]!.trim() : arg.text
+    })
+    return out
+  }
+  const norm = (t: string | undefined) => (t === undefined ? undefined : parseThinkCall(`f(${t})`, facts.callee.isPy)?.args[0]?.norm ?? t)
+  const line = slotsOf(facts.call)
+  const ask = slotsOf(got.call)
+  const width = Math.max(line.length, ask.length)
+  const said = Array.from({ length: width }, (_, i) => {
+    const param = facts.callee.params[i]
+    return param !== undefined && new RegExp(`(?<![\\w$])${param.replace(/\$/g, '\\$')}(?![\\w$])`).test(mine)
+  })
+  const isAnySaid = said.some(one => one)
+  const slots = Array.from({ length: width }, (_, i) => {
+    // A slot the model left out that the learner speaks of ("…를 안 쓰고") stays out; one the learner never named stays the line's.
+    if (ask[i] === undefined) return said[i] ? undefined : line[i]
+    if (norm(ask[i]) === norm(line[i])) return line[i]
+    // When the learner names parameters, only those may change (a value the model put on another argument is moved below).
+    if (isAnySaid && !said[i]) return line[i]
+    return namesInput(mine, [ask[i]!]) || said[i] ? ask[i] : line[i]
+  })
+  // The learner's value on the wrong argument: moved to the one parameter the learner named that the model left as it was.
+  const open = said.flatMap((one, i) => (one && norm(slots[i]) === norm(line[i]) && ask[i] !== undefined ? [i] : []))
+  const strayed = ask.flatMap((one, i) => (one !== undefined && !said[i] && norm(one) !== norm(line[i]) && namesInput(mine, [one]) ? [i] : []))
+  if (isAnySaid && open.length === 1 && strayed.length === 1) slots[open[0]!] = ask[strayed[0]!]
+  if (slots.length === line.length && slots.every((one, i) => norm(one) === norm(line[i]))) return undefined
+  // Written back in the line's own form (its named arguments named), positional while no slot is left out, then by name.
+  const namedAt = new Set(facts.call.args.flatMap((arg, k) => {
+    const named = /^([A-Za-z_]\w*)\s*=/.exec(arg.text)
+    return named && facts.callee.isPy ? [facts.callee.params.indexOf(named[1]!)] : k < 0 ? [k] : []
+  }))
+  const parts: string[] = []
+  let isGap = false
+  for (const [i, one] of slots.entries()) {
+    if (one === undefined) {
+      isGap = true
+      continue
+    }
+    const param = facts.callee.params[i]
+    if (!isGap && !namedAt.has(i)) parts.push(one)
+    else if (facts.callee.isPy && param !== undefined) {
+      parts.push(`${param}=${one}`)
+      isGap = true
+    } else return undefined
+  }
+  return fit(`${facts.callee.name}(${parts.join(', ')})`)
+}
+/**
+ * Whether the learner's text names each of these argument texts: its value (a number as a number, a string's
+ * characters, quotes and spaces aside), a word for an empty or blank kind (빈 문자열 · 빈 목록 · 공백 …, S21: any
+ * value of the kind named), or its `name=`.
+ */
+function namesInput(mine: string, args: readonly string[]): boolean {
+  const plain = mine.replace(/(\d),(?=\d{3})/g, '$1')
+  const flat = plain.replace(/[\s'"`]/g, '')
+  return args.every(arg => {
+    const m = /^([A-Za-z_]\w*)\s*=\s*(.*)$/s.exec(arg)
+    const raw = (m ? m[2]! : arg).trim()
+    if (m !== null && flat.includes(m[1]!)) return true
+    const str = /^(['"])(.*)\1$/s.exec(raw)
+    if (str && str[2]!.trim() === '')
+      return plain.includes(`"${str[2]}"`) || plain.includes(`'${str[2]}'`) || (str[2] === '' ? /빈\s*(?:문자열|글자|제목|이름|값|문장|칸)|아무\s*것도|아무것도/.test(mine) : /공백|빈\s*칸|빈칸|띄어\s*쓰기|스페이스/.test(mine))
+    if (/^\[\s*\]$/.test(raw)) return /\[\s*\]/.test(mine) || /빈\s*(?:목록|리스트|배열)/.test(mine)
+    if (/^-?\d+(?:\.\d+)?$/.test(raw)) return [...plain.matchAll(/-?\d+(?:\.\d+)?/g)].some(one => Number(one[0]) === Number(raw))
+    const value = raw.replace(/[\s'"`]/g, '')
+    return value !== '' && flat.includes(value)
+  })
+}
+/** A comma list split at the top level (no comma inside brackets or quotes). */
+function splitTopLevel(text: string): string[] {
+  const out: string[] = []
+  let depth = 0
+  let quote = ''
+  let from = 0
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!
+    if (quote) {
+      if (c === '\\') i++
+      else if (c === quote) quote = ''
+    } else if (c === '"' || c === "'") quote = c
+    else if ('([{'.includes(c)) depth++
+    else if (')]}'.includes(c)) depth--
+    else if (c === ',' && depth === 0) {
+      out.push(text.slice(from, i).trim())
+      from = i + 1
+    }
+  }
+  if (text.slice(from).trim() !== '') out.push(text.slice(from).trim())
+  return out
+}
+/** The closed words a 짐작값 may be (thinkCalcPrompt). */
+const closedGuessWords = ['오류', '돌려주는 것 없음', '따라가기와 같음', '음수', '0', '빈 값', '참', '거짓', '기타', '없음']
+/** Whether a guess (a literal or a closed word) is said in the learner's own words. */
+function guessSaidIn(guess: string, mine: string): boolean {
+  if (guess === '') return false
+  const closed: Record<string, RegExp> = { 오류: /오류|에러|예외|터|멈|Error/, '돌려주는 것 없음': /없|None|undefined|null/, '따라가기와 같음': /같|그대로|똑같/, 음수: /음수|마이너스|-\d/, '빈 값': /빈|비어|''|""|\[\]|\{\}/, 참: /참|true|True|맞/, 거짓: /거짓|false|False|아니/, 기타: /./ }
+  if (Object.hasOwn(closed, guess)) return closed[guess]!.test(mine)
+  if (/^[A-Z]\w*(?:Error|Exception)$/.test(guess)) return mine.includes(guess) || /오류|에러|예외/.test(mine)
+  const bare = guess.replace(/^(['"])(.*)\1$/s, '$2')
+  if (/^-?\d+(?:\.\d+)?$/.test(bare)) return [...mine.replace(/(\d),(?=\d{3})/g, '$1').matchAll(/-?\d+(?:\.\d+)?/g)].some(m => Number(m[0]) === Number(bare))
+  const norm = (t: string) => t.replace(/[\s,'"`]/g, '')
+  return bare !== '' && norm(mine).includes(norm(bare))
+}
+/** guessOf against another run's facts (a 다른 호출's 네/아니요). */
+function guessOfFor(raw: string, facts: ThinkFacts): boolean | undefined {
+  if (raw === '기타') return undefined
+  const closed = closedGuess(raw, facts)
+  if (closed !== undefined) return closed
+  const lit = literalOf(raw, facts.lang, false)
+  return lit ? facts.asked.kind === 'value' && calcEqual(lit.value, facts.asked.value) : undefined
 }
 
 /**
