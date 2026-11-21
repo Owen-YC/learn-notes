@@ -4,6 +4,8 @@ import {
   CHANGED_HINT,
   CHANGED_LEAD,
   CHANGED_RUN_ASK,
+  CHANGED_RUN_MS,
+  CHANGED_RUN_TRIES,
   IS_CHANGED_RUN,
   MODEL_SWITCHES,
   SWITCHES_OFF,
@@ -95,6 +97,21 @@ describe('1.13.0 (G2-RUN): code changed the plugin ran itself', () => {
     for (const c of t.certs) expect('lines' in newRun(c.changed, 'js', { printArgs: true })).toBe(true)
     expect(changedRunFor('const a = {x: 1}\nconsole.log(a)', 'c.js', '— `a`')).toBeUndefined()
     expect(changedRunFor('const f = 1.5\nconsole.log(f * 2)\nconsole.log(f > 1)', 'd.js', '— `f`')!.certs.every(c => c.site.token !== '1.5')).toBe(true)
+  })
+
+  test('changedRunFor: a safety net over the whole run (1.13.0 cross-review 1): past CHANGED_RUN_TRIES newRun calls it stops with the places certified so far; under it, the same places as with none', () => {
+    expect([CHANGED_RUN_TRIES, CHANGED_RUN_MS]).toEqual([80, 600])
+    // Four unused arrays nearest the quoted line: each number's values run and print the same (never certified), so the
+    // one place that changes the output, `let t = 0`, comes after 40 · 4 · 4 tries with 40 numbers an array; with 5, first.
+    const arr = (k: number, per: number) => `const d${k} = [${Array.from({ length: per }, (_, i) => (i % 7) + 1).join(', ')}]`
+    const code = (per: number) => [arr(0, per), arr(1, per), arr(2, per), arr(3, per), 'let t = 0', 'for (let i = 0; i < 10; i++) { t += 1 }', "console.log('합계:', t)"].join('\n')
+    const blurb = (per: number) => `배열 — \`${arr(0, per).slice(0, 12)}\``
+    expect(code(40).length).toBeLessThanOrEqual(700)
+    const capped = changedRunFor(code(40), 'a.js', blurb(40))!
+    expect(capped).toEqual({ out: ['합계: 10'], certs: [] })
+    const under = changedRunFor(code(5), 'a.js', blurb(5))!
+    expect(under.out).toEqual(['합계: 10'])
+    expect(under.certs.map(c => [c.site.token, c.value])).toEqual([['0', '1']])
   })
 
   test('rungOf: off, the 1.12.0 branch byte for byte; on, two certified changes at least, else 내 코드', () => {
