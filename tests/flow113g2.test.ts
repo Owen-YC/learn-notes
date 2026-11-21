@@ -60,21 +60,26 @@ describe('1.13.0 (G2-RUN): the run route in a sonnet window', () => {
     expect(items.map(one => one.answer)).toEqual(['합계: 72\n평균 36'])
   })
 
+  // The off request (no harness), kept for the test after it: one world per test (b3 d34), so the two windows are two
+  // tests and the second compares with what the first caught (1.13.0 cross-review 1, robust-1-4; these two tests
+  // printed both requests and compared neither before).
+  let offRequest: unknown[] | undefined
+  test('the off request, for the byte comparison with the test after it', { options: { model: 'sonnet', level: 'beginner' }, timeoutMs: 30000 }, async ($, on) => {
+    const reply = 'T1: 예측\nQ1: x\nH1: y\nA1: z'
+    const b = await quizOnce($, on, undefined, reply)
+    expect(b.got.length).toBe(1)
+    expect(b.got[0]!.maxTokens).toBe(3400)
+    offRequest = b.got
+  })
+
   test('isChangedRun with code changed off: the request is the off request to the byte (no run, no file read)', { options: { model: 'sonnet', level: 'beginner' }, timeoutMs: 30000 }, async ($, on) => {
     const reply = 'T1: 예측\nQ1: x\nH1: y\nA1: z'
     const a = await quizOnce($, on, { models: { sonnet: { isChangedRun: true } } }, reply)
     expect(a.got.length).toBe(1)
     expect(a.got[0]!.prompt).not.toContain('지금 찍히는 글자')
     expect(a.got[0]!.prompt).not.toContain('바꿀 곳')
-    expect(a.got[0]!.maxTokens).toBe(3400)
-    ;(globalThis as any).console.log('RUNOFFREQ ' + JSON.stringify(a.got))
-  })
-
-  test('the off request, for the byte comparison with the test above', { options: { model: 'sonnet', level: 'beginner' }, timeoutMs: 30000 }, async ($, on) => {
-    const reply = 'T1: 예측\nQ1: x\nH1: y\nA1: z'
-    const b = await quizOnce($, on, undefined, reply)
-    ;(globalThis as any).console.log('OFFREQ ' + JSON.stringify(b.got))
-    expect(b.got[0]!.maxTokens).toBe(3400)
+    expect(offRequest).toBeDefined()
+    expect(a.got).toEqual(offRequest)
   })
 
   const RUN_ON = { models: { sonnet: { rungChangedStep: 2, isChangedRun: true } } }
